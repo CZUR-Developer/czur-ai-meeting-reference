@@ -1,0 +1,35 @@
+services:
+  api:
+    image: ${REFERENCE_API_IMAGE:-czur-ai-meeting-reference-api:local}
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-jdbc:postgresql://db:5432/meeting}
+      STORAGE_ROOT: ${STORAGE_ROOT:-/var/lib/meeting}
+      MODEL_ENDPOINT: ${MODEL_ENDPOINT:-http://model:9000}
+    ports: ["${API_PORT:-8080}:8080"]
+    volumes: ["meeting-storage:${STORAGE_MOUNT:-/var/lib/meeting}"]
+    depends_on: [db]
+  worker:
+    image: ${REFERENCE_WORKER_IMAGE:-czur-ai-meeting-reference-worker:local}
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-jdbc:postgresql://db:5432/meeting}
+      MODEL_ENDPOINT: ${MODEL_ENDPOINT:-http://model:9000}
+    depends_on: [db]
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-meeting}
+      POSTGRES_USER: ${POSTGRES_USER:-meeting}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-locally}
+    volumes: ["meeting-db:/var/lib/postgresql/data"]
+  model:
+    image: ${REFERENCE_MODEL_IMAGE:-partner-model:local}
+    profiles: [model]
+  storage:
+    image: ${REFERENCE_STORAGE_IMAGE:-minio/minio:latest}
+    profiles: [object-storage]
+    command: server /data
+    volumes: ["meeting-object-data:/data"]
+volumes:
+  meeting-storage:
+  meeting-db:
+  meeting-object-data:

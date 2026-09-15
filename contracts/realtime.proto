@@ -1,0 +1,308 @@
+syntax = "proto3";
+
+package czur.ai_meeting.realtime.v1;
+
+option java_multiple_files = true;
+option java_package = "com.czur.aimeeting.contract.realtime.v1";
+
+// WebSocket 的每个二进制消息恰好包含一个 ClientEnvelope 或 ServerEnvelope。
+// 时间轴字段均相对于本场音频起点；墙钟字段使用 UTC RFC 3339 字符串。
+message ClientEnvelope {
+  string spec_version = 1;
+  string meeting_id = 2;
+  string stream_id = 3;
+  string client_message_id = 4;
+
+  oneof body {
+    StreamStart stream_start = 10;
+    MeetingAudioFrame audio_frame = 11;
+    InputComplete input_complete = 12;
+    Cancel cancel = 13;
+    ResumeRequest resume_request = 14;
+    Heartbeat heartbeat = 15;
+    AudioDiscontinuity audio_discontinuity = 16;
+  }
+}
+
+message ServerEnvelope {
+  string spec_version = 1;
+  string meeting_id = 2;
+  string stream_id = 3;
+  string event_id = 4;
+  uint64 event_sequence = 5;
+  string emitted_at = 6;
+
+  oneof body {
+    SessionStateEvent session_state = 10;
+    AudioAck audio_ack = 11;
+    TranscriptUpsert transcript_upsert = 12;
+    TranslationUpsert translation_upsert = 13;
+    SpeakerUpdate speaker_update = 14;
+    CapabilityChanged capability_changed = 15;
+    FinalizationEvent finalization = 16;
+    ErrorEvent error = 17;
+    Heartbeat heartbeat = 18;
+    AudioContinuityEvent audio_continuity = 19;
+  }
+}
+
+message AudioProfile {
+  AudioEncoding encoding = 1;
+  uint32 sample_rate_hz = 2;
+  uint32 channel_count = 3;
+  uint32 frame_duration_ms = 4;
+}
+
+enum AudioEncoding {
+  AUDIO_ENCODING_UNKNOWN = 0;
+  AUDIO_ENCODING_PCM_S16LE = 1;
+}
+
+message StreamStart {
+  AudioProfile audio_profile = 1;
+  uint64 resume_after_stream_sequence = 2;
+  uint64 resume_after_event_sequence = 3;
+}
+
+// App 已把 PlatformAudioFrame 规范化为公共输入格式；本结构不暴露 Framework 类型。
+message MeetingAudioFrame {
+  uint64 stream_sequence = 1;
+  uint64 start_position_ms = 2;
+  uint32 duration_ms = 3;
+  bytes audio = 4;
+  // 可选的 sha256 十六进制摘要，用于诊断传输损坏；不得用作业务 ID。
+  string checksum = 5;
+  uint64 source_generation = 6;
+  uint32 format_revision = 7;
+  uint64 gap_duration_ms_before = 8;
+  repeated AudioFrameFlag flags = 9;
+}
+
+enum AudioFrameFlag {
+  AUDIO_FRAME_FLAG_UNKNOWN = 0;
+  AUDIO_FRAME_FLAG_AFTER_GAP = 1;
+  AUDIO_FRAME_FLAG_SOURCE_CHANGED = 2;
+  AUDIO_FRAME_FLAG_PLATFORM_RESTARTED = 3;
+}
+
+message AudioDiscontinuity {
+  uint64 after_stream_sequence = 1;
+  uint64 resume_audio_position_ms = 2;
+  uint64 source_generation = 3;
+  uint32 format_revision = 4;
+  AudioDiscontinuityReason reason = 5;
+  uint64 gap_duration_ms = 6;
+}
+
+enum AudioDiscontinuityReason {
+  AUDIO_DISCONTINUITY_REASON_UNKNOWN = 0;
+  AUDIO_DISCONTINUITY_REASON_DROPPED_FRAMES = 1;
+  AUDIO_DISCONTINUITY_REASON_SOURCE_CHANGED = 2;
+  AUDIO_DISCONTINUITY_REASON_FORMAT_CHANGED = 3;
+  AUDIO_DISCONTINUITY_REASON_BROKER_RESTARTED = 4;
+}
+
+message AudioContinuityEvent {
+  uint64 after_stream_sequence = 1;
+  uint64 source_generation = 2;
+  AudioDiscontinuityReason reason = 3;
+  uint64 gap_duration_ms = 4;
+  AudioContinuityAction action = 5;
+}
+
+enum AudioContinuityAction {
+  AUDIO_CONTINUITY_ACTION_UNKNOWN = 0;
+  AUDIO_CONTINUITY_ACTION_CONTINUED = 1;
+  AUDIO_CONTINUITY_ACTION_PROVIDER_REOPENED = 2;
+  AUDIO_CONTINUITY_ACTION_MEETING_FAILED = 3;
+}
+
+message InputComplete {
+  uint64 last_stream_sequence = 1;
+  uint64 last_audio_position_ms = 2;
+  string recording_checksum = 3;
+  uint64 recording_size_bytes = 4;
+  string request_id = 5;
+}
+
+message Cancel {
+  string request_id = 1;
+  string reason_code = 2;
+}
+
+message ResumeRequest {
+  uint64 after_event_sequence = 1;
+}
+
+message Heartbeat {
+  string nonce = 1;
+  string sent_at = 2;
+}
+
+message SessionStateEvent {
+  MeetingState state = 1;
+  string reason_code = 2;
+  bool terminal = 3;
+}
+
+enum MeetingState {
+  MEETING_STATE_UNKNOWN = 0;
+  MEETING_STATE_CREATED = 1;
+  MEETING_STATE_AUTHORIZED = 2;
+  MEETING_STATE_STARTING = 3;
+  MEETING_STATE_RUNNING = 4;
+  MEETING_STATE_STOPPING = 5;
+  MEETING_STATE_FINALIZING = 6;
+  MEETING_STATE_READY = 7;
+  MEETING_STATE_READY_WITH_WARNINGS = 8;
+  MEETING_STATE_FAILED = 9;
+  MEETING_STATE_CANCELLED = 10;
+  MEETING_STATE_DELETION_PENDING = 11;
+  MEETING_STATE_DELETED = 12;
+}
+
+message AudioAck {
+  uint64 accepted_stream_sequence = 1;
+  uint64 accepted_audio_position_ms = 2;
+  uint32 suggested_max_in_flight_frames = 3;
+  uint32 retry_after_ms = 4;
+  bool durable = 5;
+}
+
+message TranscriptUpsert {
+  string segment_id = 1;
+  uint32 revision = 2;
+  UpsertOperation operation = 3;
+  uint64 start_ms = 4;
+  uint64 end_ms = 5;
+  string language = 6;
+  string text = 7;
+  bool final = 8;
+  SpeakerRef speaker = 9;
+  float confidence = 10;
+  repeated string quality_flags = 11;
+  repeated string supersedes_segment_ids = 12;
+}
+
+enum UpsertOperation {
+  UPSERT_OPERATION_UNKNOWN = 0;
+  UPSERT_OPERATION_UPSERT = 1;
+  UPSERT_OPERATION_REPLACE = 2;
+}
+
+message TranslationUpsert {
+  string translation_id = 1;
+  string source_segment_id = 2;
+  uint32 revision = 3;
+  UpsertOperation operation = 4;
+  string source_language = 5;
+  string target_language = 6;
+  string text = 7;
+  bool final = 8;
+  repeated string supersedes_translation_ids = 9;
+}
+
+message SpeakerRef {
+  string session_speaker_id = 1;
+  string person_id = 2;
+  string display_name = 3;
+}
+
+message SpeakerUpdate {
+  string session_speaker_id = 1;
+  uint32 revision = 2;
+  string person_id = 3;
+  string display_name = 4;
+  SpeakerUpdateKind kind = 5;
+  float confidence = 6;
+}
+
+enum SpeakerUpdateKind {
+  SPEAKER_UPDATE_KIND_UNKNOWN = 0;
+  SPEAKER_UPDATE_KIND_SESSION_LABEL = 1;
+  SPEAKER_UPDATE_KIND_CROSS_MEETING_IDENTITY = 2;
+  SPEAKER_UPDATE_KIND_USER_RENAME = 3;
+}
+
+message CapabilityChanged {
+  string capability = 1;
+  CapabilityAvailability availability = 2;
+  string reason_code = 3;
+  bool required_by_profile = 4;
+}
+
+enum CapabilityAvailability {
+  CAPABILITY_AVAILABILITY_UNKNOWN = 0;
+  CAPABILITY_AVAILABILITY_AVAILABLE = 1;
+  CAPABILITY_AVAILABILITY_DEGRADED = 2;
+  CAPABILITY_AVAILABILITY_UNAVAILABLE = 3;
+}
+
+message FinalizationEvent {
+  FinalizationStage stage = 1;
+  string finalization_receipt = 2;
+  uint32 progress_percent = 3;
+  string manifest_state = 4;
+  repeated string warning_codes = 5;
+  InputState input_state = 6;
+}
+
+// 输入责任状态。INPUT_COMPLETE_SENT 只存在于 App 本地 Journal，不能作为服务端事件值。
+enum InputState {
+  INPUT_STATE_UNKNOWN = 0;
+  INPUT_COMPLETE_PENDING = 1;
+  INPUT_ACCEPTED = 2;
+  INPUT_CANCELLED = 3;
+}
+
+enum FinalizationStage {
+  FINALIZATION_STAGE_UNKNOWN = 0;
+  FINALIZATION_STAGE_INPUT_ACCEPTED = 1;
+  FINALIZATION_STAGE_REALTIME_CLOSED = 2;
+  FINALIZATION_STAGE_ARTIFACTS_PERSISTING = 3;
+  FINALIZATION_STAGE_OFFLINE_PROCESSING = 4;
+  FINALIZATION_STAGE_SUMMARIZING = 5;
+  FINALIZATION_STAGE_MANIFEST_READY = 6;
+  FINALIZATION_STAGE_FAILED = 7;
+}
+
+message ErrorEvent {
+  ErrorDomain domain = 1;
+  string code = 2;
+  ErrorSeverity severity = 3;
+  bool retryable = 4;
+  uint32 retry_after_ms = 5;
+  UserAction user_action = 6;
+  string message_key = 7;
+  string diagnostic_id = 8;
+}
+
+enum ErrorDomain {
+  ERROR_DOMAIN_UNKNOWN = 0;
+  ERROR_DOMAIN_CONTRACT = 1;
+  ERROR_DOMAIN_IDENTITY = 2;
+  ERROR_DOMAIN_ENTITLEMENT = 3;
+  ERROR_DOMAIN_SESSION = 4;
+  ERROR_DOMAIN_AUDIO = 5;
+  ERROR_DOMAIN_NETWORK = 6;
+  ERROR_DOMAIN_MODEL = 7;
+  ERROR_DOMAIN_STORAGE = 8;
+  ERROR_DOMAIN_SUMMARY = 9;
+  ERROR_DOMAIN_INTERNAL = 10;
+}
+
+enum ErrorSeverity {
+  ERROR_SEVERITY_UNKNOWN = 0;
+  ERROR_SEVERITY_WARNING = 1;
+  ERROR_SEVERITY_FATAL = 2;
+}
+
+enum UserAction {
+  USER_ACTION_UNKNOWN = 0;
+  USER_ACTION_NONE = 1;
+  USER_ACTION_RETRY = 2;
+  USER_ACTION_LOGIN = 3;
+  USER_ACTION_CONTACT_ADMIN = 4;
+  USER_ACTION_CHECK_NETWORK = 5;
+  USER_ACTION_FREE_STORAGE = 6;
+}

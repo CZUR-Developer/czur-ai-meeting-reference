@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AI 会议纪要参考页面</title></head>
+<body><main id="app"><h1>AI 会议纪要</h1><p id="status">正在读取会议能力……</p><section id="capabilities" aria-label="会议产物"></section></main>
+<script>
+// 参考页面仅展示后端能力清单声明的模块；能力缺失时不渲染对应入口。
+const status=document.querySelector('#status'),target=document.querySelector('#capabilities');
+fetch('./config.json').then(r=>r.ok?r.json():{}).catch(()=>({})).then(c=>fetch(`${c.apiBaseUrl||''}/v1/capabilities`)).then(r=>r.ok?r.json():{capabilities:[]}).catch(()=>({capabilities:[]})).then(d=>{const a=Array.isArray(d.capabilities)?d.capabilities:[];a.forEach(n=>{const p=document.createElement('p');p.textContent=String(n);target.appendChild(p)});status.textContent=a.length?'已加载可用能力':'当前后端未声明可展示能力'});
+</script></body></html>

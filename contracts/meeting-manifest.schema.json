@@ -1,0 +1,217 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.example.com/ai-meeting/v0.1/meeting-manifest.schema.json",
+  "title": "AI Meeting Manifest",
+  "description": "与模型厂商和对象存储实现无关的会议最终产物清单。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "specVersion",
+    "meetingId",
+    "manifestRevision",
+    "profile",
+    "status",
+    "startedAt",
+    "endedAt",
+    "durationMs",
+    "languages",
+    "artifacts",
+    "warnings"
+  ],
+  "properties": {
+    "specVersion": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+$"
+    },
+    "meetingId": {
+      "type": "string",
+      "pattern": "^mtg_[A-Za-z0-9_-]+$"
+    },
+    "manifestRevision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "profile": {
+      "$ref": "#/$defs/profileRef"
+    },
+    "status": {
+      "enum": ["READY", "READY_WITH_WARNINGS", "FAILED", "DELETION_PENDING", "DELETED"]
+    },
+    "title": {
+      "type": ["string", "null"],
+      "maxLength": 256
+    },
+    "startedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "endedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "durationMs": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "languages": {
+      "$ref": "#/$defs/languages"
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/artifactRef"
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/warning"
+      }
+    }
+  },
+  "$defs": {
+    "profileRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "revision"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "languages": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "targets"],
+      "properties": {
+        "source": {
+          "type": "string",
+          "minLength": 2
+        },
+        "targets": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 2
+          }
+        }
+      }
+    },
+    "artifactRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifactId",
+        "type",
+        "mediaType",
+        "revision",
+        "size",
+        "checksum",
+        "status"
+      ],
+      "properties": {
+        "artifactId": {
+          "type": "string",
+          "pattern": "^art_[A-Za-z0-9_-]+$"
+        },
+        "type": {
+          "enum": [
+            "audio.original",
+            "transcript.raw",
+            "transcript.final",
+            "translation.final",
+            "speaker.session",
+            "speaker.identity",
+            "summary.structured",
+            "summary.markdown",
+            "chapters.structured",
+            "action-items.structured",
+            "presentation.capture",
+            "export.file"
+          ]
+        },
+        "mediaType": {
+          "type": "string",
+          "minLength": 3
+        },
+        "language": {
+          "type": ["string", "null"]
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "checksum": {
+          "type": "string",
+          "pattern": "^sha256:[A-Fa-f0-9]{64}$"
+        },
+        "status": {
+          "enum": ["PENDING", "READY", "FAILED", "DELETED"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "supersedesArtifactId": {
+          "type": ["string", "null"],
+          "pattern": "^art_[A-Za-z0-9_-]+$"
+        },
+        "failure": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/artifactFailure"}
+          ]
+        }
+      }
+    },
+    "artifactFailure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["domain", "code", "retryable", "diagnosticId"],
+      "properties": {
+        "domain": {
+          "enum": ["MODEL", "STORAGE", "SUMMARY", "INTERNAL"]
+        },
+        "code": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "diagnosticId": {
+          "type": "string"
+        }
+      }
+    },
+    "warning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "capability", "messageKey"],
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "capability": {
+          "type": "string"
+        },
+        "messageKey": {
+          "type": "string"
+        },
+        "diagnosticId": {
+          "type": ["string", "null"]
+        }
+      }
+    }
+  }
+}

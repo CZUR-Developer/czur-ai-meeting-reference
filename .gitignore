@@ -1,0 +1,89 @@
+# Operating-system files
+.DS_Store
+Thumbs.db
+
+# IntelliJ IDEA / Android Studio
+.idea/*
+!.idea/.gitignore
+!.idea/codeStyles/
+!.idea/codeStyles/**
+!.idea/inspectionProfiles/
+!.idea/inspectionProfiles/**
+*.iml
+*.iws
+*.ipr
+
+# Gradle
+.gradle/
+build/
+**/build/
+out/
+**/out/
+target/
+**/target/
+
+# Android
+local.properties
+*.apk
+*.aab
+*.apks
+captures/
+.externalNativeBuild/
+.cxx/
+*.hprof
+
+# Java / Kotlin
+*.class
+*.jar
+*.war
+*.ear
+hs_err_pid*
+
+# Gradle Wrapper binaries are required to reproduce the build.
+!gradle/wrapper/gradle-wrapper.jar
+!**/gradle/wrapper/gradle-wrapper.jar
+
+# Node / Web
+node_modules/
+dist/
+coverage/
+.npm/
+.yarn/
+.pnpm-store/
+*.tsbuildinfo
+
+# Native/tooling outputs
+cmake-build-*/
+compile_commands.json
+
+# Containers and local deployment overrides
+docker-compose.override.yml
+docker-compose.local.yml
+.env
+.env.*
+!.env.example
+
+# Secrets, credentials and local certificates
+*.pem
+*.key
+*.p12
+*.jks
+*.keystore
+credentials.json
+secrets.yml
+secrets.yaml
+
+# Logs and local reports
+*.log
+reports/
+tmp/
+
+# Generated protocol and coverage reports
+*.class
+*.gcda
+*.gcno
+
+# IDE metadata that is safe to regenerate
+.project
+.classpath
+.settings/

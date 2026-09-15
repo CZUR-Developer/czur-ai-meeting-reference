@@ -1,0 +1,1005 @@
+openapi: 3.1.0
+info:
+  title: AI Meeting Control API
+  version: 0.1.0
+  description: |
+    AI 字幕纪要设备端与后端之间的公开控制面协议草案。
+    实时音频和事件使用 realtime.proto；最终结果清单使用
+    meeting-manifest.schema.json。本协议不暴露模型厂商、对象存储路径或 CZUR 内部接口。
+servers:
+  - url: https://ai.example.com
+tags:
+  - name: Discovery
+  - name: Profiles
+  - name: Meetings
+  - name: Artifacts
+paths:
+  /.well-known/ai-meeting:
+    get:
+      tags: [Discovery]
+      operationId: discoverAiMeetingService
+      summary: 获取协议、服务能力和限制
+      security: []
+      responses:
+        "200":
+          description: 服务描述
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceDescriptor"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/capabilities:
+    get:
+      tags: [Discovery]
+      operationId: getCapabilities
+      summary: 获取当前部署支持的能力、语言和限制
+      security: []
+      responses:
+        "200":
+          description: 能力描述；与服务发现中的静态能力保持一致
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CapabilitiesResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/product-profiles:
+    get:
+      tags: [Profiles]
+      operationId: listProductProfiles
+      summary: 获取后端支持的产品档位
+      security: []
+      responses:
+        "200":
+          description: 产品档位列表
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ProductProfile"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/product-profiles/{profileId}:
+    get:
+      tags: [Profiles]
+      operationId: getProductProfile
+      summary: 获取指定产品档位
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/ProfileId"
+      responses:
+        "200":
+          description: 产品档位
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductProfile"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/meetings:
+    get:
+      tags: [Meetings]
+      operationId: listMeetings
+      summary: 查询当前凭证可访问的会议列表
+      security:
+        - bearerAuth: []
+        - resultAccessAuth: []
+      parameters:
+        - name: pageToken
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: pageSize
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        "200":
+          description: 会议列表
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MeetingListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      tags: [Meetings]
+      operationId: createMeeting
+      summary: 鉴权、预占权益并创建会议
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/RequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateMeetingRequest"
+      responses:
+        "201":
+          description: 会议创建成功；此时音频流尚未必进入 RUNNING
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateMeetingResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/meetings/{meetingId}:
+    get:
+      tags: [Meetings]
+      operationId: getMeeting
+      summary: 查询会议权威状态
+      security:
+        - bearerAuth: []
+        - resultAccessAuth: []
+      parameters:
+        - $ref: "#/components/parameters/MeetingId"
+      responses:
+        "200":
+          description: 会议状态
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MeetingStatus"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      tags: [Meetings]
+      operationId: deleteMeeting
+      summary: 撤销访问并异步删除会议及产物
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/MeetingId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "202":
+          description: 删除请求已受理
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MeetingStatus"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/meetings/{meetingId}:stop:
+    post:
+      tags: [Meetings]
+      operationId: stopMeeting
+      summary: 幂等结束音频输入并启动最终收口
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/MeetingId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/RequestId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StopMeetingRequest"
+      responses:
+        "200":
+          description: 输入已被后端持久化接管；重复请求返回同一受理结果
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StopMeetingResponse"
+        "202":
+          description: 停止意图已持久记录，但输入尚未完成接管；客户端不得清理本地恢复数据
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StopMeetingResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/meetings/{meetingId}:cancel:
+    post:
+      tags: [Meetings]
+      operationId: cancelMeeting
+      summary: 幂等取消尚未完成的会议
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/MeetingId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: 取消结果
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MeetingStatus"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/meetings/{meetingId}:issueResultAccess:
+    post:
+      tags: [Meetings]
+      operationId: issueMeetingResultAccess
+      summary: 由已登录 Android App 签发短期结果 Web 访问凭证
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/MeetingId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                ttlSeconds:
+                  type: integer
+                  minimum: 60
+                  maximum: 3600
+                  default: 600
+      responses:
+        "200":
+          description: 短期结果访问凭证；参考 Web 不自行登录
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResultAccessGrant"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/result-access:
+    post:
+      tags: [Meetings]
+      operationId: issueResultAccess
+      summary: （可选扩展）由已登录 Android App 签发短期结果端访问凭证
+      description: 参考 Web 的标准实现使用 genTime 结果 URL，不依赖此接口。伙伴需要更严格结果控制时可自行实现此扩展。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IssueResultAccessRequest"
+      responses:
+        "200":
+          description: 用户范围或指定会议范围的短期结果访问凭证
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResultAccessGrant"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/meetings/{meetingId}/events:
+    get:
+      tags: [Meetings]
+      operationId: listMeetingEvents
+      summary: 按会议事件序号补拉标准事件
+      security:
+        - bearerAuth: []
+        - resultAccessAuth: []
+      parameters:
+        - $ref: "#/components/parameters/MeetingId"
+        - name: afterSequence
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 200
+      responses:
+        "200":
+          description: 标准事件页；payload 由 type 对应的版本化 Schema 解释
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, lastSequence, hasMore]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/MeetingEvent"
+                  lastSequence:
+                    type: integer
+                    format: int64
+                  hasMore:
+                    type: boolean
+        "410":
+          description: 请求的事件已超出服务端重放窗口
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/meetings/{meetingId}/manifest:
+    get:
+      tags: [Meetings]
+      operationId: getMeetingManifest
+      summary: 获取最终会议产物清单
+      # 参考 Web 的标准结果访问：opaque meetingId + genTime；不要求 Web 登录。
+      # 伙伴如需更严格控制，可在自己的实现中启用可选 resultAccessAuth 扩展。
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/MeetingId"
+        - $ref: "#/components/parameters/GenTime"
+      responses:
+        "200":
+          description: 与 meeting-manifest.schema.json 一致的结果清单
+          content:
+            application/json:
+              schema:
+                # Canonical result schema is maintained once in the adjacent
+                # JSON Schema; implementations must validate against that file.
+                $ref: "./meeting-manifest.schema.json"
+        "202":
+          description: 最终产物仍在生成
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MeetingStatus"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/artifacts/{artifactId}:
+    get:
+      tags: [Artifacts]
+      operationId: getArtifact
+      summary: 获取结果产物内容（genTime 结果 URL）
+      description: 参考 Web 通过会议结果 URL 携带的 genTime 读取产物；不要求 Web 单独登录。
+      security: []
+      parameters:
+        - name: artifactId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: "^art_[A-Za-z0-9_-]+$"
+        - $ref: "#/components/parameters/GenTime"
+      responses:
+        "200":
+          description: 产物内容；media type 由 Manifest 中的 ArtifactRef 声明
+          content:
+            application/json: {}
+            text/plain: {}
+            text/markdown: {}
+            text/html: {}
+            application/octet-stream: {}
+        "410":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/artifacts/{artifactId}:issueAccess:
+    post:
+      tags: [Artifacts]
+      operationId: issueArtifactAccess
+      summary: （可选扩展）为有权用户签发短期产物访问授权
+      security:
+        - bearerAuth: []
+        - resultAccessAuth: []
+      parameters:
+        - name: artifactId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: "^art_[A-Za-z0-9_-]+$"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IssueArtifactAccessRequest"
+      responses:
+        "200":
+          description: 短期访问授权
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IssueArtifactAccessResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: partner-issued-token
+    resultAccessAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: optional-short-lived-result-access-token
+  parameters:
+    ProfileId:
+      name: profileId
+      in: path
+      required: true
+      schema:
+        type: string
+    MeetingId:
+      name: meetingId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^mtg_[A-Za-z0-9_-]+$"
+    GenTime:
+      name: genTime
+      in: query
+      required: true
+      description: 结果 URL 生成时间；服务端按部署配置中的统一有效期判断是否过期。
+      schema:
+        type: integer
+        format: int64
+        minimum: 0
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 16
+        maxLength: 128
+    RequestId:
+      name: X-Request-Id
+      in: header
+      required: false
+      schema:
+        type: string
+        maxLength: 128
+  responses:
+    ErrorResponse:
+      description: 标准错误
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+  schemas:
+    ServiceDescriptor:
+      type: object
+      additionalProperties: false
+      required: [specVersion, serviceId, serviceVersion, apiBaseUrl, realtime, supportedContractRange, productProfiles, limits]
+      properties:
+        specVersion:
+          type: string
+        serviceId:
+          type: string
+        serviceVersion:
+          type: string
+        apiBaseUrl:
+          type: string
+          format: uri
+        realtime:
+          $ref: "#/components/schemas/RealtimeDescriptor"
+        supportedContractRange:
+          type: string
+        productProfiles:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProfileRef"
+        limits:
+          $ref: "#/components/schemas/Limits"
+    CapabilitiesResponse:
+      type: object
+      additionalProperties: false
+      required: [specVersion, capabilities, languages, audioProfiles, limits]
+      properties:
+        specVersion:
+          type: string
+        capabilities:
+          type: array
+          items:
+            type: string
+        languages:
+          type: array
+          items:
+            type: string
+        audioProfiles:
+          type: array
+          items:
+            type: string
+        limits:
+          $ref: "#/components/schemas/Limits"
+    RealtimeDescriptor:
+      type: object
+      additionalProperties: false
+      required: [transport, subprotocol]
+      properties:
+        transport:
+          const: websocket-protobuf
+        subprotocol:
+          const: czur.ai-meeting.realtime.v1
+    Limits:
+      type: object
+      additionalProperties: false
+      required: [maxMeetingDurationMs, maxAudioFrameBytes, eventReplayWindow]
+      properties:
+        maxMeetingDurationMs:
+          type: integer
+          format: int64
+          minimum: 1
+        maxAudioFrameBytes:
+          type: integer
+          minimum: 1
+        eventReplayWindow:
+          type: integer
+          minimum: 1
+        maxReplayAudioMs:
+          type: integer
+          minimum: 0
+    ProfileRef:
+      type: object
+      additionalProperties: false
+      required: [id, revision]
+      properties:
+        id:
+          type: string
+        revision:
+          type: integer
+          minimum: 1
+    ProductProfile:
+      type: object
+      additionalProperties: false
+      required: [id, revision, requiredCapabilities, optionalCapabilities, requiredArtifacts, supportedAudioProfiles, supportedLanguages, failurePolicy]
+      properties:
+        id:
+          type: string
+        revision:
+          type: integer
+          minimum: 1
+        requiredCapabilities:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+        optionalCapabilities:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+        requiredArtifacts:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+        supportedAudioProfiles:
+          type: array
+          items:
+            type: string
+        supportedLanguages:
+          type: array
+          items:
+            type: string
+        failurePolicy:
+          type: object
+          additionalProperties:
+            enum: [FAIL_MEETING, READY_WITH_WARNINGS, IGNORE]
+    CreateMeetingRequest:
+      type: object
+      additionalProperties: false
+      required: [clientSessionId, profile, client, timezone, languages, audioProfile, requestedCapabilities, artifactPolicy]
+      properties:
+        clientSessionId:
+          type: string
+        profile:
+          $ref: "#/components/schemas/ProfileRef"
+        client:
+          $ref: "#/components/schemas/ClientDescriptor"
+        title:
+          type: string
+          maxLength: 256
+        timezone:
+          type: string
+        languages:
+          $ref: "#/components/schemas/LanguageSelection"
+        audioProfile:
+          $ref: "#/components/schemas/AudioProfile"
+        requestedCapabilities:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+        artifactPolicy:
+          $ref: "#/components/schemas/ArtifactPolicy"
+    ClientDescriptor:
+      type: object
+      additionalProperties: false
+      required: [appId, appVersion, contractVersion, deviceId]
+      properties:
+        appId:
+          type: string
+        appVersion:
+          type: string
+        contractVersion:
+          type: string
+        deviceId:
+          type: string
+          description: 不透明设备标识，不代替用户身份
+    LanguageSelection:
+      type: object
+      additionalProperties: false
+      required: [source, targets]
+      properties:
+        source:
+          type: string
+        targets:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+    AudioProfile:
+      type: object
+      additionalProperties: false
+      required: [encoding, sampleRateHz, channelCount, frameDurationMs]
+      properties:
+        encoding:
+          enum: [PCM_S16LE]
+        sampleRateHz:
+          type: integer
+          enum: [16000]
+        channelCount:
+          type: integer
+          enum: [1]
+        frameDurationMs:
+          type: integer
+          minimum: 20
+          maximum: 200
+    ArtifactPolicy:
+      type: object
+      additionalProperties: false
+      required: [retainAudio, presentationCapture]
+      properties:
+        retainAudio:
+          type: boolean
+        presentationCapture:
+          type: boolean
+    CreateMeetingResponse:
+      type: object
+      additionalProperties: false
+      required: [meetingId, state, acceptedProfile, grantedCapabilities, capabilityDecisions, acceptedAudioProfile, realtime, limits]
+      properties:
+        meetingId:
+          type: string
+        state:
+          $ref: "#/components/schemas/MeetingState"
+        acceptedProfile:
+          $ref: "#/components/schemas/ProfileRef"
+        grantedCapabilities:
+          type: array
+          items:
+            type: string
+        capabilityDecisions:
+          type: array
+          description: 本场会议最终能力计划；包含已启用、降级和不可用能力及其原因。
+          items:
+            type: object
+            additionalProperties: false
+            required: [capability, availability, requiredByProfile]
+            properties:
+              capability:
+                type: string
+              availability:
+                enum: [AVAILABLE, DEGRADED, UNAVAILABLE]
+              reasonCode:
+                type: [string, "null"]
+              requiredByProfile:
+                type: boolean
+              fallbackCapability:
+                type: [string, "null"]
+        acceptedAudioProfile:
+          $ref: "#/components/schemas/AudioProfile"
+        realtime:
+          type: object
+          additionalProperties: false
+          required: [url, subprotocol, sessionToken, expiresAt]
+          properties:
+            url:
+              type: string
+              format: uri
+            subprotocol:
+              const: czur.ai-meeting.realtime.v1
+            sessionToken:
+              type: string
+              readOnly: true
+            expiresAt:
+              type: string
+              format: date-time
+        limits:
+          $ref: "#/components/schemas/Limits"
+    StopMeetingRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        lastStreamSequence:
+          type: integer
+          format: int64
+          minimum: 0
+        lastAudioPositionMs:
+          type: integer
+          format: int64
+          minimum: 0
+        recordingChecksum:
+          type: string
+    StopMeetingResponse:
+      type: object
+      additionalProperties: false
+      required: [meetingId, state, inputState, finalizationReceipt, manifestState]
+      properties:
+        meetingId:
+          type: string
+        state:
+          $ref: "#/components/schemas/MeetingState"
+        inputState:
+          enum: [INPUT_COMPLETE_PENDING, INPUT_ACCEPTED]
+        finalizationReceipt:
+          type: [string, "null"]
+        manifestState:
+          enum: [NOT_STARTED, GENERATING, READY, FAILED]
+    MeetingStatus:
+      type: object
+      additionalProperties: false
+      required: [meetingId, state, inputState, manifestState, updatedAt]
+      properties:
+        meetingId:
+          type: string
+        state:
+          $ref: "#/components/schemas/MeetingState"
+        inputState:
+          enum: [INPUT_OPEN, INPUT_COMPLETE_PENDING, INPUT_ACCEPTED, INPUT_CANCELLED]
+        manifestState:
+          enum: [NOT_STARTED, GENERATING, READY, FAILED, DELETED]
+        finalizationReceipt:
+          type: [string, "null"]
+        updatedAt:
+          type: string
+          format: date-time
+        warnings:
+          type: array
+          items:
+            $ref: "#/components/schemas/Warning"
+    MeetingState:
+      enum: [UNKNOWN, CREATED, AUTHORIZED, STARTING, RUNNING, STOPPING, FINALIZING, READY, READY_WITH_WARNINGS, FAILED, CANCELLED, DELETION_PENDING, DELETED]
+    MeetingListResponse:
+      type: object
+      additionalProperties: false
+      required: [items, nextPageToken]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/MeetingSummary"
+        nextPageToken:
+          type: [string, "null"]
+    MeetingSummary:
+      type: object
+      additionalProperties: false
+      required: [meetingId, title, state, inputState, manifestState, createdAt, updatedAt]
+      properties:
+        meetingId:
+          type: string
+        title:
+          type: [string, "null"]
+        state:
+          $ref: "#/components/schemas/MeetingState"
+        inputState:
+          enum: [INPUT_OPEN, INPUT_COMPLETE_PENDING, INPUT_ACCEPTED, INPUT_CANCELLED]
+        manifestState:
+          enum: [NOT_STARTED, GENERATING, READY, FAILED, DELETED]
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    MeetingEvent:
+      type: object
+      additionalProperties: false
+      required: [specVersion, eventId, meetingId, eventSequence, emittedAt]
+      properties:
+        specVersion:
+          type: string
+        eventId:
+          type: string
+        meetingId:
+          type: string
+        streamId:
+          type: string
+        eventSequence:
+          type: string
+          pattern: "^[0-9]+$"
+          description: Protobuf JSON Mapping 中 uint64 使用十进制字符串。
+        emittedAt:
+          type: string
+          format: date-time
+        sessionState:
+          type: object
+          additionalProperties: true
+        audioAck:
+          type: object
+          additionalProperties: true
+        transcriptUpsert:
+          type: object
+          additionalProperties: true
+        translationUpsert:
+          type: object
+          additionalProperties: true
+        speakerUpdate:
+          type: object
+          additionalProperties: true
+        capabilityChanged:
+          type: object
+          additionalProperties: true
+        finalization:
+          type: object
+          additionalProperties: true
+        error:
+          type: object
+          additionalProperties: true
+        heartbeat:
+          type: object
+          additionalProperties: true
+        audioContinuity:
+          type: object
+          additionalProperties: true
+      oneOf:
+        - required: [sessionState]
+        - required: [audioAck]
+        - required: [transcriptUpsert]
+        - required: [translationUpsert]
+        - required: [speakerUpdate]
+        - required: [capabilityChanged]
+        - required: [finalization]
+        - required: [error]
+        - required: [heartbeat]
+        - required: [audioContinuity]
+    IssueArtifactAccessRequest:
+      type: object
+      additionalProperties: false
+      required: [disposition, ttlSeconds]
+      properties:
+        disposition:
+          enum: [INLINE, ATTACHMENT]
+        ttlSeconds:
+          type: integer
+          minimum: 30
+          maximum: 3600
+    IssueArtifactAccessResponse:
+      type: object
+      additionalProperties: false
+      required: [artifactId, accessUrl, expiresAt, headers]
+      properties:
+        artifactId:
+          type: string
+        accessUrl:
+          type: string
+          format: uri
+        expiresAt:
+          type: string
+          format: date-time
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+    ResultAccessGrant:
+      type: object
+      additionalProperties: false
+      required: [meetingId, accessToken, expiresAt, scopes]
+      properties:
+        meetingId:
+          type: [string, "null"]
+          description: 用户范围授权时为空；单会议授权时为会议 ID。
+        accessToken:
+          type: string
+          readOnly: true
+        expiresAt:
+          type: string
+          format: date-time
+        scopes:
+          type: array
+          uniqueItems: true
+          items:
+            enum: [MEETING_LIST, MEETING_READ, ARTIFACT_READ, ARTIFACT_EXPORT]
+    IssueResultAccessRequest:
+      type: object
+      additionalProperties: false
+      required: [scopes, ttlSeconds]
+      properties:
+        meetingId:
+          type: [string, "null"]
+          description: 为空表示用户范围授权；非空表示单会议授权。
+        scopes:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            enum: [MEETING_LIST, MEETING_READ, ARTIFACT_READ, ARTIFACT_EXPORT]
+        ttlSeconds:
+          type: integer
+          minimum: 60
+          maximum: 3600
+    Warning:
+      type: object
+      additionalProperties: false
+      required: [code, messageKey]
+      properties:
+        code:
+          type: string
+        messageKey:
+          type: string
+        diagnosticId:
+          type: string
+    ErrorEnvelope:
+      type: object
+      additionalProperties: false
+      required: [specVersion, error]
+      properties:
+        specVersion:
+          type: string
+        error:
+          type: object
+          additionalProperties: false
+          required: [domain, code, severity, retryable, userAction, messageKey, diagnosticId]
+          properties:
+            domain:
+              enum: [CONTRACT, IDENTITY, ENTITLEMENT, SESSION, AUDIO, NETWORK, MODEL, STORAGE, SUMMARY, INTERNAL]
+            code:
+              type: string
+            severity:
+              enum: [WARNING, FATAL]
+            retryable:
+              type: boolean
+            retryAfterMs:
+              type: [integer, "null"]
+              minimum: 0
+            userAction:
+              enum: [NONE, RETRY, LOGIN, CONTACT_ADMIN, CHECK_NETWORK, FREE_STORAGE]
+            messageKey:
+              type: string
+            diagnosticId:
+              type: string
+security:
+  - bearerAuth: []
