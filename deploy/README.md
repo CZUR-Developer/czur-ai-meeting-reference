@@ -70,6 +70,10 @@ DATABASE_PASSWORD='<从 Secret Manager 注入>' \
   执行过的版本。新版本使用例如 `V002__add_result_index.sql` 的命名。
 - 每个迁移文件必须在 PostgreSQL 16 和外部 PostgreSQL 上通过 `ON_ERROR_STOP`
   验证，并保持可重复执行或由 `schema_migrations` 明确跳过。
+- Outbox Worker 的 `claim`、`markPublished`、`markFailed` 必须在同一个条件
+  更新中校验 `lease_owner`、`lease_token`、`lease_version` 和仍有效的
+  `lease_until`。`V002__outbox_lease_fencing.sql` 提供这些字段和过期租约扫描
+  索引；内存适配器继续只用于单进程测试，不代表生产持久化语义。
 - 数据库保存会议状态、事件、幂等记录、工作流租约、产物元数据和 Outbox；音频
   及大文件仍在对象/文件存储，必须独立备份。
 - 备份、恢复、恢复后的契约测试和对象存储校验见
