@@ -4,6 +4,10 @@
 只用于本地演示、契约测试和快速验证；CZUR 生产环境及合作伙伴环境可以继续
 使用已经管理的外部 PostgreSQL，不能把数据库 Docker 化当作接入前提。
 
+示例命令使用 Docker Compose V2（建议 `docker compose version` 不低于
+2.20）。Compose 只负责启动参考服务和可选的 PostgreSQL 容器；数据库迁移仍由
+仓库中的 `migrations/` 版本文件负责，不能用“容器启动即建表”的隐式行为代替。
+
 ## 选择数据库来源
 
 | 模式 | 数据库来源 | Compose 行为 | 适用场景 |
