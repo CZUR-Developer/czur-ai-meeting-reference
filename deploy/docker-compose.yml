@@ -3,24 +3,64 @@ services:
     image: ${REFERENCE_API_IMAGE:-czur-ai-meeting-reference-api:local}
     environment:
       DATABASE_URL: ${DATABASE_URL:-jdbc:postgresql://db:5432/meeting}
+      DATABASE_USER: ${DATABASE_USER:-meeting}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:-change-me-locally}
       STORAGE_ROOT: ${STORAGE_ROOT:-/var/lib/meeting}
       MODEL_ENDPOINT: ${MODEL_ENDPOINT:-http://model:9000}
     ports: ["${API_PORT:-8080}:8080"]
     volumes: ["meeting-storage:${STORAGE_MOUNT:-/var/lib/meeting}"]
-    depends_on: [db]
   worker:
     image: ${REFERENCE_WORKER_IMAGE:-czur-ai-meeting-reference-worker:local}
     environment:
       DATABASE_URL: ${DATABASE_URL:-jdbc:postgresql://db:5432/meeting}
+      DATABASE_USER: ${DATABASE_USER:-meeting}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:-change-me-locally}
       MODEL_ENDPOINT: ${MODEL_ENDPOINT:-http://model:9000}
-    depends_on: [db]
   db:
+    # 数据库容器只用于本地演示和契约测试。默认 docker compose up 不会启用
+    # database profile；CZUR 或合作伙伴生产环境应注入外部 DATABASE_URL。
+    profiles: [database]
     image: postgres:16-alpine
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-meeting}
       POSTGRES_USER: ${POSTGRES_USER:-meeting}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-locally}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
     volumes: ["meeting-db:/var/lib/postgresql/data"]
+  migrate:
+    # migrate 是一次性任务，必须在 database profile 下显式运行。它不承载
+    # 业务逻辑，只执行 deploy/migrations 中的版本化 SQL。
+    profiles: [database]
+    image: postgres:16-alpine
+    environment:
+      PGHOST: db
+      PGPORT: 5432
+      PGDATABASE: ${POSTGRES_DB:-meeting}
+      PGUSER: ${POSTGRES_USER:-meeting}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-change-me-locally}
+      LOG_LEVEL: ${MIGRATION_LOG_LEVEL:-INFO}
+    volumes:
+      - ./migrations:/migrations:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-ec"]
+    command: |
+      log() { level="$$1"; shift; printf '[%s] %s\n' "$$level" "$$*"; }
+      log INFO "等待 PostgreSQL 健康检查通过"
+      pg_isready -q
+      log INFO "开始执行版本化数据库迁移"
+      for file in /migrations/V*.sql; do
+        [ -f "$$file" ] || continue
+        log INFO "执行迁移 $$(basename "$$file")"
+        psql -v ON_ERROR_STOP=1 -f "$$file"
+      done
+      log INFO "数据库迁移完成"
   model:
     image: ${REFERENCE_MODEL_IMAGE:-partner-model:local}
     profiles: [model]

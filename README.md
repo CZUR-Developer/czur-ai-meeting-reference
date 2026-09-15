@@ -30,6 +30,13 @@ python3 tools/check-public-boundary.py
 cd web-reference && npm run check && npm run build
 ```
 
+参考后端的数据库初始化和 Compose Profile 用法见
+[`deploy/README.md`](deploy/README.md)。数据库容器默认不启动；本地演示需要
+显式执行 `docker compose --profile database up -d db`，然后运行
+`docker compose --profile database run --rm migrate`。生产或 CZUR 现有环境可
+注入外部 `DATABASE_URL` 并直接使用同一份 `deploy/migrations/`，无需部署数据库
+容器。
+
 根目录和 Android 工程都提交可重建的 Gradle Wrapper；首次执行可能需要下载
 Gradle 和 Android 构建插件。Web 按 `web-reference/README.md` 生成静态资源。
 
