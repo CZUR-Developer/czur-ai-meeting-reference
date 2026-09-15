@@ -50,37 +50,40 @@ services:
       db:
         condition: service_healthy
     entrypoint: ["/bin/sh", "-ec"]
-    command: |
-      log() { level="$$1"; shift; printf '[%s] %s\n' "$$level" "$$*"; }
-      export LC_ALL=C
-      log INFO "等待 PostgreSQL 健康检查通过"
-      pg_isready -q
-      log INFO "开始执行版本化数据库迁移"
-      psql -v ON_ERROR_STOP=1 <<'SQL'
-      CREATE TABLE IF NOT EXISTS schema_migrations (
-          version TEXT PRIMARY KEY,
-          applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-      );
-      SQL
-      found=0
-      for file in /migrations/V*.sql; do
-        [ -f "$$file" ] || continue
-        found=1
-        version="$$(basename "$$file" .sql)"
-        applied="$$(psql -v ON_ERROR_STOP=1 -Atqc "SELECT 1 FROM schema_migrations WHERE version = '$$version' LIMIT 1")"
-        if [ "$$applied" = "1" ]; then
-          log DEBUG "跳过已应用迁移 $$version"
-          continue
+    # Compose V1 会把 command 字符串按空白拆成多个参数；显式使用只有
+    # 一个元素的数组，确保整个多行脚本作为 /bin/sh -ec 的同一个参数传入。
+    command:
+      - |
+        log() { level="$$1"; shift; printf '[%s] %s\n' "$$level" "$$*"; }
+        export LC_ALL=C
+        log INFO "等待 PostgreSQL 健康检查通过"
+        pg_isready -q
+        log INFO "开始执行版本化数据库迁移"
+        psql -v ON_ERROR_STOP=1 <<'SQL'
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            version TEXT PRIMARY KEY,
+            applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        SQL
+        found=0
+        for file in /migrations/V*.sql; do
+          [ -f "$$file" ] || continue
+          found=1
+          version="$$(basename "$$file" .sql)"
+          applied="$$(psql -v ON_ERROR_STOP=1 -Atqc "SELECT 1 FROM schema_migrations WHERE version = '$$version' LIMIT 1")"
+          if [ "$$applied" = "1" ]; then
+            log DEBUG "跳过已应用迁移 $$version"
+            continue
+          fi
+          log INFO "执行迁移 $$version"
+          psql -v ON_ERROR_STOP=1 -f "$$file"
+          psql -v ON_ERROR_STOP=1 -c "INSERT INTO schema_migrations(version) VALUES ('$$version') ON CONFLICT (version) DO NOTHING"
+        done
+        if [ "$$found" -eq 0 ]; then
+          log ERROR "迁移目录中没有 V*.sql 文件"
+          exit 1
         fi
-        log INFO "执行迁移 $$version"
-        psql -v ON_ERROR_STOP=1 -f "$$file"
-        psql -v ON_ERROR_STOP=1 -c "INSERT INTO schema_migrations(version) VALUES ('$$version') ON CONFLICT (version) DO NOTHING"
-      done
-      if [ "$$found" -eq 0 ]; then
-        log ERROR "迁移目录中没有 V*.sql 文件"
-        exit 1
-      fi
-      log INFO "数据库迁移完成"
+        log INFO "数据库迁移完成"
   model:
     image: ${REFERENCE_MODEL_IMAGE:-partner-model:local}
     profiles: [model]
