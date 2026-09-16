@@ -1,9 +1,9 @@
-# P3-T03/P3-T04 公开切片来源与审计记录
+# P3-T03/P3-T04/P3-T05 公开切片来源与审计记录
 
 本文件记录 P3-T03 选择性迁移的固定来源、路径映射和逐文件校验结果，以及
-P3-T04 的测试工具和无网络第二 Driver 增量。公开仓只保留已独立验收的纯 Java
-能力计划与 Model Driver 端口/固定文本实现；它不是完整后端，也不包含数据库、
-HTTP API、Worker、Gateway 编排或真实 Provider Driver。
+P3-T04 的测试工具/无网络第二 Driver 和 P3-T05 的会议应用切片增量。公开仓只
+保留已独立验收的纯 Java 参考代码；它不是完整后端，也不包含数据库、HTTP API、
+Worker、Gateway 编排或真实 Provider Driver。
 
 ## 固定来源与目标基线
 
@@ -17,8 +17,8 @@ HTTP API、Worker、Gateway 编排或真实 Provider Driver。
   `6c8dbc25`、`daedbd8e`、`e2389624`、`3c7de044`、`23726454`；公开切片
   使用最终提交内容，不从来源工作区复制。
 - 目标仓库：`/home/cfy/Data/Code/czur-ai-meeting-reference`，目标目录：
-  `backend-reference/`。开工基线为分支 `master`、HEAD
-  `d3781729b3bb56d1d3489623ad24b18042c555df`；配置的 `origin/master` 远端跟踪
+  `backend-reference/`。P3-T05 开工基线为分支 `master`、HEAD
+  `a621a3f2e5d6272a32f5897c07b1b1abb1820f03`；配置的 `origin/master` 远端跟踪
   引用缺失（Git 显示 `[丢失]`），因此 ahead/behind 无法计算，本任务不 push。
 
 ## 目录映射与公开白名单
@@ -41,8 +41,9 @@ P3-T03 白名单仅为上述四个 Java 源/测试目录，以及
 `NOTICE`；Maven 依赖仅为测试用 JUnit，依赖许可证由构建元数据追踪。
 
 P3-T04 增量白名单仍只允许 Model Driver 的 main/test 目录及上述两个说明文件；
-具体新增文件在下文登记，未修改 `contracts/`、`deploy/`、数据库、Gateway、
-API/Worker、Android、Web 或会议领域。
+P3-T05 白名单增加会议领域的快照恢复、应用命令、应用端口、内存适配器及其测试，
+具体新增文件在下文登记。两个任务均未修改 `contracts/`、`deploy/`、数据库、
+Gateway、API/Worker、Android 或 Web。
 
 ## 逐文件 SHA-256 一致性
 
@@ -111,12 +112,77 @@ P3-T04 基于公开仓 P3-T03 提交 `6893361` 实现，没有从 `czur-cloud` �
 
 ## 差异与审查结论
 
-- 迁移的 29 个 Java 文件均与固定来源提交逐字节一致；无重排、换行、包名或
-  行为改动，故无机械差异待说明。README 与本 SOURCE.md 是公开仓审计文档，
-  不属于来源 Java 切片。
+- P3-T03/P3-T04 迁移的 29 个 Java 文件均与固定来源提交逐字节一致；P3-T05
+  复核的 21 个会议相关 Java 文件也逐字节一致。无重排、换行、包名或行为改动，
+  故无机械差异待说明。README 与本 SOURCE.md 是公开仓审计文档，不属于来源
+  Java 切片。
 - 对 Java `import`、Maven POM 和日志字符串做审查：仅使用 JDK 21 与测试作用域
   JUnit；P3-T04 第二 Driver 仅使用 JDK 和公开端口类型；无厂商 SDK、Gateway、数据库
   框架/JDBC、生产 URL、Token、密码、账号、用户数据、原始音频或完整 Provider
   响应。两个固定文本 Driver 均不访问网络。
 - 公开边界检查还需结合 `tools/check-public-boundary.py`、Maven 测试、依赖树及
-  Fixture 校验结果；P3-T03 与 P3-T04 分别记录各自命令的实际输出。
+  Fixture 校验结果；P3-T03、P3-T04 和 P3-T05 分别记录各自命令的实际输出。
+
+## P3-T05 会议应用切片
+
+P3-T05 从 `czur-cloud` 的固定提交
+`23726454ebb893ae1402cff59b0f226b041daa04`（目录
+`reference-backend/src/`）同步会议领域和应用层的纯 Java 参考代码。目标路径为
+`backend-reference/src/`；同步内容与来源逐字节一致，公开仓不引入 HTTP、数据库
+驱动、认证、计费、Worker、Gateway、Android、Web 或生产配置。
+
+| 来源目录/文件 | 公开目录/文件 | SHA-256 |
+| --- | --- | --- |
+| `src/main/java/com/czur/reference/application/command/`（4 个文件） | `backend-reference/src/main/java/com/czur/reference/application/command/` | 见下方校验命令 |
+| `src/main/java/com/czur/reference/application/error/`（3 个文件） | `backend-reference/src/main/java/com/czur/reference/application/error/` | 见下方校验命令 |
+| `src/main/java/com/czur/reference/application/persistence/`（3 个文件） | `backend-reference/src/main/java/com/czur/reference/application/persistence/` | 见下方校验命令 |
+| `src/main/java/com/czur/reference/application/port/{IdempotencyStore,MeetingRepository,OutboxStore}.java` | `backend-reference/src/main/java/com/czur/reference/application/port/` | 见下方校验命令 |
+| `src/main/java/com/czur/reference/domain/meeting/`（5 个文件） | `backend-reference/src/main/java/com/czur/reference/domain/meeting/` | 见下方校验命令 |
+| 对应 `src/test/java` 测试（4 个文件） | `backend-reference/src/test/java` | 见下方校验命令 |
+
+逐文件一致性由以下命令复核（路径前缀替换后比较 SHA-256）：
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+import hashlib
+src = Path('/mnt/DataDisk/Data/Code/czur-cloud/reference-backend/src')
+dst = Path('/home/cfy/Data/Code/czur-ai-meeting-reference/backend-reference/src')
+for path in sorted(src.rglob('*.java')):
+    target = dst / path.relative_to(src)
+    assert target.exists(), target
+    assert hashlib.sha256(path.read_bytes()).digest() == hashlib.sha256(target.read_bytes()).digest(), path
+print('P3_T05_SOURCE_SHA_OK')
+PY
+```
+
+固定提交下本次审计覆盖的 22 个会议相关文件 SHA-256（其中未改变的文件也一并复核）：
+
+```text
+main/java/com/czur/reference/application/command/CreateMeetingCommand.java e3ae729f719712a65c9d9aaa001468ee2129c2af343ad73031422334bc6c4457
+main/java/com/czur/reference/application/command/MeetingCommandResult.java 8101f6f820df08a4faa1e32ebb6e745154238ddbd07a026d13c2d8678c29f94f
+main/java/com/czur/reference/application/command/MeetingCommandService.java 10530100b06fa55fb8a34a6db20a9dc1d8a42a141e205d97b051e3ab80963258
+main/java/com/czur/reference/application/command/StopMeetingCommand.java 7a8876465fb6ee0966aaf7ee128149bc6929066c8c3d152b1fabb354b05c8bdb
+main/java/com/czur/reference/application/error/IdempotencyConflictException.java 2b0aa3d4a9ed45bd3defa4cf81c7b434fe69153eb90f82a561c3043bd5d87ffd
+main/java/com/czur/reference/application/error/MeetingAlreadyExistsException.java 4a2c2da40f495a3cc6d39de095328c33aca7d3a559f45c8f8e867bb672075109
+main/java/com/czur/reference/application/error/MeetingNotFoundException.java c5fc58e9ea6acb2a992bd1c21a31f718acdf74d736821910d7466485093299ef
+main/java/com/czur/reference/application/persistence/InMemoryIdempotencyStore.java 7b7f0906c0dc0df1e1abe7e24a176e0044b01bf4e57e74f398839941a95ef48f
+main/java/com/czur/reference/application/persistence/InMemoryMeetingRepository.java aff5cb42e4b34f0880423670f34645f35c48e8b6d4f23a5a7130d316663c1cce
+main/java/com/czur/reference/application/persistence/InMemoryOutboxStore.java cb6bc051ee061141b408f9d348d2a7c14da7da4d163f4e7eb78f050f6c76f883
+main/java/com/czur/reference/application/port/IdempotencyStore.java e5ff47edb5b6dad61aede8383cce0b900e7c30197ad34d38911a963e996b81ef
+main/java/com/czur/reference/application/port/MeetingRepository.java 1c960ef1cd1cc9866adcab28d8bceb16b3f67107df6eb9b5e5eaa854a3cc9867
+main/java/com/czur/reference/application/port/OutboxStore.java 26062abd9258c4af4393296e2c4fb9fbba22a97a4af41af1da7879d7a3fda98d
+main/java/com/czur/reference/domain/meeting/InvalidMeetingTransitionException.java 912b66f97ac22a648a56d1ba4635944f69eff38c2e4a20db4178f7be8c1972a0
+main/java/com/czur/reference/domain/meeting/MeetingAggregate.java 6d7c6e6254b2717554ff0d51b9dc3a80d7855c783e5296173539f744a87d909c
+main/java/com/czur/reference/domain/meeting/MeetingEvent.java 761f928abcdbfba962ce904ddaf2c78ba2bdaa790dac996a04d6c993c8a060a1
+main/java/com/czur/reference/domain/meeting/MeetingState.java 614139b6416a3df64880280c486eaa1a0fb377ebd9423d00e879786bd709a680
+main/java/com/czur/reference/domain/meeting/MeetingStateMachine.java 02a524fd2ccdabb5a60bee13ce01e843cae7a7609ffabbc69a73bbec4643fac4
+test/java/com/czur/reference/application/MeetingCommandServiceTest.java a0dd8619d4f73208dff8374cdaac3bd8f0614f29f339c9ae1ec85eedb9b1cfc2
+test/java/com/czur/reference/application/OutboxStoreTest.java 0ec7e2b220bc42645adaf4bab75875788484fb925d1837d160606e80e528f754
+test/java/com/czur/reference/domain/meeting/MeetingAggregateTest.java bcef40ae78438773f465ef85fdb0d760f47cd196c8d96269f66aa6a8d2d58f72
+test/java/com/czur/reference/domain/meeting/MeetingStateMachineTest.java ddcdbbae069ece17a86742d066bbd2fac14e6a378d6cde0c773bc9c5c4f99c81
+```
+
+本次切片提供 `deploymentScope + clientSessionId` 唯一性、旧 `default` 构造兼容、
+快照恢复、幂等预占/释放以及 Outbox lease/fencing 语义；内存实现仅用于参考和测试，
+生产数据库适配器与事务/Unit of Work 仍属于后续任务。

@@ -18,6 +18,7 @@ class MeetingAggregateTest {
         MeetingAggregate.MeetingSnapshot snapshot = aggregate.snapshot();
 
         assertEquals("meeting-1", snapshot.meetingId());
+        assertEquals("default", snapshot.deploymentScope());
         assertEquals("client-session-1", snapshot.clientSessionId());
         assertEquals("meeting-minutes/v1", snapshot.profileId());
         assertEquals(3, snapshot.profileRevision());
@@ -47,6 +48,29 @@ class MeetingAggregateTest {
         assertEquals(UPDATED_AT, aggregate.updatedAt());
         assertThrows(IllegalArgumentException.class,
                 () -> aggregate.apply(MeetingEvent.START, CREATED_AT));
+    }
+
+    @Test
+    void restoresDeploymentScopeFromSnapshot() {
+        MeetingAggregate original = new MeetingAggregate(
+                "meeting-1", "partner-a", "client-session-1", "meeting-minutes/v1", 3, CREATED_AT);
+
+        MeetingAggregate restored = MeetingAggregate.fromSnapshot(original.snapshot());
+
+        assertEquals("partner-a", restored.deploymentScope());
+        assertEquals("partner-a", restored.snapshot().deploymentScope());
+    }
+
+    @Test
+    void oldAggregateAndSnapshotConstructorsUseDefaultScope() {
+        MeetingAggregate aggregate = aggregate();
+        MeetingAggregate.MeetingSnapshot legacySnapshot = new MeetingAggregate.MeetingSnapshot(
+                "meeting-legacy", "session-legacy", "profile", 1, MeetingState.CREATED,
+                CREATED_AT, CREATED_AT);
+
+        assertEquals("default", aggregate.deploymentScope());
+        assertEquals("default", legacySnapshot.deploymentScope());
+        assertEquals("default", MeetingAggregate.fromSnapshot(legacySnapshot).deploymentScope());
     }
 
     @Test

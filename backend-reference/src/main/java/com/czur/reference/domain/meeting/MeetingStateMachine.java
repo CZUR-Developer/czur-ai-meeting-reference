@@ -32,6 +32,14 @@ public final class MeetingStateMachine {
         return state;
     }
 
+    /** 仅供聚合从已校验快照恢复，禁止应用层绕过状态转换直接调用。 */
+    void restore(MeetingState restoredState) {
+        if (restoredState == null || restoredState == MeetingState.UNKNOWN) {
+            throw new IllegalArgumentException("restoredState must be concrete");
+        }
+        state = restoredState;
+    }
+
     public boolean canApply(MeetingEvent event) {
         if (event == null) {
             return false;

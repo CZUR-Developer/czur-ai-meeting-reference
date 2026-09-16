@@ -6,7 +6,12 @@ Provider 特有的响应转换只能位于仓库外的 Driver 实现中。
 
 ## 当前公开范围
 
-- `domain/meeting/`：目标仓已有的会议状态机和聚合代码，本次迁移保留原有文件与测试。
+- `domain/meeting/`：会议状态机、聚合、不变量和快照恢复；本次同步新增部署范围语义，
+  并保留原有文件与测试。
+- `application/command/`：创建/停止命令、请求校验、幂等预占和会议仓库调用。
+- `application/port/`：`MeetingRepository`、`IdempotencyStore`、`OutboxStore` 等替换
+  边界；生产实现可接入 PostgreSQL 或其他持久化系统。
+- `application/persistence/`：线程安全的内存适配器，仅用于参考和测试，不是生产事实源。
 - `domain/capability/`：P3-T01 已验收的能力描述、产品 Profile、依赖/回退规则和不可变能力计划。
 - `application/port/model/`：P3-T02 已验收的 Model Driver SPI、规范化会话/音频/事件对象、无网络 `MockModelDriver`，以及 P3-T04 的 `AlternativeTextModelDriver`。
 - 对应 `src/test/java/`：能力计划、Model Driver 生命周期、幂等、顺序、取消、超时及资源边界测试；`ModelDriverContractTestKit` 为任意 Driver 复用的测试作用域契约工具包。
@@ -16,6 +21,14 @@ Provider 特有的响应转换只能位于仓库外的 Driver 实现中。
 `RealtimeSessionSpec`，按公共序号处理音频并输出稳定的
 `segmentId`/`revision`/`final` 事件；Mock 和 `AlternativeTextModelDriver` 均不访问网络，
 固定文本仅用于契约测试和示例，不代表任何真实模型已接入。
+
+## P3-T05 会议应用切片
+
+会议应用切片同步自 `czur-cloud` 固定提交
+`23726454ebb893ae1402cff59b0f226b041daa04`。创建和停止命令通过端口访问会议事实源、
+幂等记录和 Outbox；`deploymentScope + clientSessionId` 是创建唯一性范围，旧调用
+默认使用 `default`。内存适配器只用于示例和测试；PostgreSQL、事务/Unit of Work、
+HTTP API、认证、计费、Worker 和真实运行时编排不在本切片内。
 
 ## P3-T04 Driver 契约测试
 
@@ -48,7 +61,8 @@ P3-T03 迁移上述已独立验收的纯 Java 公共切片；P3-T04 仅新增 Mo
 TCK 及其登记，不修改 `contracts/`、
 `deploy/`、Gateway、API/Worker、Android、Web 或系统音频代码，也不携带真实模型、
 厂商 SDK、私有 DTO、生产地址、凭据、用户数据或闭源二进制。目标仓既有会议领域
-代码保持不变。
+代码在 P3-T05 中补齐了应用命令、持久化端口和 `deploymentScope` 语义；这些内容
+仍保持纯 Java，且没有引入运行时外部依赖。
 
 该切片不构成 JDBC/数据库恢复、事务或 Unit of Work、Meeting API/Worker、Gateway
 编排、真实 Provider Driver 或完整后端闭环验收；两个无网络固定文本实现只证明
