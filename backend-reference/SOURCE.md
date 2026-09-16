@@ -1,8 +1,9 @@
-# P3-T03 公开切片来源与审计记录
+# P3-T03/P3-T04 公开切片来源与审计记录
 
-本文件记录 P3-T03 选择性迁移的固定来源、路径映射和逐文件校验结果。公开仓只
-保留已独立验收的纯 Java 能力计划与 Model Driver 端口/Mock；它不是完整后端，
-也不包含数据库、HTTP API、Worker、Gateway 编排或真实 Provider Driver。
+本文件记录 P3-T03 选择性迁移的固定来源、路径映射和逐文件校验结果，以及
+P3-T04 的测试工具和无网络第二 Driver 增量。公开仓只保留已独立验收的纯 Java
+能力计划与 Model Driver 端口/固定文本实现；它不是完整后端，也不包含数据库、
+HTTP API、Worker、Gateway 编排或真实 Provider Driver。
 
 ## 固定来源与目标基线
 
@@ -38,6 +39,10 @@ P3-T03 白名单仅为上述四个 Java 源/测试目录，以及
 目标仓既有 `domain/meeting` 文件不属于本次迁移。许可证审查确认迁移文件无第三方
 版权头或闭源代码，适用目标仓根目录 Apache License 2.0（`LICENSE`）及
 `NOTICE`；Maven 依赖仅为测试用 JUnit，依赖许可证由构建元数据追踪。
+
+P3-T04 增量白名单仍只允许 Model Driver 的 main/test 目录及上述两个说明文件；
+具体新增文件在下文登记，未修改 `contracts/`、`deploy/`、数据库、Gateway、
+API/Worker、Android、Web 或会议领域。
 
 ## 逐文件 SHA-256 一致性
 
@@ -84,13 +89,34 @@ P3-T03 白名单仅为上述四个 Java 源/测试目录，以及
 | `reference-backend/src/test/java/com/czur/reference/application/port/model/MockModelDriverTest.java` | `backend-reference/src/test/java/com/czur/reference/application/port/model/MockModelDriverTest.java` | `285b1abb0948a2d128540fa9f0ff8337b6cda2d4f2f58d091937a386f002df01` |
 | `reference-backend/src/test/java/com/czur/reference/application/port/model/ModelDriverSettingsValidationTest.java` | `backend-reference/src/test/java/com/czur/reference/application/port/model/ModelDriverSettingsValidationTest.java` | `dc4e1c6a1a8ef3df63b0f740499bd7caa28329e3c9a3530761dfccb3f5fc56d4` |
 
+## P3-T04 增量登记：TCK 与第二 Driver
+
+P3-T04 基于公开仓 P3-T03 提交 `6893361` 实现，没有从 `czur-cloud` 复制新的
+生产代码，也未修改既有会议领域、能力计划、协议、部署或 API 文件。新增文件如下：
+
+| 公开路径 | 来源/边界 | 说明 |
+| --- | --- | --- |
+| `backend-reference/src/main/java/com/czur/reference/application/port/model/AlternativeTextModelDriver.java` | 本任务新写的 JDK-only 参考实现 | 独立 `providerId=alternative-fixed-text`、能力集合、会话状态机和固定文本分段策略，仅声明 `transcript.realtime` 与 `transcript.final`；不访问 HTTP、数据库、厂商 SDK、生产配置或真实模型 |
+| `backend-reference/src/test/java/com/czur/reference/application/port/model/ModelDriverContractTestKit.java` | 本任务新写的 test-scope 契约工具 | 抽象 `descriptor()`/`createDriver(...)` 扩展入口，统一覆盖生命周期、能力、幂等、并发、错误和回调线性化；可选覆盖 `createPendingDriver(...)` 与 `supportsPendingDispatchHook()` 以启用确定性的 pending 竞态；不读取实现内部状态 |
+| `backend-reference/src/test/java/com/czur/reference/application/port/model/MockModelDriverContractTest.java` | 本任务新增测试入口 | 使用 TCK 验证既有 Mock |
+| `backend-reference/src/test/java/com/czur/reference/application/port/model/AlternativeModelDriverContractTest.java` | 本任务新增测试入口 | 使用同一 TCK 验证第二 Driver，并额外断言独立能力和固定文本语义 |
+
+`ModelDriverSession` 是 Driver 返回的 identity handle。TCK 使用值相等但非原始对象
+的伪造句柄验证 `INVALID_ARGUMENT`，不会以 record 值相等绕过身份边界。两个具体测试
+类均继承同一个 `ModelDriverContractTestKit`，因此替换 Driver 只改变工厂和能力描述；
+会议状态机、能力计划和公共协议没有第二套语义。
+
+第二 Driver 的固定文本（`alternative partial N`、`alternative final alternative-segment-N`）
+和无 speaker 能力只用于替换证明、契约测试与示例，不是模型质量评测或生产接入。
+
 ## 差异与审查结论
 
 - 迁移的 29 个 Java 文件均与固定来源提交逐字节一致；无重排、换行、包名或
   行为改动，故无机械差异待说明。README 与本 SOURCE.md 是公开仓审计文档，
   不属于来源 Java 切片。
 - 对 Java `import`、Maven POM 和日志字符串做审查：仅使用 JDK 21 与测试作用域
-  JUnit；无厂商 SDK、Gateway、数据库框架/JDBC、生产 URL、Token、密码、账号、
-  用户数据、原始音频或完整 Provider 响应。`MockModelDriver` 不访问网络。
+  JUnit；P3-T04 第二 Driver 仅使用 JDK 和公开端口类型；无厂商 SDK、Gateway、数据库
+  框架/JDBC、生产 URL、Token、密码、账号、用户数据、原始音频或完整 Provider
+  响应。两个固定文本 Driver 均不访问网络。
 - 公开边界检查还需结合 `tools/check-public-boundary.py`、Maven 测试、依赖树及
-  Fixture 校验结果；这些命令的实际输出记录在本次 P3-T03 交付说明中。
+  Fixture 校验结果；P3-T03 与 P3-T04 分别记录各自命令的实际输出。
