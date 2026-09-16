@@ -105,11 +105,21 @@ public interface OutboxStore {
      * <p>该 token 是不透明的完成凭证；调用方只能原样传回
      * {@link #markPublished(LeaseToken, Instant)} 或
      * {@link #markFailed(LeaseToken, Instant, Instant, String, int)}，不能持久化
-     * 它来跨进程恢复。若生产数据库只保留当前 schema 的 owner/until 字段，
-     * 还必须增加 token 或单调版本列，否则同一 owner 重用时无法防止旧请求
-     * 误更新。</p>
+     * 它来跨进程恢复。{@code leaseVersion} 来自数据库单调递增的
+     * {@code outbox_event.lease_version}；生产完成/失败条件更新必须同时校验
+     * owner、token、version 和 lease 到期时间。若数据库只保留 owner/until 字段，
+     * 就无法防止同一 owner 重用时旧请求误更新。</p>
      */
-    record LeaseToken(String eventId, String owner, String token, Instant expiresAt, Instant claimedAt) {
+    record LeaseToken(String eventId, String owner, String token, Instant expiresAt, Instant claimedAt,
+                      long leaseVersion) {
+        /**
+         * 兼容 P2-T08 之前的内存适配器；未连接数据库时版本使用 0。
+         * PostgreSQL 适配器必须使用数据库返回的单调版本构造完整令牌。
+         */
+        public LeaseToken(String eventId, String owner, String token, Instant expiresAt, Instant claimedAt) {
+            this(eventId, owner, token, expiresAt, claimedAt, 0);
+        }
+
         public LeaseToken {
             requireText("eventId", eventId);
             requireText("owner", owner);
@@ -118,6 +128,9 @@ public interface OutboxStore {
             Objects.requireNonNull(claimedAt, "claimedAt");
             if (!expiresAt.isAfter(claimedAt)) {
                 throw new IllegalArgumentException("expiresAt must be after claimedAt");
+            }
+            if (leaseVersion < 0) {
+                throw new IllegalArgumentException("leaseVersion must not be negative");
             }
         }
     }

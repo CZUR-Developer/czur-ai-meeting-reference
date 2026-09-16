@@ -1,9 +1,10 @@
 # P3-T03/P3-T04/P3-T05 公开切片来源与审计记录
 
 本文件记录 P3-T03 选择性迁移的固定来源、路径映射和逐文件校验结果，以及
-P3-T04 的测试工具/无网络第二 Driver 和 P3-T05 的会议应用切片增量。公开仓只
-保留已独立验收的纯 Java 参考代码；它不是完整后端，也不包含数据库、HTTP API、
-Worker、Gateway 编排或真实 Provider Driver。
+P3-T04 的测试工具/无网络第二 Driver、P3-T05 的会议应用切片和 P2-T05 的 JDBC
+适配器增量。公开仓只保留可替换的参考实现；它不是完整后端，也不包含 HTTP API、
+Worker、Gateway 编排或真实 Provider Driver。JDBC 适配器属于显式数据库运行时边界，
+不改变领域和端口的 JDK-only 设计。
 
 ## 固定来源与目标基线
 
@@ -38,11 +39,13 @@ P3-T03 白名单仅为上述四个 Java 源/测试目录，以及
 `reference-backend` 的 command、persistence、其他 port、部署、协议或服务实现；
 目标仓既有 `domain/meeting` 文件不属于本次迁移。许可证审查确认迁移文件无第三方
 版权头或闭源代码，适用目标仓根目录 Apache License 2.0（`LICENSE`）及
-`NOTICE`；Maven 依赖仅为测试用 JUnit，依赖许可证由构建元数据追踪。
+`NOTICE`；Maven 依赖包括测试用 JUnit，以及 JDBC 适配器运行时使用的 PostgreSQL
+驱动，依赖许可证由构建元数据追踪。
 
 P3-T04 增量白名单仍只允许 Model Driver 的 main/test 目录及上述两个说明文件；
 P3-T05 白名单增加会议领域的快照恢复、应用命令、应用端口、内存适配器及其测试，
-具体新增文件在下文登记。两个任务均未修改 `contracts/`、`deploy/`、数据库、
+P2-T05 进一步增加 JDBC 适配器及其显式 PostgreSQL 运行时依赖，具体新增文件在下文登记。
+P3-T04/P3-T05 未修改 `contracts/`、`deploy/`、数据库、
 Gateway、API/Worker、Android 或 Web。
 
 ## 逐文件 SHA-256 一致性
@@ -113,23 +116,25 @@ P3-T04 基于公开仓 P3-T03 提交 `6893361` 实现，没有从 `czur-cloud` �
 ## 差异与审查结论
 
 - P3-T03/P3-T04 迁移的 29 个 Java 文件均与固定来源提交逐字节一致；P3-T05
-  复核的 21 个会议相关 Java 文件也逐字节一致。无重排、换行、包名或行为改动，
+  复核的 22 个会议相关 Java 文件也逐字节一致。无重排、换行、包名或行为改动，
   故无机械差异待说明。README 与本 SOURCE.md 是公开仓审计文档，不属于来源
   Java 切片。
-- 对 Java `import`、Maven POM 和日志字符串做审查：仅使用 JDK 21 与测试作用域
-  JUnit；P3-T04 第二 Driver 仅使用 JDK 和公开端口类型；无厂商 SDK、Gateway、数据库
-  框架/JDBC、生产 URL、Token、密码、账号、用户数据、原始音频或完整 Provider
-  响应。两个固定文本 Driver 均不访问网络。
+- 对 Java `import`、Maven POM 和日志字符串做审查：领域、应用端口和两个固定文本
+  Driver 仅使用 JDK 21 与测试作用域 JUnit；P2-T05 JDBC 适配器只使用标准
+  `java.sql`/`javax.sql`，PostgreSQL 驱动为运行时依赖；无厂商 SDK、Gateway、生产
+  URL、Token、密码、账号、用户数据、原始音频或完整 Provider 响应。两个固定文本
+  Driver 均不访问网络。
 - 公开边界检查还需结合 `tools/check-public-boundary.py`、Maven 测试、依赖树及
-  Fixture 校验结果；P3-T03、P3-T04 和 P3-T05 分别记录各自命令的实际输出。
+  Fixture 校验结果；P3-T03、P3-T04 和 P3-T05/P2-T05 分别记录各自命令的实际输出。
 
 ## P3-T05 会议应用切片
 
 P3-T05 从 `czur-cloud` 的固定提交
 `23726454ebb893ae1402cff59b0f226b041daa04`（目录
 `reference-backend/src/`）同步会议领域和应用层的纯 Java 参考代码。目标路径为
-`backend-reference/src/`；同步内容与来源逐字节一致，公开仓不引入 HTTP、数据库
-驱动、认证、计费、Worker、Gateway、Android、Web 或生产配置。
+`backend-reference/src/`；同步内容与来源逐字节一致，P3-T05 本身不引入 HTTP、
+数据库驱动、认证、计费、Worker、Gateway、Android、Web 或生产配置；后续 P2-T05
+仅在新增的 JDBC 适配器边界引入运行时 PostgreSQL 驱动。
 
 | 来源目录/文件 | 公开目录/文件 | SHA-256 |
 | --- | --- | --- |
@@ -184,5 +189,21 @@ test/java/com/czur/reference/domain/meeting/MeetingStateMachineTest.java ddcdbba
 ```
 
 本次切片提供 `deploymentScope + clientSessionId` 唯一性、旧 `default` 构造兼容、
-快照恢复、幂等预占/释放以及 Outbox lease/fencing 语义；内存实现仅用于参考和测试，
-生产数据库适配器与事务/Unit of Work 仍属于后续任务。
+快照恢复、幂等预占/释放以及 Outbox lease/fencing 语义；内存实现仅用于参考和测试。
+JDBC 适配器已在 P2-T05 增加，但生产连接池、迁移执行、备份恢复和跨端口事务/Unit
+of Work 仍属于后续任务。
+
+## P2-T05 JDBC 适配器增量
+
+P2-T05 新增文件位于 `backend-reference/src/main/java/com/czur/reference/application/persistence/jdbc/`：
+
+- `JdbcMeetingRepository`：按会议 ID 读写快照，并支持部署范围与客户端会话查询；
+- `JdbcIdempotencyStore`：以 `(subject_scope, idempotency_key)` 唯一键完成原子预占、重放、冲突和释放；
+- `JdbcOutboxStore`：以 V001/V002 表结构实现追加、`SKIP LOCKED` 领取、lease token/version 栅栏、发布确认、失败重试和死信；
+- `IdempotencyResultJson`：JDK-only 的固定响应 JSONB 编解码，仅处理公开命令结果。
+
+PostgreSQL 驱动在 `backend-reference/pom.xml` 使用 `runtime` 作用域；领域和端口编译
+不依赖驱动。`JdbcPostgresIntegrationTest` 仅在显式设置
+`REFERENCE_TEST_DATABASE_URL`、可选账号密码后运行，数据库须预先执行 V001/V002；
+默认单测不连接外部数据库。该增量不实现 HTTP、Worker、连接池、迁移执行、备份恢复
+或 Unit of Work，不应单独宣称完整生产闭环。

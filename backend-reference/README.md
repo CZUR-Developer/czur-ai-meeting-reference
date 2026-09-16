@@ -12,6 +12,9 @@ Provider 特有的响应转换只能位于仓库外的 Driver 实现中。
 - `application/port/`：`MeetingRepository`、`IdempotencyStore`、`OutboxStore` 等替换
   边界；生产实现可接入 PostgreSQL 或其他持久化系统。
 - `application/persistence/`：线程安全的内存适配器，仅用于参考和测试，不是生产事实源。
+- `application/persistence/jdbc/`：基于标准 JDBC `DataSource` 的 PostgreSQL 适配器，
+  覆盖会议快照、幂等记录和 Outbox。适配器不自动建表，必须先执行仓库
+  `deploy/migrations/V001__initial_schema.sql` 与 `V002__outbox_lease_fencing.sql`。
 - `domain/capability/`：P3-T01 已验收的能力描述、产品 Profile、依赖/回退规则和不可变能力计划。
 - `application/port/model/`：P3-T02 已验收的 Model Driver SPI、规范化会话/音频/事件对象、无网络 `MockModelDriver`，以及 P3-T04 的 `AlternativeTextModelDriver`。
 - 对应 `src/test/java/`：能力计划、Model Driver 生命周期、幂等、顺序、取消、超时及资源边界测试；`ModelDriverContractTestKit` 为任意 Driver 复用的测试作用域契约工具包。
@@ -27,8 +30,19 @@ Provider 特有的响应转换只能位于仓库外的 Driver 实现中。
 会议应用切片同步自 `czur-cloud` 固定提交
 `23726454ebb893ae1402cff59b0f226b041daa04`。创建和停止命令通过端口访问会议事实源、
 幂等记录和 Outbox；`deploymentScope + clientSessionId` 是创建唯一性范围，旧调用
-默认使用 `default`。内存适配器只用于示例和测试；PostgreSQL、事务/Unit of Work、
-HTTP API、认证、计费、Worker 和真实运行时编排不在本切片内。
+默认使用 `default`。内存适配器只用于示例和测试；PostgreSQL 适配器提供持久化端口，
+事务/Unit of Work、HTTP API、认证、计费、Worker 和真实运行时编排不在本切片内。
+
+### PostgreSQL 适配器
+
+`JdbcMeetingRepository`、`JdbcIdempotencyStore` 和 `JdbcOutboxStore` 只依赖
+`javax.sql.DataSource`。参考运行时可以由应用启动 PostgreSQL JDBC 驱动（Maven
+依赖使用 `runtime` 作用域），也可以由容器运行时提供驱动；核心领域和单元测试不
+要求数据库可用。适配器不会打印响应正文、Outbox 载荷或连接凭据。
+
+当前 `MeetingCommandService` 仍按端口分别调用仓库；要保证会议快照、幂等记录和
+Outbox 在同一事务中提交，下一阶段需要新增 Unit of Work，而不是在 Gateway 中拼接
+事务。数据库容器是否由 Compose 启动不改变这个边界。
 
 ## P3-T04 Driver 契约测试
 
@@ -61,10 +75,10 @@ P3-T03 迁移上述已独立验收的纯 Java 公共切片；P3-T04 仅新增 Mo
 TCK 及其登记，不修改 `contracts/`、
 `deploy/`、Gateway、API/Worker、Android、Web 或系统音频代码，也不携带真实模型、
 厂商 SDK、私有 DTO、生产地址、凭据、用户数据或闭源二进制。目标仓既有会议领域
-代码在 P3-T05 中补齐了应用命令、持久化端口和 `deploymentScope` 语义；这些内容
-仍保持纯 Java，且没有引入运行时外部依赖。
+代码在 P3-T05 中补齐了应用命令、持久化端口和 `deploymentScope` 语义；领域和
+端口仍保持纯 Java，PostgreSQL 驱动只位于 JDBC 运行时适配边界。
 
-该切片不构成 JDBC/数据库恢复、事务或 Unit of Work、Meeting API/Worker、Gateway
+该切片不构成数据库恢复的真实环境验收、事务或 Unit of Work、Meeting API/Worker、Gateway
 编排、真实 Provider Driver 或完整后端闭环验收；两个无网络固定文本实现只证明
 公开端口可替换，不代表真实模型质量或生产接入。数据库仍应是未来运行时会议状态、
 幂等记录和 Outbox 的事实源；内存和 Mock 仅用于单元测试与示例。

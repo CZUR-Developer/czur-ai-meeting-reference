@@ -13,6 +13,17 @@
     <junit.version>5.11.0</junit.version>
   </properties>
   <dependencies>
+    <!--
+      JDBC 适配器只依赖 javax.sql.DataSource 和 java.sql；驱动放在运行时边界，
+      使核心领域仍可在没有数据库的环境中编译和执行单元测试。部署参考后端时
+      必须把该驱动与应用一起打包，或由容器运行时提供同版本驱动。
+    -->
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+      <version>42.6.2</version>
+      <scope>runtime</scope>
+    </dependency>
     <dependency>
       <groupId>org.junit.jupiter</groupId>
       <artifactId>junit-jupiter</artifactId>

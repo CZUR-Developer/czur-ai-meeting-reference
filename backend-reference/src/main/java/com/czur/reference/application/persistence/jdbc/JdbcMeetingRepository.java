@@ -1,0 +1,148 @@
+package com.czur.reference.application.persistence.jdbc;
+
+import com.czur.reference.application.port.MeetingRepository;
+import com.czur.reference.domain.meeting.MeetingAggregate;
+import com.czur.reference.domain.meeting.MeetingState;
+
+import javax.sql.DataSource;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
+/**
+ * 基于 JDBC 的 PostgreSQL 会议仓库参考实现。
+ *
+ * <p>该类只依赖标准 {@link DataSource} 和 SQL，不依赖 Gateway、Web 框架或
+ * PostgreSQL 专有 Java API。调用方负责在需要时把本仓库与幂等、Outbox 的写入
+ * 放入同一个数据库事务；当前 {@link MeetingRepository} 端口仍保留独立
+ * {@code save} 方法，事务/Unit of Work 将在后续任务中补齐。</p>
+ *
+ * <p>公开领域快照比 V001 表少部分生产字段。参考适配器使用稳定默认值写入
+ * {@code subject_scope='meeting'}、{@code aggregate_version=0}、空元数据，其余
+ * 生产字段保持 NULL/数据库默认值；这些字段不会伪装成领域已经拥有的事实。</p>
+ */
+public final class JdbcMeetingRepository implements MeetingRepository {
+    private static final Logger LOGGER = Logger.getLogger(JdbcMeetingRepository.class.getName());
+    private static final String SUBJECT_SCOPE = "meeting";
+
+    private static final String FIND_SQL = """
+            SELECT meeting_id, deployment_scope, client_session_id, profile_id,
+                   profile_revision, state, created_at, updated_at
+              FROM meeting
+             WHERE meeting_id = ?
+            """;
+
+    private static final String FIND_BY_SCOPE_SQL = """
+            SELECT meeting_id, deployment_scope, client_session_id, profile_id,
+                   profile_revision, state, created_at, updated_at
+              FROM meeting
+             WHERE deployment_scope = ? AND client_session_id = ?
+             ORDER BY created_at, meeting_id
+             LIMIT 1
+            """;
+
+    private static final String SAVE_SQL = """
+            INSERT INTO meeting (
+                meeting_id, deployment_scope, client_session_id, subject_scope,
+                profile_id, profile_revision, state, aggregate_version,
+                created_at, updated_at, metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, '{}'::jsonb)
+            ON CONFLICT (meeting_id) DO UPDATE SET
+                deployment_scope = EXCLUDED.deployment_scope,
+                client_session_id = EXCLUDED.client_session_id,
+                profile_id = EXCLUDED.profile_id,
+                profile_revision = EXCLUDED.profile_revision,
+                state = EXCLUDED.state,
+                updated_at = EXCLUDED.updated_at
+            """;
+
+    private final DataSource dataSource;
+
+    public JdbcMeetingRepository(DataSource dataSource) {
+        this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
+    }
+
+    @Override
+    public Optional<MeetingAggregate.MeetingSnapshot> find(String meetingId) {
+        requireText("meetingId", meetingId);
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(FIND_SQL)) {
+            statement.setString(1, meetingId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next() ? Optional.of(readSnapshot(resultSet)) : Optional.empty();
+            }
+        } catch (SQLException failure) {
+            throw failure("查询会议快照失败 meetingId=" + meetingId, failure);
+        }
+    }
+
+    @Override
+    public Optional<MeetingAggregate.MeetingSnapshot> findByDeploymentScopeAndClientSessionId(
+            String deploymentScope,
+            String clientSessionId) {
+        requireText("deploymentScope", deploymentScope);
+        requireText("clientSessionId", clientSessionId);
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(FIND_BY_SCOPE_SQL)) {
+            statement.setString(1, deploymentScope);
+            statement.setString(2, clientSessionId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next() ? Optional.of(readSnapshot(resultSet)) : Optional.empty();
+            }
+        } catch (SQLException failure) {
+            throw failure("按范围查询会议失败 deploymentScope=" + deploymentScope, failure);
+        }
+    }
+
+    @Override
+    public void save(MeetingAggregate.MeetingSnapshot meeting) {
+        Objects.requireNonNull(meeting, "meeting");
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(SAVE_SQL)) {
+            statement.setString(1, meeting.meetingId());
+            statement.setString(2, meeting.deploymentScope());
+            statement.setString(3, meeting.clientSessionId());
+            statement.setString(4, SUBJECT_SCOPE);
+            statement.setString(5, meeting.profileId());
+            statement.setInt(6, meeting.profileRevision());
+            statement.setString(7, meeting.state().name());
+            statement.setTimestamp(8, Timestamp.from(meeting.createdAt()));
+            statement.setTimestamp(9, Timestamp.from(meeting.updatedAt()));
+            statement.executeUpdate();
+            LOGGER.log(Level.FINE, "JDBC 会议快照已保存 meetingId={0} state={1}",
+                    new Object[]{meeting.meetingId(), meeting.state()});
+        } catch (SQLException failure) {
+            LOGGER.log(Level.SEVERE, "JDBC 会议快照保存失败 meetingId=" + meeting.meetingId(), failure);
+            throw failure("保存会议快照失败 meetingId=" + meeting.meetingId(), failure);
+        }
+    }
+
+    private static MeetingAggregate.MeetingSnapshot readSnapshot(ResultSet resultSet) throws SQLException {
+        return new MeetingAggregate.MeetingSnapshot(
+                resultSet.getString("meeting_id"),
+                resultSet.getString("deployment_scope"),
+                resultSet.getString("client_session_id"),
+                resultSet.getString("profile_id"),
+                resultSet.getInt("profile_revision"),
+                MeetingState.valueOf(resultSet.getString("state")),
+                resultSet.getTimestamp("created_at").toInstant(),
+                resultSet.getTimestamp("updated_at").toInstant());
+    }
+
+    private static RuntimeException failure(String message, SQLException cause) {
+        return new IllegalStateException(message, cause);
+    }
+
+    private static void requireText(String name, String value) {
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException(name + " must not be blank");
+        }
+    }
+}
