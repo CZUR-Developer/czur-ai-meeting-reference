@@ -14,6 +14,22 @@
   </properties>
   <dependencies>
     <!--
+      运行时唯一共享连接池。HikariCP 只位于数据库装配边界，不渗透到领域
+      和 application port；连接池由 JdbcDatabaseRuntime 负责启动与关闭。
+    -->
+    <dependency>
+      <groupId>com.zaxxer</groupId>
+      <artifactId>HikariCP</artifactId>
+      <version>5.1.0</version>
+    </dependency>
+    <!-- Hikari 使用 SLF4J；将其统一桥接到本参考后端已有的 JUL 分级日志。 -->
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-jdk14</artifactId>
+      <version>1.7.36</version>
+      <scope>runtime</scope>
+    </dependency>
+    <!--
       JDBC 适配器只依赖 javax.sql.DataSource 和 java.sql；驱动放在运行时边界，
       使核心领域仍可在没有数据库的环境中编译和执行单元测试。部署参考后端时
       必须把该驱动与应用一起打包，或由容器运行时提供同版本驱动。
