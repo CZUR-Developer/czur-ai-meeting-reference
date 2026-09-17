@@ -1,6 +1,9 @@
 package com.czur.reference.application.persistence.jdbc;
 
 import java.time.Duration;
+import java.net.Inet6Address;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.util.Map;
 import java.util.Objects;
 
@@ -170,7 +173,8 @@ public final class DatabaseRuntimeConfig {
         }
         String hostAndPort = authority.substring(0, end);
         if (hostAndPort.isBlank() || hostAndPort.startsWith(":")
-                || hostAndPort.endsWith(":") || hostAndPort.indexOf('@') >= 0) {
+                || hostAndPort.endsWith(":") || hostAndPort.indexOf('@') >= 0
+                || hostAndPort.indexOf(',') >= 0) {
             throw invalid(DATABASE_URL, "必须包含有效主机");
         }
         String lower = url.toLowerCase(java.util.Locale.ROOT);
@@ -230,14 +234,38 @@ public final class DatabaseRuntimeConfig {
     }
 
     private static void validatePort(String hostAndPort) {
-        int colon = hostAndPort.lastIndexOf(':');
-        if (colon < 0 || hostAndPort.startsWith("[")) {
-            if (hostAndPort.startsWith("[") && hostAndPort.indexOf(']') < 0) {
+        if (hostAndPort.startsWith("[")) {
+            int closingBracket = hostAndPort.indexOf(']');
+            if (closingBracket <= 1 || hostAndPort.indexOf('[', 1) >= 0
+                    || hostAndPort.indexOf(']', closingBracket + 1) >= 0) {
                 throw invalid(DATABASE_URL, "主机 IPv6 地址格式非法");
             }
+            validateIpv6Literal(hostAndPort.substring(1, closingBracket));
+            String suffix = hostAndPort.substring(closingBracket + 1);
+            if (suffix.isEmpty()) {
+                return;
+            }
+            if (!suffix.startsWith(":")) {
+                throw invalid(DATABASE_URL, "IPv6 右括号后只能跟端口");
+            }
+            validateNumericPort(suffix.substring(1));
             return;
         }
-        String port = hostAndPort.substring(colon + 1);
+        int colon = hostAndPort.lastIndexOf(':');
+        if (colon < 0) {
+            return;
+        }
+        // 未加方括号的 IPv6 authority 不能被误解析成 host:port。
+        if (hostAndPort.indexOf(':') != colon) {
+            throw invalid(DATABASE_URL, "IPv6 主机必须使用方括号");
+        }
+        validateNumericPort(hostAndPort.substring(colon + 1));
+    }
+
+    private static void validateNumericPort(String port) {
+        if (port.isEmpty()) {
+            throw invalid(DATABASE_URL, "端口不能为空");
+        }
         try {
             int value = Integer.parseInt(port);
             if (value < 1 || value > 65535) {
@@ -246,6 +274,31 @@ public final class DatabaseRuntimeConfig {
         } catch (NumberFormatException failure) {
             throw invalid(DATABASE_URL, "端口必须是数字");
         }
+    }
+
+    private static void validateIpv6Literal(String literal) {
+        if (literal.indexOf(':') < 0 || literal.indexOf('%') >= 0) {
+            throw invalid(DATABASE_URL, "方括号内必须是 IPv6 literal，且不支持 zone id");
+        }
+        for (int index = 0; index < literal.length(); index++) {
+            char character = literal.charAt(index);
+            if (!(character == ':' || character == '.' || isHexDigit(character))) {
+                throw invalid(DATABASE_URL, "方括号内 IPv6 literal 含非法字符");
+            }
+        }
+        try {
+            if (!(InetAddress.getByName(literal) instanceof Inet6Address)) {
+                throw invalid(DATABASE_URL, "方括号内地址不是 IPv6 literal");
+            }
+        } catch (UnknownHostException failure) {
+            throw invalid(DATABASE_URL, "方括号内 IPv6 literal 格式非法");
+        }
+    }
+
+    private static boolean isHexDigit(char character) {
+        return (character >= '0' && character <= '9')
+                || (character >= 'a' && character <= 'f')
+                || (character >= 'A' && character <= 'F');
     }
 
     private static boolean containsWhitespaceOrControl(String value) {

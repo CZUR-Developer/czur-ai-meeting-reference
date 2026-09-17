@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -169,6 +170,42 @@ class DatabaseRuntimeConfigTest {
         environment.put(DatabaseRuntimeConfig.DATABASE_URL,
                 "jdbc:postgresql://localhost:not-a-port/meeting");
         assertSafeFailure(environment, DatabaseRuntimeConfig.DATABASE_URL);
+    }
+
+    @Test
+    void acceptsBracketedIpv6AuthorityWithOrWithoutPort() {
+        for (String ipv6Url : List.of(
+                "jdbc:postgresql://[::1]/meeting",
+                "jdbc:postgresql://[::1]:5432/meeting",
+                "jdbc:postgresql://[2001:db8::10]:65535/meeting")) {
+            Map<String, String> environment = validEnvironment();
+            environment.put(DatabaseRuntimeConfig.DATABASE_URL, ipv6Url);
+            assertEquals(ipv6Url, DatabaseRuntimeConfig.fromEnvironment(environment).url());
+        }
+    }
+
+    @Test
+    void rejectsInvalidIpv6SuffixPortsAndMultiHostAuthority() {
+        for (String ipv6Url : List.of(
+                "jdbc:postgresql://[::1/meeting",
+                "jdbc:postgresql://[]/meeting",
+                "jdbc:postgresql://[::1]:/meeting",
+                "jdbc:postgresql://[::1]:not-a-port/meeting",
+                "jdbc:postgresql://[::1]:0/meeting",
+                "jdbc:postgresql://[::1]:65536/meeting",
+                "jdbc:postgresql://[::1]garbage/meeting",
+                "jdbc:postgresql://[::1]::5432/meeting",
+                "jdbc:postgresql://[not-ipv6]/meeting",
+                "jdbc:postgresql://[:::]/meeting",
+                "jdbc:postgresql://[gggg::1]/meeting",
+                "jdbc:postgresql://[fe80::1%eth0]/meeting",
+                "jdbc:postgresql://host:65536/meeting",
+                "jdbc:postgresql://host:5432,other:5432/meeting",
+                "jdbc:postgresql://host,other/meeting")) {
+            Map<String, String> environment = validEnvironment();
+            environment.put(DatabaseRuntimeConfig.DATABASE_URL, ipv6Url);
+            assertSafeFailure(environment, DatabaseRuntimeConfig.DATABASE_URL);
+        }
     }
 
     private static Map<String, String> validEnvironment() {
