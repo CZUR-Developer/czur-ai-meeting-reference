@@ -280,6 +280,25 @@ class JdbcEntitlementIntegrationTest {
         assertError(replay, EntitlementProviderError.Code.INTERNAL);
     }
 
+    @Test
+    void damagedGrantExpiryFailsInternalWithoutLeakingSnapshotDetails() throws Exception {
+        ReferenceDevEntitlementPolicy policy = policyAt(NOW);
+        JdbcReferenceDevEntitlementProvider provider = provider(policy, NOW);
+        ReserveUsageRequest request = reserveRequest(
+                grantAt(NOW.minusSeconds(1), NOW.plusSeconds(599)),
+                "reserve-corrupt-expiry", "digest-corrupt-expiry", "meeting-corrupt-expiry");
+        assertTrue(provider.reserveUsage(request).isSuccess());
+
+        updateResultBody("jsonb_set(result_body, '{grantExpiresAt}', 'null'::jsonb)",
+                request.idempotencyKey());
+        assertError(provider.reserveUsage(request), EntitlementProviderError.Code.INTERNAL);
+
+        updateResultBody("jsonb_set(result_body, '{grantExpiresAt}', "
+                        + "to_jsonb('2026-09-17T04:04:59.123456789Z'::text))",
+                request.idempotencyKey());
+        assertError(provider.reserveUsage(request), EntitlementProviderError.Code.INTERNAL);
+    }
+
     private static void assertThrowsCorruptNumeric(BigDecimal value) {
         try {
             JdbcUsageReservationStore.exactLong(value, "test");
@@ -391,6 +410,20 @@ class JdbcEntitlementIntegrationTest {
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, value);
+            assertEquals(1, statement.executeUpdate());
+        }
+    }
+
+    private void updateResultBody(String expression, String idempotencyKey) throws SQLException {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "UPDATE usage_operation SET result_body = " + expression
+                             + " WHERE deployment_scope = ? AND subject_scope = ?"
+                             + " AND operation_scope = ? AND idempotency_key = ?")) {
+            statement.setString(1, DEPLOYMENT);
+            statement.setString(2, SUBJECT);
+            statement.setString(3, UsageOperationScopes.RESERVE);
+            statement.setString(4, idempotencyKey);
             assertEquals(1, statement.executeUpdate());
         }
     }

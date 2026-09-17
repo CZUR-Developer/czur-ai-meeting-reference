@@ -155,6 +155,12 @@ class EntitlementPortContractTest {
         assertEquals(SUBJECT, replay.subjectScope());
         assertEquals(UsageOperationScopes.RESERVE, replay.operationScope());
         assertThrows(IllegalArgumentException.class, () -> new UsageOperationResult(
+                DEPLOYMENT, SUBJECT, UsageOperationScopes.RESERVE, "key", digest("missing"),
+                null, reserved));
+        assertThrows(IllegalArgumentException.class, () -> new UsageOperationResult(
+                DEPLOYMENT, SUBJECT, UsageOperationScopes.RESERVE, "key", digest("early"),
+                reserved.expiresAt().minusNanos(1), reserved));
+        assertThrows(IllegalArgumentException.class, () -> new UsageOperationResult(
                 DEPLOYMENT, SUBJECT, UsageOperationScopes.COMMIT, "key", digest("f"),
                 null, reserved));
     }

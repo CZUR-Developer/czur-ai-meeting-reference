@@ -79,6 +79,12 @@ class UsageOperationResultJsonTest {
                 valid.replace("\"schemaVersion\":1", "\"schemaVersion\":1,\"schemaVersion\":1"),
                 valid.replace(
                         "\"grantExpiresAt\":\"2026-09-17T04:05:01.123456789Z\",", ""),
+                valid.replace(
+                        "\"grantExpiresAt\":\"2026-09-17T04:05:01.123456789Z\"",
+                        "\"grantExpiresAt\":null"),
+                valid.replace(
+                        "\"grantExpiresAt\":\"2026-09-17T04:05:01.123456789Z\"",
+                        "\"grantExpiresAt\":\"2026-09-17T04:04:59.123456789Z\""),
                 valid.replace("\"version\":0", "\"version\":0.0"),
                 valid.replace("\"version\":0", "\"version\":1e0"),
                 valid.replace("\"version\":0", "\"version\":9223372036854775808"),

@@ -29,12 +29,18 @@ public record UsageOperationResult(
         ReserveUsageRequest.requireText("operationScope", operationScope);
         ReserveUsageRequest.requireText("idempotencyKey", idempotencyKey);
         ReserveUsageRequest.requireText("requestDigest", requestDigest);
+        Objects.requireNonNull(reservation, "reservation");
         if (UsageOperationScopes.RESERVE.equals(operationScope)) {
-            Objects.requireNonNull(grantExpiresAt, "grantExpiresAt");
+            if (grantExpiresAt == null) {
+                throw new IllegalArgumentException("reserve result grantExpiresAt is required");
+            }
+            if (grantExpiresAt.isBefore(reservation.expiresAt())) {
+                throw new IllegalArgumentException(
+                        "grantExpiresAt must not be before reservation expiry");
+            }
         } else if (grantExpiresAt != null) {
             throw new IllegalArgumentException("commit/cancel result grantExpiresAt must be null");
         }
-        Objects.requireNonNull(reservation, "reservation");
         if (!deploymentScope.equals(reservation.deploymentScope())
                 || !subjectScope.equals(reservation.subjectScope())) {
             throw new IllegalArgumentException("result scope does not match reservation scope");
@@ -66,12 +72,6 @@ public record UsageOperationResult(
             Instant grantExpiresAt,
             UsageReservation reservation) {
         ReserveUsageRequest.requireText("operationScope", UsageOperationScopes.RESERVE);
-        Objects.requireNonNull(grantExpiresAt, "grantExpiresAt");
-        Objects.requireNonNull(reservation, "reservation");
-        if (grantExpiresAt.isBefore(reservation.expiresAt())) {
-            throw new IllegalArgumentException(
-                    "grantExpiresAt must not be before reservation expiry");
-        }
         return new UsageOperationResult(deploymentScope, subjectScope,
                 UsageOperationScopes.RESERVE, idempotencyKey, requestDigest,
                 grantExpiresAt, reservation);
