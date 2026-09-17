@@ -113,6 +113,41 @@ class MeetingCreateOutcomeJsonTest {
         }
     }
 
+    @Test
+    void failureRejectsTrailingCommaAndNonCanonicalSchemaVersionNumbers() {
+        // 独立 Review 发现的两个输入：对象尾逗号和带前导零的整数。
+        assertMalformed("{\"schemaVersion\":3,\"operation\":\"MEETING_CREATE\","
+                + "\"outcome\":\"FAILURE\",\"errorCode\":\"INTERNAL\","
+                + "\"retryable\":false,}");
+        assertMalformed(failureJson("03"));
+
+        // 相邻语法边界：JSON 子解析器不得接受双逗号、其它前导零、符号、
+        // 小数或指数形式作为 schemaVersion 整数。
+        assertMalformed("{\"schemaVersion\":3,,\"operation\":\"MEETING_CREATE\","
+                + "\"outcome\":\"FAILURE\",\"errorCode\":\"INTERNAL\","
+                + "\"retryable\":false}");
+        for (String invalidVersion : new String[]{
+                "00", "+3", "-3", "3.0", "3e0", "3E+0"
+        }) {
+            assertMalformed(failureJson(invalidVersion));
+        }
+    }
+
+    private static String failureJson(String schemaVersion) {
+        return "{\"schemaVersion\":" + schemaVersion
+                + ",\"operation\":\"MEETING_CREATE\""
+                + ",\"outcome\":\"FAILURE\""
+                + ",\"errorCode\":\"INTERNAL\",\"retryable\":false}";
+    }
+
+    private static void assertMalformed(String invalid) {
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> MeetingCreateOutcomeJson.decode(invalid));
+        assertEquals("会议创建 Outcome 格式非法", error.getMessage());
+        assertNull(error.getCause());
+    }
+
     private static MeetingCommandResult createdResult() {
         Instant now = Instant.parse("2026-09-17T11:00:00.123456Z");
         return new MeetingCommandResult(

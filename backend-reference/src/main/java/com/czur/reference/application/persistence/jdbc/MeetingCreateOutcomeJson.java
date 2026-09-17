@@ -103,6 +103,9 @@ final class MeetingCreateOutcomeJson {
             }
             if (reader.peek() == ',') {
                 reader.expect(',');
+                if (reader.peek() == '}') {
+                    throw reader.error("对象不允许尾逗号");
+                }
             } else {
                 break;
             }
@@ -186,17 +189,33 @@ final class MeetingCreateOutcomeJson {
         private int readInt() {
             skipWhitespace();
             int start = index;
-            while (index < input.length() && Character.isDigit(input.charAt(index))) {
-                index++;
-            }
-            if (start == index) {
+            if (index >= input.length()) {
                 throw error("需要整数");
+            }
+            char first = input.charAt(index);
+            if (first == '0') {
+                index++;
+                if (index < input.length() && isAsciiDigit(input.charAt(index))) {
+                    throw error("整数不允许前导零");
+                }
+                return 0;
+            }
+            if (first < '1' || first > '9') {
+                throw error("需要整数");
+            }
+            index++;
+            while (index < input.length() && isAsciiDigit(input.charAt(index))) {
+                index++;
             }
             try {
                 return Integer.parseInt(input.substring(start, index));
             } catch (NumberFormatException outOfRange) {
                 throw error("整数超出范围");
             }
+        }
+
+        private static boolean isAsciiDigit(char value) {
+            return value >= '0' && value <= '9';
         }
 
         private boolean readBoolean() {
