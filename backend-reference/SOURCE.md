@@ -222,3 +222,22 @@ P2-T10 在应用端口增加 `MeetingUnitOfWork`，并以 `JdbcMeetingUnitOfWork
 三类端口后抛错时整体回滚。事务内会议查询使用 `SELECT ... FOR UPDATE`，并由两个
 独立命令服务和数据库连接验证并发 Stop 只生成一条停止事件。JDBC Outbox 的重放比较使用 PostgreSQL JSONB 相等语义，
 避免数据库规范化空白或键顺序后把相同载荷误判为冲突。
+
+## P2-T11 PostgreSQL 运行时增量
+
+P2-T11 提交 `5bed0fc5deea953d82417f1379fd3bd33bce25d5` 增加
+`DatabaseRuntimeConfig`、`JdbcDatabaseRuntime`、脱敏 readiness/启动异常模型和
+HikariCP 连接池；修正提交 `71bef21` 收紧单主机 JDBC URL、IPv6 literal 与端口
+校验，并明确拒绝本参考实现未支持的 PostgreSQL multi-host URL。Hikari 日志通过
+`slf4j-jdk14` 进入既有 JUL 分级日志，默认输出不包含数据库账号、密码或完整 URL。
+
+运行时只创建一个共享 `DataSource`，并复用 P2-T10 的 `JdbcMeetingUnitOfWork` 和
+`JdbcOutboxStore`。启动时执行只读探针并检查 V001/V002 登记；失败会关闭连接池，
+不自动迁移、不切换内存实现。readiness 与 liveness 分离，关闭幂等，关闭后禁止
+继续获取业务组件。
+
+独立验收在 PostgreSQL 16.15 上完成 116 项测试，包含同一个 Runtime 的
+`READY → DATABASE_UNAVAILABLE → READY` 停库/重启恢复及恢复后的 create/stop，
+并回归 P2-T10 事务、并发 Stop、Fixture、公开边界、迁移、依赖树和 `jdeps`。
+本增量未实现 HTTP、Worker、认证、权益、模型、存储、Dockerfile、备份恢复或生产
+流量切换，不能单独宣称 P2 或参考后端已经完成。
