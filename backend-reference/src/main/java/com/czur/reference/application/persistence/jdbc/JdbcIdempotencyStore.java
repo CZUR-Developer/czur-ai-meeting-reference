@@ -129,11 +129,26 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
      * Outbox 事件作为一个原子提交单元。
      */
     static Reservation reserve(Connection connection, IdempotencyRecord candidate) throws SQLException {
+        return reserve(connection, candidate, Instant.now());
+    }
+
+    /**
+     * 在调用方事务连接上使用显式事实时间预占幂等键。
+     *
+     * <p>owned 创建工作单元必须把 Reservation bind、Meeting、幂等记录和
+     * Outbox 的时间统一为一次读取的微秒精度 {@code createdAt}。因此新事务
+     * 编排调用本重载；不传时间的旧入口继续使用当前 JVM 时间以保持兼容。</p>
+     */
+    static Reservation reserve(
+            Connection connection,
+            IdempotencyRecord candidate,
+            Instant createdAt) throws SQLException {
         Objects.requireNonNull(connection, "connection");
         Objects.requireNonNull(candidate, "candidate");
+        Objects.requireNonNull(createdAt, "createdAt");
         int inserted;
         try (PreparedStatement statement = connection.prepareStatement(INSERT_SQL)) {
-            bindCandidate(statement, candidate);
+            bindCandidate(statement, candidate, createdAt);
             inserted = statement.executeUpdate();
         }
         IdempotencyRecord current = find(connection, candidate.scope(), candidate.key())
@@ -201,12 +216,19 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
 
     private static void bindCandidate(PreparedStatement statement, IdempotencyRecord candidate)
             throws SQLException {
+        bindCandidate(statement, candidate, Instant.now());
+    }
+
+    private static void bindCandidate(
+            PreparedStatement statement,
+            IdempotencyRecord candidate,
+            Instant createdAt) throws SQLException {
         statement.setString(1, candidate.scope());
         statement.setString(2, candidate.key());
         statement.setString(3, candidate.requestDigest());
         statement.setInt(4, 200);
         statement.setString(5, IdempotencyResultJson.encode(candidate.result()));
-        statement.setTimestamp(6, Timestamp.from(Instant.now()));
+        statement.setTimestamp(6, Timestamp.from(createdAt));
     }
 
     private static IdempotencyRecord readRecord(ResultSet resultSet) throws SQLException {

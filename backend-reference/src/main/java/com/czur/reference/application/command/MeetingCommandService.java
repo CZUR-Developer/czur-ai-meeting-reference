@@ -13,7 +13,6 @@ import com.czur.reference.domain.meeting.MeetingEvent;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.time.Instant;
 import java.util.HexFormat;
 import java.util.Objects;
 import java.util.logging.Level;
@@ -110,7 +109,8 @@ public final class MeetingCommandService {
         try {
             meetingRepository.save(result.meeting());
             if (outboxStore != null) {
-                appendCommandEvent(outboxStore, result, "MeetingCreated", command.requestedAt());
+                appendCommandEvent(outboxStore, MeetingCommandEventFactory.meetingCreated(
+                        result.meeting(), command.requestedAt()));
             }
         } catch (RuntimeException failure) {
             idempotencyStore.release(candidate);
@@ -177,7 +177,9 @@ public final class MeetingCommandService {
             if (firstStopRequest) {
                 meetingRepository.save(result.meeting());
                 if (outboxStore != null) {
-                    appendCommandEvent(outboxStore, result, "MeetingStopRequested", command.requestedAt());
+                    appendCommandEvent(outboxStore,
+                            MeetingCommandEventFactory.meetingStopRequested(
+                                    result.meeting(), command.requestedAt()));
                 }
             }
         } catch (RuntimeException failure) {
@@ -195,44 +197,14 @@ public final class MeetingCommandService {
      */
     private static void appendCommandEvent(
             OutboxStore outboxStore,
-            MeetingCommandResult result,
-            String eventType,
-            Instant occurredAt) {
+            OutboxStore.OutboxEvent event) {
         Objects.requireNonNull(outboxStore, "outboxStore");
-        MeetingAggregate.MeetingSnapshot meeting = result.meeting();
-        String eventId = "meeting-" + digest(eventType, meeting.meetingId());
-        String payload = "{\"meetingId\":" + quote(meeting.meetingId())
-                + ",\"deploymentScope\":" + quote(meeting.deploymentScope())
-                + ",\"state\":" + quote(meeting.state().name())
-                + ",\"updatedAt\":" + quote(meeting.updatedAt().toString()) + "}";
-        OutboxStore.AppendResult append = outboxStore.append(OutboxStore.OutboxEvent.pending(
-                eventId, "Meeting", meeting.meetingId(), eventType, payload,
-                occurredAt, occurredAt));
+        Objects.requireNonNull(event, "event");
+        OutboxStore.AppendResult append = outboxStore.append(event);
         if (append.status() == OutboxStore.AppendStatus.CONFLICT) {
-            throw new IllegalStateException("命令 Outbox 事件内容冲突 eventType=" + eventType);
+            throw new IllegalStateException(
+                    "命令 Outbox 事件内容冲突 eventType=" + event.eventType());
         }
-    }
-
-    private static String quote(String value) {
-        StringBuilder result = new StringBuilder(value.length() + 2).append('"');
-        for (int i = 0; i < value.length(); i++) {
-            char c = value.charAt(i);
-            switch (c) {
-                case '"' -> result.append("\\\"");
-                case '\\' -> result.append("\\\\");
-                case '\n' -> result.append("\\n");
-                case '\r' -> result.append("\\r");
-                case '\t' -> result.append("\\t");
-                default -> {
-                    if (c < 0x20) {
-                        result.append(String.format("\\u%04x", (int) c));
-                    } else {
-                        result.append(c);
-                    }
-                }
-            }
-        }
-        return result.append('"').toString();
     }
 
     private static String digest(String... values) {

@@ -88,6 +88,18 @@ final class JdbcUsageReservationStore {
                AND bound_meeting_id IS NULL AND expected_meeting_id = ? AND version = ?
             """;
 
+    private static final String BIND_FOR_OWNED_MEETING_SQL = """
+            UPDATE usage_reservation
+               SET bound_meeting_id = ?, bound_at = ?, version = ?, updated_at = ?,
+                   lease_owner = NULL, lease_token = NULL, lease_until = NULL
+             WHERE deployment_scope = ? AND subject_scope = ? AND reservation_id = ?
+               AND record_format = 'V3' AND status = 'RESERVED'
+               AND bound_meeting_id IS NULL AND bound_at IS NULL
+               AND expected_meeting_id = ? AND grant_id = ? AND version = ?
+               AND expires_at > ?
+               AND (lease_until IS NULL OR lease_until <= ?)
+            """;
+
     private JdbcUsageReservationStore() {
     }
 
@@ -230,6 +242,50 @@ final class JdbcUsageReservationStore {
             statement.setString(7, previous.reservationId());
             statement.setString(8, previous.expectedMeetingId());
             statement.setLong(9, previous.version());
+            return statement.executeUpdate() == 1;
+        }
+    }
+
+    /**
+     * 在调用方事务连接上把尚未消费的 V3 Reservation 绑定到预期会议。
+     *
+     * <p>该操作是 5B2 owned 创建事务使用的 compare-and-set 原语：更新条件
+     * 同时校验部署、主体、Reservation ID、expectedMeetingId、Grant、状态和
+     * expectedVersion。{@code bindAt} 必须严格早于 {@code expires_at}；恰好
+     * 等于截止时刻也会失败。尚未到期的清理 lease 会阻止绑定，已到期 lease
+     * 允许创建路径接管，并在成功时清空 owner/token/until，但保留单调递增的
+     * leaseVersion 作为 fencing 历史。</p>
+     *
+     * <p>方法不获取连接、不提交、不回滚，也不插入 Meeting。返回 false 只表示
+     * CAS 条件未命中，调用方必须在同一锁定事务中读取事实后映射稳定错误，不能
+     * 仅凭 false 猜测 Reservation 是否存在。</p>
+     */
+    static boolean bindForOwnedMeeting(
+            Connection connection,
+            UsageReservation reservation,
+            Instant bindAt) throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(reservation, "reservation");
+        Objects.requireNonNull(bindAt, "bindAt");
+        if (reservation.state() != UsageReservation.State.RESERVED
+                || reservation.isBound()) {
+            throw new IllegalArgumentException(
+                    "initial unbound RESERVED snapshot is required");
+        }
+        try (PreparedStatement statement = connection.prepareStatement(
+                BIND_FOR_OWNED_MEETING_SQL)) {
+            statement.setString(1, reservation.expectedMeetingId());
+            statement.setTimestamp(2, Timestamp.from(bindAt));
+            statement.setLong(3, reservation.version() + 1);
+            statement.setTimestamp(4, Timestamp.from(bindAt));
+            statement.setString(5, reservation.deploymentScope());
+            statement.setString(6, reservation.subjectScope());
+            statement.setString(7, reservation.reservationId());
+            statement.setString(8, reservation.expectedMeetingId());
+            statement.setString(9, reservation.grantId());
+            statement.setLong(10, reservation.version());
+            statement.setTimestamp(11, Timestamp.from(bindAt));
+            statement.setTimestamp(12, Timestamp.from(bindAt));
             return statement.executeUpdate() == 1;
         }
     }

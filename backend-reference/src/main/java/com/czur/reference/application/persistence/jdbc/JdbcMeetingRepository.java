@@ -26,9 +26,10 @@ import java.util.logging.Logger;
  *
  * <p>读取同时兼容 V001/V002 与 V003：查询通过 {@code to_jsonb(meeting)} 读取
  * 可选列，旧表缺少归属列时明确恢复为 {@code LEGACY_UNOWNED}，不会猜测真实主体。
- * 当前公开 {@code save} 只允许 legacy SQL，且不引用 V003 列。owned 快照只有读取
- * 映射；写入必须等待 5B 的 connection-scoped 原子 bind 事务入口，不能通过普通
- * Repository 绕开 Reservation 的锁定、校验和版本更新。</p>
+ * 当前公开 {@code save} 只允许 legacy SQL，且不引用 V003 列。owned 快照通过
+ * package-private {@link #insertOwned(Connection, MeetingAggregate.MeetingSnapshot)}
+ * 首次写入；该原语只允许未来 owned 创建工作单元在同一连接中调用，普通
+ * Repository 仍不能绕开 Reservation 的锁定、校验和版本更新。</p>
  */
 public final class JdbcMeetingRepository implements MeetingRepository {
     private static final Logger LOGGER = Logger.getLogger(JdbcMeetingRepository.class.getName());
@@ -82,6 +83,21 @@ public final class JdbcMeetingRepository implements MeetingRepository {
                    AND to_jsonb(meeting) ->> 'grant_id' IS NULL
                    AND to_jsonb(meeting) ->> 'grant_expires_at' IS NULL
                    AND to_jsonb(meeting) ->> 'usage_reservation_id' IS NULL)
+            """;
+
+    /**
+     * 新归属会议只能首次插入，不能通过 UPSERT 覆盖已存在的会议归属。
+     * 该 SQL 只由 connection-scoped 创建工作单元调用；三个权益引用与真实主体
+     * 一次性写入，数据库的延迟外键在整个事务提交时检查 Meeting 与
+     * Reservation 双向引用的存在性；绑定状态仍由同事务 bind CAS 保证。
+     */
+    private static final String INSERT_OWNED_SQL = """
+            INSERT INTO meeting (
+                meeting_id, deployment_scope, client_session_id, subject_scope,
+                grant_id, grant_expires_at, usage_reservation_id,
+                profile_id, profile_revision, state, aggregate_version,
+                created_at, updated_at, metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, '{}'::jsonb)
             """;
 
     private final DataSource dataSource;
@@ -194,6 +210,37 @@ public final class JdbcMeetingRepository implements MeetingRepository {
         }
     }
 
+    /**
+     * 在调用方已经开启的事务连接上首次插入 owned 会议。
+     *
+     * <p>该方法不会获取、提交、回滚或关闭连接，也不会执行 Reservation bind。
+     * 调用方必须先在同一事务中通过权益原语验证并绑定预占。这里刻意使用纯
+     * {@code INSERT}：meetingId 或 deployment/clientSession 唯一键冲突必须交给
+     * 5B2 映射为 {@code MEETING_CONFLICT}，不能更新、认领或覆盖既有会议。</p>
+     */
+    static void insertOwned(
+            Connection connection,
+            MeetingAggregate.MeetingSnapshot meeting) throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(meeting, "meeting");
+        requireOwnedInitialSnapshot(meeting);
+        try (PreparedStatement statement = connection.prepareStatement(INSERT_OWNED_SQL)) {
+            statement.setString(1, meeting.meetingId());
+            statement.setString(2, meeting.deploymentScope());
+            statement.setString(3, meeting.clientSessionId());
+            statement.setString(4, meeting.subjectScope());
+            statement.setString(5, meeting.grantId());
+            statement.setTimestamp(6, Timestamp.from(meeting.grantExpiresAt()));
+            statement.setString(7, meeting.usageReservationId());
+            statement.setString(8, meeting.profileId());
+            statement.setInt(9, meeting.profileRevision());
+            statement.setString(10, meeting.state().name());
+            statement.setTimestamp(11, Timestamp.from(meeting.createdAt()));
+            statement.setTimestamp(12, Timestamp.from(meeting.updatedAt()));
+            requireInserted(statement.executeUpdate());
+        }
+    }
+
     private static MeetingAggregate.MeetingSnapshot readSnapshot(ResultSet resultSet) throws SQLException {
         String meetingId = resultSet.getString("meeting_id");
         String deploymentScope = resultSet.getString("deployment_scope");
@@ -242,9 +289,31 @@ public final class JdbcMeetingRepository implements MeetingRepository {
         }
     }
 
+    private static void requireOwnedInitialSnapshot(
+            MeetingAggregate.MeetingSnapshot meeting) {
+        if (isLegacy(meeting)
+                || meeting.grantId() == null
+                || meeting.grantExpiresAt() == null
+                || meeting.usageReservationId() == null) {
+            throw new IllegalArgumentException(
+                    "insertOwned requires complete subject, grant and reservation facts");
+        }
+        if (meeting.state() != MeetingState.CREATED
+                || !meeting.createdAt().equals(meeting.updatedAt())) {
+            throw new IllegalArgumentException(
+                    "insertOwned requires an initial CREATED snapshot");
+        }
+    }
+
     private static void requireSaved(int affectedRows) throws SQLException {
         if (affectedRows != 1) {
             throw new SQLException("会议归属事实冲突，拒绝覆盖已有快照", "23000");
+        }
+    }
+
+    private static void requireInserted(int affectedRows) throws SQLException {
+        if (affectedRows != 1) {
+            throw new SQLException("owned 会议插入数量异常", "23000");
         }
     }
 
