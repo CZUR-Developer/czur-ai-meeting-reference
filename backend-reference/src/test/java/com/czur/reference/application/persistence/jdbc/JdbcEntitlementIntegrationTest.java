@@ -105,6 +105,8 @@ class JdbcEntitlementIntegrationTest {
 
         EntitlementProviderResult<UsageOperationResult> first = provider.reserveUsage(request);
         assertTrue(first.isSuccess());
+        assertEquals(NOW.plusSeconds(300),
+                first.valueOrThrow().reservation().expiresAt());
         AuthorizedProfileSnapshot firstSnapshot =
                 first.valueOrThrow().requireAuthorizedProfileSnapshot();
         assertEquals(PROFILE, firstSnapshot.profileId());
@@ -114,8 +116,8 @@ class JdbcEntitlementIntegrationTest {
         assertTrue(replay.isSuccess());
         assertEquals(first.valueOrThrow(), replay.valueOrThrow());
 
-        // 模拟进程重建及随后发生的策略/Grant 变更。相同四元组与摘要必须返回
-        // 首次持久化的 Profile、能力和时长，不能拿重试请求的新 Grant 篡改结果。
+        // 模拟进程重建及随后发生的时钟、reservation TTL、Profile、能力和 Grant
+        // 变更。相同四元组与摘要必须返回首次持久化快照，不能重新执行当前策略。
         MeetingGrant changedGrant = new MeetingGrant(
                 "grant-after-policy-change", DEPLOYMENT, SUBJECT,
                 "profile-after-change", 9,
@@ -127,13 +129,17 @@ class JdbcEntitlementIntegrationTest {
                 new ReferenceDevEntitlementPolicyConfig(
                         DEPLOYMENT, "profile-after-change", 9,
                         Set.of("summary.structured"), 120_000,
-                        Duration.ofMinutes(10), Duration.ofMinutes(5)),
-                Clock.fixed(NOW, ZoneOffset.UTC), new TestIds());
+                        Duration.ofMinutes(10), Duration.ofSeconds(30)),
+                Clock.fixed(NOW.plusSeconds(120), ZoneOffset.UTC), new TestIds());
         EntitlementProviderResult<UsageOperationResult> restarted =
                 provider(changedPolicy, NOW).reserveUsage(changedRetry);
         assertTrue(restarted.isSuccess());
         assertEquals(first.valueOrThrow(), restarted.valueOrThrow());
         assertEquals(firstSnapshot, restarted.valueOrThrow().requireAuthorizedProfileSnapshot());
+        assertEquals(NOW.plusSeconds(300), restarted.valueOrThrow().reservation().expiresAt(),
+                "幂等重放必须保留首次截止时间，不能按新时钟和 30 秒 TTL 重算");
+        assertEquals(1L, count("SELECT count(*) FROM usage_reservation WHERE record_format='V3'"));
+        assertEquals(1L, count("SELECT count(*) FROM usage_operation"));
 
         ReserveUsageRequest conflict = reserveRequest(request.grant(),
                 "reserve-concurrent", "digest-other", "meeting-other");
@@ -386,8 +392,7 @@ class JdbcEntitlementIntegrationTest {
             MeetingGrant grant, String key, String digest, String meetingId) {
         return new ReserveUsageRequest(
                 DEPLOYMENT, SUBJECT, UsageOperationScopes.RESERVE, key, digest, grant,
-                new UsageEstimate(UsageUnit.MEETING_DURATION_MS, 60_000), meetingId,
-                NOW.plusSeconds(300));
+                new UsageEstimate(UsageUnit.MEETING_DURATION_MS, 60_000), meetingId);
     }
 
     private void bind(UsageReservation reservation, Instant boundAt) throws SQLException {

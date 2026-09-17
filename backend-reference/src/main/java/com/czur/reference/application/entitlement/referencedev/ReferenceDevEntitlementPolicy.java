@@ -24,9 +24,10 @@ import java.util.logging.Logger;
  * deployment、Profile 及 revision，只允许 {@link UsageUnit#MEETING_DURATION_MS}，
  * 并把申请能力原样作为授权能力，绝不会借授权过程额外扩权。</p>
  *
- * <p>{@link #prepareReservation(ReserveUsageRequest)} 只校验 Grant 和预占边界并
- * 构造初始快照，仍不持久化、不提供幂等。后续 JDBC Provider 必须先处理持久
- * 幂等，再把首次请求交给该方法，并以数据库唯一约束保存返回值。</p>
+ * <p>{@link #prepareReservation(ReserveUsageRequest)} 校验 Grant 和预占边界，
+ * 并由服务端策略生成截止时间及初始快照，仍不持久化、不提供幂等。后续 JDBC
+ * Provider 必须先处理持久幂等，只把首次请求交给该方法，并以数据库唯一约束
+ * 保存返回值；重放不得再次调用策略计算截止时间。</p>
  *
  * <p>时钟和不透明 ID 端口均由装配层注入。日志只记录固定原因码和结果类别，
  * 不记录主体、幂等键、摘要、Grant/Reservation ID 或请求正文。</p>
@@ -113,9 +114,10 @@ public final class ReferenceDevEntitlementPolicy {
     /**
      * 校验首次预占并创建版本为零的 Reservation 快照。
      *
-     * <p>请求的预占截止时间可以早于策略上限，但不能晚于“当前时间加
-     * reservation TTL”或 Grant 截止时间中的较早者。调用方必须把返回快照和
-     * usage operation 放入同一个数据库事务；本方法本身不产生持久副作用。</p>
+     * <p>本方法只读取一次注入时钟，并将截止时间确定为“当前时间加 reservation
+     * TTL”与 Grant 截止时间中的较早者。截止时间完全属于 Provider 生成的服务端
+     * 事实，调用方不能指定。调用方必须把返回快照和 usage operation 放入同一个
+     * 数据库事务；本方法本身不产生持久副作用。</p>
      */
     public EntitlementProviderResult<UsageReservation> prepareReservation(
             ReserveUsageRequest request) {
@@ -155,16 +157,8 @@ public final class ReferenceDevEntitlementPolicy {
         } catch (DateTimeException | ArithmeticException invalidClockRange) {
             return reject(EntitlementProviderError.Code.INTERNAL, "RESERVATION_TIME_OVERFLOW");
         }
-        Instant latestExpiry = policyExpiry.isBefore(grant.expiresAt())
+        Instant reservationExpiresAt = policyExpiry.isBefore(grant.expiresAt())
                 ? policyExpiry : grant.expiresAt();
-        if (!request.reservationExpiresAt().isAfter(now)) {
-            return reject(EntitlementProviderError.Code.RESERVATION_EXPIRED,
-                    "RESERVATION_ALREADY_EXPIRED");
-        }
-        if (request.reservationExpiresAt().isAfter(latestExpiry)) {
-            return reject(EntitlementProviderError.Code.INVALID_REQUEST,
-                    "RESERVATION_EXPIRY_INVALID");
-        }
 
         String reservationId;
         try {
@@ -179,7 +173,7 @@ public final class ReferenceDevEntitlementPolicy {
                 request.expectedMeetingId(),
                 request.estimate(),
                 now,
-                request.reservationExpiresAt());
+                reservationExpiresAt);
         LOGGER.log(Level.FINE, "reference-dev 权益预占已准备 result=RESERVATION_PREPARED");
         return EntitlementProviderResult.success(reservation);
     }

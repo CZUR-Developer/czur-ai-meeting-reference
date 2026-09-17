@@ -4,6 +4,7 @@ import com.czur.reference.application.port.identity.Subject;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -78,9 +79,17 @@ class EntitlementPortContractTest {
         assertEquals(UsageOperationScopes.CANCEL, cancel.operationScope());
         assertEquals(DEPLOYMENT, reserve.deploymentScope());
         assertEquals(SUBJECT, commit.subjectScope());
+        assertEquals(List.of(
+                        "deploymentScope", "subjectScope", "operationScope",
+                        "idempotencyKey", "requestDigest", "grant", "estimate",
+                        "expectedMeetingId"),
+                Arrays.stream(ReserveUsageRequest.class.getRecordComponents())
+                        .map(component -> component.getName())
+                        .toList(),
+                "调用方请求不得携带由服务端策略生成的 Reservation 截止时间");
         assertThrows(IllegalArgumentException.class, () -> new ReserveUsageRequest(
                 "other-deployment", SUBJECT, UsageOperationScopes.RESERVE, "key", digest("d"),
-                grant(), estimate(), MEETING, NOW.plusSeconds(300)));
+                grant(), estimate(), MEETING));
         assertThrows(IllegalArgumentException.class, () -> new CommitUsageRequest(
                 DEPLOYMENT, SUBJECT, UsageOperationScopes.RESERVE, "key", digest("e"),
                 "reservation-1", 0, new UsageActual(UsageUnit.MEETING_DURATION_MS, 1)));
@@ -219,8 +228,7 @@ class EntitlementPortContractTest {
 
     private static ReserveUsageRequest reserveRequest(MeetingGrant grant) {
         return new ReserveUsageRequest(DEPLOYMENT, SUBJECT, UsageOperationScopes.RESERVE,
-                "reserve-key", digest("a"), grant, estimate(), MEETING,
-                NOW.plusSeconds(300));
+                "reserve-key", digest("a"), grant, estimate(), MEETING);
     }
 
     private static UsageReservation reservation() {

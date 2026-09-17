@@ -16,6 +16,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -115,15 +116,39 @@ class ReferenceDevEntitlementPolicyTest {
     }
 
     @Test
-    void prepareReservationUsesInjectedIdAndEnforcesGrantAndReservationLimits() {
+    void prepareReservationUsesSingleNowAndExactPolicyTtlBoundary() {
+        FixedIds ids = new FixedIds("opaque-grant-random", "opaque-reservation-random");
+        SingleReadClock clock = new SingleReadClock(NOW);
+        ReferenceDevEntitlementPolicy policy = policyWithClock(clock, ids);
+        MeetingGrant grant = new MeetingGrant(
+                "grant-from-authorize", DEPLOYMENT, SUBJECT, PROFILE, 7,
+                Set.of("transcript.realtime"), Set.of("transcript.realtime"),
+                120_000, NOW.minusSeconds(1), NOW.plusSeconds(500));
+
+        EntitlementProviderResult<UsageReservation> result =
+                policy.prepareReservation(reserveRequest(grant, 60_000));
+
+        assertTrue(result.isSuccess());
+        UsageReservation reservation = result.valueOrThrow();
+        assertEquals("opaque-reservation-random", reservation.reservationId());
+        assertEquals(60_000, reservation.reservedUsage().amount());
+        assertEquals(NOW, reservation.createdAt());
+        assertEquals(NOW.plusSeconds(300), reservation.expiresAt(),
+                "截止时间应精确等于同一次 now 加 reservation TTL");
+        assertEquals(1, clock.reads(), "一次预占只能读取一次时钟");
+        assertEquals(0, reservation.version());
+        assertFalse(reservation.isBound());
+    }
+
+    @Test
+    void prepareReservationUsesEarlierGrantExpiryAndEnforcesGrantLimits() {
         FixedIds ids = new FixedIds("opaque-grant-random", "opaque-reservation-random");
         ReferenceDevEntitlementPolicy policy = policyAt(NOW, ids);
         MeetingGrant grant = new MeetingGrant(
                 "grant-from-authorize", DEPLOYMENT, SUBJECT, PROFILE, 7,
                 Set.of("transcript.realtime"), Set.of("transcript.realtime"),
-                120_000, NOW.minusSeconds(1), NOW.plusSeconds(300));
-        ReserveUsageRequest request = reserveRequest(
-                grant, 60_000, NOW.plusSeconds(120));
+                120_000, NOW.minusSeconds(1), NOW.plusSeconds(120));
+        ReserveUsageRequest request = reserveRequest(grant, 60_000);
 
         EntitlementProviderResult<UsageReservation> result =
                 policy.prepareReservation(request);
@@ -134,59 +159,46 @@ class ReferenceDevEntitlementPolicyTest {
         assertEquals(60_000, reservation.reservedUsage().amount());
         assertEquals(NOW, reservation.createdAt());
         assertEquals(NOW.plusSeconds(120), reservation.expiresAt());
-        assertEquals(0, reservation.version());
-        assertFalse(reservation.isBound());
 
         MeetingGrant narrowGrant = new MeetingGrant(
                 "narrow", DEPLOYMENT, SUBJECT, PROFILE, 7,
                 Set.of("transcript.realtime"), Set.of("transcript.realtime"),
                 30_000, NOW.minusSeconds(1), NOW.plusSeconds(300));
-        assertError(policy.prepareReservation(reserveRequest(
-                        narrowGrant, 30_001, NOW.plusSeconds(60))),
+        assertError(policy.prepareReservation(reserveRequest(narrowGrant, 30_001)),
                 EntitlementProviderError.Code.ENTITLEMENT_DENIED);
 
         MeetingGrant expandedGrant = new MeetingGrant(
                 "expanded", DEPLOYMENT, SUBJECT, PROFILE, 7,
                 Set.of("transcript.realtime"), SUPPORTED,
                 120_000, NOW.minusSeconds(1), NOW.plusSeconds(300));
-        assertError(policy.prepareReservation(reserveRequest(
-                        expandedGrant, 1, NOW.plusSeconds(60))),
+        assertError(policy.prepareReservation(reserveRequest(expandedGrant, 1)),
                 EntitlementProviderError.Code.ENTITLEMENT_DENIED);
     }
 
     @Test
-    void prepareReservationRejectsFutureExpiredOverflowAndInvalidExpiryBoundaries() {
+    void prepareReservationRejectsFutureExpiredAndReservationTimeOverflow() {
         ReferenceDevEntitlementPolicy policy = policyAt(NOW, new FixedIds("g", "r"));
         MeetingGrant future = grant(NOW.plusSeconds(1), NOW.plusSeconds(60), 60_000);
-        assertError(policy.prepareReservation(reserveRequest(
-                        future, 1, NOW.plusSeconds(30))),
+        assertError(policy.prepareReservation(reserveRequest(future, 1)),
                 EntitlementProviderError.Code.ENTITLEMENT_DENIED);
 
         MeetingGrant expired = grant(NOW.minusSeconds(60), NOW, 60_000);
-        assertError(policy.prepareReservation(reserveRequest(
-                        expired, 1, NOW)),
+        assertError(policy.prepareReservation(reserveRequest(expired, 1)),
                 EntitlementProviderError.Code.GRANT_EXPIRED);
 
-        MeetingGrant valid = grant(NOW.minusSeconds(1), NOW.plusSeconds(500), 60_000);
-        assertError(policy.prepareReservation(reserveRequest(valid, 1, NOW)),
-                EntitlementProviderError.Code.RESERVATION_EXPIRED);
-        assertError(policy.prepareReservation(reserveRequest(
-                        valid, 1, NOW.plusSeconds(301))),
-                EntitlementProviderError.Code.INVALID_REQUEST);
-
-        Instant nearMaximum = Instant.MAX.minusSeconds(1);
+        Instant nearMaximum = Instant.MAX.minusSeconds(60);
         ReferenceDevEntitlementPolicy overflowPolicy = policyAt(
-                Instant.MAX, new FixedIds("g", "r"));
+                nearMaximum, new FixedIds("g", "r"));
         MeetingGrant overflow = new MeetingGrant(
                 "overflow", DEPLOYMENT, SUBJECT, PROFILE, 7,
                 Set.of("transcript.realtime"), Set.of("transcript.realtime"),
-                60_000, nearMaximum, Instant.MAX);
+                60_000, Instant.MAX.minusSeconds(600), Instant.MAX);
         assertError(overflowPolicy.prepareReservation(new ReserveUsageRequest(
                         DEPLOYMENT, SUBJECT, UsageOperationScopes.RESERVE,
                         "reserve-key", digest(), overflow,
                         new UsageEstimate(UsageUnit.MEETING_DURATION_MS, 1),
-                        "meeting-expected", Instant.MAX)),
-                EntitlementProviderError.Code.ENTITLEMENT_DENIED);
+                        "meeting-expected")),
+                EntitlementProviderError.Code.INTERNAL);
     }
 
     @Test
@@ -242,11 +254,16 @@ class ReferenceDevEntitlementPolicyTest {
 
     private static ReferenceDevEntitlementPolicy policyAt(
             Instant now, EntitlementIdGenerator ids) {
+        return policyWithClock(Clock.fixed(now, ZoneOffset.UTC), ids);
+    }
+
+    private static ReferenceDevEntitlementPolicy policyWithClock(
+            Clock clock, EntitlementIdGenerator ids) {
         return new ReferenceDevEntitlementPolicy(
                 new ReferenceDevEntitlementPolicyConfig(
                         DEPLOYMENT, PROFILE, 7, SUPPORTED, 3_600_000,
                         Duration.ofMinutes(10), Duration.ofMinutes(5)),
-                Clock.fixed(now, ZoneOffset.UTC),
+                clock,
                 ids);
     }
 
@@ -273,8 +290,7 @@ class ReferenceDevEntitlementPolicyTest {
                 maxDuration, issuedAt, expiresAt);
     }
 
-    private static ReserveUsageRequest reserveRequest(
-            MeetingGrant grant, long amount, Instant reservationExpiresAt) {
+    private static ReserveUsageRequest reserveRequest(MeetingGrant grant, long amount) {
         return new ReserveUsageRequest(
                 DEPLOYMENT,
                 SUBJECT,
@@ -283,8 +299,7 @@ class ReferenceDevEntitlementPolicyTest {
                 digest(),
                 grant,
                 new UsageEstimate(UsageUnit.MEETING_DURATION_MS, amount),
-                "meeting-expected-sensitive",
-                reservationExpiresAt);
+                "meeting-expected-sensitive");
     }
 
     private static String digest() {
@@ -325,6 +340,45 @@ class ReferenceDevEntitlementPolicyTest {
         @Override
         public String newLeaseToken() {
             return "opaque-lease-random";
+        }
+    }
+
+    /**
+     * 只允许读取一次的固定时钟，用于防止实现分别读取 createdAt 和 expiresAt 的
+     * 基准时间，从而在真实可变时钟下产生内部不一致的 Reservation 快照。
+     */
+    private static final class SingleReadClock extends Clock {
+        private final Instant instant;
+        private int reads;
+
+        private SingleReadClock(Instant instant) {
+            this.instant = instant;
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            if (!ZoneOffset.UTC.equals(zone)) {
+                throw new IllegalArgumentException("test clock only supports UTC");
+            }
+            return this;
+        }
+
+        @Override
+        public Instant instant() {
+            reads++;
+            if (reads > 1) {
+                throw new AssertionError("reservation policy read clock more than once");
+            }
+            return instant;
+        }
+
+        private int reads() {
+            return reads;
         }
     }
 }
