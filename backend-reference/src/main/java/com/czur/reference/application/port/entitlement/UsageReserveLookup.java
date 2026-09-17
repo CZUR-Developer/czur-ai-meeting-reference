@@ -20,6 +20,46 @@ public interface UsageReserveLookup {
     /** 执行一次只读 reserve 结果查询。 */
     Result lookup(Request request);
 
+    /**
+     * 判断首次用量结果是否足以作为 owned 会议创建的 reserve 重放事实。
+     *
+     * <p>这是公共端口唯一的重放不变量定义，JDBC、内存或合作伙伴适配器都必须
+     * 复用本方法，不能各自复制一套判断。只有同时满足下列条件才返回 {@code true}：</p>
+     *
+     * <ul>
+     *   <li>结果是带授权 Profile 快照的当前 reserve 格式；历史 v1、commit 和
+     *       cancel 终态都不能驱动新的 owned 会议创建；</li>
+     *   <li>Reservation 仍是初始 {@code RESERVED}、尚未绑定且版本为零，避免把
+     *       已消费、已演进或终态事实冒充首次预占；</li>
+     *   <li>授权能力覆盖全部请求能力；</li>
+     *   <li>预占单位是标准会议时长，且预占量不超过首次 Profile 的时长上限。</li>
+     * </ul>
+     *
+     * <p>本方法只校验不可变的首次结果，不读取当前 Reservation、当前策略或新
+     * Grant，因此重试和进程重启不会改变原请求的解释。</p>
+     *
+     * @param result 已完成结构解码的首次稳定结果
+     * @return 该结果能否安全构造 {@link Replayed}
+     * @throws NullPointerException {@code result} 为空
+     */
+    static boolean isReplayableOwnedReserveResult(UsageOperationResult result) {
+        Objects.requireNonNull(result, "result");
+        if (!result.supportsOwnedMeetingCreation()
+                || !UsageOperationScopes.RESERVE.equals(result.operationScope())) {
+            return false;
+        }
+        UsageReservation reservation = result.reservation();
+        if (reservation.state() != UsageReservation.State.RESERVED
+                || reservation.isBound()
+                || reservation.version() != 0) {
+            return false;
+        }
+        AuthorizedProfileSnapshot profile = result.requireAuthorizedProfileSnapshot();
+        return profile.grantedCapabilities().containsAll(profile.requestedCapabilities())
+                && reservation.reservedUsage().unit() == UsageUnit.MEETING_DURATION_MS
+                && reservation.reservedUsage().amount() <= profile.maxDurationMs();
+    }
+
     /** reserve 查询键；操作 scope 固定，不作为调用方字段暴露。 */
     record Request(
             String deploymentScope,
@@ -83,6 +123,10 @@ public interface UsageReserveLookup {
     record Replayed(UsageOperationResult result) implements Result {
         public Replayed {
             Objects.requireNonNull(result, "result");
+            if (!isReplayableOwnedReserveResult(result)) {
+                throw new IllegalArgumentException(
+                        "replayed result must be an initial owned reserve result");
+            }
         }
 
         @Override

@@ -1,11 +1,8 @@
 package com.czur.reference.application.persistence.jdbc;
 
-import com.czur.reference.application.port.entitlement.AuthorizedProfileSnapshot;
 import com.czur.reference.application.port.entitlement.UsageOperationResult;
 import com.czur.reference.application.port.entitlement.UsageOperationScopes;
-import com.czur.reference.application.port.entitlement.UsageReservation;
 import com.czur.reference.application.port.entitlement.UsageReserveLookup;
-import com.czur.reference.application.port.entitlement.UsageUnit;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
@@ -78,7 +75,7 @@ public final class JdbcUsageReserveLookup implements UsageReserveLookup {
                 return logged(new Inconsistent(
                         InconsistencyReason.RESERVATION_REFERENCE_MISMATCH));
             }
-            if (!satisfiesOwnedReserveInvariants(result)) {
+            if (!UsageReserveLookup.isReplayableOwnedReserveResult(result)) {
                 return logged(new Inconsistent(
                         InconsistencyReason.OWNED_RESERVE_INVARIANT_VIOLATION));
             }
@@ -92,24 +89,6 @@ public final class JdbcUsageReserveLookup implements UsageReserveLookup {
         } finally {
             closeQuietly(connection);
         }
-    }
-
-    /** 与 owned 创建工作单元保持一致，但只校验首次快照，不读取当前行。 */
-    private static boolean satisfiesOwnedReserveInvariants(UsageOperationResult result) {
-        if (!result.supportsOwnedMeetingCreation()
-                || !UsageOperationScopes.RESERVE.equals(result.operationScope())) {
-            return false;
-        }
-        UsageReservation reservation = result.reservation();
-        if (reservation.state() != UsageReservation.State.RESERVED
-                || reservation.isBound()
-                || reservation.version() != 0) {
-            return false;
-        }
-        AuthorizedProfileSnapshot profile = result.requireAuthorizedProfileSnapshot();
-        return profile.grantedCapabilities().containsAll(profile.requestedCapabilities())
-                && reservation.reservedUsage().unit() == UsageUnit.MEETING_DURATION_MS
-                && reservation.reservedUsage().amount() <= profile.maxDurationMs();
     }
 
     private static Result fromSqlFailure(SQLException failure) {
