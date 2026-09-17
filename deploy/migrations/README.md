@@ -10,7 +10,18 @@
 Outbox，以及插件调用诊断。它不包含终端用户密码、模型密钥、对象存储正文
 或 CZUR 私有账号字段。`V002__outbox_lease_fencing.sql` 为 Outbox 增加
 `lease_token` 和单调递增的 `lease_version`，用于防止租约过期后的旧 Worker
-误确认事件。
+误确认事件。`V003__identity_entitlement.sql` 增加会议主体、Grant、主预占引用、
+会前用量预占和独立的权益操作幂等表。V001/V002 历史用量逐行保留并标记为
+`LEGACY_V1`，历史会议标记为 `LEGACY_UNOWNED`；迁移不会猜测真实用户、Grant，
+也不会从历史多条用量中选择主 Reservation。
+
+V003 必须允许在“Schema 已提交但版本登记失败”后安全重跑。执行约束前会先
+检查历史 Reservation 状态，发现未知状态时整事务失败；不要绕过该检查手工登记
+版本。没有 PostgreSQL 时可以先运行静态门禁：
+
+```bash
+python3 ../../tools/check-identity-entitlement-migration.py
+```
 
 ## Outbox 租约栅栏约束
 

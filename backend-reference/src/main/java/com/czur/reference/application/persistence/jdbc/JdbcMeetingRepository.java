@@ -23,13 +23,14 @@ import java.util.logging.Logger;
  * PostgreSQL 专有 Java API。独立查询可直接使用本类；会议命令需要跨会议、
  * 幂等和 Outbox 原子提交时，应通过 {@link JdbcMeetingUnitOfWork} 执行。</p>
  *
- * <p>公开领域快照比 V001 表少部分生产字段。参考适配器使用稳定默认值写入
- * {@code subject_scope='meeting'}、{@code aggregate_version=0}、空元数据，其余
- * 生产字段保持 NULL/数据库默认值；这些字段不会伪装成领域已经拥有的事实。</p>
+ * <p>公开领域快照暂时还没有认证主体、Grant 和主 Reservation。这个旧命令兼容
+ * 入口只能使用 {@code subject_scope='LEGACY_UNOWNED'}，明确表示普通用户不能认领
+ * 或据此获得访问权；它不是 reference-dev 认证创建路径。后续认证编排必须通过
+ * 带真实主体和预占绑定的专用事务入口写入，不能复用该占位值。</p>
  */
 public final class JdbcMeetingRepository implements MeetingRepository {
     private static final Logger LOGGER = Logger.getLogger(JdbcMeetingRepository.class.getName());
-    private static final String SUBJECT_SCOPE = "meeting";
+    private static final String SUBJECT_SCOPE = "LEGACY_UNOWNED";
 
     private static final String FIND_SQL = """
             SELECT meeting_id, deployment_scope, client_session_id, profile_id,
