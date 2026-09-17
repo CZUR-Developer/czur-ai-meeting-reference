@@ -2,6 +2,7 @@ package com.czur.reference.application.port;
 
 import com.czur.reference.application.command.MeetingCommandResult;
 import com.czur.reference.domain.meeting.MeetingOwnership;
+import com.czur.reference.domain.meeting.MeetingState;
 
 import java.util.Objects;
 
@@ -19,10 +20,16 @@ public sealed interface MeetingCreateOutcome
     /**
      * 创建成功的稳定结果。
      *
-     * <p>普通构造拒绝没有真实主体归属的历史会议；只有
+     * <p>成功结果必须保留会议创建事务刚提交时的原始快照：操作为
+     * {@code CREATED}、会议状态为 {@code CREATED}，并且 {@code updatedAt}
+     * 等于 {@code createdAt}。后续已经进入运行、停止或仅更新时间发生变化的
+     * 当前会议快照，都不能替代首次创建结果。</p>
+     *
+     * <p>普通构造还拒绝没有真实主体归属的历史会议；只有
      * {@link MeetingCreateOutcome#restoreHistoricalSuccess(MeetingCommandResult)}
      * 可以恢复 v1 只读事实，供升级后明确识别并由 authenticated-create 上层
-     * fail closed，禁止把历史匿名结果冒充当前主体的成功。</p>
+     * fail closed，禁止把历史匿名结果冒充当前主体的成功。历史恢复只放宽归属，
+     * 不放宽上述创建瞬间快照规则。</p>
      */
     final class Success implements MeetingCreateOutcome {
         private final MeetingCommandResult result;
@@ -36,6 +43,14 @@ public sealed interface MeetingCreateOutcome
             if (result.operation() != MeetingCommandResult.Operation.CREATED) {
                 throw new IllegalArgumentException(
                         "meeting create success requires CREATED command result");
+            }
+            if (result.meeting().state() != MeetingState.CREATED) {
+                throw new IllegalArgumentException(
+                        "meeting create success requires CREATED meeting state");
+            }
+            if (!result.meeting().createdAt().equals(result.meeting().updatedAt())) {
+                throw new IllegalArgumentException(
+                        "meeting create success requires unchanged creation timestamp");
             }
             if (!allowLegacyRestore && MeetingOwnership.LEGACY_UNOWNED_SUBJECT_SCOPE.equals(
                     result.meeting().subjectScope())) {

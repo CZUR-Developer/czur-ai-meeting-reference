@@ -65,6 +65,37 @@ class MeetingCreateOutcomeContractTest {
     }
 
     @Test
+    void successRequiresUnchangedCreatedSnapshotForOwnedAndHistoricalResults() {
+        Instant createdAt = Instant.parse("2026-09-17T11:00:00Z");
+        Instant updatedLater = createdAt.plusSeconds(1);
+        for (MeetingState invalidState : new MeetingState[]{
+                MeetingState.RUNNING, MeetingState.STOPPING
+        }) {
+            assertThrows(IllegalArgumentException.class, () ->
+                    MeetingCreateOutcome.success(ownedResult(
+                            invalidState, createdAt, createdAt)));
+            assertThrows(IllegalArgumentException.class, () ->
+                    MeetingCreateOutcome.restoreHistoricalSuccess(legacyResult(
+                            invalidState, createdAt, createdAt)));
+        }
+        assertThrows(IllegalArgumentException.class, () ->
+                MeetingCreateOutcome.success(ownedResult(
+                        MeetingState.CREATED, createdAt, updatedLater)));
+        assertThrows(IllegalArgumentException.class, () ->
+                MeetingCreateOutcome.restoreHistoricalSuccess(legacyResult(
+                        MeetingState.CREATED, createdAt, updatedLater)));
+
+        assertEquals(MeetingState.CREATED,
+                MeetingCreateOutcome.success(ownedResult(
+                        MeetingState.CREATED, createdAt, createdAt))
+                        .result().meeting().state());
+        assertEquals(MeetingOwnership.LEGACY_UNOWNED_SUBJECT_SCOPE,
+                MeetingCreateOutcome.restoreHistoricalSuccess(legacyResult(
+                        MeetingState.CREATED, createdAt, createdAt))
+                        .result().meeting().subjectScope());
+    }
+
+    @Test
     void recordsNeverExposeScopeKeyDigestSubjectOrMeetingSnapshotInToString() {
         String secretScope = "opaque-scope-with-sensitive-subject";
         String secretKey = "sensitive-key";
@@ -97,12 +128,26 @@ class MeetingCreateOutcomeContractTest {
 
     private static MeetingCommandResult createdResult() {
         Instant now = Instant.parse("2026-09-17T11:00:00Z");
+        return ownedResult(MeetingState.CREATED, now, now);
+    }
+
+    private static MeetingCommandResult ownedResult(
+            MeetingState state, Instant createdAt, Instant updatedAt) {
         return new MeetingCommandResult(
                 MeetingCommandResult.Operation.CREATED,
                 MeetingAggregate.MeetingSnapshot.owned(
                         "meeting-secret", "deployment-secret", "session-secret",
-                        "subject-secret", "grant-secret", now.plusSeconds(600),
+                        "subject-secret", "grant-secret", createdAt.plusSeconds(600),
                         "reservation-secret", "profile", 1,
-                        MeetingState.CREATED, now, now));
+                        state, createdAt, updatedAt));
+    }
+
+    private static MeetingCommandResult legacyResult(
+            MeetingState state, Instant createdAt, Instant updatedAt) {
+        return new MeetingCommandResult(
+                MeetingCommandResult.Operation.CREATED,
+                MeetingAggregate.MeetingSnapshot.legacyUnowned(
+                        "legacy", "deployment", "session", "profile", 1,
+                        state, createdAt, updatedAt));
     }
 }

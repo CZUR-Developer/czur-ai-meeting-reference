@@ -64,6 +64,27 @@ class MeetingCreateOutcomeJsonTest {
     }
 
     @Test
+    void tamperedVersionOneAndTwoSuccessSnapshotsFailClosed() {
+        String versionOne = "{\"operation\":\"CREATED\",\"meeting\":{"
+                + "\"meetingId\":\"legacy\",\"deploymentScope\":\"deployment\","
+                + "\"clientSessionId\":\"session\",\"profileId\":\"profile\","
+                + "\"profileRevision\":1,\"state\":\"CREATED\","
+                + "\"createdAt\":\"2026-09-17T11:00:00Z\","
+                + "\"updatedAt\":\"2026-09-17T11:00:00Z\"}}";
+        String versionTwo = IdempotencyResultJson.encode(createdResult());
+
+        for (String valid : new String[]{versionOne, versionTwo}) {
+            assertMalformed(valid.replace("\"state\":\"CREATED\"",
+                    "\"state\":\"RUNNING\""));
+            assertMalformed(valid.replace("\"state\":\"CREATED\"",
+                    "\"state\":\"STOPPING\""));
+            assertMalformed(valid.replace(
+                    "\"updatedAt\":\"2026-09-17T11:00:00",
+                    "\"updatedAt\":\"2026-09-17T11:00:01"));
+        }
+    }
+
+    @Test
     void failureUsesFixedVersionThreeFieldsAndRoundTrips() {
         MeetingCreateOutcome failure = MeetingCreateOutcome.failure(
                 new MeetingCreateFailure(ErrorCode.INTERNAL, false));
