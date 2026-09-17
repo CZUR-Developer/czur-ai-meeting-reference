@@ -12,6 +12,8 @@ Driver 实现中。
 - `application/command/`：创建/停止命令、请求校验、幂等预占和会议仓库调用。
 - `application/port/`：`MeetingRepository`、`IdempotencyStore`、`OutboxStore` 等替换
   边界；生产实现可接入 PostgreSQL 或其他持久化系统。
+- `application/identity/referencedev/`：默认禁用的固定 Bearer Token 身份示例，
+  只用于本地演示和契约测试，不是合作伙伴或 CZUR 生产账号实现。
 - `application/persistence/`：线程安全的内存适配器，仅用于参考和测试，不是生产事实源。
 - `application/persistence/jdbc/`：基于标准 JDBC `DataSource` 的 PostgreSQL 适配器，
   覆盖会议快照、幂等记录、Outbox、跨端口工作单元，以及 P2-T11 的配置、连接池、
@@ -64,6 +66,15 @@ Outbox 的领取、发布和失败重试继续由提交后的 Worker 使用独�
 数据库恢复后重新建连。`close()` 可重复调用，关闭后禁止继续取得业务组件。
 Compose 数据库和外部 PostgreSQL 使用完全相同的配置入口，不根据 hostname 或
 Profile 切换实现。
+
+### reference-dev 身份
+
+`ReferenceDevIdentityProvider` 只有在 `REFERENCE_DEV_IDENTITY_ENABLED=true` 时
+启用。启用后必须完整配置 `.env.example` 中的 Token、稳定主体、角色、权限、
+audience、client 和有效期；缺失或非法配置会在装配阶段失败，不会静默匿名登录。
+配置对象只保存固定 Token 的 SHA-256 摘要，诊断文本和日志不会输出 Token、摘要、
+主体或完整请求。它不提供登录页面、用户注册、管理员后台、Token 刷新或生产认证，
+部署方不得把该固定凭据方案作为正式合作伙伴身份系统。
 
 ## P3-T04 Driver 契约测试
 
