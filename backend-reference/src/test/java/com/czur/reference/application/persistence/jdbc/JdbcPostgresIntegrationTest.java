@@ -100,7 +100,9 @@ class JdbcPostgresIntegrationTest {
                         "jdbc-test-owner-b", NOW.plusSeconds(61), Duration.ofMinutes(1), 1)
                 .stream().findFirst().orElseThrow();
         assertTrue(secondLease.lease().leaseVersion() > firstLease.lease().leaseVersion());
-        assertEquals(OutboxStore.PublishStatus.LEASE_EXPIRED,
+        // 事件已被新 owner 重新领取，旧 token 被栅栏拒绝；此时状态仍是 LEASED，
+        // 因而返回 NOT_OWNER，而不是把新 owner 的有效 lease 误判成过期。
+        assertEquals(OutboxStore.PublishStatus.NOT_OWNER,
                 outbox.markPublished(firstLease.lease(), NOW.plusSeconds(62)).status());
         assertEquals(OutboxStore.FailureStatus.RETRY_SCHEDULED,
                 outbox.markFailed(secondLease.lease(), NOW.plusSeconds(62), NOW.plusSeconds(120),
