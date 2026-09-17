@@ -25,7 +25,7 @@ import java.util.logging.Logger;
  * 密码、Token、音频或模型响应。</p>
  *
  * <p>该类不创建表；部署方必须先执行 {@code deploy/migrations/V001__initial_schema.sql}。
- * 事务编排（会议快照、幂等和 Outbox 的原子提交）由后续 Unit of Work 适配器负责。</p>
+ * 会议快照、幂等和 Outbox 的原子提交由 {@link JdbcMeetingUnitOfWork} 负责。</p>
  */
 public final class JdbcIdempotencyStore implements IdempotencyStore {
     private static final Logger LOGGER = Logger.getLogger(JdbcIdempotencyStore.class.getName());
@@ -123,6 +123,67 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
         }
     }
 
+    /**
+     * 在调用方已经开启的事务连接上预占幂等键；不会提交、回滚或关闭连接。
+     * 插入与读取在同一连接内完成，外层 Unit of Work 可以把它和会议快照、
+     * Outbox 事件作为一个原子提交单元。
+     */
+    static Reservation reserve(Connection connection, IdempotencyRecord candidate) throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(candidate, "candidate");
+        int inserted;
+        try (PreparedStatement statement = connection.prepareStatement(INSERT_SQL)) {
+            bindCandidate(statement, candidate);
+            inserted = statement.executeUpdate();
+        }
+        IdempotencyRecord current = find(connection, candidate.scope(), candidate.key())
+                .orElseThrow(() -> new IllegalStateException("幂等记录插入后不可见"));
+        if (inserted == 1) {
+            LOGGER.log(Level.FINE, "JDBC 事务内幂等预占成功 scope={0}", candidate.scope());
+            return new Reservation(ReservationStatus.ACQUIRED, candidate);
+        }
+        if (!current.requestDigest().equals(candidate.requestDigest())) {
+            LOGGER.log(Level.WARNING, "JDBC 事务内幂等键摘要冲突 scope={0}", candidate.scope());
+            return new Reservation(ReservationStatus.CONFLICT, current);
+        }
+        LOGGER.log(Level.INFO, "JDBC 事务内幂等请求重放 scope={0}", candidate.scope());
+        return new Reservation(ReservationStatus.REPLAY, current);
+    }
+
+    /** 在调用方事务连接上读取幂等记录。 */
+    static Optional<IdempotencyRecord> find(Connection connection, String scope, String key)
+            throws SQLException {
+        requireText("scope", scope);
+        requireText("key", key);
+        try (PreparedStatement statement = connection.prepareStatement(FIND_SQL)) {
+            statement.setString(1, scope);
+            statement.setString(2, key);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next() ? Optional.of(readRecord(resultSet)) : Optional.empty();
+            }
+        }
+    }
+
+    /** 在调用方事务连接上保存幂等记录；不会自行提交事务。 */
+    static void save(Connection connection, IdempotencyRecord record) throws SQLException {
+        Objects.requireNonNull(record, "record");
+        try (PreparedStatement statement = connection.prepareStatement(INSERT_SQL)) {
+            bindCandidate(statement, record);
+            statement.executeUpdate();
+        }
+    }
+
+    /** 在调用方事务连接上释放预占；仅删除摘要完全相同的记录。 */
+    static void release(Connection connection, IdempotencyRecord candidate) throws SQLException {
+        Objects.requireNonNull(candidate, "candidate");
+        try (PreparedStatement statement = connection.prepareStatement(DELETE_SQL)) {
+            statement.setString(1, candidate.scope());
+            statement.setString(2, candidate.key());
+            statement.setString(3, candidate.requestDigest());
+            statement.executeUpdate();
+        }
+    }
+
     @Override
     public void release(IdempotencyRecord candidate) {
         Objects.requireNonNull(candidate, "candidate");
@@ -146,17 +207,6 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
         statement.setInt(4, 200);
         statement.setString(5, IdempotencyResultJson.encode(candidate.result()));
         statement.setTimestamp(6, Timestamp.from(Instant.now()));
-    }
-
-    private static Optional<IdempotencyRecord> find(Connection connection, String scope, String key)
-            throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(FIND_SQL)) {
-            statement.setString(1, scope);
-            statement.setString(2, key);
-            try (ResultSet resultSet = statement.executeQuery()) {
-                return resultSet.next() ? Optional.of(readRecord(resultSet)) : Optional.empty();
-            }
-        }
     }
 
     private static IdempotencyRecord readRecord(ResultSet resultSet) throws SQLException {

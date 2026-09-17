@@ -20,9 +20,8 @@ import java.util.logging.Logger;
  * 基于 JDBC 的 PostgreSQL 会议仓库参考实现。
  *
  * <p>该类只依赖标准 {@link DataSource} 和 SQL，不依赖 Gateway、Web 框架或
- * PostgreSQL 专有 Java API。调用方负责在需要时把本仓库与幂等、Outbox 的写入
- * 放入同一个数据库事务；当前 {@link MeetingRepository} 端口仍保留独立
- * {@code save} 方法，事务/Unit of Work 将在后续任务中补齐。</p>
+ * PostgreSQL 专有 Java API。独立查询可直接使用本类；会议命令需要跨会议、
+ * 幂等和 Outbox 原子提交时，应通过 {@link JdbcMeetingUnitOfWork} 执行。</p>
  *
  * <p>公开领域快照比 V001 表少部分生产字段。参考适配器使用稳定默认值写入
  * {@code subject_scope='meeting'}、{@code aggregate_version=0}、空元数据，其余
@@ -38,6 +37,8 @@ public final class JdbcMeetingRepository implements MeetingRepository {
               FROM meeting
              WHERE meeting_id = ?
             """;
+
+    private static final String FIND_FOR_UPDATE_SQL = FIND_SQL + " FOR UPDATE";
 
     private static final String FIND_BY_SCOPE_SQL = """
             SELECT meeting_id, deployment_scope, client_session_id, profile_id,
@@ -121,6 +122,69 @@ public final class JdbcMeetingRepository implements MeetingRepository {
         } catch (SQLException failure) {
             LOGGER.log(Level.SEVERE, "JDBC 会议快照保存失败 meetingId=" + meeting.meetingId(), failure);
             throw failure("保存会议快照失败 meetingId=" + meeting.meetingId(), failure);
+        }
+    }
+
+    /**
+     * 在调用方已经开启的事务连接上读取快照；该方法不会提交、回滚或关闭连接。
+     * 事务 Unit of Work 通过它保证会议与幂等、Outbox 使用同一数据库连接。
+     */
+    static Optional<MeetingAggregate.MeetingSnapshot> find(Connection connection, String meetingId)
+            throws SQLException {
+        return find(connection, FIND_SQL, meetingId);
+    }
+
+    /**
+     * 在调用方事务连接上读取并锁定会议行。
+     *
+     * <p>会议停止命令必须先获得该行锁，再判断是否首次进入 STOPPING，避免
+     * 多个服务实例同时基于旧 RUNNING 快照生成第二条停止事件。锁由外层工作
+     * 单元提交或回滚时释放。</p>
+     */
+    static Optional<MeetingAggregate.MeetingSnapshot> findForUpdate(
+            Connection connection, String meetingId) throws SQLException {
+        return find(connection, FIND_FOR_UPDATE_SQL, meetingId);
+    }
+
+    private static Optional<MeetingAggregate.MeetingSnapshot> find(
+            Connection connection, String sql, String meetingId) throws SQLException {
+        requireText("meetingId", meetingId);
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, meetingId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next() ? Optional.of(readSnapshot(resultSet)) : Optional.empty();
+            }
+        }
+    }
+
+    /** 在调用方事务连接上按部署范围和客户端会话读取快照。 */
+    static Optional<MeetingAggregate.MeetingSnapshot> findByDeploymentScopeAndClientSessionId(
+            Connection connection, String deploymentScope, String clientSessionId) throws SQLException {
+        requireText("deploymentScope", deploymentScope);
+        requireText("clientSessionId", clientSessionId);
+        try (PreparedStatement statement = connection.prepareStatement(FIND_BY_SCOPE_SQL)) {
+            statement.setString(1, deploymentScope);
+            statement.setString(2, clientSessionId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next() ? Optional.of(readSnapshot(resultSet)) : Optional.empty();
+            }
+        }
+    }
+
+    /** 在调用方事务连接上保存快照；该方法不会自行提交事务。 */
+    static void save(Connection connection, MeetingAggregate.MeetingSnapshot meeting) throws SQLException {
+        Objects.requireNonNull(meeting, "meeting");
+        try (PreparedStatement statement = connection.prepareStatement(SAVE_SQL)) {
+            statement.setString(1, meeting.meetingId());
+            statement.setString(2, meeting.deploymentScope());
+            statement.setString(3, meeting.clientSessionId());
+            statement.setString(4, SUBJECT_SCOPE);
+            statement.setString(5, meeting.profileId());
+            statement.setInt(6, meeting.profileRevision());
+            statement.setString(7, meeting.state().name());
+            statement.setTimestamp(8, Timestamp.from(meeting.createdAt()));
+            statement.setTimestamp(9, Timestamp.from(meeting.updatedAt()));
+            statement.executeUpdate();
         }
     }
 

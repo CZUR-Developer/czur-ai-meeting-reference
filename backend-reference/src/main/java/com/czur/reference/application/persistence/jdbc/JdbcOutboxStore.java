@@ -36,7 +36,7 @@ import static com.czur.reference.application.port.OutboxStore.PublishStatus;
  * 旧请求。事件载荷只作为 JSONB 不透明文本传递，日志不会输出载荷正文。</p>
  *
  * <p>该类不负责消息发布，也不负责创建表；部署前必须执行 V001、V002 迁移。
- * 会议快照和 Outbox 的同事务写入由后续 Unit of Work 负责。</p>
+ * 会议快照和 Outbox 的同事务写入由 {@link JdbcMeetingUnitOfWork} 负责。</p>
  */
 public final class JdbcOutboxStore implements OutboxStore {
     private static final Logger LOGGER = Logger.getLogger(JdbcOutboxStore.class.getName());
@@ -53,6 +53,16 @@ public final class JdbcOutboxStore implements OutboxStore {
             SELECT event_id, aggregate_type, aggregate_id, event_type, payload,
                    occurred_at, available_at, status, attempt_count,
                    lease_owner, lease_until, lease_token, lease_version, published_at, last_error
+              FROM outbox_event
+             WHERE event_id = ?
+            """;
+
+    private static final String SAME_MESSAGE_SQL = """
+            SELECT aggregate_type = ?
+               AND aggregate_id = ?
+               AND event_type = ?
+               AND payload = ?::jsonb
+               AND occurred_at = ? AS same_message
               FROM outbox_event
              WHERE event_id = ?
             """;
@@ -124,7 +134,7 @@ public final class JdbcOutboxStore implements OutboxStore {
                             new Object[]{event.eventId(), event.eventType()});
                     return new AppendResult(AppendStatus.APPENDED, current);
                 }
-                if (current.sameMessage(event)) {
+                if (sameMessage(connection, event)) {
                     LOGGER.log(Level.FINE, "JDBC Outbox 事件幂等重放 eventId={0}", event.eventId());
                     return new AppendResult(AppendStatus.REPLAYED, current);
                 }
@@ -141,6 +151,33 @@ public final class JdbcOutboxStore implements OutboxStore {
         } catch (SQLException failure) {
             throw fail("创建 Outbox 数据库连接失败", failure);
         }
+    }
+
+    /**
+     * 在调用方已经开启的事务连接上追加 Outbox 事件；不会提交、回滚或关闭
+     * 连接。调用方可因此把事件追加与会议快照、幂等记录放入同一事务。
+     */
+    static AppendResult append(Connection connection, OutboxEvent event) throws SQLException {
+        validateAppend(event);
+        Objects.requireNonNull(connection, "connection");
+        int inserted;
+        try (PreparedStatement statement = connection.prepareStatement(APPEND_SQL)) {
+            bindAppend(statement, event);
+            inserted = statement.executeUpdate();
+        }
+        OutboxEvent current = find(connection, event.eventId())
+                .orElseThrow(() -> new IllegalStateException("Outbox 插入后不可见"));
+        if (inserted == 1) {
+            LOGGER.log(Level.INFO, "JDBC 事务内 Outbox 事件已追加 eventId={0} eventType={1}",
+                    new Object[]{event.eventId(), event.eventType()});
+            return new AppendResult(AppendStatus.APPENDED, current);
+        }
+        if (sameMessage(connection, event)) {
+            LOGGER.log(Level.FINE, "JDBC 事务内 Outbox 事件幂等重放 eventId={0}", event.eventId());
+            return new AppendResult(AppendStatus.REPLAYED, current);
+        }
+        LOGGER.log(Level.WARNING, "JDBC 事务内 Outbox eventId 内容冲突 eventId={0}", event.eventId());
+        return new AppendResult(AppendStatus.CONFLICT, current);
     }
 
     @Override
@@ -326,11 +363,32 @@ public final class JdbcOutboxStore implements OutboxStore {
         return new FailureResult(FailureStatus.NOT_OWNER, current);
     }
 
-    private static Optional<OutboxEvent> find(Connection connection, String eventId) throws SQLException {
+    /** 在调用方事务连接上读取事件；不会关闭或提交连接。 */
+    static Optional<OutboxEvent> find(Connection connection, String eventId) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(FIND_SQL)) {
             statement.setString(1, eventId);
             try (ResultSet rows = statement.executeQuery()) {
                 return rows.next() ? Optional.of(readEvent(rows)) : Optional.empty();
+            }
+        }
+    }
+
+    /**
+     * 使用 PostgreSQL JSONB 相等语义比较不可变消息字段。
+     *
+     * <p>JSONB 读取后可能改变无意义空白或对象键顺序，不能继续使用 Java 原始
+     * 字符串相等判断，否则同一事件在首次写入后重放会被误判为冲突。</p>
+     */
+    private static boolean sameMessage(Connection connection, OutboxEvent event) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(SAME_MESSAGE_SQL)) {
+            statement.setString(1, event.aggregateType());
+            statement.setString(2, event.aggregateId());
+            statement.setString(3, event.eventType());
+            statement.setString(4, event.payload());
+            statement.setTimestamp(5, Timestamp.from(event.occurredAt()));
+            statement.setString(6, event.eventId());
+            try (ResultSet rows = statement.executeQuery()) {
+                return rows.next() && rows.getBoolean("same_message");
             }
         }
     }
