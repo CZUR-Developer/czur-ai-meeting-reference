@@ -9,7 +9,11 @@ import com.czur.reference.application.error.MeetingAlreadyExistsException;
 import com.czur.reference.application.error.MeetingNotFoundException;
 import com.czur.reference.application.persistence.InMemoryIdempotencyStore;
 import com.czur.reference.application.persistence.InMemoryMeetingRepository;
+import com.czur.reference.application.persistence.InMemoryOutboxStore;
+import com.czur.reference.application.port.IdempotencyStore;
 import com.czur.reference.application.port.MeetingRepository;
+import com.czur.reference.application.port.MeetingUnitOfWork;
+import com.czur.reference.application.port.OutboxStore;
 import com.czur.reference.domain.meeting.MeetingState;
 import com.czur.reference.domain.meeting.MeetingAggregate;
 import com.czur.reference.domain.meeting.MeetingEvent;
@@ -26,6 +30,7 @@ import java.util.concurrent.Future;
 import java.util.Optional;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -235,6 +240,46 @@ class MeetingCommandServiceTest {
         assertThrows(IllegalStateException.class, () -> retryable.create(command));
         MeetingCommandResult retried = retryable.create(command);
         assertEquals(MeetingCommandResult.Operation.CREATED, retried.operation());
+    }
+
+    @Test
+    void unitOfWorkPathWritesMeetingIdempotencyAndOutboxThroughOneContext() {
+        InMemoryMeetingRepository transactionalMeetings = new InMemoryMeetingRepository();
+        InMemoryIdempotencyStore transactionalIdempotency = new InMemoryIdempotencyStore();
+        InMemoryOutboxStore transactionalOutbox = new InMemoryOutboxStore();
+        MeetingUnitOfWork directUnitOfWork = new MeetingUnitOfWork() {
+            @Override
+            public <T> T execute(Function<Transaction, T> work) {
+                return work.apply(new Transaction() {
+                    @Override
+                    public MeetingRepository meetings() {
+                        return transactionalMeetings;
+                    }
+
+                    @Override
+                    public IdempotencyStore idempotency() {
+                        return transactionalIdempotency;
+                    }
+
+                    @Override
+                    public OutboxStore outbox() {
+                        return transactionalOutbox;
+                    }
+                });
+            }
+        };
+        MeetingCommandService transactionalService = new MeetingCommandService(directUnitOfWork);
+
+        MeetingCommandResult result = transactionalService.create(create("uow-create"));
+
+        assertEquals(result.meeting(), transactionalMeetings.find("m-1").orElseThrow());
+        assertEquals(result, transactionalIdempotency
+                .find("meeting.create", "uow-create").orElseThrow().result());
+        OutboxStore.ClaimedEvent event = transactionalOutbox.claim(
+                "test-worker", CREATED, java.time.Duration.ofMinutes(1), 1)
+                .stream().findFirst().orElseThrow();
+        assertEquals("MeetingCreated", event.event().eventType());
+        assertEquals("m-1", event.event().aggregateId());
     }
 
     private static CreateMeetingCommand create(String key) {

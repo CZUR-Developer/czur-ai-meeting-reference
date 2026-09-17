@@ -13,7 +13,7 @@ Provider 特有的响应转换只能位于仓库外的 Driver 实现中。
   边界；生产实现可接入 PostgreSQL 或其他持久化系统。
 - `application/persistence/`：线程安全的内存适配器，仅用于参考和测试，不是生产事实源。
 - `application/persistence/jdbc/`：基于标准 JDBC `DataSource` 的 PostgreSQL 适配器，
-  覆盖会议快照、幂等记录和 Outbox。适配器不自动建表，必须先执行仓库
+  覆盖会议快照、幂等记录、Outbox 和跨端口工作单元。适配器不自动建表，必须先执行仓库
   `deploy/migrations/V001__initial_schema.sql` 与 `V002__outbox_lease_fencing.sql`。
 - `domain/capability/`：P3-T01 已验收的能力描述、产品 Profile、依赖/回退规则和不可变能力计划。
 - `application/port/model/`：P3-T02 已验收的 Model Driver SPI、规范化会话/音频/事件对象、无网络 `MockModelDriver`，以及 P3-T04 的 `AlternativeTextModelDriver`。
@@ -31,7 +31,7 @@ Provider 特有的响应转换只能位于仓库外的 Driver 实现中。
 `23726454ebb893ae1402cff59b0f226b041daa04`。创建和停止命令通过端口访问会议事实源、
 幂等记录和 Outbox；`deploymentScope + clientSessionId` 是创建唯一性范围，旧调用
 默认使用 `default`。内存适配器只用于示例和测试；PostgreSQL 适配器提供持久化端口，
-事务/Unit of Work、HTTP API、认证、计费、Worker 和真实运行时编排不在本切片内。
+HTTP API、认证、计费、Worker 和完整运行时编排不在本切片内。
 
 ### PostgreSQL 适配器
 
@@ -40,9 +40,14 @@ Provider 特有的响应转换只能位于仓库外的 Driver 实现中。
 依赖使用 `runtime` 作用域），也可以由容器运行时提供驱动；核心领域和单元测试不
 要求数据库可用。适配器不会打印响应正文、Outbox 载荷或连接凭据。
 
-当前 `MeetingCommandService` 仍按端口分别调用仓库；要保证会议快照、幂等记录和
-Outbox 在同一事务中提交，下一阶段需要新增 Unit of Work，而不是在 Gateway 中拼接
-事务。数据库容器是否由 Compose 启动不改变这个边界。
+`MeetingCommandService` 保留旧的双端口构造器，供既有内存示例兼容使用；JDBC
+运行时应使用 `MeetingUnitOfWork` 构造器。`JdbcMeetingUnitOfWork` 在一个
+`Connection` 中提交会议快照、幂等记录和命令 Outbox，任何一步失败都会整体回滚。
+事务内读取会议时使用 PostgreSQL 行锁，使多个后端实例并发 Stop 也只能由首次
+状态转换写入一条 `MeetingStopRequested`；后到事务复用已提交的停止状态。
+Outbox 的领取、发布和失败重试继续由提交后的 Worker 使用独立短事务执行，不能放入
+会议命令事务，更不能在 Gateway 中拼接业务事务。数据库容器是否由 Compose 启动不
+改变这个边界。
 
 ## P3-T04 Driver 契约测试
 
@@ -78,7 +83,7 @@ TCK 及其登记，不修改 `contracts/`、
 代码在 P3-T05 中补齐了应用命令、持久化端口和 `deploymentScope` 语义；领域和
 端口仍保持纯 Java，PostgreSQL 驱动只位于 JDBC 运行时适配边界。
 
-该切片不构成数据库恢复的真实环境验收、事务或 Unit of Work、Meeting API/Worker、Gateway
+该切片不构成数据库恢复的完整验收、Meeting API/Worker、Gateway
 编排、真实 Provider Driver 或完整后端闭环验收；两个无网络固定文本实现只证明
 公开端口可替换，不代表真实模型质量或生产接入。数据库仍应是未来运行时会议状态、
 幂等记录和 Outbox 的事实源；内存和 Mock 仅用于单元测试与示例。
@@ -93,3 +98,12 @@ mvn -B -f backend-reference/pom.xml clean test
 
 该命令只构建本模块，不启动数据库、不调用外部服务，也不会触发父仓库的 Maven
 reactor。Fixture、公开边界和依赖检查由仓库根目录的工具脚本执行。
+
+真实 PostgreSQL 事务门禁需要先执行 V001/V002，再显式传入测试连接：
+
+```bash
+REFERENCE_TEST_DATABASE_URL='jdbc:postgresql://127.0.0.1:5432/meeting' \
+REFERENCE_TEST_DATABASE_USER='meeting' \
+REFERENCE_TEST_DATABASE_PASSWORD='<从测试 Secret 注入>' \
+mvn -B -f backend-reference/pom.xml clean test
+```

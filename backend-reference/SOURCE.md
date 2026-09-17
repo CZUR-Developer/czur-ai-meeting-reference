@@ -190,8 +190,9 @@ test/java/com/czur/reference/domain/meeting/MeetingStateMachineTest.java ddcdbba
 
 本次切片提供 `deploymentScope + clientSessionId` 唯一性、旧 `default` 构造兼容、
 快照恢复、幂等预占/释放以及 Outbox lease/fencing 语义；内存实现仅用于参考和测试。
-JDBC 适配器已在 P2-T05 增加，但生产连接池、迁移执行、备份恢复和跨端口事务/Unit
-of Work 仍属于后续任务。
+JDBC 适配器已在 P2-T05 增加；P2-T10 又增加公开的 `MeetingUnitOfWork`、
+`JdbcMeetingUnitOfWork` 和命令服务事务入口。生产连接池、迁移执行、备份恢复、
+HTTP API 与 Worker 仍属于后续任务。
 
 ## P2-T05 JDBC 适配器增量
 
@@ -206,4 +207,18 @@ PostgreSQL 驱动在 `backend-reference/pom.xml` 使用 `runtime` 作用域；�
 不依赖驱动。`JdbcPostgresIntegrationTest` 仅在显式设置
 `REFERENCE_TEST_DATABASE_URL`、可选账号密码后运行，数据库须预先执行 V001/V002；
 默认单测不连接外部数据库。该增量不实现 HTTP、Worker、连接池、迁移执行、备份恢复
-或 Unit of Work，不应单独宣称完整生产闭环。
+或完整运行时，不应单独宣称完整生产闭环。
+
+## P2-T10 Unit of Work 增量
+
+P2-T10 在应用端口增加 `MeetingUnitOfWork`，并以 `JdbcMeetingUnitOfWork` 将
+`MeetingRepository`、`IdempotencyStore` 和 `OutboxStore.append` 绑定到同一个 JDBC
+连接。`MeetingCommandService` 的工作单元入口会原子提交创建/停止快照、幂等结果和
+确定性命令事件；异常时统一回滚。旧双端口构造器继续存在，避免破坏已有内存示例。
+
+事务内 Outbox 视图明确拒绝 `claim`、`markPublished` 和 `markFailed`；这些 Worker
+操作在提交后通过原 `JdbcOutboxStore` 的独立短事务执行。真实 PostgreSQL 集成测试
+覆盖成功提交、重复 Stop 不产生第二条收口事件、Outbox 冲突回滚，以及回调在写入
+三类端口后抛错时整体回滚。事务内会议查询使用 `SELECT ... FOR UPDATE`，并由两个
+独立命令服务和数据库连接验证并发 Stop 只生成一条停止事件。JDBC Outbox 的重放比较使用 PostgreSQL JSONB 相等语义，
+避免数据库规范化空白或键顺序后把相同载荷误判为冲突。
