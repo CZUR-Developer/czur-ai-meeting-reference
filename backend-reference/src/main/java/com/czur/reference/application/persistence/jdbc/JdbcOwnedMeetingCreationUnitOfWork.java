@@ -77,6 +77,7 @@ public final class JdbcOwnedMeetingCreationUnitOfWork
         boolean commitStarted = false;
         boolean commitCompleted = false;
         boolean previousAutoCommit = true;
+        TransactionResolution transactionResolution = new TransactionResolution();
         Phase phase = Phase.OPEN_CONNECTION;
         try {
             connection = dataSource.getConnection();
@@ -90,7 +91,7 @@ public final class JdbcOwnedMeetingCreationUnitOfWork
                             connection, meetingScope, request.idempotencyKey());
             if (previous.isPresent()) {
                 Result replay = classifyIdempotency(previous.get(), request);
-                rollbackQuietly(connection);
+                transactionResolution.rollback(connection);
                 return replay;
             }
 
@@ -103,7 +104,9 @@ public final class JdbcOwnedMeetingCreationUnitOfWork
                             request.subjectScope(),
                             suppliedReservation.reservationId());
             if (lockedOptional.isEmpty()) {
-                return failAndRollback(connection, ErrorCode.RESERVATION_NOT_FOUND, false);
+                return failAndRollback(
+                        connection, transactionResolution,
+                        ErrorCode.RESERVATION_NOT_FOUND, false);
             }
 
             // 行锁等待期间同 key 的另一事务可能已经提交；锁后必须再次读取。
@@ -112,7 +115,7 @@ public final class JdbcOwnedMeetingCreationUnitOfWork
                     connection, meetingScope, request.idempotencyKey());
             if (previous.isPresent()) {
                 Result replay = classifyIdempotency(previous.get(), request);
-                rollbackQuietly(connection);
+                transactionResolution.rollback(connection);
                 return replay;
             }
 
@@ -121,7 +124,8 @@ public final class JdbcOwnedMeetingCreationUnitOfWork
                     connection, request, lockedOptional.get().reservation());
             if (stable.failure() != null) {
                 return failAndRollback(
-                        connection, stable.failure().code(), stable.failure().retryable());
+                        connection, transactionResolution,
+                        stable.failure().code(), stable.failure().retryable());
             }
 
             JdbcUsageReservationStore.LockedReservation locked = lockedOptional.get();
@@ -129,7 +133,7 @@ public final class JdbcOwnedMeetingCreationUnitOfWork
             Result staticReservationFailure = validateStaticReservation(
                     current, stable.result().reservation());
             if (staticReservationFailure != null) {
-                rollbackQuietly(connection);
+                transactionResolution.rollback(connection);
                 return staticReservationFailure;
             }
 
@@ -139,7 +143,7 @@ public final class JdbcOwnedMeetingCreationUnitOfWork
             Result timedReservationFailure = validateAtBindTime(
                     current, stable.result(), locked, bindAt);
             if (timedReservationFailure != null) {
-                rollbackQuietly(connection);
+                transactionResolution.rollback(connection);
                 return timedReservationFailure;
             }
 
@@ -168,7 +172,7 @@ public final class JdbcOwnedMeetingCreationUnitOfWork
                     JdbcIdempotencyStore.reserve(connection, candidate, bindAt);
             if (idempotency.status() != IdempotencyStore.ReservationStatus.ACQUIRED) {
                 Result replay = classifyIdempotency(idempotency.record(), request);
-                rollbackQuietly(connection);
+                transactionResolution.rollback(connection);
                 return replay;
             }
 
@@ -177,7 +181,8 @@ public final class JdbcOwnedMeetingCreationUnitOfWork
                     connection, current, bindAt)) {
                 // 已持有行锁且状态、版本、lease、时间均已验证，CAS 不命中表示
                 // 数据库事实或触发器偏离冻结契约，不能猜测成业务状态冲突。
-                return failAndRollback(connection, ErrorCode.INTERNAL, false);
+                return failAndRollback(
+                        connection, transactionResolution, ErrorCode.INTERNAL, false);
             }
 
             phase = Phase.MEETING_INSERT;
@@ -188,7 +193,8 @@ public final class JdbcOwnedMeetingCreationUnitOfWork
                     connection,
                     MeetingCommandEventFactory.meetingCreated(created.meeting(), bindAt));
             if (append.status() != OutboxStore.AppendStatus.APPENDED) {
-                return failAndRollback(connection, ErrorCode.INTERNAL, false);
+                return failAndRollback(
+                        connection, transactionResolution, ErrorCode.INTERNAL, false);
             }
 
             phase = Phase.COMMIT;
@@ -199,7 +205,7 @@ public final class JdbcOwnedMeetingCreationUnitOfWork
             return new Success(SuccessCode.CREATED, created);
         } catch (JdbcUsageReservationStore.CorruptUsageDataException corruption) {
             if (transactionStarted && !commitStarted) {
-                rollbackQuietly(connection);
+                transactionResolution.rollback(connection);
             }
             return loggedFailure(ErrorCode.INTERNAL, false, phase, null);
         } catch (IllegalArgumentException | IllegalStateException invalidFact) {
@@ -208,7 +214,7 @@ public final class JdbcOwnedMeetingCreationUnitOfWork
                         ErrorCode.OUTCOME_UNKNOWN, true, Phase.COMMIT, null);
             }
             if (transactionStarted && !commitStarted) {
-                rollbackQuietly(connection);
+                transactionResolution.rollback(connection);
             }
             return loggedFailure(ErrorCode.INTERNAL, false, phase, null);
         } catch (RuntimeException runtimeFailure) {
@@ -221,7 +227,7 @@ public final class JdbcOwnedMeetingCreationUnitOfWork
                         ErrorCode.OUTCOME_UNKNOWN, true, Phase.COMMIT, null);
             }
             if (transactionStarted && !commitStarted) {
-                rollbackQuietly(connection);
+                transactionResolution.rollback(connection);
             }
             return loggedFailure(ErrorCode.INTERNAL, false, phase, null);
         } catch (SQLException sqlFailure) {
@@ -230,7 +236,7 @@ public final class JdbcOwnedMeetingCreationUnitOfWork
                         ErrorCode.OUTCOME_UNKNOWN, true, Phase.COMMIT, sqlFailure.getSQLState());
             }
             if (transactionStarted) {
-                rollbackQuietly(connection);
+                transactionResolution.rollback(connection);
             }
             if (phase == Phase.MEETING_INSERT && isUniqueViolation(sqlFailure)) {
                 return loggedFailure(
@@ -242,9 +248,10 @@ public final class JdbcOwnedMeetingCreationUnitOfWork
                     code, code == ErrorCode.STORAGE_UNAVAILABLE,
                     phase, sqlFailure.getSQLState());
         } finally {
-            // commit 抛错时结果未知，setAutoCommit(true) 本身可能再次尝试提交，
-            // 因而只能直接归还/关闭连接，不能用“恢复状态”改变未知事务结果。
-            if (!commitStarted || commitCompleted) {
+            // 只有 commit 已确认完成，或 rollback 已确认成功，才允许恢复连接原始
+            // auto-commit。commit 结果未知或 rollback 失败时，setAutoCommit(true)
+            // 可能提交仍悬而未决的事务，因此必须直接关闭并丢弃这条连接。
+            if (commitCompleted || transactionResolution.rollbackConfirmed()) {
                 restoreAutoCommitQuietly(connection, previousAutoCommit);
             }
             closeQuietly(connection);
@@ -392,8 +399,11 @@ public final class JdbcOwnedMeetingCreationUnitOfWork
     }
 
     private static Result failAndRollback(
-            Connection connection, ErrorCode code, boolean retryable) {
-        rollbackQuietly(connection);
+            Connection connection,
+            TransactionResolution transactionResolution,
+            ErrorCode code,
+            boolean retryable) {
+        transactionResolution.rollback(connection);
         return loggedFailure(code, retryable, Phase.BUSINESS_VALIDATION, null);
     }
 
@@ -437,15 +447,23 @@ public final class JdbcOwnedMeetingCreationUnitOfWork
         return sqlState.matches("[A-Z0-9]{5}") ? sqlState : "INVALID";
     }
 
-    private static void rollbackQuietly(Connection connection) {
+    /**
+     * 尝试回滚并返回数据库是否明确确认了回滚。
+     *
+     * <p>返回 false 后不得调用 {@code setAutoCommit(true)}；JDBC 规范允许该调用
+     * 提交当前事务。调用方只能关闭连接，让连接池或驱动丢弃未决事务。</p>
+     */
+    private static boolean rollbackQuietly(Connection connection) {
         if (connection == null) {
-            return;
+            return false;
         }
         try {
             connection.rollback();
-        } catch (SQLException rollbackFailure) {
+            return true;
+        } catch (SQLException | RuntimeException rollbackFailure) {
             // commit 前的业务结果仍然确定；回滚失败不能被误报为 OUTCOME_UNKNOWN。
             LOGGER.log(Level.WARNING, "owned 会议创建工作单元回滚失败");
+            return false;
         }
     }
 
@@ -458,7 +476,7 @@ public final class JdbcOwnedMeetingCreationUnitOfWork
             if (!connection.isClosed()) {
                 connection.setAutoCommit(previousAutoCommit);
             }
-        } catch (SQLException restoreFailure) {
+        } catch (SQLException | RuntimeException restoreFailure) {
             LOGGER.log(Level.WARNING, "owned 会议创建工作单元恢复连接状态失败");
         }
     }
@@ -469,8 +487,26 @@ public final class JdbcOwnedMeetingCreationUnitOfWork
         }
         try {
             connection.close();
-        } catch (SQLException closeFailure) {
+        } catch (SQLException | RuntimeException closeFailure) {
             LOGGER.log(Level.WARNING, "owned 会议创建工作单元关闭连接失败");
+        }
+    }
+
+    /**
+     * 记录本次本地事务是否已由数据库明确回滚。
+     *
+     * <p>该状态只影响 finally 中能否恢复 auto-commit，不改变已经确定的业务结果
+     * 或存储错误分类。回滚失败时保持 false，确保连接只能被关闭。</p>
+     */
+    private static final class TransactionResolution {
+        private boolean rollbackConfirmed;
+
+        void rollback(Connection connection) {
+            rollbackConfirmed = rollbackQuietly(connection);
+        }
+
+        boolean rollbackConfirmed() {
+            return rollbackConfirmed;
         }
     }
 

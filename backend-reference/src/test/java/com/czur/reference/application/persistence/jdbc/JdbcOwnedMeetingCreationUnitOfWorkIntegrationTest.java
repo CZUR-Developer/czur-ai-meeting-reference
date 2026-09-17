@@ -41,6 +41,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -342,6 +343,48 @@ class JdbcOwnedMeetingCreationUnitOfWorkIntegrationTest {
     }
 
     @Test
+    void rollbackSqlFailureClosesConnectionWithoutImplicitCommit() throws Exception {
+        UsageOperationResult reserve = insertReserve(
+                "rollback-sql", "meeting-rollback-sql", BIND_AT.plusSeconds(60));
+        FaultObservation observation = new FaultObservation();
+        DataSource failing = faultInjectingDataSource(
+                dataSource, FaultPoint.OUTBOX_WRITE_AND_ROLLBACK_SQL, observation);
+
+        var result = failure(unitOfWork(failing, BIND_CLOCK).create(request(
+                reserve, "meeting-rollback-sql", "session-rollback-sql",
+                "key-rollback-sql", "digest-rollback-sql")));
+
+        assertEquals(OwnedMeetingCreationUnitOfWork.ErrorCode.STORAGE_UNAVAILABLE,
+                result.code());
+        assertTrue(result.retryable());
+        assertFalse(observation.restoreAutoCommitAttempted.get());
+        assertTrue(observation.closeAttempted.get());
+        assertUnboundAndNoMeetingIdempotency(
+                reserve.reservation().reservationId(),
+                "meeting-rollback-sql", "key-rollback-sql");
+    }
+
+    @Test
+    void rollbackRuntimeFailureDoesNotEscapeOrChangeBusinessResult() throws Exception {
+        UsageOperationResult reserve = insertReserve(
+                "rollback-runtime", "meeting-rollback-runtime", BIND_AT.plusSeconds(60));
+        deleteReserveFacts(reserve);
+        FaultObservation observation = new FaultObservation();
+        DataSource failing = faultInjectingDataSource(
+                dataSource, FaultPoint.ROLLBACK_RUNTIME, observation);
+
+        var result = failure(unitOfWork(failing, BIND_CLOCK).create(request(
+                reserve, "meeting-rollback-runtime", "session-rollback-runtime",
+                "key-rollback-runtime", "digest-rollback-runtime")));
+
+        assertEquals(OwnedMeetingCreationUnitOfWork.ErrorCode.RESERVATION_NOT_FOUND,
+                result.code());
+        assertFalse(result.retryable());
+        assertFalse(observation.restoreAutoCommitAttempted.get());
+        assertTrue(observation.closeAttempted.get());
+    }
+
+    @Test
     void commitFailureAfterDatabaseCommitIsOutcomeUnknownAndCanBeReplayed() throws Exception {
         UsageOperationResult reserve = insertReserve(
                 "commit-unknown", "meeting-commit-unknown", BIND_AT.plusSeconds(60));
@@ -402,6 +445,44 @@ class JdbcOwnedMeetingCreationUnitOfWorkIntegrationTest {
                 .find("meeting-runtime-commit").isPresent());
         var replay = success(unitOfWork(dataSource, BIND_CLOCK).create(request));
         assertEquals(OwnedMeetingCreationUnitOfWork.SuccessCode.REPLAYED, replay.code());
+    }
+
+    @Test
+    void restoreAutoCommitRuntimeFailureDoesNotOverrideCommittedSuccess() throws Exception {
+        UsageOperationResult reserve = insertReserve(
+                "restore-runtime", "meeting-restore-runtime", BIND_AT.plusSeconds(60));
+        FaultObservation observation = new FaultObservation();
+        DataSource failing = faultInjectingDataSource(
+                dataSource, FaultPoint.RESTORE_AUTOCOMMIT_RUNTIME, observation);
+
+        var result = success(unitOfWork(failing, BIND_CLOCK).create(request(
+                reserve, "meeting-restore-runtime", "session-restore-runtime",
+                "key-restore-runtime", "digest-restore-runtime")));
+
+        assertEquals(OwnedMeetingCreationUnitOfWork.SuccessCode.CREATED, result.code());
+        assertTrue(observation.restoreAutoCommitAttempted.get());
+        assertTrue(observation.closeAttempted.get());
+        assertTrue(new JdbcMeetingRepository(dataSource)
+                .find("meeting-restore-runtime").isPresent());
+    }
+
+    @Test
+    void closeRuntimeFailureDoesNotOverrideCommittedSuccess() throws Exception {
+        UsageOperationResult reserve = insertReserve(
+                "close-runtime", "meeting-close-runtime", BIND_AT.plusSeconds(60));
+        FaultObservation observation = new FaultObservation();
+        DataSource failing = faultInjectingDataSource(
+                dataSource, FaultPoint.CLOSE_RUNTIME, observation);
+
+        var result = success(unitOfWork(failing, BIND_CLOCK).create(request(
+                reserve, "meeting-close-runtime", "session-close-runtime",
+                "key-close-runtime", "digest-close-runtime")));
+
+        assertEquals(OwnedMeetingCreationUnitOfWork.SuccessCode.CREATED, result.code());
+        assertTrue(observation.restoreAutoCommitAttempted.get());
+        assertTrue(observation.closeAttempted.get());
+        assertTrue(new JdbcMeetingRepository(dataSource)
+                .find("meeting-close-runtime").isPresent());
     }
 
     @Test
@@ -606,6 +687,30 @@ class JdbcOwnedMeetingCreationUnitOfWorkIntegrationTest {
         }
     }
 
+    private void deleteReserveFacts(UsageOperationResult reserve) throws SQLException {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement operation = connection.prepareStatement("""
+                     DELETE FROM usage_operation
+                      WHERE deployment_scope = ? AND subject_scope = ?
+                        AND operation_scope = ? AND idempotency_key = ?
+                     """);
+             PreparedStatement reservation = connection.prepareStatement("""
+                     DELETE FROM usage_reservation
+                      WHERE deployment_scope = ? AND subject_scope = ?
+                        AND reservation_id = ?
+                     """)) {
+            operation.setString(1, reserve.deploymentScope());
+            operation.setString(2, reserve.subjectScope());
+            operation.setString(3, reserve.operationScope());
+            operation.setString(4, reserve.idempotencyKey());
+            assertEquals(1, operation.executeUpdate());
+            reservation.setString(1, reserve.deploymentScope());
+            reservation.setString(2, reserve.subjectScope());
+            reservation.setString(3, reserve.reservation().reservationId());
+            assertEquals(1, reservation.executeUpdate());
+        }
+    }
+
     private void assertUnboundAndNoMeetingIdempotency(
             String reservationId,
             String meetingId,
@@ -692,23 +797,33 @@ class JdbcOwnedMeetingCreationUnitOfWorkIntegrationTest {
 
     private static DataSource faultInjectingDataSource(
             DataSource delegate, FaultPoint faultPoint) {
+        return faultInjectingDataSource(delegate, faultPoint, new FaultObservation());
+    }
+
+    private static DataSource faultInjectingDataSource(
+            DataSource delegate,
+            FaultPoint faultPoint,
+            FaultObservation observation) {
         return new DelegatingDataSource(delegate) {
             @Override
             public Connection getConnection() throws SQLException {
-                return faultInjectingConnection(super.getConnection(), faultPoint);
+                return faultInjectingConnection(
+                        super.getConnection(), faultPoint, observation);
             }
 
             @Override
             public Connection getConnection(String username, String password)
                     throws SQLException {
                 return faultInjectingConnection(
-                        super.getConnection(username, password), faultPoint);
+                        super.getConnection(username, password), faultPoint, observation);
             }
         };
     }
 
     private static Connection faultInjectingConnection(
-            Connection delegate, FaultPoint faultPoint) {
+            Connection delegate,
+            FaultPoint faultPoint,
+            FaultObservation observation) {
         return (Connection) Proxy.newProxyInstance(
                 Connection.class.getClassLoader(),
                 new Class<?>[]{Connection.class},
@@ -720,6 +835,25 @@ class JdbcOwnedMeetingCreationUnitOfWorkIntegrationTest {
                             && arguments[0] instanceof String sql
                             && sql.contains("INSERT INTO meeting")) {
                         throw new SQLException("dynamic driver detail must stay hidden", "08006");
+                    }
+                    if (faultPoint == FaultPoint.OUTBOX_WRITE_AND_ROLLBACK_SQL
+                            && "prepareStatement".equals(method.getName())
+                            && arguments != null
+                            && arguments.length > 0
+                            && arguments[0] instanceof String sql
+                            && sql.contains("INSERT INTO outbox_event")) {
+                        throw new SQLException(
+                                "dynamic outbox detail must stay hidden", "08006");
+                    }
+                    if (faultPoint == FaultPoint.OUTBOX_WRITE_AND_ROLLBACK_SQL
+                            && "rollback".equals(method.getName())) {
+                        throw new SQLException(
+                                "dynamic rollback detail must stay hidden", "08006");
+                    }
+                    if (faultPoint == FaultPoint.ROLLBACK_RUNTIME
+                            && "rollback".equals(method.getName())) {
+                        throw new IllegalStateException(
+                                "dynamic rollback runtime detail must stay hidden");
                     }
                     if (faultPoint == FaultPoint.BEFORE_COMMIT
                             && "commit".equals(method.getName())) {
@@ -735,6 +869,24 @@ class JdbcOwnedMeetingCreationUnitOfWorkIntegrationTest {
                         delegate.commit();
                         throw new IllegalStateException(
                                 "dynamic runtime commit detail must stay hidden");
+                    }
+                    if ("setAutoCommit".equals(method.getName())
+                            && arguments != null
+                            && arguments.length == 1
+                            && Boolean.TRUE.equals(arguments[0])) {
+                        observation.restoreAutoCommitAttempted.set(true);
+                        if (faultPoint == FaultPoint.RESTORE_AUTOCOMMIT_RUNTIME) {
+                            throw new IllegalStateException(
+                                    "dynamic auto-commit detail must stay hidden");
+                        }
+                    }
+                    if ("close".equals(method.getName())) {
+                        observation.closeAttempted.set(true);
+                        if (faultPoint == FaultPoint.CLOSE_RUNTIME) {
+                            delegate.close();
+                            throw new IllegalStateException(
+                                    "dynamic close detail must stay hidden");
+                        }
                     }
                     try {
                         return method.invoke(delegate, arguments);
@@ -789,9 +941,19 @@ class JdbcOwnedMeetingCreationUnitOfWorkIntegrationTest {
 
     private enum FaultPoint {
         BEFORE_MEETING_INSERT,
+        OUTBOX_WRITE_AND_ROLLBACK_SQL,
+        ROLLBACK_RUNTIME,
         BEFORE_COMMIT,
         AFTER_COMMIT,
-        RUNTIME_AFTER_COMMIT
+        RUNTIME_AFTER_COMMIT,
+        RESTORE_AUTOCOMMIT_RUNTIME,
+        CLOSE_RUNTIME
+    }
+
+    /** 记录代理连接是否进入了可能改变事务结局的清理分支。 */
+    private static final class FaultObservation {
+        private final AtomicBoolean restoreAutoCommitAttempted = new AtomicBoolean();
+        private final AtomicBoolean closeAttempted = new AtomicBoolean();
     }
 
     /** 只覆盖连接创建的测试 DataSource，其余标准配置透明委托。 */
