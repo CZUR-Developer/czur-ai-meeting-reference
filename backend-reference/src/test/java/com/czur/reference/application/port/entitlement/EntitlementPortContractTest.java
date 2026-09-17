@@ -145,7 +145,8 @@ class EntitlementPortContractTest {
     void operationResultsAreStableSnapshotsWithExplicitScopes() {
         UsageReservation reserved = reservation();
         UsageOperationResult first = new UsageOperationResult(DEPLOYMENT, SUBJECT,
-                UsageOperationScopes.RESERVE, "reserve-key", digest("a"), reserved);
+                UsageOperationScopes.RESERVE, "reserve-key", digest("a"),
+                GRANT_EXPIRES_AT, reserved);
         UsageOperationResult replay = first;
 
         assertEquals(first, replay);
@@ -154,7 +155,8 @@ class EntitlementPortContractTest {
         assertEquals(SUBJECT, replay.subjectScope());
         assertEquals(UsageOperationScopes.RESERVE, replay.operationScope());
         assertThrows(IllegalArgumentException.class, () -> new UsageOperationResult(
-                DEPLOYMENT, SUBJECT, UsageOperationScopes.COMMIT, "key", digest("f"), reserved));
+                DEPLOYMENT, SUBJECT, UsageOperationScopes.COMMIT, "key", digest("f"),
+                null, reserved));
     }
 
     @Test

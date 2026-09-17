@@ -1,0 +1,319 @@
+package com.czur.reference.application.persistence.jdbc;
+
+import com.czur.reference.application.port.entitlement.UsageActual;
+import com.czur.reference.application.port.entitlement.UsageEstimate;
+import com.czur.reference.application.port.entitlement.UsageOperationResult;
+import com.czur.reference.application.port.entitlement.UsageReservation;
+import com.czur.reference.application.port.entitlement.UsageUnit;
+
+import java.math.BigDecimal;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.Objects;
+import java.util.Optional;
+
+/**
+ * V003 {@code usage_reservation}/{@code usage_operation} 的事务内 JDBC 原语。
+ *
+ * <p>该类型不获取连接、不提交事务，也不对外提供权益业务结果。调用方必须为
+ * 每个公开操作建立明确事务，并在 operation 唯一键竞争失败时完整回滚候选
+ * Reservation。所有 Reservation 查询和变更都同时带 deployment、subject、
+ * reservationId 和 {@code record_format='V3'}，绝不先按全局 ID 探测真实范围。</p>
+ *
+ * <p>数据库 NUMERIC 只能通过 {@link BigDecimal#longValueExact()} 进入公共 long
+ * 契约。小数或溢出表示持久事实损坏，不能截断、四舍五入或伪装为合法用量。</p>
+ */
+final class JdbcUsageReservationStore {
+    private static final String FIND_OPERATION_SQL = """
+            SELECT request_digest, result_body::text
+              FROM usage_operation
+             WHERE deployment_scope = ? AND subject_scope = ?
+               AND operation_scope = ? AND idempotency_key = ?
+            """;
+
+    private static final String INSERT_OPERATION_SQL = """
+            INSERT INTO usage_operation (
+                deployment_scope, subject_scope, operation_scope, idempotency_key,
+                request_digest, reservation_id, result_body, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?::jsonb, ?)
+            ON CONFLICT (deployment_scope, subject_scope, operation_scope, idempotency_key)
+            DO NOTHING
+            """;
+
+    private static final String INSERT_RESERVATION_SQL = """
+            INSERT INTO usage_reservation (
+                reservation_id, meeting_id, usage_type, status, quantity, provider_ref,
+                created_at, updated_at, record_format, deployment_scope, subject_scope,
+                grant_id, expected_meeting_id, bound_meeting_id, bound_at, usage_unit,
+                reserved_amount, actual_amount, expires_at, version, committed_at,
+                cancelled_at, cancellation_reason_code, lease_owner, lease_token,
+                lease_until, lease_version)
+            VALUES (?, NULL, NULL, 'RESERVED', NULL, NULL,
+                    ?, ?, 'V3', ?, ?, ?, ?, NULL, NULL, ?, ?, NULL, ?, 0,
+                    NULL, NULL, NULL, NULL, NULL, NULL, 0)
+            """;
+
+    private static final String LOCK_RESERVATION_SQL = """
+            SELECT reservation_id, deployment_scope, subject_scope, grant_id,
+                   expected_meeting_id, bound_meeting_id, bound_at, usage_unit,
+                   reserved_amount, actual_amount, created_at, expires_at, status,
+                   version, committed_at, cancelled_at, cancellation_reason_code
+              FROM usage_reservation
+             WHERE deployment_scope = ? AND subject_scope = ? AND reservation_id = ?
+               AND record_format = 'V3'
+             FOR UPDATE
+            """;
+
+    private static final String COMMIT_SQL = """
+            UPDATE usage_reservation
+               SET status = 'COMMITTED', actual_amount = ?, committed_at = ?,
+                   version = ?, updated_at = ?, lease_owner = NULL,
+                   lease_token = NULL, lease_until = NULL
+             WHERE deployment_scope = ? AND subject_scope = ? AND reservation_id = ?
+               AND record_format = 'V3' AND status = 'RESERVED'
+               AND bound_meeting_id IS NOT NULL AND version = ?
+            """;
+
+    private static final String CANCEL_SQL = """
+            UPDATE usage_reservation
+               SET status = 'CANCELLED', cancelled_at = ?, cancellation_reason_code = ?,
+                   version = ?, updated_at = ?, lease_owner = NULL,
+                   lease_token = NULL, lease_until = NULL
+             WHERE deployment_scope = ? AND subject_scope = ? AND reservation_id = ?
+               AND record_format = 'V3' AND status = 'RESERVED'
+               AND bound_meeting_id IS NULL AND expected_meeting_id = ? AND version = ?
+            """;
+
+    private JdbcUsageReservationStore() {
+    }
+
+    /** 在完整四元组范围内读取原始幂等行；正文只在摘要相同时由 Provider 解码。 */
+    static Optional<UsageOperationRow> findOperation(
+            Connection connection,
+            String deploymentScope,
+            String subjectScope,
+            String operationScope,
+            String idempotencyKey) throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        try (PreparedStatement statement = connection.prepareStatement(FIND_OPERATION_SQL)) {
+            statement.setString(1, deploymentScope);
+            statement.setString(2, subjectScope);
+            statement.setString(3, operationScope);
+            statement.setString(4, idempotencyKey);
+            try (ResultSet rows = statement.executeQuery()) {
+                if (!rows.next()) {
+                    return Optional.empty();
+                }
+                String digest = rows.getString("request_digest");
+                String resultBody = rows.getString("result_body");
+                if (digest == null || digest.isBlank() || resultBody == null) {
+                    throw new CorruptUsageDataException("usage operation fields are incomplete");
+                }
+                return Optional.of(new UsageOperationRow(digest, resultBody));
+            }
+        }
+    }
+
+    /** 插入首次完整 Reservation 快照；ID 碰撞交给数据库唯一约束拒绝。 */
+    static void insertReservation(Connection connection, UsageReservation reservation)
+            throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(reservation, "reservation");
+        if (reservation.state() != UsageReservation.State.RESERVED
+                || reservation.isBound()
+                || reservation.version() != 0) {
+            throw new IllegalArgumentException("only initial unbound reservation can be inserted");
+        }
+        try (PreparedStatement statement = connection.prepareStatement(INSERT_RESERVATION_SQL)) {
+            statement.setString(1, reservation.reservationId());
+            statement.setTimestamp(2, Timestamp.from(reservation.createdAt()));
+            statement.setTimestamp(3, Timestamp.from(reservation.createdAt()));
+            statement.setString(4, reservation.deploymentScope());
+            statement.setString(5, reservation.subjectScope());
+            statement.setString(6, reservation.grantId());
+            statement.setString(7, reservation.expectedMeetingId());
+            statement.setString(8, reservation.reservedUsage().unit().name());
+            statement.setBigDecimal(9, BigDecimal.valueOf(reservation.reservedUsage().amount()));
+            statement.setTimestamp(10, Timestamp.from(reservation.expiresAt()));
+            if (statement.executeUpdate() != 1) {
+                throw new SQLException("usage reservation insert count is not one");
+            }
+        }
+    }
+
+    /**
+     * 保存首次稳定结果。返回 false 表示四元组已有赢家；调用方必须回滚当前
+     * 整个事务后再读取赢家，不能只删除候选 Reservation。
+     */
+    static boolean insertOperation(
+            Connection connection, UsageOperationResult result, Instant createdAt)
+            throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(result, "result");
+        Objects.requireNonNull(createdAt, "createdAt");
+        try (PreparedStatement statement = connection.prepareStatement(INSERT_OPERATION_SQL)) {
+            statement.setString(1, result.deploymentScope());
+            statement.setString(2, result.subjectScope());
+            statement.setString(3, result.operationScope());
+            statement.setString(4, result.idempotencyKey());
+            statement.setString(5, result.requestDigest());
+            statement.setString(6, result.reservation().reservationId());
+            statement.setString(7, UsageOperationResultJson.encode(result));
+            statement.setTimestamp(8, Timestamp.from(createdAt));
+            return statement.executeUpdate() == 1;
+        }
+    }
+
+    /** 锁定完整范围内的 V3 Reservation；其它范围和历史格式统一表现为不存在。 */
+    static Optional<UsageReservation> lockReservation(
+            Connection connection,
+            String deploymentScope,
+            String subjectScope,
+            String reservationId) throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        try (PreparedStatement statement = connection.prepareStatement(LOCK_RESERVATION_SQL)) {
+            statement.setString(1, deploymentScope);
+            statement.setString(2, subjectScope);
+            statement.setString(3, reservationId);
+            try (ResultSet rows = statement.executeQuery()) {
+                return rows.next() ? Optional.of(readReservation(rows)) : Optional.empty();
+            }
+        }
+    }
+
+    /** 使用状态、绑定和 expectedVersion 条件原子提交最终用量。 */
+    static boolean commit(
+            Connection connection,
+            UsageReservation previous,
+            UsageReservation committed) throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(previous, "previous");
+        Objects.requireNonNull(committed, "committed");
+        if (committed.state() != UsageReservation.State.COMMITTED) {
+            throw new IllegalArgumentException("committed snapshot is required");
+        }
+        try (PreparedStatement statement = connection.prepareStatement(COMMIT_SQL)) {
+            statement.setBigDecimal(1, BigDecimal.valueOf(committed.actualUsage().amount()));
+            statement.setTimestamp(2, Timestamp.from(committed.committedAt()));
+            statement.setLong(3, committed.version());
+            statement.setTimestamp(4, Timestamp.from(committed.committedAt()));
+            statement.setString(5, previous.deploymentScope());
+            statement.setString(6, previous.subjectScope());
+            statement.setString(7, previous.reservationId());
+            statement.setLong(8, previous.version());
+            return statement.executeUpdate() == 1;
+        }
+    }
+
+    /** 使用范围、预期会议和 expectedVersion 条件原子取消未绑定预占。 */
+    static boolean cancel(
+            Connection connection,
+            UsageReservation previous,
+            UsageReservation cancelled) throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(previous, "previous");
+        Objects.requireNonNull(cancelled, "cancelled");
+        if (cancelled.state() != UsageReservation.State.CANCELLED) {
+            throw new IllegalArgumentException("cancelled snapshot is required");
+        }
+        try (PreparedStatement statement = connection.prepareStatement(CANCEL_SQL)) {
+            statement.setTimestamp(1, Timestamp.from(cancelled.cancelledAt()));
+            statement.setString(2, cancelled.cancellationReasonCode());
+            statement.setLong(3, cancelled.version());
+            statement.setTimestamp(4, Timestamp.from(cancelled.cancelledAt()));
+            statement.setString(5, previous.deploymentScope());
+            statement.setString(6, previous.subjectScope());
+            statement.setString(7, previous.reservationId());
+            statement.setString(8, previous.expectedMeetingId());
+            statement.setLong(9, previous.version());
+            return statement.executeUpdate() == 1;
+        }
+    }
+
+    /** 从当前 ResultSet 行恢复完整 V3 Reservation，并执行领域构造器二次校验。 */
+    static UsageReservation readReservation(ResultSet rows) throws SQLException {
+        try {
+            UsageUnit unit = UsageUnit.valueOf(requireText(rows, "usage_unit"));
+            UsageEstimate reserved = new UsageEstimate(
+                    unit, exactLong(rows.getBigDecimal("reserved_amount"), "reserved_amount"));
+            BigDecimal actualAmount = rows.getBigDecimal("actual_amount");
+            UsageActual actual = actualAmount == null
+                    ? null : new UsageActual(unit, exactLong(actualAmount, "actual_amount"));
+            return new UsageReservation(
+                    requireText(rows, "reservation_id"),
+                    requireText(rows, "deployment_scope"),
+                    requireText(rows, "subject_scope"),
+                    requireText(rows, "grant_id"),
+                    requireText(rows, "expected_meeting_id"),
+                    rows.getString("bound_meeting_id"),
+                    nullableInstant(rows, "bound_at"),
+                    reserved,
+                    actual,
+                    requireInstant(rows, "created_at"),
+                    requireInstant(rows, "expires_at"),
+                    UsageReservation.State.valueOf(requireText(rows, "status")),
+                    rows.getLong("version"),
+                    nullableInstant(rows, "committed_at"),
+                    nullableInstant(rows, "cancelled_at"),
+                    rows.getString("cancellation_reason_code"));
+        } catch (IllegalArgumentException | ArithmeticException invalid) {
+            throw new CorruptUsageDataException("usage reservation row is invalid", invalid);
+        }
+    }
+
+    static long exactLong(BigDecimal value, String field) {
+        if (value == null) {
+            throw new CorruptUsageDataException("numeric field is null: " + field);
+        }
+        try {
+            return value.longValueExact();
+        } catch (ArithmeticException invalid) {
+            throw new CorruptUsageDataException("numeric field is not an exact long: " + field,
+                    invalid);
+        }
+    }
+
+    private static String requireText(ResultSet rows, String column) throws SQLException {
+        String value = rows.getString(column);
+        if (value == null || value.isBlank()) {
+            throw new CorruptUsageDataException("text field is blank: " + column);
+        }
+        return value;
+    }
+
+    private static Instant requireInstant(ResultSet rows, String column) throws SQLException {
+        Timestamp value = rows.getTimestamp(column);
+        if (value == null) {
+            throw new CorruptUsageDataException("time field is null: " + column);
+        }
+        return value.toInstant();
+    }
+
+    private static Instant nullableInstant(ResultSet rows, String column) throws SQLException {
+        Timestamp value = rows.getTimestamp(column);
+        return value == null ? null : value.toInstant();
+    }
+
+    /** usage_operation 中尚未解码的摘要与稳定结果正文。 */
+    record UsageOperationRow(String requestDigest, String resultBody) {
+        UsageOperationRow {
+            Objects.requireNonNull(requestDigest, "requestDigest");
+            Objects.requireNonNull(resultBody, "resultBody");
+        }
+    }
+
+    /** 数据库行或 JSON 违反冻结契约；不得按暂时不可用自动重试。 */
+    static final class CorruptUsageDataException extends IllegalStateException {
+        CorruptUsageDataException(String message) {
+            super(message);
+        }
+
+        CorruptUsageDataException(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+}

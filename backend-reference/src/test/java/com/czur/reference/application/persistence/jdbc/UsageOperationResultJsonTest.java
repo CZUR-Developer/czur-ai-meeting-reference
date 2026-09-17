@@ -36,6 +36,8 @@ class UsageOperationResultJsonTest {
 
         assertEquals(expected, decoded);
         assertTrue(encoded.contains("\"schemaVersion\":1"));
+        assertTrue(encoded.contains(
+                "\"grantExpiresAt\":\"2026-09-17T04:05:01.123456789Z\""));
         assertTrue(encoded.contains("\"amount\":9223372036854775807"));
         assertTrue(encoded.contains("\"boundMeetingId\":null"));
         assertTrue(encoded.contains("\"actualUsage\":null"));
@@ -75,6 +77,8 @@ class UsageOperationResultJsonTest {
                 valid.replace("\"schemaVersion\":1,", ""),
                 valid.replace("\"schemaVersion\":1", "\"schemaVersion\":1,\"extra\":0"),
                 valid.replace("\"schemaVersion\":1", "\"schemaVersion\":1,\"schemaVersion\":1"),
+                valid.replace(
+                        "\"grantExpiresAt\":\"2026-09-17T04:05:01.123456789Z\",", ""),
                 valid.replace("\"version\":0", "\"version\":0.0"),
                 valid.replace("\"version\":0", "\"version\":1e0"),
                 valid.replace("\"version\":0", "\"version\":9223372036854775808"),
@@ -135,7 +139,10 @@ class UsageOperationResultJsonTest {
     private static UsageOperationResult result(
             String operationScope, UsageReservation reservation) {
         return new UsageOperationResult(
-                DEPLOYMENT, SUBJECT, operationScope, KEY, DIGEST, reservation);
+                DEPLOYMENT, SUBJECT, operationScope, KEY, DIGEST,
+                UsageOperationScopes.RESERVE.equals(operationScope)
+                        ? CREATED_AT.plusSeconds(301) : null,
+                reservation);
     }
 
     private static UsageReservation reserved(long amount) {

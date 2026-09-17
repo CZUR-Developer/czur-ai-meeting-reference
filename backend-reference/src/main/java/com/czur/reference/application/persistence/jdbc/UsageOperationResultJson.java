@@ -29,7 +29,7 @@ final class UsageOperationResultJson {
     private static final int SCHEMA_VERSION = 1;
     private static final Set<String> TOP_LEVEL_FIELDS = Set.of(
             "schemaVersion", "deploymentScope", "subjectScope", "operationScope",
-            "idempotencyKey", "requestDigest", "reservation");
+            "idempotencyKey", "requestDigest", "grantExpiresAt", "reservation");
     private static final Set<String> RESERVATION_FIELDS = Set.of(
             "reservationId", "deploymentScope", "subjectScope", "grantId",
             "expectedMeetingId", "boundMeetingId", "boundAt", "reservedUsage",
@@ -50,6 +50,7 @@ final class UsageOperationResultJson {
                 + ",\"operationScope\":" + quote(result.operationScope())
                 + ",\"idempotencyKey\":" + quote(result.idempotencyKey())
                 + ",\"requestDigest\":" + quote(result.requestDigest())
+                + ",\"grantExpiresAt\":" + nullableInstant(result.grantExpiresAt())
                 + ",\"reservation\":{"
                 + "\"reservationId\":" + quote(reservation.reservationId())
                 + ",\"deploymentScope\":" + quote(reservation.deploymentScope())
@@ -107,6 +108,7 @@ final class UsageOperationResultJson {
         String operationScope = requireString(top, "operationScope");
         String idempotencyKey = requireString(top, "idempotencyKey");
         String requestDigest = requireString(top, "requestDigest");
+        Instant grantExpiresAt = nullableInstant(top, "grantExpiresAt");
         requireMatch("deploymentScope", expectedDeploymentScope, deploymentScope);
         requireMatch("subjectScope", expectedSubjectScope, subjectScope);
         requireMatch("operationScope", expectedOperationScope, operationScope);
@@ -117,7 +119,7 @@ final class UsageOperationResultJson {
         requireExactFields(reservationValues, RESERVATION_FIELDS, "reservation");
         UsageReservation reservation = decodeReservation(reservationValues);
         return new UsageOperationResult(deploymentScope, subjectScope, operationScope,
-                idempotencyKey, requestDigest, reservation);
+                idempotencyKey, requestDigest, grantExpiresAt, reservation);
     }
 
     private static UsageReservation decodeReservation(Map<String, Object> values) {
