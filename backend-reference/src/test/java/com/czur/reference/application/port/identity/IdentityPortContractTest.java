@@ -60,6 +60,22 @@ class IdentityPortContractTest {
     }
 
     @Test
+    void verifiedIdentityDiagnosticTextDoesNotExposeIdentityOrAuthorizationClaims() {
+        VerifiedIdentity identity = new VerifiedIdentity(
+                new Subject("subject-private", "organization-private"),
+                Set.of("ROLE_PRIVATE"), Set.of("permission:private"),
+                ISSUED_AT, EXPIRES_AT, "credential-private");
+
+        assertFalse(identity.toString().contains("subject-private"));
+        assertFalse(identity.toString().contains("organization-private"));
+        assertFalse(identity.toString().contains("ROLE_PRIVATE"));
+        assertFalse(identity.toString().contains("permission:private"));
+        assertFalse(identity.toString().contains("credential-private"));
+        assertFalse(identity.subject().toString().contains("subject-private"));
+        assertFalse(identity.subject().toString().contains("organization-private"));
+    }
+
+    @Test
     void secretCredentialDefensivelyCopiesRedactsAndDestroysTemporaryBytes() {
         byte[] source = "never-log-this-token".getBytes(StandardCharsets.UTF_8);
         byte[] expected = source.clone();

@@ -26,4 +26,16 @@ public record Subject(String subjectScope, String organizationScope) {
     public Subject(String subjectScope) {
         this(subjectScope, null);
     }
+
+    /**
+     * 返回不暴露稳定主体和可选组织范围的诊断摘要。
+     *
+     * <p>主体值会进入持久归属和幂等范围，不应因为 record 默认输出被日志或异常
+     * 拼接带出。调用方若要判断主体，只能使用结构化 accessor，不得解析此文本。</p>
+     */
+    @Override
+    public String toString() {
+        return "Subject[identified=true, organizationScoped="
+                + (organizationScope != null) + ']';
+    }
 }

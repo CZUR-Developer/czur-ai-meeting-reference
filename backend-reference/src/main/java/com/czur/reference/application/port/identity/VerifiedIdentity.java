@@ -47,6 +47,20 @@ public record VerifiedIdentity(
         return permission != null && permissions.contains(permission);
     }
 
+    /**
+     * 返回可以安全进入诊断信息的脱敏摘要。
+     *
+     * <p>record 默认实现会逐项输出 {@link #subject()}、角色、权限和
+     * {@code credentialId}。这些值分别属于稳定归属、当次授权声明和凭据引用，
+     * 均不得因为日志或异常拼接而泄漏。本实现只保留身份已经通过验证以及凭据的
+     * 时间窗口；不要在后续改动中重新加入主体或声明集合。</p>
+     */
+    @Override
+    public String toString() {
+        return "VerifiedIdentity[verified=true, issuedAt=" + issuedAt
+                + ", expiresAt=" + expiresAt + ']';
+    }
+
     private static Set<String> immutableTextSet(Set<String> values, String name) {
         Objects.requireNonNull(values, name);
         TreeSet<String> copy = new TreeSet<>();
