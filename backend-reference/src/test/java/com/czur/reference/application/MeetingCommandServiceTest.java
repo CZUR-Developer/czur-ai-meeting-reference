@@ -96,6 +96,16 @@ class MeetingCommandServiceTest {
     }
 
     @Test
+    void ordinaryInMemoryRepositoryCannotBypassOwnedReservationBinding() {
+        var owned = MeetingAggregate.MeetingSnapshot.owned(
+                "owned", "deployment", "session", "subject", "grant",
+                CREATED.plusSeconds(60), "reservation", "profile", 1,
+                MeetingState.CREATED, CREATED, CREATED);
+
+        assertThrows(IllegalArgumentException.class, () -> meetings.save(owned));
+    }
+
+    @Test
     void repeatedCreateReturnsTheOriginalResult() {
         MeetingCommandResult first = service.create(create("create-1"));
         MeetingCommandResult retry = service.create(create("create-1"));

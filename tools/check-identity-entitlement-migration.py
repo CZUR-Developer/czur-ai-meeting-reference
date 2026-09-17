@@ -27,6 +27,19 @@ REPOSITORY = (
     / "jdbc"
     / "JdbcMeetingRepository.java"
 )
+OWNERSHIP = (
+    ROOT
+    / "backend-reference"
+    / "src"
+    / "main"
+    / "java"
+    / "com"
+    / "czur"
+    / "reference"
+    / "domain"
+    / "meeting"
+    / "MeetingOwnership.java"
+)
 
 
 def fail(message: str) -> int:
@@ -39,10 +52,13 @@ def main() -> int:
         return fail(f"迁移文件不存在：{MIGRATION}")
     if not REPOSITORY.is_file():
         return fail(f"JDBC 兼容适配器不存在：{REPOSITORY}")
+    if not OWNERSHIP.is_file():
+        return fail(f"会议归属保留值不存在：{OWNERSHIP}")
 
     sql = MIGRATION.read_text(encoding="utf-8")
     normalized = re.sub(r"\s+", " ", sql).lower()
     java = REPOSITORY.read_text(encoding="utf-8")
+    ownership_java = OWNERSHIP.read_text(encoding="utf-8")
 
     required_fragments = {
         "事务开始": "begin;",
@@ -101,7 +117,12 @@ def main() -> int:
     if validation_at > first_schema_change:
         return fail("未知历史状态必须在首次 schema/data 变更前 fail-fast")
 
-    if "private static final string subject_scope = \"legacy_unowned\";" not in java.lower():
+    if (
+        'public static final string legacy_unowned_subject_scope = "legacy_unowned";'
+        not in ownership_java.lower()
+    ):
+        return fail("LEGACY_UNOWNED 必须由唯一会议归属常量声明")
+    if "meetingownership.legacy_unowned_subject_scope" not in java.lower():
         return fail("旧 Java 兼容入口必须写入 LEGACY_UNOWNED，而不是可认领主体")
 
     print("IDENTITY_ENTITLEMENT_MIGRATION_CHECK_OK")

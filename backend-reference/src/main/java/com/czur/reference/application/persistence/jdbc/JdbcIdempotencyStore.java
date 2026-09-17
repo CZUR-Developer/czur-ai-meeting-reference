@@ -68,7 +68,7 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
                 return resultSet.next() ? Optional.of(readRecord(resultSet)) : Optional.empty();
             }
         } catch (SQLException failure) {
-            throw fail("查询幂等记录失败 scope=" + scope, failure);
+            throw fail("查询幂等记录失败", failure);
         }
     }
 
@@ -79,9 +79,9 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
              PreparedStatement statement = connection.prepareStatement(INSERT_SQL)) {
             bindCandidate(statement, record);
             statement.executeUpdate();
-            LOGGER.log(Level.FINE, "JDBC 幂等记录已保存 scope={0}", record.scope());
+            LOGGER.log(Level.FINE, "JDBC 幂等记录已保存");
         } catch (SQLException failure) {
-            throw fail("保存幂等记录失败 scope=" + record.scope(), failure);
+            throw fail("保存幂等记录失败", failure);
         }
     }
 
@@ -101,19 +101,19 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
                         .orElseThrow(() -> new IllegalStateException("幂等记录插入后不可见"));
                 connection.commit();
                 if (inserted == 1) {
-                    LOGGER.log(Level.FINE, "JDBC 幂等预占成功 scope={0}", candidate.scope());
+                    LOGGER.log(Level.FINE, "JDBC 幂等预占成功");
                     return new Reservation(ReservationStatus.ACQUIRED, candidate);
                 }
                 if (!current.requestDigest().equals(candidate.requestDigest())) {
-                    LOGGER.log(Level.WARNING, "JDBC 幂等键摘要冲突 scope={0}", candidate.scope());
+                    LOGGER.log(Level.WARNING, "JDBC 幂等键摘要冲突");
                     return new Reservation(ReservationStatus.CONFLICT, current);
                 }
-                LOGGER.log(Level.INFO, "JDBC 幂等请求重放 scope={0}", candidate.scope());
+                LOGGER.log(Level.INFO, "JDBC 幂等请求重放");
                 return new Reservation(ReservationStatus.REPLAY, current);
             } catch (RuntimeException | SQLException failure) {
                 rollbackQuietly(connection);
                 throw failure instanceof SQLException
-                        ? fail("登记幂等记录失败 scope=" + candidate.scope(), (SQLException) failure)
+                        ? fail("登记幂等记录失败", (SQLException) failure)
                         : (RuntimeException) failure;
             } finally {
                 connection.setAutoCommit(previousAutoCommit);
@@ -139,14 +139,14 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
         IdempotencyRecord current = find(connection, candidate.scope(), candidate.key())
                 .orElseThrow(() -> new IllegalStateException("幂等记录插入后不可见"));
         if (inserted == 1) {
-            LOGGER.log(Level.FINE, "JDBC 事务内幂等预占成功 scope={0}", candidate.scope());
+            LOGGER.log(Level.FINE, "JDBC 事务内幂等预占成功");
             return new Reservation(ReservationStatus.ACQUIRED, candidate);
         }
         if (!current.requestDigest().equals(candidate.requestDigest())) {
-            LOGGER.log(Level.WARNING, "JDBC 事务内幂等键摘要冲突 scope={0}", candidate.scope());
+            LOGGER.log(Level.WARNING, "JDBC 事务内幂等键摘要冲突");
             return new Reservation(ReservationStatus.CONFLICT, current);
         }
-        LOGGER.log(Level.INFO, "JDBC 事务内幂等请求重放 scope={0}", candidate.scope());
+        LOGGER.log(Level.INFO, "JDBC 事务内幂等请求重放");
         return new Reservation(ReservationStatus.REPLAY, current);
     }
 
@@ -193,9 +193,9 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
             statement.setString(2, candidate.key());
             statement.setString(3, candidate.requestDigest());
             statement.executeUpdate();
-            LOGGER.log(Level.FINE, "JDBC 幂等预占已释放 scope={0}", candidate.scope());
+            LOGGER.log(Level.FINE, "JDBC 幂等预占已释放");
         } catch (SQLException failure) {
-            throw fail("释放幂等记录失败 scope=" + candidate.scope(), failure);
+            throw fail("释放幂等记录失败", failure);
         }
     }
 
@@ -214,7 +214,13 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
         if (responseBody == null) {
             throw new SQLException("idempotency_record.response_body 不能为空");
         }
-        MeetingCommandResult result = IdempotencyResultJson.decode(responseBody);
+        final MeetingCommandResult result;
+        try {
+            result = IdempotencyResultJson.decode(responseBody);
+        } catch (IllegalArgumentException malformed) {
+            // 不附带 cause，防止损坏 JSON、主体或权益引用通过异常链外泄。
+            throw new SQLException("幂等持久事实损坏", "22000");
+        }
         return new IdempotencyRecord(
                 resultSet.getString("subject_scope"),
                 resultSet.getString("idempotency_key"),
@@ -223,7 +229,9 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
     }
 
     private static RuntimeException fail(String message, SQLException cause) {
-        return new IllegalStateException(message, cause);
+        String state = cause.getSQLState();
+        return new IllegalStateException(message + " sqlState="
+                + (state == null || state.isBlank() ? "UNKNOWN" : state));
     }
 
     private static void rollbackQuietly(Connection connection) {

@@ -1,6 +1,7 @@
 package com.czur.reference.application.identity.referencedev;
 
 import com.czur.reference.application.port.identity.Subject;
+import com.czur.reference.domain.meeting.MeetingOwnership;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -110,8 +111,11 @@ public final class ReferenceDevIdentityConfig {
 
             String organization = optionalText(
                     ORGANIZATION_SCOPE, environment.get(ORGANIZATION_SCOPE));
-            Subject subject = new Subject(
-                    requireText(SUBJECT_SCOPE, environment.get(SUBJECT_SCOPE)), organization);
+            String subjectScope = requireText(SUBJECT_SCOPE, environment.get(SUBJECT_SCOPE));
+            if (MeetingOwnership.LEGACY_UNOWNED_SUBJECT_SCOPE.equals(subjectScope)) {
+                throw invalid(SUBJECT_SCOPE, "不能使用历史兼容保留值");
+            }
+            Subject subject = new Subject(subjectScope, organization);
             Set<String> roles = parseSet(ROLES, environment.get(ROLES));
             Set<String> permissions = parseSet(PERMISSIONS, environment.get(PERMISSIONS));
             String audience = requireText(AUDIENCE, environment.get(AUDIENCE));

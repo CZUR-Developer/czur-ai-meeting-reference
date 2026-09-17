@@ -1,5 +1,6 @@
 package com.czur.reference.application.identity.referencedev;
 
+import com.czur.reference.domain.meeting.MeetingOwnership;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -116,6 +117,11 @@ class ReferenceDevIdentityConfigTest {
         Map<String, String> blankOrganization = validEnvironment(TOKEN_VALUE);
         blankOrganization.put(ReferenceDevIdentityConfig.ORGANIZATION_SCOPE, "  ");
         assertSafeFailure(blankOrganization, ReferenceDevIdentityConfig.ORGANIZATION_SCOPE);
+
+        Map<String, String> reservedSubject = validEnvironment(TOKEN_VALUE);
+        reservedSubject.put(ReferenceDevIdentityConfig.SUBJECT_SCOPE,
+                MeetingOwnership.LEGACY_UNOWNED_SUBJECT_SCOPE);
+        assertSafeFailure(reservedSubject, ReferenceDevIdentityConfig.SUBJECT_SCOPE);
 
         Map<String, String> emptyRole = validEnvironment(TOKEN_VALUE);
         emptyRole.put(ReferenceDevIdentityConfig.ROLES, "USER,,REVIEWER");

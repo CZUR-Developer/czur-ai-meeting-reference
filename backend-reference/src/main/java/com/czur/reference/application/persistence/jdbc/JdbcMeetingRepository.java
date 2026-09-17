@@ -2,6 +2,7 @@ package com.czur.reference.application.persistence.jdbc;
 
 import com.czur.reference.application.port.MeetingRepository;
 import com.czur.reference.domain.meeting.MeetingAggregate;
+import com.czur.reference.domain.meeting.MeetingOwnership;
 import com.czur.reference.domain.meeting.MeetingState;
 
 import javax.sql.DataSource;
@@ -23,39 +24,52 @@ import java.util.logging.Logger;
  * PostgreSQL 专有 Java API。独立查询可直接使用本类；会议命令需要跨会议、
  * 幂等和 Outbox 原子提交时，应通过 {@link JdbcMeetingUnitOfWork} 执行。</p>
  *
- * <p>公开领域快照暂时还没有认证主体、Grant 和主 Reservation。这个旧命令兼容
- * 入口只能使用 {@code subject_scope='LEGACY_UNOWNED'}，明确表示普通用户不能认领
- * 或据此获得访问权；它不是 reference-dev 认证创建路径。后续认证编排必须通过
- * 带真实主体和预占绑定的专用事务入口写入，不能复用该占位值。</p>
+ * <p>读取同时兼容 V001/V002 与 V003：查询通过 {@code to_jsonb(meeting)} 读取
+ * 可选列，旧表缺少归属列时明确恢复为 {@code LEGACY_UNOWNED}，不会猜测真实主体。
+ * 当前公开 {@code save} 只允许 legacy SQL，且不引用 V003 列。owned 快照只有读取
+ * 映射；写入必须等待 5B 的 connection-scoped 原子 bind 事务入口，不能通过普通
+ * Repository 绕开 Reservation 的锁定、校验和版本更新。</p>
  */
 public final class JdbcMeetingRepository implements MeetingRepository {
     private static final Logger LOGGER = Logger.getLogger(JdbcMeetingRepository.class.getName());
-    private static final String SUBJECT_SCOPE = "LEGACY_UNOWNED";
-
     private static final String FIND_SQL = """
-            SELECT meeting_id, deployment_scope, client_session_id, profile_id,
-                   profile_revision, state, created_at, updated_at
-              FROM meeting
-             WHERE meeting_id = ?
+            SELECT stored.meeting_id, stored.deployment_scope, stored.client_session_id,
+                   stored.subject_scope, stored.profile_id, stored.profile_revision,
+                   stored.state, stored.created_at, stored.updated_at,
+                   jsonb_exists(to_jsonb(stored), 'grant_id') AS ownership_columns_present,
+                   to_jsonb(stored) ->> 'grant_id' AS grant_id,
+                   (to_jsonb(stored) ->> 'grant_expires_at')::timestamptz AS grant_expires_at,
+                   to_jsonb(stored) ->> 'usage_reservation_id' AS usage_reservation_id
+              FROM meeting AS stored
+             WHERE stored.meeting_id = ?
             """;
 
     private static final String FIND_FOR_UPDATE_SQL = FIND_SQL + " FOR UPDATE";
 
     private static final String FIND_BY_SCOPE_SQL = """
-            SELECT meeting_id, deployment_scope, client_session_id, profile_id,
-                   profile_revision, state, created_at, updated_at
-              FROM meeting
-             WHERE deployment_scope = ? AND client_session_id = ?
-             ORDER BY created_at, meeting_id
+            SELECT stored.meeting_id, stored.deployment_scope, stored.client_session_id,
+                   stored.subject_scope, stored.profile_id, stored.profile_revision,
+                   stored.state, stored.created_at, stored.updated_at,
+                   jsonb_exists(to_jsonb(stored), 'grant_id') AS ownership_columns_present,
+                   to_jsonb(stored) ->> 'grant_id' AS grant_id,
+                   (to_jsonb(stored) ->> 'grant_expires_at')::timestamptz AS grant_expires_at,
+                   to_jsonb(stored) ->> 'usage_reservation_id' AS usage_reservation_id
+              FROM meeting AS stored
+             WHERE stored.deployment_scope = ? AND stored.client_session_id = ?
+             ORDER BY stored.created_at, stored.meeting_id
              LIMIT 1
             """;
 
-    private static final String SAVE_SQL = """
+    /**
+     * V001/V002/V003 都可执行的兼容写入。冲突更新只有在数据库行仍是 legacy
+     * 形态时才允许；因此旧命令不能用相同 meetingId 覆盖真实主体会议。
+     */
+    private static final String SAVE_LEGACY_SQL = """
             INSERT INTO meeting (
                 meeting_id, deployment_scope, client_session_id, subject_scope,
                 profile_id, profile_revision, state, aggregate_version,
                 created_at, updated_at, metadata)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, '{}'::jsonb)
+            VALUES (?, ?, ?, 'LEGACY_UNOWNED', ?, ?, ?, 0, ?, ?, '{}'::jsonb)
             ON CONFLICT (meeting_id) DO UPDATE SET
                 deployment_scope = EXCLUDED.deployment_scope,
                 client_session_id = EXCLUDED.client_session_id,
@@ -63,6 +77,11 @@ public final class JdbcMeetingRepository implements MeetingRepository {
                 profile_revision = EXCLUDED.profile_revision,
                 state = EXCLUDED.state,
                 updated_at = EXCLUDED.updated_at
+            WHERE NOT jsonb_exists(to_jsonb(meeting), 'grant_id')
+               OR (meeting.subject_scope = 'LEGACY_UNOWNED'
+                   AND to_jsonb(meeting) ->> 'grant_id' IS NULL
+                   AND to_jsonb(meeting) ->> 'grant_expires_at' IS NULL
+                   AND to_jsonb(meeting) ->> 'usage_reservation_id' IS NULL)
             """;
 
     private final DataSource dataSource;
@@ -106,18 +125,11 @@ public final class JdbcMeetingRepository implements MeetingRepository {
     @Override
     public void save(MeetingAggregate.MeetingSnapshot meeting) {
         Objects.requireNonNull(meeting, "meeting");
+        requireLegacySave(meeting);
         try (Connection connection = dataSource.getConnection();
-             PreparedStatement statement = connection.prepareStatement(SAVE_SQL)) {
-            statement.setString(1, meeting.meetingId());
-            statement.setString(2, meeting.deploymentScope());
-            statement.setString(3, meeting.clientSessionId());
-            statement.setString(4, SUBJECT_SCOPE);
-            statement.setString(5, meeting.profileId());
-            statement.setInt(6, meeting.profileRevision());
-            statement.setString(7, meeting.state().name());
-            statement.setTimestamp(8, Timestamp.from(meeting.createdAt()));
-            statement.setTimestamp(9, Timestamp.from(meeting.updatedAt()));
-            statement.executeUpdate();
+             PreparedStatement statement = connection.prepareStatement(SAVE_LEGACY_SQL)) {
+            bindSnapshot(statement, meeting);
+            requireSaved(statement.executeUpdate());
             LOGGER.log(Level.FINE, "JDBC 会议快照已保存 meetingId={0} state={1}",
                     new Object[]{meeting.meetingId(), meeting.state()});
         } catch (SQLException failure) {
@@ -175,30 +187,65 @@ public final class JdbcMeetingRepository implements MeetingRepository {
     /** 在调用方事务连接上保存快照；该方法不会自行提交事务。 */
     static void save(Connection connection, MeetingAggregate.MeetingSnapshot meeting) throws SQLException {
         Objects.requireNonNull(meeting, "meeting");
-        try (PreparedStatement statement = connection.prepareStatement(SAVE_SQL)) {
-            statement.setString(1, meeting.meetingId());
-            statement.setString(2, meeting.deploymentScope());
-            statement.setString(3, meeting.clientSessionId());
-            statement.setString(4, SUBJECT_SCOPE);
-            statement.setString(5, meeting.profileId());
-            statement.setInt(6, meeting.profileRevision());
-            statement.setString(7, meeting.state().name());
-            statement.setTimestamp(8, Timestamp.from(meeting.createdAt()));
-            statement.setTimestamp(9, Timestamp.from(meeting.updatedAt()));
-            statement.executeUpdate();
+        requireLegacySave(meeting);
+        try (PreparedStatement statement = connection.prepareStatement(SAVE_LEGACY_SQL)) {
+            bindSnapshot(statement, meeting);
+            requireSaved(statement.executeUpdate());
         }
     }
 
     private static MeetingAggregate.MeetingSnapshot readSnapshot(ResultSet resultSet) throws SQLException {
+        String meetingId = resultSet.getString("meeting_id");
+        String deploymentScope = resultSet.getString("deployment_scope");
+        String clientSessionId = resultSet.getString("client_session_id");
+        String profileId = resultSet.getString("profile_id");
+        int profileRevision = resultSet.getInt("profile_revision");
+        MeetingState state = MeetingState.valueOf(resultSet.getString("state"));
+        Instant createdAt = resultSet.getTimestamp("created_at").toInstant();
+        Instant updatedAt = resultSet.getTimestamp("updated_at").toInstant();
+        if (!resultSet.getBoolean("ownership_columns_present")) {
+            return MeetingAggregate.MeetingSnapshot.legacyUnowned(
+                    meetingId, deploymentScope, clientSessionId, profileId,
+                    profileRevision, state, createdAt, updatedAt);
+        }
+        String subjectScope = resultSet.getString("subject_scope");
+        String grantId = resultSet.getString("grant_id");
+        Timestamp grantExpiresAt = resultSet.getTimestamp("grant_expires_at");
+        String usageReservationId = resultSet.getString("usage_reservation_id");
         return new MeetingAggregate.MeetingSnapshot(
-                resultSet.getString("meeting_id"),
-                resultSet.getString("deployment_scope"),
-                resultSet.getString("client_session_id"),
-                resultSet.getString("profile_id"),
-                resultSet.getInt("profile_revision"),
-                MeetingState.valueOf(resultSet.getString("state")),
-                resultSet.getTimestamp("created_at").toInstant(),
-                resultSet.getTimestamp("updated_at").toInstant());
+                meetingId, deploymentScope, clientSessionId, subjectScope, grantId,
+                grantExpiresAt == null ? null : grantExpiresAt.toInstant(), usageReservationId,
+                profileId, profileRevision, state, createdAt, updatedAt);
+    }
+
+    private static void bindSnapshot(
+            PreparedStatement statement,
+            MeetingAggregate.MeetingSnapshot meeting) throws SQLException {
+        statement.setString(1, meeting.meetingId());
+        statement.setString(2, meeting.deploymentScope());
+        statement.setString(3, meeting.clientSessionId());
+        statement.setString(4, meeting.profileId());
+        statement.setInt(5, meeting.profileRevision());
+        statement.setString(6, meeting.state().name());
+        statement.setTimestamp(7, Timestamp.from(meeting.createdAt()));
+        statement.setTimestamp(8, Timestamp.from(meeting.updatedAt()));
+    }
+
+    private static boolean isLegacy(MeetingAggregate.MeetingSnapshot meeting) {
+        return MeetingOwnership.LEGACY_UNOWNED_SUBJECT_SCOPE.equals(meeting.subjectScope());
+    }
+
+    private static void requireLegacySave(MeetingAggregate.MeetingSnapshot meeting) {
+        if (!isLegacy(meeting)) {
+            throw new IllegalArgumentException(
+                    "owned meeting must be persisted by the atomic reservation bind unit of work");
+        }
+    }
+
+    private static void requireSaved(int affectedRows) throws SQLException {
+        if (affectedRows != 1) {
+            throw new SQLException("会议归属事实冲突，拒绝覆盖已有快照", "23000");
+        }
     }
 
     private static RuntimeException failure(String message, SQLException cause) {

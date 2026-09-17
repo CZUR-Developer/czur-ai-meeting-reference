@@ -1,5 +1,7 @@
 package com.czur.reference.application.port.identity;
 
+import com.czur.reference.domain.meeting.MeetingOwnership;
+
 /**
  * 身份 Provider 返回的稳定终端用户主体。
  *
@@ -14,7 +16,7 @@ package com.czur.reference.application.port.identity;
 public record Subject(String subjectScope, String organizationScope) {
 
     public Subject {
-        requireText("subjectScope", subjectScope);
+        MeetingOwnership.requireOwnedSubjectScope(subjectScope);
         if (organizationScope != null && organizationScope.isBlank()) {
             throw new IllegalArgumentException("organizationScope must be null or non-blank");
         }
@@ -23,11 +25,5 @@ public record Subject(String subjectScope, String organizationScope) {
     /** 创建不启用组织隔离的默认单部署主体。 */
     public Subject(String subjectScope) {
         this(subjectScope, null);
-    }
-
-    private static void requireText(String name, String value) {
-        if (value == null || value.isBlank()) {
-            throw new IllegalArgumentException(name + " must not be blank");
-        }
     }
 }

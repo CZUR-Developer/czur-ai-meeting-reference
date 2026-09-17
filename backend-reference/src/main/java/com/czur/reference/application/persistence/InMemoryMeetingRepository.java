@@ -2,6 +2,7 @@ package com.czur.reference.application.persistence;
 
 import com.czur.reference.application.port.MeetingRepository;
 import com.czur.reference.domain.meeting.MeetingAggregate;
+import com.czur.reference.domain.meeting.MeetingOwnership;
 
 import java.util.Map;
 import java.util.Optional;
@@ -28,6 +29,10 @@ public final class InMemoryMeetingRepository implements MeetingRepository {
 
     @Override
     public void save(MeetingAggregate.MeetingSnapshot meeting) {
+        if (!MeetingOwnership.LEGACY_UNOWNED_SUBJECT_SCOPE.equals(meeting.subjectScope())) {
+            throw new IllegalArgumentException(
+                    "owned meeting must be persisted by the atomic reservation bind unit of work");
+        }
         meetings.put(meeting.meetingId(), meeting);
     }
 }

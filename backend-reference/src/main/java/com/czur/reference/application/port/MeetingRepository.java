@@ -33,5 +33,13 @@ public interface MeetingRepository {
         return Optional.empty();
     }
 
+    /**
+     * 保存旧未认证命令链的会议快照。
+     *
+     * <p>P2-T12 5A 中，参考内存/JDBC 实现只接受 {@code LEGACY_UNOWNED} 快照。
+     * owned 快照必须在 5B 通过专用工作单元与 Reservation bind、会议幂等和
+     * Outbox 原子提交；普通 Repository 实现不得把单独 {@code save} 当成可绕过
+     * bind 的生产入口。</p>
+     */
     void save(MeetingAggregate.MeetingSnapshot meeting);
 }

@@ -10,6 +10,11 @@ import java.util.Optional;
  * <p>记录以“操作范围 + 幂等键”唯一定位，同时保存请求摘要和第一次
  * 返回值。实现必须提供原子性的“查询后写入”能力（数据库中通常使用
  * 唯一索引）；否则并发重试可能重复调用外部模型、存储或计费服务。</p>
+ *
+ * <p>新认证命令的操作范围由 {@link IdempotencyScopeCodec} 生成，虽然对调用方
+ * 不透明，但仍可逆地包含部署和主体，因此不能输出到日志或异常。旧裸
+ * {@code meeting.create}/{@code meeting.stop} 仅用于历史兼容，不能映射成真实
+ * 用户的认证范围。</p>
  */
 public interface IdempotencyStore {
     Optional<IdempotencyRecord> find(String scope, String key);

@@ -5,6 +5,7 @@ import com.czur.reference.application.command.MeetingCommandService;
 import com.czur.reference.application.command.StopMeetingCommand;
 import com.czur.reference.domain.meeting.MeetingAggregate;
 import com.czur.reference.domain.meeting.MeetingEvent;
+import com.czur.reference.domain.meeting.MeetingOwnership;
 import com.czur.reference.domain.meeting.MeetingState;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -88,9 +89,29 @@ class JdbcV003MigrationIntegrationTest {
         // subject_scope='meeting'，避免测试用手写 JSON 替代真实兼容数据。
         MeetingCommandService legacyService = new MeetingCommandService(
                 new JdbcMeetingUnitOfWork(schemaDataSource));
-        legacyService.create(new CreateMeetingCommand(
+        Instant nanosecondInput = NOW.plusNanos(123_456_789);
+        var legacyCreated = legacyService.create(new CreateMeetingCommand(
                 "legacy-meeting", "legacy-deployment", "legacy-session", "profile", 1,
-                NOW, "legacy-create"));
+                nanosecondInput, "legacy-create"));
+        assertEquals(Instant.parse("2026-09-17T06:00:00.123456Z"),
+                legacyCreated.meeting().createdAt());
+        var preV003Snapshot = new JdbcMeetingRepository(schemaDataSource)
+                .find("legacy-meeting").orElseThrow();
+        assertEquals(legacyCreated.meeting(), preV003Snapshot,
+                "仅有 V001/V002 时，兼容 SELECT/SAVE 和微秒往返必须仍可工作");
+        assertEquals(MeetingOwnership.LEGACY_UNOWNED_SUBJECT_SCOPE,
+                preV003Snapshot.subjectScope());
+        MeetingAggregate preV003Running = MeetingAggregate.fromSnapshot(preV003Snapshot);
+        preV003Running.apply(MeetingEvent.AUTHORIZE, nanosecondInput.plusSeconds(1));
+        preV003Running.apply(MeetingEvent.START, nanosecondInput.plusSeconds(2));
+        preV003Running.apply(MeetingEvent.START, nanosecondInput.plusSeconds(3));
+        new JdbcMeetingRepository(schemaDataSource).save(preV003Running.snapshot());
+        StopMeetingCommand preV003Stop = new StopMeetingCommand(
+                "legacy-meeting", nanosecondInput.plusSeconds(4), "legacy-stop");
+        var firstStop = legacyService.stop(preV003Stop);
+        assertEquals(firstStop, legacyService.stop(preV003Stop),
+                "仅有 V001/V002 时停止重放必须仍然稳定");
+        assertEquals(MeetingState.STOPPING, firstStop.meeting().state());
         executeUpdate("UPDATE meeting SET subject_scope = 'meeting' WHERE meeting_id = 'legacy-meeting'");
         executeUpdate("""
                 INSERT INTO usage_reservation (
@@ -103,6 +124,23 @@ class JdbcV003MigrationIntegrationTest {
                     ('legacy-usage-tokens', 'legacy-meeting', 'PROVIDER_TOKENS',
                      'COMMITTED', 123.5, 'provider-b',
                      TIMESTAMPTZ '2026-09-17 06:00:00Z', TIMESTAMPTZ '2026-09-17 06:02:00Z')
+                """);
+        executeUpdate("""
+                UPDATE idempotency_record
+                   SET response_body = '{
+                     "operation":"CREATED",
+                     "meeting":{
+                       "meetingId":"legacy-meeting",
+                       "deploymentScope":"legacy-deployment",
+                       "clientSessionId":"legacy-session",
+                       "profileId":"profile",
+                       "profileRevision":1,
+                       "state":"CREATED",
+                       "createdAt":"2026-09-17T06:00:00.123456Z",
+                       "updatedAt":"2026-09-17T06:00:00.123456Z"
+                     }
+                   }'::jsonb
+                 WHERE subject_scope = 'meeting.create' AND idempotency_key = 'legacy-create'
                 """);
         String oldJson = queryText("""
                 SELECT response_body::text
@@ -147,8 +185,11 @@ class JdbcV003MigrationIntegrationTest {
                 """));
         assertTrue(new JdbcIdempotencyStore(schemaDataSource)
                 .find("meeting.create", "legacy-create").isPresent());
-        assertEquals(MeetingState.CREATED, new JdbcMeetingRepository(schemaDataSource)
-                .find("legacy-meeting").orElseThrow().state());
+        var migratedLegacy = new JdbcMeetingRepository(schemaDataSource)
+                .find("legacy-meeting").orElseThrow();
+        assertEquals(MeetingState.STOPPING, migratedLegacy.state());
+        assertEquals(MeetingOwnership.LEGACY_UNOWNED_SUBJECT_SCOPE,
+                migratedLegacy.subjectScope());
         SQLException damagedLegacyFact = assertThrows(SQLException.class, () -> executeUpdate("""
                 UPDATE usage_reservation
                    SET actual_amount = 1
@@ -211,6 +252,7 @@ class JdbcV003MigrationIntegrationTest {
                  WHERE reservation_id = 'unknown-state-usage'
                    AND status = 'PROVIDER_PENDING'
                 """));
+
         assertFalse(isMigrationRegistered("V003__identity_entitlement"));
     }
 
@@ -238,6 +280,38 @@ class JdbcV003MigrationIntegrationTest {
                  WHERE reservation_id = 'v3-unbound' AND meeting_id IS NULL
                    AND bound_meeting_id IS NULL
                 """));
+
+        executeUpdate("""
+                INSERT INTO meeting (
+                    meeting_id, deployment_scope, client_session_id, subject_scope,
+                    grant_id, grant_expires_at, usage_reservation_id,
+                    profile_id, profile_revision, state, aggregate_version,
+                    created_at, updated_at, metadata)
+                VALUES ('future-meeting', 'deployment-a', 'owned-session', 'subject-a',
+                        'grant-a', TIMESTAMPTZ '2026-09-17 06:10:00.987654321Z',
+                        'v3-unbound', 'profile', 1, 'CREATED', 0,
+                        TIMESTAMPTZ '2026-09-17 06:00:00.123456789Z',
+                        TIMESTAMPTZ '2026-09-17 06:00:00.123456789Z', '{}'::jsonb)
+                """);
+        var owned = new JdbcMeetingRepository(schemaDataSource)
+                .find("future-meeting").orElseThrow();
+        assertEquals("subject-a", owned.subjectScope());
+        assertEquals("grant-a", owned.grantId());
+        assertEquals("v3-unbound", owned.usageReservationId());
+        assertEquals(Instant.parse("2026-09-17T06:00:00.123457Z"), owned.createdAt());
+        assertEquals(Instant.parse("2026-09-17T06:10:00.987654Z"), owned.grantExpiresAt());
+
+        assertThrows(IllegalArgumentException.class,
+                () -> new JdbcMeetingRepository(schemaDataSource).save(owned),
+                "普通 Repository 不得绕过 5B 的 Reservation 原子 bind");
+        var conflictingLegacy = MeetingAggregate.MeetingSnapshot.legacyUnowned(
+                "future-meeting", "deployment-a", "owned-session", "profile", 1,
+                MeetingState.STOPPING, owned.createdAt(), owned.updatedAt());
+        assertThrows(IllegalStateException.class,
+                () -> new JdbcMeetingRepository(schemaDataSource).save(conflictingLegacy),
+                "legacy upsert 不得覆盖已有 owned 归属");
+        assertEquals("subject-a", queryText(
+                "SELECT subject_scope FROM meeting WHERE meeting_id = 'future-meeting'"));
 
         executeUpdate("""
                 INSERT INTO usage_reservation (

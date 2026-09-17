@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Instant;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class MeetingAggregateTest {
@@ -25,6 +26,10 @@ class MeetingAggregateTest {
         assertEquals(MeetingState.CREATED, snapshot.state());
         assertEquals(CREATED_AT, snapshot.createdAt());
         assertEquals(CREATED_AT, snapshot.updatedAt());
+        assertEquals(MeetingOwnership.LEGACY_UNOWNED_SUBJECT_SCOPE, snapshot.subjectScope());
+        assertNull(snapshot.grantId());
+        assertNull(snapshot.grantExpiresAt());
+        assertNull(snapshot.usageReservationId());
     }
 
     @Test
@@ -59,6 +64,51 @@ class MeetingAggregateTest {
 
         assertEquals("partner-a", restored.deploymentScope());
         assertEquals("partner-a", restored.snapshot().deploymentScope());
+    }
+
+    @Test
+    void ownedSnapshotRequiresAndPreservesCompleteOwnershipFacts() {
+        Instant nanos = Instant.parse("2026-09-15T01:00:00.123456789Z");
+        Instant expires = Instant.parse("2026-09-15T01:10:00.987654321Z");
+        MeetingAggregate aggregate = MeetingAggregate.owned(
+                "owned-meeting", "deployment-a", "session-a", "subject-a",
+                "grant-a", expires, "reservation-a", "profile", 1, nanos);
+
+        MeetingAggregate.MeetingSnapshot snapshot = aggregate.snapshot();
+        MeetingAggregate restored = MeetingAggregate.fromSnapshot(snapshot);
+
+        assertEquals("subject-a", snapshot.subjectScope());
+        assertEquals("grant-a", snapshot.grantId());
+        assertEquals("reservation-a", snapshot.usageReservationId());
+        assertEquals(Instant.parse("2026-09-15T01:00:00.123456Z"), snapshot.createdAt());
+        assertEquals(Instant.parse("2026-09-15T01:10:00.987654Z"), snapshot.grantExpiresAt());
+        assertEquals(snapshot, restored.snapshot());
+    }
+
+    @Test
+    void rejectsPartialOwnedSnapshotsAndReservedLegacySubject() {
+        assertThrows(IllegalArgumentException.class, () -> new MeetingAggregate.MeetingSnapshot(
+                "meeting", "deployment", "session", "subject", "grant", null,
+                "reservation", "profile", 1, MeetingState.CREATED, CREATED_AT, CREATED_AT));
+        assertThrows(IllegalArgumentException.class, () -> new MeetingAggregate.MeetingSnapshot(
+                "meeting", "deployment", "session",
+                MeetingOwnership.LEGACY_UNOWNED_SUBJECT_SCOPE, "grant", CREATED_AT.plusSeconds(1),
+                "reservation", "profile", 1, MeetingState.CREATED, CREATED_AT, CREATED_AT));
+        assertThrows(IllegalArgumentException.class, () -> MeetingAggregate.owned(
+                "meeting", "deployment", "session",
+                MeetingOwnership.LEGACY_UNOWNED_SUBJECT_SCOPE, "grant",
+                CREATED_AT.plusSeconds(1), "reservation", "profile", 1, CREATED_AT));
+    }
+
+    @Test
+    void subMicrosecondGrantWindowFailsClosedAfterDatabasePrecisionNormalization() {
+        Instant created = Instant.parse("2026-09-15T01:00:00.123456100Z");
+        Instant expiresLessThanOneMicrosecondLater =
+                Instant.parse("2026-09-15T01:00:00.123456900Z");
+
+        assertThrows(IllegalArgumentException.class, () -> MeetingAggregate.owned(
+                "meeting", "deployment", "session", "subject", "grant",
+                expiresLessThanOneMicrosecondLater, "reservation", "profile", 1, created));
     }
 
     @Test

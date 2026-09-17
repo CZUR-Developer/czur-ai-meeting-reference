@@ -78,7 +78,7 @@ public final class MeetingCommandService {
             OutboxStore outboxStore) {
         String digest = digest(command.meetingId(), command.deploymentScope(), command.clientSessionId(), command.profileId(),
                 Integer.toString(command.profileRevision()), command.requestedAt().toString());
-        MeetingAggregate aggregate = new MeetingAggregate(
+        MeetingAggregate aggregate = MeetingAggregate.legacyUnowned(
                 command.meetingId(), command.deploymentScope(), command.clientSessionId(), command.profileId(),
                 command.profileRevision(), command.requestedAt());
         MeetingCommandResult result = new MeetingCommandResult(

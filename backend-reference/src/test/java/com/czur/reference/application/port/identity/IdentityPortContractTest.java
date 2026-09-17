@@ -1,5 +1,6 @@
 package com.czur.reference.application.port.identity;
 
+import com.czur.reference.domain.meeting.MeetingOwnership;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -34,6 +35,12 @@ class IdentityPortContractTest {
         assertNotEquals(first.permissions(), refreshed.permissions());
         assertTrue(first.hasPermission("meeting:create"));
         assertFalse(first.hasPermission("meeting:stop"));
+    }
+
+    @Test
+    void subjectRejectsReservedLegacyOwnershipMarker() {
+        assertThrows(IllegalArgumentException.class,
+                () -> new Subject(MeetingOwnership.LEGACY_UNOWNED_SUBJECT_SCOPE));
     }
 
     @Test
