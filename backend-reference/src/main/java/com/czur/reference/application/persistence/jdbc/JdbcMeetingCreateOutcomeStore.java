@@ -6,8 +6,6 @@ import com.czur.reference.application.port.MeetingCreateOutcomeStore.StoreErrorC
 import com.czur.reference.application.port.MeetingCreateOutcomeStore.StoreException;
 
 import javax.sql.DataSource;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -129,6 +127,19 @@ public final class JdbcMeetingCreateOutcomeStore implements MeetingCreateOutcome
     /** 在调用方事务连接中读取终态；不提交、回滚或关闭连接。 */
     static Optional<OutcomeRecord> find(Connection connection, String scope, String key)
             throws SQLException {
+        Optional<RawOutcomeRow> raw = findRaw(connection, scope, key);
+        return raw.isEmpty() ? Optional.empty() : Optional.of(decodeRaw(raw.get()));
+    }
+
+    /**
+     * 在调用方连接中读取尚未解析的终态行。
+     *
+     * <p>该方法只验证 scope、key 和摘要可以安全参与比较，不解释 status/body。
+     * typed replay lookup 因而可以先用常量时间比较摘要，并在冲突时不触碰可能
+     * 损坏的正文。返回对象的 {@code toString()} 不会暴露任何原始字段。</p>
+     */
+    static Optional<RawOutcomeRow> findRaw(Connection connection, String scope, String key)
+            throws SQLException {
         Objects.requireNonNull(connection, "connection");
         requireText("scope", scope);
         requireText("key", key);
@@ -136,7 +147,7 @@ public final class JdbcMeetingCreateOutcomeStore implements MeetingCreateOutcome
             statement.setString(1, scope);
             statement.setString(2, key);
             try (ResultSet rows = statement.executeQuery()) {
-                return rows.next() ? Optional.of(readRecord(rows)) : Optional.empty();
+                return rows.next() ? Optional.of(readRawRow(rows)) : Optional.empty();
             }
         }
     }
@@ -163,7 +174,8 @@ public final class JdbcMeetingCreateOutcomeStore implements MeetingCreateOutcome
             LOGGER.log(Level.FINE, "JDBC 事务内会议创建终态争抢成功 result=ACQUIRED");
             return new Reservation(ReservationStatus.ACQUIRED, candidate);
         }
-        if (!sameDigest(current.requestDigest(), candidate.requestDigest())) {
+        if (!JdbcReadLookupSupport.sameDigest(
+                current.requestDigest(), candidate.requestDigest())) {
             LOGGER.log(Level.FINE, "JDBC 事务内会议创建终态摘要冲突 result=CONFLICT");
             return new Reservation(ReservationStatus.CONFLICT, current);
         }
@@ -183,25 +195,37 @@ public final class JdbcMeetingCreateOutcomeStore implements MeetingCreateOutcome
         statement.setTimestamp(6, Timestamp.from(createdAt));
     }
 
-    private static OutcomeRecord readRecord(ResultSet rows) throws SQLException {
+    private static RawOutcomeRow readRawRow(ResultSet rows) throws SQLException {
         try {
             int responseStatus = rows.getInt("response_status");
-            if (rows.wasNull()) {
+            Integer nullableStatus = rows.wasNull() ? null : responseStatus;
+            return new RawOutcomeRow(
+                    requireRowText(rows, "subject_scope"),
+                    requireRowText(rows, "idempotency_key"),
+                    requireRowText(rows, "request_hash"),
+                    nullableStatus,
+                    rows.getString("response_body"));
+        } catch (IllegalArgumentException | NullPointerException malformed) {
+            throw corruptFact("会议创建终态持久事实损坏");
+        }
+    }
+
+    /** 同摘要后唯一允许使用的 status/body 严格解码入口。 */
+    static OutcomeRecord decodeRaw(RawOutcomeRow raw) throws SQLException {
+        Objects.requireNonNull(raw, "raw");
+        try {
+            if (raw.responseStatus() == null) {
                 throw corruptFact("终态 status 缺失");
             }
-            String responseBody = rows.getString("response_body");
-            if (responseBody == null) {
+            if (raw.responseBody() == null) {
                 throw corruptFact("终态 body 缺失");
             }
-            MeetingCreateOutcome outcome = MeetingCreateOutcomeJson.decode(responseBody);
-            if (responseStatus != statusFor(outcome)) {
+            MeetingCreateOutcome outcome = MeetingCreateOutcomeJson.decode(raw.responseBody());
+            if (raw.responseStatus() != statusFor(outcome)) {
                 throw corruptFact("终态 status 与 body 不一致");
             }
             return new OutcomeRecord(
-                    rows.getString("subject_scope"),
-                    rows.getString("idempotency_key"),
-                    rows.getString("request_hash"),
-                    outcome);
+                    raw.scope(), raw.key(), raw.requestDigest(), outcome);
         } catch (IllegalArgumentException | NullPointerException malformed) {
             throw corruptFact("会议创建终态持久事实损坏");
         }
@@ -212,10 +236,12 @@ public final class JdbcMeetingCreateOutcomeStore implements MeetingCreateOutcome
                 ? SUCCESS_STATUS : FAILURE_STATUS;
     }
 
-    private static boolean sameDigest(String left, String right) {
-        return MessageDigest.isEqual(
-                left.getBytes(StandardCharsets.UTF_8),
-                right.getBytes(StandardCharsets.UTF_8));
+    private static String requireRowText(ResultSet rows, String column) throws SQLException {
+        String value = rows.getString(column);
+        if (value == null || value.isBlank()) {
+            throw corruptFact("会议创建终态关键字段缺失");
+        }
+        return value;
     }
 
     private static SQLException corruptFact(String fixedReason) {
@@ -283,6 +309,25 @@ public final class JdbcMeetingCreateOutcomeStore implements MeetingCreateOutcome
     private static void requireText(String name, String value) {
         if (value == null || value.isBlank()) {
             throw new IllegalArgumentException(name + " must not be blank");
+        }
+    }
+
+    /** 尚未解释 status/body 的敏感数据库行；只允许在 JDBC 包内传递。 */
+    record RawOutcomeRow(
+            String scope,
+            String key,
+            String requestDigest,
+            Integer responseStatus,
+            String responseBody) {
+        RawOutcomeRow {
+            Objects.requireNonNull(scope, "scope");
+            Objects.requireNonNull(key, "key");
+            Objects.requireNonNull(requestDigest, "requestDigest");
+        }
+
+        @Override
+        public String toString() {
+            return "RawOutcomeRow[redacted]";
         }
     }
 }
