@@ -29,7 +29,7 @@ import java.util.Optional;
  */
 final class JdbcUsageReservationStore {
     private static final String FIND_OPERATION_SQL = """
-            SELECT request_digest, result_body::text
+            SELECT request_digest, reservation_id, result_body::text
               FROM usage_operation
              WHERE deployment_scope = ? AND subject_scope = ?
                AND operation_scope = ? AND idempotency_key = ?
@@ -61,7 +61,8 @@ final class JdbcUsageReservationStore {
             SELECT reservation_id, deployment_scope, subject_scope, grant_id,
                    expected_meeting_id, bound_meeting_id, bound_at, usage_unit,
                    reserved_amount, actual_amount, created_at, expires_at, status,
-                   version, committed_at, cancelled_at, cancellation_reason_code
+                   version, committed_at, cancelled_at, cancellation_reason_code,
+                   lease_owner, lease_token, lease_until, lease_version
               FROM usage_reservation
              WHERE deployment_scope = ? AND subject_scope = ? AND reservation_id = ?
                AND record_format = 'V3'
@@ -121,11 +122,14 @@ final class JdbcUsageReservationStore {
                     return Optional.empty();
                 }
                 String digest = rows.getString("request_digest");
+                String reservationId = rows.getString("reservation_id");
                 String resultBody = rows.getString("result_body");
-                if (digest == null || digest.isBlank() || resultBody == null) {
+                if (digest == null || digest.isBlank()
+                        || reservationId == null || reservationId.isBlank()
+                        || resultBody == null) {
                     throw new CorruptUsageDataException("usage operation fields are incomplete");
                 }
-                return Optional.of(new UsageOperationRow(digest, resultBody));
+                return Optional.of(new UsageOperationRow(digest, reservationId, resultBody));
             }
         }
     }
@@ -186,13 +190,32 @@ final class JdbcUsageReservationStore {
             String deploymentScope,
             String subjectScope,
             String reservationId) throws SQLException {
+        return lockReservationForOwnedCreation(
+                connection, deploymentScope, subjectScope, reservationId)
+                .map(LockedReservation::reservation);
+    }
+
+    /**
+     * 锁定 owned 会议创建所需的完整 Reservation 与清理 lease 视图。
+     *
+     * <p>普通权益提交和取消只关心 Reservation 状态；会议创建还必须在读取
+     * {@code bindAt} 后明确判断清理 Worker 的 lease 是否仍然有效。把 lease
+     * 和 Reservation 放在同一个 {@code FOR UPDATE} 结果中，可避免先读状态、
+     * 再用 {@code bind=false} 猜测失败原因。owner/token 只用于校验持久事实
+     * 完整性，不会离开 JDBC 包，也不会进入日志或返回值。</p>
+     */
+    static Optional<LockedReservation> lockReservationForOwnedCreation(
+            Connection connection,
+            String deploymentScope,
+            String subjectScope,
+            String reservationId) throws SQLException {
         Objects.requireNonNull(connection, "connection");
         try (PreparedStatement statement = connection.prepareStatement(LOCK_RESERVATION_SQL)) {
             statement.setString(1, deploymentScope);
             statement.setString(2, subjectScope);
             statement.setString(3, reservationId);
             try (ResultSet rows = statement.executeQuery()) {
-                return rows.next() ? Optional.of(readReservation(rows)) : Optional.empty();
+                return rows.next() ? Optional.of(readLockedReservation(rows)) : Optional.empty();
             }
         }
     }
@@ -321,6 +344,22 @@ final class JdbcUsageReservationStore {
         }
     }
 
+    private static LockedReservation readLockedReservation(ResultSet rows) throws SQLException {
+        UsageReservation reservation = readReservation(rows);
+        String leaseOwner = rows.getString("lease_owner");
+        String leaseToken = rows.getString("lease_token");
+        Instant leaseUntil = nullableInstant(rows, "lease_until");
+        long leaseVersion = rows.getLong("lease_version");
+        boolean noLease = leaseOwner == null && leaseToken == null && leaseUntil == null;
+        boolean completeLease = leaseOwner != null && !leaseOwner.isBlank()
+                && leaseToken != null && !leaseToken.isBlank()
+                && leaseUntil != null && leaseVersion > 0;
+        if (!noLease && !completeLease) {
+            throw new CorruptUsageDataException("usage reservation lease facts are incomplete");
+        }
+        return new LockedReservation(reservation, leaseUntil);
+    }
+
     static long exactLong(BigDecimal value, String field) {
         if (value == null) {
             throw new CorruptUsageDataException("numeric field is null: " + field);
@@ -355,10 +394,31 @@ final class JdbcUsageReservationStore {
     }
 
     /** usage_operation 中尚未解码的摘要与稳定结果正文。 */
-    record UsageOperationRow(String requestDigest, String resultBody) {
+    record UsageOperationRow(
+            String requestDigest,
+            String reservationId,
+            String resultBody) {
         UsageOperationRow {
             Objects.requireNonNull(requestDigest, "requestDigest");
+            Objects.requireNonNull(reservationId, "reservationId");
             Objects.requireNonNull(resultBody, "resultBody");
+        }
+    }
+
+    /**
+     * owned 创建事务持有行锁期间观察到的稳定视图。
+     *
+     * <p>{@code leaseUntil} 为空表示没有清理 lease；等于判断时刻表示 lease
+     * 已到期，只有严格晚于判断时刻才阻止 bind，与 SQL CAS 条件保持一致。</p>
+     */
+    record LockedReservation(UsageReservation reservation, Instant leaseUntil) {
+        LockedReservation {
+            Objects.requireNonNull(reservation, "reservation");
+        }
+
+        boolean hasActiveLeaseAt(Instant instant) {
+            Objects.requireNonNull(instant, "instant");
+            return leaseUntil != null && leaseUntil.isAfter(instant);
         }
     }
 
