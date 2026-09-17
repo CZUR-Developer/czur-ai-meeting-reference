@@ -77,9 +77,6 @@ public final class JdbcMeetingCreateReplayLookup implements MeetingCreateReplayL
         }
         MeetingCommandResult result = ((MeetingCreateOutcome.Success) outcome).result();
         MeetingAggregate.MeetingSnapshot meeting = result.meeting();
-        if (result.operation() != MeetingCommandResult.Operation.CREATED) {
-            return new Inconsistent(InconsistencyReason.STORED_OUTCOME_INVALID);
-        }
         if (MeetingOwnership.LEGACY_UNOWNED_SUBJECT_SCOPE.equals(meeting.subjectScope())) {
             return new Inconsistent(InconsistencyReason.SUCCESS_NOT_OWNED);
         }

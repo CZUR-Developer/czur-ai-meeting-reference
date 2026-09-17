@@ -1,6 +1,5 @@
 package com.czur.reference.application.port;
 
-import com.czur.reference.application.command.MeetingCommandResult;
 import com.czur.reference.domain.meeting.MeetingOwnership;
 
 import java.util.Objects;
@@ -93,11 +92,6 @@ public interface MeetingCreateReplayLookup {
         public Replayed {
             Objects.requireNonNull(outcome, "outcome");
             if (outcome instanceof MeetingCreateOutcome.Success success) {
-                if (success.result().operation()
-                        != MeetingCommandResult.Operation.CREATED) {
-                    throw new IllegalArgumentException(
-                            "meeting create replay success must be CREATED");
-                }
                 MeetingOwnership.requireOwnedSubjectScope(
                         success.result().meeting().subjectScope());
             }
