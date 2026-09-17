@@ -1,24 +1,31 @@
 package com.czur.reference.application.persistence.jdbc;
 
+import com.czur.reference.application.port.entitlement.AuthorizedProfileSnapshot;
 import com.czur.reference.application.port.entitlement.UsageActual;
 import com.czur.reference.application.port.entitlement.UsageEstimate;
 import com.czur.reference.application.port.entitlement.UsageOperationResult;
+import com.czur.reference.application.port.entitlement.UsageOperationScopes;
 import com.czur.reference.application.port.entitlement.UsageReservation;
 import com.czur.reference.application.port.entitlement.UsageUnit;
 
 import java.time.DateTimeException;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.TreeSet;
 
 /**
  * {@link UsageOperationResult} 的独立、版本化 JSON 编解码器。
  *
  * <p>该格式只用于 {@code usage_operation.result_body}，不会复用会议命令幂等
- * JSON。schemaVersion=1 保存首次操作结果中的完整 Reservation 快照，包括所有
- * nullable 绑定和终态字段；重放不能根据当前 Reservation 行重新拼接结果。</p>
+ * JSON。编码器固定写 schemaVersion=2：除完整 Reservation 快照外，reserve 还
+ * 保存首次授权 Profile/能力快照。解码器严格双读 v1/v2；v1 reserve 可稳定重放，
+ * 但因缺少授权快照而不能继续创建新的归属会议。</p>
  *
  * <p>解码必须由调用方再次提供数据库查询所使用的 deployment、subject、
  * operation、idempotency key 和 request digest。正文中的任一范围与期望不一致
@@ -26,10 +33,17 @@ import java.util.Set;
  * 字段名和解析位置，不包含 JSON 正文、摘要或动态字段值。</p>
  */
 final class UsageOperationResultJson {
-    private static final int SCHEMA_VERSION = 1;
-    private static final Set<String> TOP_LEVEL_FIELDS = Set.of(
+    private static final int CURRENT_SCHEMA_VERSION = 2;
+    private static final Set<String> V1_TOP_LEVEL_FIELDS = Set.of(
             "schemaVersion", "deploymentScope", "subjectScope", "operationScope",
             "idempotencyKey", "requestDigest", "grantExpiresAt", "reservation");
+    private static final Set<String> V2_TOP_LEVEL_FIELDS = Set.of(
+            "schemaVersion", "deploymentScope", "subjectScope", "operationScope",
+            "idempotencyKey", "requestDigest", "grantExpiresAt",
+            "authorizedProfileSnapshot", "reservation");
+    private static final Set<String> AUTHORIZED_PROFILE_FIELDS = Set.of(
+            "profileId", "profileRevision", "requestedCapabilities",
+            "grantedCapabilities", "maxDurationMs");
     private static final Set<String> RESERVATION_FIELDS = Set.of(
             "reservationId", "deploymentScope", "subjectScope", "grantId",
             "expectedMeetingId", "boundMeetingId", "boundAt", "reservedUsage",
@@ -40,17 +54,24 @@ final class UsageOperationResultJson {
     private UsageOperationResultJson() {
     }
 
-    /** 编码完整、确定字段顺序的 schemaVersion=1 结果。 */
+    /** 编码完整、确定字段与能力顺序的 schemaVersion=2 结果。 */
     static String encode(UsageOperationResult result) {
         Objects.requireNonNull(result, "result");
+        if (UsageOperationScopes.RESERVE.equals(result.operationScope())
+                && !result.supportsOwnedMeetingCreation()) {
+            throw new IllegalArgumentException(
+                    "schemaVersion=2 reserve result requires authorized profile snapshot");
+        }
         UsageReservation reservation = result.reservation();
-        return "{\"schemaVersion\":" + SCHEMA_VERSION
+        return "{\"schemaVersion\":" + CURRENT_SCHEMA_VERSION
                 + ",\"deploymentScope\":" + quote(result.deploymentScope())
                 + ",\"subjectScope\":" + quote(result.subjectScope())
                 + ",\"operationScope\":" + quote(result.operationScope())
                 + ",\"idempotencyKey\":" + quote(result.idempotencyKey())
                 + ",\"requestDigest\":" + quote(result.requestDigest())
                 + ",\"grantExpiresAt\":" + nullableInstant(result.grantExpiresAt())
+                + ",\"authorizedProfileSnapshot\":"
+                + encodeAuthorizedProfile(result.authorizedProfileSnapshot())
                 + ",\"reservation\":{"
                 + "\"reservationId\":" + quote(reservation.reservationId())
                 + ",\"deploymentScope\":" + quote(reservation.deploymentScope())
@@ -98,8 +119,12 @@ final class UsageOperationResultJson {
         Reader reader = new Reader(json);
         Map<String, Object> top = reader.readObject();
         reader.ensureEnd();
-        requireExactFields(top, TOP_LEVEL_FIELDS, "顶层");
-        if (requireInt(top, "schemaVersion") != SCHEMA_VERSION) {
+        int schemaVersion = requireInt(top, "schemaVersion");
+        if (schemaVersion == 1) {
+            requireExactFields(top, V1_TOP_LEVEL_FIELDS, "v1 顶层");
+        } else if (schemaVersion == CURRENT_SCHEMA_VERSION) {
+            requireExactFields(top, V2_TOP_LEVEL_FIELDS, "v2 顶层");
+        } else {
             throw new IllegalArgumentException("用量结果 JSON schemaVersion 不受支持");
         }
 
@@ -109,6 +134,9 @@ final class UsageOperationResultJson {
         String idempotencyKey = requireString(top, "idempotencyKey");
         String requestDigest = requireString(top, "requestDigest");
         Instant grantExpiresAt = nullableInstant(top, "grantExpiresAt");
+        AuthorizedProfileSnapshot authorizedProfileSnapshot = schemaVersion == 1
+                ? null
+                : decodeAuthorizedProfile(nullableObject(top, "authorizedProfileSnapshot"));
         requireMatch("deploymentScope", expectedDeploymentScope, deploymentScope);
         requireMatch("subjectScope", expectedSubjectScope, subjectScope);
         requireMatch("operationScope", expectedOperationScope, operationScope);
@@ -118,8 +146,55 @@ final class UsageOperationResultJson {
         Map<String, Object> reservationValues = requireObject(top, "reservation");
         requireExactFields(reservationValues, RESERVATION_FIELDS, "reservation");
         UsageReservation reservation = decodeReservation(reservationValues);
-        return new UsageOperationResult(deploymentScope, subjectScope, operationScope,
-                idempotencyKey, requestDigest, grantExpiresAt, reservation);
+        if (UsageOperationScopes.RESERVE.equals(operationScope)) {
+            if (schemaVersion == 1) {
+                return UsageOperationResult.restoreLegacyV1Reserve(
+                        deploymentScope, subjectScope, idempotencyKey, requestDigest,
+                        grantExpiresAt, reservation);
+            }
+            if (authorizedProfileSnapshot == null) {
+                throw new IllegalArgumentException(
+                        "用量结果 JSON reserve authorizedProfileSnapshot 缺失");
+            }
+            return UsageOperationResult.reserve(
+                    deploymentScope, subjectScope, idempotencyKey, requestDigest,
+                    grantExpiresAt, authorizedProfileSnapshot, reservation);
+        }
+        if (grantExpiresAt != null || authorizedProfileSnapshot != null) {
+            throw new IllegalArgumentException(
+                    "用量结果 JSON 终态 reserve 专属字段必须为空");
+        }
+        return UsageOperationResult.terminal(
+                deploymentScope, subjectScope, operationScope,
+                idempotencyKey, requestDigest, reservation);
+    }
+
+    private static String encodeAuthorizedProfile(AuthorizedProfileSnapshot snapshot) {
+        if (snapshot == null) {
+            return "null";
+        }
+        return "{\"profileId\":" + quote(snapshot.profileId())
+                + ",\"profileRevision\":" + snapshot.profileRevision()
+                + ",\"requestedCapabilities\":"
+                + encodeCapabilities(snapshot.requestedCapabilities())
+                + ",\"grantedCapabilities\":"
+                + encodeCapabilities(snapshot.grantedCapabilities())
+                + ",\"maxDurationMs\":" + snapshot.maxDurationMs()
+                + '}';
+    }
+
+    private static AuthorizedProfileSnapshot decodeAuthorizedProfile(
+            Map<String, Object> values) {
+        if (values == null) {
+            return null;
+        }
+        requireExactFields(values, AUTHORIZED_PROFILE_FIELDS, "authorizedProfileSnapshot");
+        return new AuthorizedProfileSnapshot(
+                requireString(values, "profileId"),
+                requireInt(values, "profileRevision"),
+                requireCapabilities(values, "requestedCapabilities"),
+                requireCapabilities(values, "grantedCapabilities"),
+                requireLong(values, "maxDurationMs"));
     }
 
     private static UsageReservation decodeReservation(Map<String, Object> values) {
@@ -175,6 +250,19 @@ final class UsageOperationResultJson {
 
     private static String encodeUsage(UsageUnit unit, long amount) {
         return "{\"unit\":" + quote(unit.name()) + ",\"amount\":" + amount + "}";
+    }
+
+    private static String encodeCapabilities(Set<String> capabilities) {
+        StringBuilder encoded = new StringBuilder("[");
+        boolean first = true;
+        for (String capability : capabilities) {
+            if (!first) {
+                encoded.append(',');
+            }
+            encoded.append(quote(capability));
+            first = false;
+        }
+        return encoded.append(']').toString();
     }
 
     private static String nullableString(String value) {
@@ -235,6 +323,27 @@ final class UsageOperationResultJson {
         } catch (NumberFormatException invalid) {
             throw new IllegalArgumentException("用量结果 JSON long 字段超出范围: " + field);
         }
+    }
+
+    private static Set<String> requireCapabilities(
+            Map<String, Object> values, String field) {
+        Object value = values.get(field);
+        if (!(value instanceof List<?> list)) {
+            throw new IllegalArgumentException(
+                    "用量结果 JSON 能力字段不是数组: " + field);
+        }
+        TreeSet<String> capabilities = new TreeSet<>();
+        for (Object entry : list) {
+            if (!(entry instanceof String capability) || capability.isBlank()) {
+                throw new IllegalArgumentException(
+                        "用量结果 JSON 能力数组包含非法元素: " + field);
+            }
+            if (!capabilities.add(capability)) {
+                throw new IllegalArgumentException(
+                        "用量结果 JSON 能力数组包含重复元素: " + field);
+            }
+        }
+        return Collections.unmodifiableSet(capabilities);
     }
 
     private static Instant requireInstant(Map<String, Object> values, String field) {
@@ -314,7 +423,7 @@ final class UsageOperationResultJson {
     private record JsonInteger(String text) {
     }
 
-    /** 只接受本协议需要的 JSON object/string/integer/null 子集。 */
+    /** 只接受本协议需要的 JSON object/array/string/integer/null 子集。 */
     private static final class Reader {
         private final String input;
         private int index;
@@ -358,6 +467,9 @@ final class UsageOperationResultJson {
             if (next == '{') {
                 return readObject();
             }
+            if (next == '[') {
+                return readArray();
+            }
             if (next == 'n') {
                 expectLiteral("null");
                 return null;
@@ -366,6 +478,28 @@ final class UsageOperationResultJson {
                 return readInteger();
             }
             throw error("字段值类型不受支持");
+        }
+
+        private List<Object> readArray() {
+            expect('[');
+            List<Object> values = new ArrayList<>();
+            if (peek() == ']') {
+                expect(']');
+                return values;
+            }
+            while (true) {
+                values.add(readValue());
+                char next = peek();
+                if (next == ',') {
+                    expect(',');
+                    continue;
+                }
+                if (next == ']') {
+                    expect(']');
+                    return values;
+                }
+                throw error("数组元素分隔符非法");
+            }
         }
 
         private JsonInteger readInteger() {

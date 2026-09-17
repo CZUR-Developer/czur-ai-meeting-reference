@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -42,6 +43,24 @@ class EntitlementPortContractTest {
         assertTrue(grant.isExpiredAt(GRANT_EXPIRES_AT));
         assertThrows(UnsupportedOperationException.class,
                 () -> grant.grantedCapabilities().add("summary.structured"));
+    }
+
+    @Test
+    void authorizedProfileSnapshotCopiesSortsAndValidatesGrantFacts() {
+        AuthorizedProfileSnapshot snapshot = AuthorizedProfileSnapshot.from(grant());
+
+        assertEquals("profile-basic", snapshot.profileId());
+        assertEquals(3, snapshot.profileRevision());
+        assertEquals(Set.of("transcript.final", "transcript.realtime"),
+                snapshot.grantedCapabilities());
+        assertEquals(List.of("transcript.final", "transcript.realtime"),
+                snapshot.grantedCapabilities().stream().toList());
+        assertEquals(3_600_000, snapshot.maxDurationMs());
+        assertThrows(UnsupportedOperationException.class,
+                () -> snapshot.requestedCapabilities().add("summary.structured"));
+        assertThrows(IllegalArgumentException.class, () -> new AuthorizedProfileSnapshot(
+                "profile", 0, Set.of("transcript.realtime"),
+                Set.of("summary.structured"), 1));
     }
 
     @Test
@@ -144,9 +163,9 @@ class EntitlementPortContractTest {
     @Test
     void operationResultsAreStableSnapshotsWithExplicitScopes() {
         UsageReservation reserved = reservation();
-        UsageOperationResult first = new UsageOperationResult(DEPLOYMENT, SUBJECT,
-                UsageOperationScopes.RESERVE, "reserve-key", digest("a"),
-                GRANT_EXPIRES_AT, reserved);
+        UsageOperationResult first = UsageOperationResult.reserve(
+                DEPLOYMENT, SUBJECT, "reserve-key", digest("a"),
+                GRANT_EXPIRES_AT, AuthorizedProfileSnapshot.from(grant()), reserved);
         UsageOperationResult replay = first;
 
         assertEquals(first, replay);
@@ -154,15 +173,25 @@ class EntitlementPortContractTest {
         assertEquals(DEPLOYMENT, replay.deploymentScope());
         assertEquals(SUBJECT, replay.subjectScope());
         assertEquals(UsageOperationScopes.RESERVE, replay.operationScope());
-        assertThrows(IllegalArgumentException.class, () -> new UsageOperationResult(
-                DEPLOYMENT, SUBJECT, UsageOperationScopes.RESERVE, "key", digest("missing"),
-                null, reserved));
-        assertThrows(IllegalArgumentException.class, () -> new UsageOperationResult(
-                DEPLOYMENT, SUBJECT, UsageOperationScopes.RESERVE, "key", digest("early"),
-                reserved.expiresAt().minusNanos(1), reserved));
-        assertThrows(IllegalArgumentException.class, () -> new UsageOperationResult(
-                DEPLOYMENT, SUBJECT, UsageOperationScopes.COMMIT, "key", digest("f"),
-                null, reserved));
+        assertTrue(first.supportsOwnedMeetingCreation());
+        assertEquals(AuthorizedProfileSnapshot.from(grant()),
+                first.requireAuthorizedProfileSnapshot());
+        assertThrows(NullPointerException.class, () -> UsageOperationResult.reserve(
+                DEPLOYMENT, SUBJECT, "key", digest("missing"),
+                GRANT_EXPIRES_AT, null, reserved));
+        assertThrows(IllegalArgumentException.class, () -> UsageOperationResult.reserve(
+                DEPLOYMENT, SUBJECT, "key", digest("early"),
+                reserved.expiresAt().minusNanos(1),
+                AuthorizedProfileSnapshot.from(grant()), reserved));
+        assertThrows(IllegalArgumentException.class, () -> UsageOperationResult.terminal(
+                DEPLOYMENT, SUBJECT, UsageOperationScopes.COMMIT,
+                "key", digest("f"), reserved));
+
+        UsageOperationResult legacy = UsageOperationResult.restoreLegacyV1Reserve(
+                DEPLOYMENT, SUBJECT, "legacy-key", digest("l"),
+                GRANT_EXPIRES_AT, reserved);
+        assertFalse(legacy.supportsOwnedMeetingCreation());
+        assertThrows(IllegalStateException.class, legacy::requireAuthorizedProfileSnapshot);
     }
 
     @Test

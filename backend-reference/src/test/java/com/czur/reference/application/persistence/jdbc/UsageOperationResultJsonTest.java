@@ -1,5 +1,6 @@
 package com.czur.reference.application.persistence.jdbc;
 
+import com.czur.reference.application.port.entitlement.AuthorizedProfileSnapshot;
 import com.czur.reference.application.port.entitlement.MeetingGrant;
 import com.czur.reference.application.port.entitlement.UsageActual;
 import com.czur.reference.application.port.entitlement.UsageEstimate;
@@ -35,9 +36,13 @@ class UsageOperationResultJsonTest {
         UsageOperationResult decoded = decode(encoded, UsageOperationScopes.RESERVE);
 
         assertEquals(expected, decoded);
-        assertTrue(encoded.contains("\"schemaVersion\":1"));
+        assertTrue(encoded.contains("\"schemaVersion\":2"));
         assertTrue(encoded.contains(
                 "\"grantExpiresAt\":\"2026-09-17T04:05:01.123456789Z\""));
+        assertTrue(encoded.contains(
+                "\"requestedCapabilities\":[\"summary.structured\",\"transcript.realtime\"]"));
+        assertTrue(encoded.contains(
+                "\"grantedCapabilities\":[\"summary.structured\",\"transcript.realtime\"]"));
         assertTrue(encoded.contains("\"amount\":9223372036854775807"));
         assertTrue(encoded.contains("\"boundMeetingId\":null"));
         assertTrue(encoded.contains("\"actualUsage\":null"));
@@ -45,6 +50,9 @@ class UsageOperationResultJsonTest {
         assertTrue(encoded.contains("\"cancelledAt\":null"));
         assertTrue(encoded.contains("\"cancellationReasonCode\":null"));
         assertEquals(CREATED_AT, decoded.reservation().createdAt());
+        assertTrue(decoded.supportsOwnedMeetingCreation());
+        assertEquals(expected.requireAuthorizedProfileSnapshot(),
+                decoded.requireAuthorizedProfileSnapshot());
     }
 
     @Test
@@ -65,6 +73,18 @@ class UsageOperationResultJsonTest {
                 decode(UsageOperationResultJson.encode(
                                 result(UsageOperationScopes.CANCEL, cancelled)),
                         UsageOperationScopes.CANCEL));
+
+        String committedJson = UsageOperationResultJson.encode(
+                result(UsageOperationScopes.COMMIT, committed));
+        assertSafeFailure(committedJson.replace(
+                        "\"authorizedProfileSnapshot\":null",
+                        "\"authorizedProfileSnapshot\":{"
+                                + "\"profileId\":\"unexpected\","
+                                + "\"profileRevision\":1,"
+                                + "\"requestedCapabilities\":[\"transcript.realtime\"],"
+                                + "\"grantedCapabilities\":[\"transcript.realtime\"],"
+                                + "\"maxDurationMs\":1}"),
+                UsageOperationScopes.COMMIT);
     }
 
     @Test
@@ -73,10 +93,10 @@ class UsageOperationResultJsonTest {
                 result(UsageOperationScopes.RESERVE, reserved(60_000)));
 
         for (String invalid : List.of(
-                valid.replace("\"schemaVersion\":1", "\"schemaVersion\":2"),
-                valid.replace("\"schemaVersion\":1,", ""),
-                valid.replace("\"schemaVersion\":1", "\"schemaVersion\":1,\"extra\":0"),
-                valid.replace("\"schemaVersion\":1", "\"schemaVersion\":1,\"schemaVersion\":1"),
+                valid.replace("\"schemaVersion\":2", "\"schemaVersion\":3"),
+                valid.replace("\"schemaVersion\":2,", ""),
+                valid.replace("\"schemaVersion\":2", "\"schemaVersion\":2,\"extra\":0"),
+                valid.replace("\"schemaVersion\":2", "\"schemaVersion\":2,\"schemaVersion\":2"),
                 valid.replace(
                         "\"grantExpiresAt\":\"2026-09-17T04:05:01.123456789Z\",", ""),
                 valid.replace(
@@ -85,6 +105,15 @@ class UsageOperationResultJsonTest {
                 valid.replace(
                         "\"grantExpiresAt\":\"2026-09-17T04:05:01.123456789Z\"",
                         "\"grantExpiresAt\":\"2026-09-17T04:04:59.123456789Z\""),
+                valid.replace("\"authorizedProfileSnapshot\":{",
+                        "\"authorizedProfileSnapshot\":null,\"discarded\":{"),
+                valid.replace("\"profileRevision\":3", "\"profileRevision\":0"),
+                valid.replace(
+                        "\"requestedCapabilities\":[\"summary.structured\",\"transcript.realtime\"]",
+                        "\"requestedCapabilities\":[\"summary.structured\",\"summary.structured\"]"),
+                valid.replace(
+                        "\"grantedCapabilities\":[\"summary.structured\",\"transcript.realtime\"]",
+                        "\"grantedCapabilities\":\"transcript.realtime\""),
                 valid.replace("\"version\":0", "\"version\":0.0"),
                 valid.replace("\"version\":0", "\"version\":1e0"),
                 valid.replace("\"version\":0", "\"version\":9223372036854775808"),
@@ -98,6 +127,24 @@ class UsageOperationResultJsonTest {
         assertSafeFailure(extraReservation, UsageOperationScopes.RESERVE);
         String missingNullable = valid.replace("\"boundMeetingId\":null,", "");
         assertSafeFailure(missingNullable, UsageOperationScopes.RESERVE);
+    }
+
+    @Test
+    void decoderStrictlyReadsLegacyV1WithoutTreatingItAsOwnedCreationInput() {
+        String v2 = UsageOperationResultJson.encode(
+                result(UsageOperationScopes.RESERVE, reserved(60_000)));
+        String v1 = toLegacyV1(v2);
+
+        UsageOperationResult legacy = decode(v1, UsageOperationScopes.RESERVE);
+
+        assertEquals(CREATED_AT.plusSeconds(301), legacy.grantExpiresAt());
+        assertFalse(legacy.supportsOwnedMeetingCreation());
+        assertThrows(IllegalStateException.class, legacy::requireAuthorizedProfileSnapshot);
+        assertThrows(IllegalArgumentException.class,
+                () -> UsageOperationResultJson.encode(legacy));
+        assertSafeFailure(v1.replace("\"schemaVersion\":1",
+                "\"schemaVersion\":1,\"authorizedProfileSnapshot\":null"),
+                UsageOperationScopes.RESERVE);
     }
 
     @Test
@@ -144,26 +191,44 @@ class UsageOperationResultJsonTest {
 
     private static UsageOperationResult result(
             String operationScope, UsageReservation reservation) {
-        return new UsageOperationResult(
-                DEPLOYMENT, SUBJECT, operationScope, KEY, DIGEST,
-                UsageOperationScopes.RESERVE.equals(operationScope)
-                        ? CREATED_AT.plusSeconds(301) : null,
-                reservation);
+        if (UsageOperationScopes.RESERVE.equals(operationScope)) {
+            return UsageOperationResult.reserve(
+                    DEPLOYMENT, SUBJECT, KEY, DIGEST,
+                    CREATED_AT.plusSeconds(301),
+                    AuthorizedProfileSnapshot.from(grant()),
+                    reservation);
+        }
+        return UsageOperationResult.terminal(
+                DEPLOYMENT, SUBJECT, operationScope, KEY, DIGEST, reservation);
     }
 
     private static UsageReservation reserved(long amount) {
         Instant expiresAt = CREATED_AT.plusSeconds(300);
-        MeetingGrant grant = new MeetingGrant(
-                "grant-\"opaque", DEPLOYMENT, SUBJECT, "profile-reference", 3,
-                Set.of("transcript.realtime"), Set.of("transcript.realtime"),
-                Long.MAX_VALUE, CREATED_AT.minusSeconds(1), expiresAt.plusSeconds(1));
         return UsageReservation.reserved(
                 "reservation-\\opaque",
-                grant,
+                grant(),
                 "meeting-expected",
                 new UsageEstimate(UsageUnit.MEETING_DURATION_MS, amount),
                 CREATED_AT,
                 expiresAt);
+    }
+
+    private static MeetingGrant grant() {
+        return new MeetingGrant(
+                "grant-\"opaque", DEPLOYMENT, SUBJECT, "profile-reference", 3,
+                Set.of("transcript.realtime", "summary.structured"),
+                Set.of("transcript.realtime", "summary.structured"),
+                Long.MAX_VALUE, CREATED_AT.minusSeconds(1), CREATED_AT.plusSeconds(301));
+    }
+
+    private static String toLegacyV1(String v2) {
+        int fieldStart = v2.indexOf(",\"authorizedProfileSnapshot\":");
+        int reservationStart = v2.indexOf(",\"reservation\":", fieldStart);
+        if (fieldStart < 0 || reservationStart < 0) {
+            throw new AssertionError("v2 fixture is missing authorized profile field");
+        }
+        return (v2.substring(0, fieldStart) + v2.substring(reservationStart))
+                .replace("\"schemaVersion\":2", "\"schemaVersion\":1");
     }
 
     private static void assertSafeFailure(String json, String operationScope) {

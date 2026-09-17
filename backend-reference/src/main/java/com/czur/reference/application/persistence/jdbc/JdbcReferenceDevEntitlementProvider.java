@@ -2,6 +2,7 @@ package com.czur.reference.application.persistence.jdbc;
 
 import com.czur.reference.application.entitlement.referencedev.ReferenceDevEntitlementPolicy;
 import com.czur.reference.application.port.entitlement.AuthorizeStartRequest;
+import com.czur.reference.application.port.entitlement.AuthorizedProfileSnapshot;
 import com.czur.reference.application.port.entitlement.CancelReservationRequest;
 import com.czur.reference.application.port.entitlement.CommitUsageRequest;
 import com.czur.reference.application.port.entitlement.EntitlementProvider;
@@ -17,7 +18,6 @@ import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.time.Clock;
-import java.time.Instant;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.logging.Level;
@@ -93,8 +93,8 @@ public final class JdbcReferenceDevEntitlementProvider implements EntitlementPro
                     connection.rollback();
                     return EntitlementProviderResult.failure(prepared.errorOrThrow());
                 }
-                UsageOperationResult candidate = identity.result(
-                        prepared.valueOrThrow(), request.grant().expiresAt());
+                UsageOperationResult candidate = identity.reserveResult(
+                        prepared.valueOrThrow(), request.grant());
                 JdbcUsageReservationStore.insertReservation(connection, candidate.reservation());
                 if (!JdbcUsageReservationStore.insertOperation(
                         connection, candidate, clock.instant())) {
@@ -175,7 +175,7 @@ public final class JdbcReferenceDevEntitlementProvider implements EntitlementPro
                     return failure(EntitlementProviderError.Code.VERSION_CONFLICT, false,
                             "COMMIT_CAS_REJECTED");
                 }
-                UsageOperationResult candidate = identity.result(committed, null);
+                UsageOperationResult candidate = identity.terminalResult(committed);
                 if (!JdbcUsageReservationStore.insertOperation(
                         connection, candidate, clock.instant())) {
                     return rollbackAndReadWinner(connection, identity);
@@ -260,7 +260,7 @@ public final class JdbcReferenceDevEntitlementProvider implements EntitlementPro
                     return failure(EntitlementProviderError.Code.VERSION_CONFLICT, false,
                             "CANCEL_CAS_REJECTED");
                 }
-                UsageOperationResult candidate = identity.result(cancelled, null);
+                UsageOperationResult candidate = identity.terminalResult(cancelled);
                 if (!JdbcUsageReservationStore.insertOperation(
                         connection, candidate, clock.instant())) {
                     return rollbackAndReadWinner(connection, identity);
@@ -409,10 +409,26 @@ public final class JdbcReferenceDevEntitlementProvider implements EntitlementPro
                     request.idempotencyKey(), request.requestDigest(), "CANCEL");
         }
 
-        UsageOperationResult result(UsageReservation reservation, Instant grantExpiresAt) {
-            return new UsageOperationResult(
-                    deploymentScope, subjectScope, operationScope,
-                    idempotencyKey, requestDigest, grantExpiresAt, reservation);
+        UsageOperationResult reserveResult(
+                UsageReservation reservation, MeetingGrant firstGrant) {
+            return UsageOperationResult.reserve(
+                    deploymentScope,
+                    subjectScope,
+                    idempotencyKey,
+                    requestDigest,
+                    firstGrant.expiresAt(),
+                    AuthorizedProfileSnapshot.from(firstGrant),
+                    reservation);
+        }
+
+        UsageOperationResult terminalResult(UsageReservation reservation) {
+            return UsageOperationResult.terminal(
+                    deploymentScope,
+                    subjectScope,
+                    operationScope,
+                    idempotencyKey,
+                    requestDigest,
+                    reservation);
         }
     }
 }

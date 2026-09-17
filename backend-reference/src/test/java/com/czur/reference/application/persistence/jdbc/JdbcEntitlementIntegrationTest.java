@@ -3,6 +3,7 @@ package com.czur.reference.application.persistence.jdbc;
 import com.czur.reference.application.entitlement.referencedev.ReferenceDevEntitlementPolicy;
 import com.czur.reference.application.entitlement.referencedev.ReferenceDevEntitlementPolicyConfig;
 import com.czur.reference.application.port.entitlement.AuthorizeStartRequest;
+import com.czur.reference.application.port.entitlement.AuthorizedProfileSnapshot;
 import com.czur.reference.application.port.entitlement.CancelReservationRequest;
 import com.czur.reference.application.port.entitlement.CommitUsageRequest;
 import com.czur.reference.application.port.entitlement.EntitlementIdGenerator;
@@ -104,15 +105,35 @@ class JdbcEntitlementIntegrationTest {
 
         EntitlementProviderResult<UsageOperationResult> first = provider.reserveUsage(request);
         assertTrue(first.isSuccess());
+        AuthorizedProfileSnapshot firstSnapshot =
+                first.valueOrThrow().requireAuthorizedProfileSnapshot();
+        assertEquals(PROFILE, firstSnapshot.profileId());
+        assertEquals(1, firstSnapshot.profileRevision());
+        assertEquals(Set.of("transcript.realtime"), firstSnapshot.grantedCapabilities());
         EntitlementProviderResult<UsageOperationResult> replay = provider.reserveUsage(request);
         assertTrue(replay.isSuccess());
         assertEquals(first.valueOrThrow(), replay.valueOrThrow());
-        // 模拟进程重建：新 Provider 只依赖数据库中的原始 Grant 截止时间和结果快照，
-        // 不接受当前调用方重新生成的 Reservation 或 Grant 代替首次事实。
+
+        // 模拟进程重建及随后发生的策略/Grant 变更。相同四元组与摘要必须返回
+        // 首次持久化的 Profile、能力和时长，不能拿重试请求的新 Grant 篡改结果。
+        MeetingGrant changedGrant = new MeetingGrant(
+                "grant-after-policy-change", DEPLOYMENT, SUBJECT,
+                "profile-after-change", 9,
+                Set.of("summary.structured"), Set.of("summary.structured"),
+                120_000, NOW.minusSeconds(1), NOW.plusSeconds(500));
+        ReserveUsageRequest changedRetry = reserveRequest(
+                changedGrant, "reserve-concurrent", "digest-reserve", "meeting-after-change");
+        ReferenceDevEntitlementPolicy changedPolicy = new ReferenceDevEntitlementPolicy(
+                new ReferenceDevEntitlementPolicyConfig(
+                        DEPLOYMENT, "profile-after-change", 9,
+                        Set.of("summary.structured"), 120_000,
+                        Duration.ofMinutes(10), Duration.ofMinutes(5)),
+                Clock.fixed(NOW, ZoneOffset.UTC), new TestIds());
         EntitlementProviderResult<UsageOperationResult> restarted =
-                provider(policyAt(NOW), NOW).reserveUsage(request);
+                provider(changedPolicy, NOW).reserveUsage(changedRetry);
         assertTrue(restarted.isSuccess());
         assertEquals(first.valueOrThrow(), restarted.valueOrThrow());
+        assertEquals(firstSnapshot, restarted.valueOrThrow().requireAuthorizedProfileSnapshot());
 
         ReserveUsageRequest conflict = reserveRequest(request.grant(),
                 "reserve-concurrent", "digest-other", "meeting-other");
@@ -148,6 +169,37 @@ class JdbcEntitlementIntegrationTest {
         }
         assertEquals(2L, count("SELECT count(*) FROM usage_reservation WHERE record_format='V3'"));
         assertEquals(2L, count("SELECT count(*) FROM usage_operation"));
+    }
+
+    @Test
+    void legacyV1ReserveReplaysAfterRestartButCannotCreateOwnedMeeting() throws Exception {
+        JdbcReferenceDevEntitlementProvider provider = provider(policyAt(NOW), NOW);
+        ReserveUsageRequest request = reserveRequest(
+                grantAt(NOW.minusSeconds(1), NOW.plusSeconds(599)),
+                "reserve-legacy-v1", "digest-legacy-v1", "meeting-legacy-v1");
+        assertTrue(provider.reserveUsage(request).isSuccess());
+
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement("""
+                     UPDATE usage_operation
+                        SET result_body = (result_body - 'authorizedProfileSnapshot')
+                                          || '{"schemaVersion":1}'::jsonb
+                      WHERE deployment_scope = ? AND subject_scope = ?
+                        AND operation_scope = ? AND idempotency_key = ?
+                     """)) {
+            statement.setString(1, DEPLOYMENT);
+            statement.setString(2, SUBJECT);
+            statement.setString(3, UsageOperationScopes.RESERVE);
+            statement.setString(4, request.idempotencyKey());
+            assertEquals(1, statement.executeUpdate());
+        }
+
+        UsageOperationResult legacy = provider(policyAt(NOW), NOW)
+                .reserveUsage(request).valueOrThrow();
+        assertFalse(legacy.supportsOwnedMeetingCreation());
+        org.junit.jupiter.api.Assertions.assertThrows(
+                IllegalStateException.class, legacy::requireAuthorizedProfileSnapshot);
+        assertEquals(request.grant().expiresAt(), legacy.grantExpiresAt());
     }
 
     @Test
