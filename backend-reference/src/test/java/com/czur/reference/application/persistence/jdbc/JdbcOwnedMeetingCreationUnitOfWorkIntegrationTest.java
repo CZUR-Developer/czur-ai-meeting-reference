@@ -1,6 +1,9 @@
 package com.czur.reference.application.persistence.jdbc;
 
 import com.czur.reference.application.command.MeetingCommandEventFactory;
+import com.czur.reference.application.port.MeetingCreateFailure;
+import com.czur.reference.application.port.MeetingCreateOutcome;
+import com.czur.reference.application.port.MeetingCreateOutcomeStore;
 import com.czur.reference.application.port.IdempotencyScopeCodec;
 import com.czur.reference.application.port.OwnedMeetingCreationUnitOfWork;
 import com.czur.reference.application.port.entitlement.AuthorizedProfileSnapshot;
@@ -107,7 +110,7 @@ class JdbcOwnedMeetingCreationUnitOfWorkIntegrationTest {
         var first = success(unitOfWork.create(request));
         assertEquals(OwnedMeetingCreationUnitOfWork.SuccessCode.CREATED, first.code());
 
-        var replay = success(unitOfWork.create(request));
+        var replay = success(unitOfWork(dataSource, BIND_CLOCK.plusSeconds(10)).create(request));
         assertEquals(OwnedMeetingCreationUnitOfWork.SuccessCode.REPLAYED, replay.code());
         assertEquals(first.result(), replay.result());
 
@@ -143,6 +146,117 @@ class JdbcOwnedMeetingCreationUnitOfWorkIntegrationTest {
                     "SELECT count(*) FROM meeting WHERE meeting_id = 'meeting-stable'"));
             assertEquals(1, queryCount(connection,
                     "SELECT count(*) FROM outbox_event WHERE event_id = '" + eventId + "'"));
+        }
+    }
+
+    @Test
+    void prePersistedFailureReplaysAfterRestartAndExitsBeforeAnyBusinessSideEffect()
+            throws Exception {
+        UsageOperationResult reserve = insertReserve(
+                "failure-replay", "meeting-failure-replay", BIND_AT.plusSeconds(60));
+        var request = request(
+                reserve, "meeting-failure-replay", "session-failure-replay",
+                "key-failure-replay", "digest-failure-replay");
+        String scope = IdempotencyScopeCodec.meetingCreate(DEPLOYMENT, SUBJECT);
+        MeetingCreateOutcomeStore.OutcomeRecord terminalFailure =
+                new MeetingCreateOutcomeStore.OutcomeRecord(
+                        scope,
+                        request.idempotencyKey(),
+                        request.canonicalRequestDigest(),
+                        MeetingCreateOutcome.failure(new MeetingCreateFailure(
+                                OwnedMeetingCreationUnitOfWork.ErrorCode.RESERVATION_EXPIRED,
+                                false)));
+        assertEquals(MeetingCreateOutcomeStore.ReservationStatus.ACQUIRED,
+                new JdbcMeetingCreateOutcomeStore(
+                        dataSource, Clock.fixed(BIND_AT.minusSeconds(1), ZoneOffset.UTC))
+                        .reserve(terminalFailure).status());
+
+        var first = failure(unitOfWork(dataSource, BIND_CLOCK).create(request));
+        var afterRestart = failure(
+                unitOfWork(dataSource, BIND_CLOCK.plusSeconds(30)).create(request));
+        var digestConflict = failure(unitOfWork(dataSource, BIND_CLOCK).create(request(
+                reserve, "meeting-failure-replay", "session-failure-replay",
+                "key-failure-replay", "different-digest")));
+
+        assertEquals(OwnedMeetingCreationUnitOfWork.ErrorCode.RESERVATION_EXPIRED,
+                first.code());
+        assertEquals(first, afterRestart);
+        assertEquals(OwnedMeetingCreationUnitOfWork.ErrorCode.IDEMPOTENCY_CONFLICT,
+                digestConflict.code());
+        try (Connection connection = dataSource.getConnection()) {
+            assertEquals(1, queryCount(connection, """
+                    SELECT count(*) FROM usage_reservation
+                     WHERE reservation_id = 'reservation-failure-replay'
+                       AND bound_meeting_id IS NULL AND bound_at IS NULL AND version = 0
+                    """));
+            assertEquals(0, queryCount(connection,
+                    "SELECT count(*) FROM meeting WHERE meeting_id = 'meeting-failure-replay'"));
+            assertEquals(0, queryCount(connection,
+                    "SELECT count(*) FROM outbox_event WHERE aggregate_id = 'meeting-failure-replay'"));
+            assertEquals(1, queryCount(connection, """
+                    SELECT count(*) FROM idempotency_record
+                     WHERE subject_scope = ? AND idempotency_key = 'key-failure-replay'
+                    """, scope));
+        }
+    }
+
+    @Test
+    void corruptOutcomeReturnsInternalBeforeBindingOrCreatingBusinessFacts()
+            throws Exception {
+        UsageOperationResult reserve = insertReserve(
+                "corrupt-outcome", "meeting-corrupt-outcome", BIND_AT.plusSeconds(60));
+        var request = request(
+                reserve, "meeting-corrupt-outcome", "session-corrupt-outcome",
+                "key-corrupt-outcome", "digest-corrupt-outcome");
+        String scope = IdempotencyScopeCodec.meetingCreate(DEPLOYMENT, SUBJECT);
+        MeetingCreateOutcomeStore.OutcomeRecord terminalFailure =
+                new MeetingCreateOutcomeStore.OutcomeRecord(
+                        scope,
+                        request.idempotencyKey(),
+                        request.canonicalRequestDigest(),
+                        MeetingCreateOutcome.failure(new MeetingCreateFailure(
+                                OwnedMeetingCreationUnitOfWork.ErrorCode.RESERVATION_EXPIRED,
+                                false)));
+        assertEquals(MeetingCreateOutcomeStore.ReservationStatus.ACQUIRED,
+                new JdbcMeetingCreateOutcomeStore(
+                        dataSource, Clock.fixed(BIND_AT.minusSeconds(1), ZoneOffset.UTC))
+                        .reserve(terminalFailure).status());
+
+        // 失败 Outcome 的合法状态是 409；人为制造 status/body 不一致，冻结损坏
+        // 持久事实从 Store 到工作单元的 fail-closed 传播边界。
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement("""
+                     UPDATE idempotency_record
+                        SET response_status = 200
+                      WHERE subject_scope = ? AND idempotency_key = ?
+                     """)) {
+            statement.setString(1, scope);
+            statement.setString(2, request.idempotencyKey());
+            assertEquals(1, statement.executeUpdate());
+        }
+
+        var result = failure(unitOfWork(dataSource, BIND_CLOCK).create(request));
+        assertEquals(OwnedMeetingCreationUnitOfWork.ErrorCode.INTERNAL, result.code());
+        assertFalse(result.retryable());
+
+        try (Connection connection = dataSource.getConnection()) {
+            assertEquals(1, queryCount(connection, """
+                    SELECT count(*) FROM usage_reservation
+                     WHERE reservation_id = 'reservation-corrupt-outcome'
+                       AND bound_meeting_id IS NULL AND bound_at IS NULL AND version = 0
+                    """));
+            assertEquals(0, queryCount(connection, """
+                    SELECT count(*) FROM meeting
+                     WHERE meeting_id = 'meeting-corrupt-outcome'
+                    """));
+            assertEquals(0, queryCount(connection, """
+                    SELECT count(*) FROM outbox_event
+                     WHERE aggregate_id = 'meeting-corrupt-outcome'
+                    """));
+            assertEquals(1, queryCount(connection, """
+                    SELECT count(*) FROM idempotency_record
+                     WHERE subject_scope = ? AND idempotency_key = 'key-corrupt-outcome'
+                    """, scope));
         }
     }
 

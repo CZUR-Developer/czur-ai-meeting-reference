@@ -3,7 +3,8 @@ package com.czur.reference.application.persistence.jdbc;
 import com.czur.reference.application.command.MeetingCommandEventFactory;
 import com.czur.reference.application.command.MeetingCommandResult;
 import com.czur.reference.application.port.IdempotencyScopeCodec;
-import com.czur.reference.application.port.IdempotencyStore;
+import com.czur.reference.application.port.MeetingCreateOutcome;
+import com.czur.reference.application.port.MeetingCreateOutcomeStore;
 import com.czur.reference.application.port.OutboxStore;
 import com.czur.reference.application.port.OwnedMeetingCreationUnitOfWork;
 import com.czur.reference.application.port.entitlement.AuthorizedProfileSnapshot;
@@ -31,10 +32,11 @@ import java.util.logging.Logger;
  * 基于 PostgreSQL 单连接事务的 owned 会议原子创建工作单元。
  *
  * <p>本实现只消费已经完成首次 reserve 的稳定结果，不调用身份 Provider、权益
- * Provider 或其它外部系统。每次首次创建在同一个 JDBC 事务中完成会议命令幂等
- * 预占、Reservation bind、owned Meeting 插入和 {@code MeetingCreated} Outbox
+ * Provider 或其它外部系统。每次首次创建在同一个 JDBC 事务中完成成功 Outcome
+ * 争抢、Reservation bind、owned Meeting 插入和 {@code MeetingCreated} Outbox
  * 追加；提交前的任一确定失败都会显式回滚，因此不会留下半绑定 Reservation、
- * 孤立幂等记录或缺少事件的会议。</p>
+ * 孤立成功 Outcome 或缺少事件的会议。本工作单元本身不持久化失败 Outcome；
+ * 它只会在产生业务副作用前读取并重放上层已经持久化的确定失败。</p>
  *
  * <p>事务在锁定 Reservation 后只读取一次注入的 {@link Clock}，并截断到
  * PostgreSQL {@code timestamptz} 的微秒精度。同一个 {@code bindAt} 同时写入
@@ -86,11 +88,11 @@ public final class JdbcOwnedMeetingCreationUnitOfWork
             transactionStarted = true;
 
             phase = Phase.IDEMPOTENCY_READ;
-            Optional<IdempotencyStore.IdempotencyRecord> previous =
-                    JdbcIdempotencyStore.find(
+            Optional<MeetingCreateOutcomeStore.OutcomeRecord> previous =
+                    JdbcMeetingCreateOutcomeStore.find(
                             connection, meetingScope, request.idempotencyKey());
             if (previous.isPresent()) {
-                Result replay = classifyIdempotency(previous.get(), request);
+                Result replay = classifyOutcome(previous.get(), request);
                 transactionResolution.rollback(connection);
                 return replay;
             }
@@ -111,10 +113,10 @@ public final class JdbcOwnedMeetingCreationUnitOfWork
 
             // 行锁等待期间同 key 的另一事务可能已经提交；锁后必须再次读取。
             phase = Phase.IDEMPOTENCY_READ;
-            previous = JdbcIdempotencyStore.find(
+            previous = JdbcMeetingCreateOutcomeStore.find(
                     connection, meetingScope, request.idempotencyKey());
             if (previous.isPresent()) {
-                Result replay = classifyIdempotency(previous.get(), request);
+                Result replay = classifyOutcome(previous.get(), request);
                 transactionResolution.rollback(connection);
                 return replay;
             }
@@ -160,18 +162,19 @@ public final class JdbcOwnedMeetingCreationUnitOfWork
                     bindAt);
             MeetingCommandResult created = new MeetingCommandResult(
                     MeetingCommandResult.Operation.CREATED, aggregate.snapshot());
-            IdempotencyStore.IdempotencyRecord candidate =
-                    new IdempotencyStore.IdempotencyRecord(
+            MeetingCreateOutcomeStore.OutcomeRecord candidate =
+                    new MeetingCreateOutcomeStore.OutcomeRecord(
                             meetingScope,
                             request.idempotencyKey(),
                             request.canonicalRequestDigest(),
-                            created);
+                            MeetingCreateOutcome.success(created));
 
-            phase = Phase.IDEMPOTENCY_RESERVE;
-            IdempotencyStore.Reservation idempotency =
-                    JdbcIdempotencyStore.reserve(connection, candidate, bindAt);
-            if (idempotency.status() != IdempotencyStore.ReservationStatus.ACQUIRED) {
-                Result replay = classifyIdempotency(idempotency.record(), request);
+            phase = Phase.OUTCOME_RESERVE;
+            MeetingCreateOutcomeStore.Reservation outcomeReservation =
+                    JdbcMeetingCreateOutcomeStore.reserve(connection, candidate, bindAt);
+            if (outcomeReservation.status()
+                    != MeetingCreateOutcomeStore.ReservationStatus.ACQUIRED) {
+                Result replay = classifyOutcome(outcomeReservation.record(), request);
                 transactionResolution.rollback(connection);
                 return replay;
             }
@@ -369,13 +372,19 @@ public final class JdbcOwnedMeetingCreationUnitOfWork
                 && current.cancellationReasonCode() == null;
     }
 
-    private static Result classifyIdempotency(
-            IdempotencyStore.IdempotencyRecord record,
+    private static Result classifyOutcome(
+            MeetingCreateOutcomeStore.OutcomeRecord record,
             CreateRequest request) {
         if (!sameDigest(record.requestDigest(), request.canonicalRequestDigest())) {
             return failure(ErrorCode.IDEMPOTENCY_CONFLICT, false);
         }
-        MeetingCommandResult result = record.result();
+        if (record.outcome() instanceof MeetingCreateOutcome.Failure stableFailure) {
+            LOGGER.log(Level.FINE,
+                    "owned 会议创建工作单元命中稳定失败重放 result=FAILURE_REPLAYED");
+            return failure(stableFailure.failure().code(), false);
+        }
+        MeetingCommandResult result =
+                ((MeetingCreateOutcome.Success) record.outcome()).result();
         MeetingAggregate.MeetingSnapshot meeting = result.meeting();
         if (result.operation() != MeetingCommandResult.Operation.CREATED
                 || !request.deploymentScope().equals(meeting.deploymentScope())
@@ -516,7 +525,7 @@ public final class JdbcOwnedMeetingCreationUnitOfWork
         RESERVATION_LOCK,
         RESERVE_RESULT_READ,
         CLOCK_READ,
-        IDEMPOTENCY_RESERVE,
+        OUTCOME_RESERVE,
         RESERVATION_BIND,
         MEETING_INSERT,
         OUTBOX_APPEND,
