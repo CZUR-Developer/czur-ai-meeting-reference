@@ -69,6 +69,16 @@ final class JdbcUsageReservationStore {
              FOR UPDATE
             """;
 
+    private static final String FIND_RESERVATION_SQL = """
+            SELECT reservation_id, deployment_scope, subject_scope, grant_id,
+                   expected_meeting_id, bound_meeting_id, bound_at, usage_unit,
+                   reserved_amount, actual_amount, created_at, expires_at, status,
+                   version, committed_at, cancelled_at, cancellation_reason_code
+              FROM usage_reservation
+             WHERE deployment_scope = ? AND subject_scope = ? AND reservation_id = ?
+               AND record_format = 'V3'
+            """;
+
     private static final String COMMIT_SQL = """
             UPDATE usage_reservation
                SET status = 'COMMITTED', actual_amount = ?, committed_at = ?,
@@ -193,6 +203,29 @@ final class JdbcUsageReservationStore {
         return lockReservationForOwnedCreation(
                 connection, deploymentScope, subjectScope, reservationId)
                 .map(LockedReservation::reservation);
+    }
+
+    /**
+     * 在完整部署、主体和 Reservation ID 范围内非锁定读取 V3 事实。
+     *
+     * <p>本原语只执行 {@code SELECT}，不使用 {@code FOR UPDATE}，也不
+     * 获取、提交、回滚或关闭连接。它为事后恢复核对提供当前快照；
+     * 其它范围和历史格式统一表现为不存在，避免跨主体探测。</p>
+     */
+    static Optional<UsageReservation> findReservation(
+            Connection connection,
+            String deploymentScope,
+            String subjectScope,
+            String reservationId) throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        try (PreparedStatement statement = connection.prepareStatement(FIND_RESERVATION_SQL)) {
+            statement.setString(1, deploymentScope);
+            statement.setString(2, subjectScope);
+            statement.setString(3, reservationId);
+            try (ResultSet rows = statement.executeQuery()) {
+                return rows.next() ? Optional.of(readReservation(rows)) : Optional.empty();
+            }
+        }
     }
 
     /**

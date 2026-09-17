@@ -325,7 +325,8 @@ public final class JdbcOwnedMeetingCreationUnitOfWork
         if (current.version() != firstReserved.version()) {
             return failure(ErrorCode.VERSION_CONFLICT, false);
         }
-        if (!sameInitialReservationFacts(current, firstReserved)) {
+        if (!OwnedMeetingCreationFacts.sameInitialReservationFacts(
+                current, firstReserved)) {
             return failure(ErrorCode.INTERNAL, false);
         }
         return null;
@@ -350,26 +351,6 @@ public final class JdbcOwnedMeetingCreationUnitOfWork
             return failure(ErrorCode.RESERVATION_STATE_CONFLICT, true);
         }
         return null;
-    }
-
-    private static boolean sameInitialReservationFacts(
-            UsageReservation current,
-            UsageReservation firstReserved) {
-        return current.reservationId().equals(firstReserved.reservationId())
-                && current.deploymentScope().equals(firstReserved.deploymentScope())
-                && current.subjectScope().equals(firstReserved.subjectScope())
-                && current.grantId().equals(firstReserved.grantId())
-                && current.expectedMeetingId().equals(firstReserved.expectedMeetingId())
-                && current.reservedUsage().equals(firstReserved.reservedUsage())
-                && samePersistentInstant(current.createdAt(), firstReserved.createdAt())
-                && samePersistentInstant(current.expiresAt(), firstReserved.expiresAt())
-                && current.state() == firstReserved.state()
-                && current.boundMeetingId() == null
-                && current.boundAt() == null
-                && current.actualUsage() == null
-                && current.committedAt() == null
-                && current.cancelledAt() == null
-                && current.cancellationReasonCode() == null;
     }
 
     private static Result classifyOutcome(
@@ -400,11 +381,6 @@ public final class JdbcOwnedMeetingCreationUnitOfWork
         return MessageDigest.isEqual(
                 left.getBytes(StandardCharsets.UTF_8),
                 right.getBytes(StandardCharsets.UTF_8));
-    }
-
-    private static boolean samePersistentInstant(Instant left, Instant right) {
-        return left.truncatedTo(ChronoUnit.MICROS)
-                .equals(right.truncatedTo(ChronoUnit.MICROS));
     }
 
     private static Result failAndRollback(
