@@ -28,7 +28,12 @@ BEGIN
             ADD CONSTRAINT meeting_event_envelope_pair_ck
             CHECK (
                 (spec_version IS NULL AND stream_id IS NULL)
-                OR (length(btrim(spec_version)) > 0 AND length(btrim(stream_id)) > 0)
+                OR (
+                    spec_version IS NOT NULL
+                    AND stream_id IS NOT NULL
+                    AND length(btrim(spec_version)) > 0
+                    AND length(btrim(stream_id)) > 0
+                )
             );
     END IF;
 END
