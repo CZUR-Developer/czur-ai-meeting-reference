@@ -20,7 +20,7 @@ import java.util.logging.Logger;
  * PostgreSQL 数据库运行时边界。
  *
  * <p>启动时创建唯一的 HikariCP 连接池，执行只读 {@code SELECT 1} 探针并检查
- * {@code schema_migrations} 中的 V001～V005。任一检查失败都会关闭已经创建的池并
+ * {@code schema_migrations} 中的 V001～V006。任一检查失败都会关闭已经创建的池并
  * 抛出 {@link DatabaseStartupException}；本类没有 InMemory fallback，也不会自动
  * 执行迁移。成功启动后，所有 JDBC Repository、会议工作单元和提交后的 Outbox
  * Worker 端口都共享同一个 {@link DataSource}。</p>
@@ -34,14 +34,15 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
     private static final String MIGRATION_QUERY = """
             SELECT version
               FROM schema_migrations
-             WHERE version IN (?, ?, ?, ?, ?, ?, ?)
+             WHERE version IN (?, ?, ?, ?, ?, ?, ?, ?)
             """;
     private static final Set<String> REQUIRED_MIGRATIONS = Set.of(
             "V001__initial_schema",
             "V002__outbox_lease_fencing",
             "V003__identity_entitlement",
             "V004__meeting_event_envelope",
-            "V005__meeting_finalization_fact");
+            "V005__meeting_finalization_fact",
+            "V006__meeting_read_model");
 
     private final DatabaseRuntimeConfig config;
     private final HikariDataSource dataSource;
@@ -135,10 +136,11 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
                 migrations.setString(3, "V003__identity_entitlement");
                 migrations.setString(4, "V004__meeting_event_envelope");
                 migrations.setString(5, "V005__meeting_finalization_fact");
+                migrations.setString(6, "V006__meeting_read_model");
                 // P2-T09 以前的开发脚本可能只把 V001/V002 登记为短版本；继续
                 // 识别这两个已存在别名，但新迁移只接受完整不可歧义的文件名。
-                migrations.setString(6, "V001");
-                migrations.setString(7, "V002");
+                migrations.setString(7, "V001");
+                migrations.setString(8, "V002");
                 try (ResultSet rows = migrations.executeQuery()) {
                     while (rows.next()) {
                         String version = rows.getString(1);

@@ -27,13 +27,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 显式 PostgreSQL 运行时门禁。
  *
  * <p>默认跳过，只有调用方显式提供测试数据库 URL、账号和密码时才启动真实
- * HikariCP。目标数据库必须预先执行并登记 V001～V005；测试不自动迁移、不清理
+ * HikariCP。目标数据库必须预先执行并登记 V001～V006；测试不自动迁移、不清理
  * 共享数据库，也不在运行失败时静默切换到内存实现。</p>
  */
 @EnabledIfEnvironmentVariable(named = "REFERENCE_TEST_DATABASE_URL", matches = ".+")
 class JdbcDatabaseRuntimeIntegrationTest {
     @Test
-    void refusesSchemaThatHasNotRegisteredV005() throws Exception {
+    void refusesSchemaThatHasNotRegisteredV006() throws Exception {
         String url = System.getenv("REFERENCE_TEST_DATABASE_URL");
         String user = System.getenv("REFERENCE_TEST_DATABASE_USER");
         String password = System.getenv("REFERENCE_TEST_DATABASE_PASSWORD");
@@ -41,7 +41,7 @@ class JdbcDatabaseRuntimeIntegrationTest {
             throw new IllegalStateException(
                     "显式 PostgreSQL 集成测试必须同时设置 REFERENCE_TEST_DATABASE_USER/PASSWORD");
         }
-        String schema = "runtime_missing_v005_"
+        String schema = "runtime_missing_v006_"
                 + UUID.randomUUID().toString().replace("-", "");
         try (Connection admin = DriverManager.getConnection(url, user, password);
              Statement statement = admin.createStatement()) {
@@ -51,7 +51,8 @@ class JdbcDatabaseRuntimeIntegrationTest {
             statement.execute("INSERT INTO " + quoteIdentifier(schema)
                     + ".schema_migrations(version) VALUES "
                     + "('V001__initial_schema'), ('V002__outbox_lease_fencing'), "
-                    + "('V003__identity_entitlement'), ('V004__meeting_event_envelope')");
+                    + "('V003__identity_entitlement'), ('V004__meeting_event_envelope'), "
+                    + "('V005__meeting_finalization_fact')");
         }
         try {
             String scopedUrl = url + (url.contains("?") ? "&" : "?")
@@ -63,7 +64,7 @@ class JdbcDatabaseRuntimeIntegrationTest {
                             Duration.ofSeconds(3), 2, 1)));
             assertEquals(DatabaseReadiness.Status.MIGRATION_MISSING,
                     failure.readiness().status());
-            assertEquals(java.util.Set.of("V005__meeting_finalization_fact"),
+            assertEquals(java.util.Set.of("V006__meeting_read_model"),
                     failure.readiness().missingMigrations());
         } finally {
             try (Connection admin = DriverManager.getConnection(url, user, password);

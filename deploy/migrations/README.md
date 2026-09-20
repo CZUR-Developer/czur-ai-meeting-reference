@@ -30,6 +30,13 @@ Outbox，以及插件调用诊断。它不包含终端用户密码、模型密�
 Schema 尚未发布，V005 只验证 V001→最新版本的全新数据库，不为未发布的中间
 开发数据提供回填规则。
 
+`V006__meeting_read_model.sql` 在 `meeting` 上增加默认值为 `NOT_STARTED` 的
+`manifest_state`，并分别约束可持久化的会议生命周期和 Manifest 状态。协议解码
+哨兵 `MeetingState.UNKNOWN` 不允许入库。该迁移还建立
+`(deployment_scope, subject_scope, created_at DESC, meeting_id DESC)` 索引，供后续
+认证查询适配器按所有者隔离并进行稳定的 keyset 分页；V006 本身不实现分页 Token、
+查询端口或 Manifest 内容存储。
+
 V003 必须允许在“Schema 已提交但版本登记失败”后安全重跑。执行约束前会先
 检查历史 Reservation 状态，发现未知状态时整事务失败；不要绕过该检查手工登记
 版本。没有 PostgreSQL 时可以先运行静态门禁：
