@@ -15,6 +15,13 @@ Outbox，以及插件调用诊断。它不包含终端用户密码、模型密�
 `LEGACY_V1`，历史会议标记为 `LEGACY_UNOWNED`；迁移不会猜测真实用户、Grant，
 也不会从历史多条用量中选择主 Reservation。
 
+`V004__meeting_event_envelope.sql` 为规范事件增加 `spec_version`、`stream_id` 和
+`canonical_payload`。三个字段必须同时为空或同时为非空；三者为空只表示 V001
+历史事件，JDBC 读取会 fail-closed，不会猜测归属。新事件在 `canonical_payload`
+保存上游已规范化的 JSON 原文，并由数据库约束验证其解析结果与 `payload` JSONB
+一致：前者用于精确幂等比较和原样返回，后者继续用于 JSON 查询与索引。V004 尚未
+发布；进入共享环境后不得原地修改，应按后续版本迁移规则追加新文件。
+
 V003 必须允许在“Schema 已提交但版本登记失败”后安全重跑。执行约束前会先
 检查历史 Reservation 状态，发现未知状态时整事务失败；不要绕过该检查手工登记
 版本。没有 PostgreSQL 时可以先运行静态门禁：

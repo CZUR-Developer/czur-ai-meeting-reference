@@ -168,6 +168,16 @@ class MeetingQueryAndDeletionContractTest {
     }
 
     @Test
+    void eventEnvelopeNormalizesTimestampToDatabaseMicrosecondPrecision() {
+        EventLog event = new EventLog(
+                "0.1", MEETING, "stream-" + MEETING, "event-microsecond", 1,
+                Instant.parse("2026-09-20T01:00:00.123456789Z"),
+                "transcriptUpsert", BODY);
+
+        assertEquals(Instant.parse("2026-09-20T01:00:00.123456Z"), event.emittedAt());
+    }
+
+    @Test
     void eventRequestFreezesAfterSequenceAndLimitContract() {
         MeetingEventLogPort.Request request = new MeetingEventLogPort.Request(
                 context(), MEETING, 42, 200);

@@ -23,10 +23,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * V004 事件 envelope 元数据约束的真实 PostgreSQL 门禁。
  *
- * <p>V004 允许 V001 的历史事件继续保持两列元数据都为 {@code NULL}，但新事件
- * 必须同时写入非空的 {@code spec_version} 和 {@code stream_id}。本测试专门覆盖
- * PostgreSQL {@code CHECK} 约束对 {@code NULL} 的三值逻辑，防止“只有一列为空”
- * 的半迁移数据被错误接受。</p>
+ * <p>V004 允许 V001 历史事件继续保持三个 envelope 字段都为 {@code NULL}，但
+ * 新事件必须同时写入非空的 {@code spec_version}、{@code stream_id} 和
+ * {@code canonical_payload}，并保证规范原文解析后与 JSONB payload 相等。本测试
+ * 专门覆盖 PostgreSQL {@code CHECK} 对 {@code NULL} 的三值逻辑，防止部分迁移
+ * 或原文/JSONB 不一致的数据被接受。</p>
  *
  * <p>测试只在显式设置 {@code REFERENCE_TEST_DATABASE_URL} 时运行。每次测试使用
  * 一个随机 schema，不访问调用方的 public schema，也不启动、删除或修改 Docker
@@ -85,52 +86,58 @@ class JdbcV004MigrationIntegrationTest {
 
         assertTrue(columnExists("meeting_event", "spec_version"));
         assertTrue(columnExists("meeting_event", "stream_id"));
+        assertTrue(columnExists("meeting_event", "canonical_payload"));
         assertNotNull(queryText("""
                 SELECT pg_get_constraintdef(oid)
                   FROM pg_constraint
                  WHERE conrelid = 'meeting_event'::regclass
-                   AND conname = 'meeting_event_envelope_pair_ck'
+                   AND conname = 'meeting_event_envelope_group_ck'
                 """));
 
-        // 历史事件保持两列 NULL；这是 V004 明确允许的兼容形态。
+        // 历史事件保持三列 NULL；这是 V004 明确允许的兼容形态。
         assertEquals(1L, queryLong("""
                 SELECT count(*) FROM meeting_event
                  WHERE event_id = 'v004-history'
                    AND spec_version IS NULL AND stream_id IS NULL
+                   AND canonical_payload IS NULL
                 """));
 
         executeUpdate("""
                 INSERT INTO meeting_event (
                     meeting_id, event_sequence, event_id, event_type, payload,
-                    occurred_at, spec_version, stream_id)
+                    canonical_payload, occurred_at, spec_version, stream_id)
                 VALUES (
-                    'v004-meeting', 2, 'v004-canonical', 'UPDATED', '{}'::jsonb,
-                    CURRENT_TIMESTAMP, '1.0', 'realtime')
+                    'v004-meeting', 2, 'v004-canonical', 'UPDATED', '{"a":1}'::jsonb,
+                    '{"a":1}', CURRENT_TIMESTAMP, '1.0', 'realtime')
                 """);
 
-        assertRejectedHalfEnvelope("v004-half-stream", null, "stream-only");
-        assertRejectedHalfEnvelope("v004-half-spec", "1.0", null);
-        assertRejectedHalfEnvelope("v004-blank-stream", "1.0", "   ");
-        assertRejectedHalfEnvelope("v004-blank-spec", "   ", "realtime");
+        assertRejectedEnvelope("v004-half-stream", null, "stream-only", "{}");
+        assertRejectedEnvelope("v004-half-spec", "1.0", null, "{}");
+        assertRejectedEnvelope("v004-missing-payload", "1.0", "realtime", null);
+        assertRejectedEnvelope("v004-blank-stream", "1.0", "   ", "{}");
+        assertRejectedEnvelope("v004-blank-spec", "   ", "realtime", "{}");
+        assertRejectedEnvelope("v004-blank-payload", "1.0", "realtime", "   ");
+        assertRejectedEnvelope("v004-mismatch", "1.0", "realtime", "{\"other\":true}");
 
         // V004 需要可安全重跑；约束和字段不能因重复执行而报错或重复创建。
         applyMigration("V004__meeting_event_envelope.sql");
     }
 
-    private void assertRejectedHalfEnvelope(
-            String eventId, String specVersion, String streamId) {
+    private void assertRejectedEnvelope(
+            String eventId, String specVersion, String streamId, String canonicalPayload) {
         String spec = sqlLiteral(specVersion);
         String stream = sqlLiteral(streamId);
+        String canonical = sqlLiteral(canonicalPayload);
         SQLException failure = assertThrows(SQLException.class, () -> executeUpdate("""
                 INSERT INTO meeting_event (
                     meeting_id, event_sequence, event_id, event_type, payload,
-                    occurred_at, spec_version, stream_id)
+                    canonical_payload, occurred_at, spec_version, stream_id)
                 VALUES (
                     'v004-meeting', 10, '%s', 'INVALID', '{}'::jsonb,
-                    CURRENT_TIMESTAMP, %s, %s)
-                """.formatted(eventId, spec, stream)));
+                    %s, CURRENT_TIMESTAMP, %s, %s)
+                """.formatted(eventId, canonical, spec, stream)));
         assertEquals("23514", failure.getSQLState(),
-                "半迁移 envelope 必须由 CHECK 约束拒绝");
+                "部分 envelope 或正文不一致必须由 CHECK 约束拒绝");
     }
 
     private void applyMigration(String filename) throws Exception {
