@@ -46,7 +46,8 @@ class MeetingRecoveryLookupContractTest {
                         MeetingCommandResult.Operation.CREATED, ownedSnapshot()));
         MeetingCreateOutcome failure = MeetingCreateOutcome.failure(
                 new MeetingCreateFailure(
-                        OwnedMeetingCreationUnitOfWork.ErrorCode.INTERNAL, false));
+                        OwnedMeetingCreationUnitOfWork.ErrorCode.RESERVATION_EXPIRED,
+                        false));
         List<MeetingRecoveryLookup.Result> results = List.of(
                 new MeetingRecoveryLookup.NotFound(),
                 new MeetingRecoveryLookup.Replayed(success),
@@ -110,7 +111,7 @@ class MeetingRecoveryLookupContractTest {
                 new MeetingRecoveryLookup.Replayed(success),
                 new MeetingRecoveryLookup.Replayed(MeetingCreateOutcome.failure(
                         new MeetingCreateFailure(
-                                OwnedMeetingCreationUnitOfWork.ErrorCode.INTERNAL,
+                                OwnedMeetingCreationUnitOfWork.ErrorCode.RESERVATION_EXPIRED,
                                 false))),
                 new MeetingRecoveryLookup.Conflict(),
                 new MeetingRecoveryLookup.Inconsistent(

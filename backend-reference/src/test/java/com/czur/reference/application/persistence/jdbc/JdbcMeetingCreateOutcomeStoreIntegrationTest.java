@@ -100,7 +100,7 @@ class JdbcMeetingCreateOutcomeStoreIntegrationTest {
         Reservation failureReplay = restarted.reserve(new OutcomeRecord(
                 SCOPE, "failure", "digest-failure",
                 MeetingCreateOutcome.failure(new MeetingCreateFailure(
-                        ErrorCode.INTERNAL, false))));
+                        ErrorCode.VERSION_CONFLICT, false))));
         assertEquals(ReservationStatus.REPLAY, failureReplay.status());
         assertEquals(failure.outcome(), failureReplay.record().outcome(),
                 "相同摘要不能用新失败码覆盖首次终态");

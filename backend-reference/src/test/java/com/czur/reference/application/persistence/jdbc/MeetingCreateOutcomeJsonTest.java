@@ -87,7 +87,7 @@ class MeetingCreateOutcomeJsonTest {
     @Test
     void failureUsesFixedVersionThreeFieldsAndRoundTrips() {
         MeetingCreateOutcome failure = MeetingCreateOutcome.failure(
-                new MeetingCreateFailure(ErrorCode.INTERNAL, false));
+                new MeetingCreateFailure(ErrorCode.RESERVATION_EXPIRED, false));
 
         String encoded = MeetingCreateOutcomeJson.encode(failure);
         MeetingCreateOutcome.Failure decoded = assertInstanceOf(
@@ -96,8 +96,10 @@ class MeetingCreateOutcomeJsonTest {
 
         assertEquals("{\"schemaVersion\":3,\"operation\":\"MEETING_CREATE\","
                 + "\"outcome\":\"FAILURE\","
-                + "\"errorCode\":\"INTERNAL\",\"retryable\":false}", encoded);
-        assertEquals(new MeetingCreateFailure(ErrorCode.INTERNAL, false), decoded.failure());
+                + "\"errorCode\":\"RESERVATION_EXPIRED\",\"retryable\":false}",
+                encoded);
+        assertEquals(new MeetingCreateFailure(ErrorCode.RESERVATION_EXPIRED, false),
+                decoded.failure());
     }
 
     @Test
@@ -108,22 +110,27 @@ class MeetingCreateOutcomeJsonTest {
                 + "\"errorCode\":\"";
         for (String invalid : new String[]{
                 prefix + "STORAGE_UNAVAILABLE\",\"retryable\":false}",
-                prefix + "INTERNAL\",\"retryable\":true}",
-                prefix + "INTERNAL\",\"retryable\":false,\"extra\":\""
+                prefix + "INTERNAL\",\"retryable\":false}",
+                prefix + "RESERVATION_EXPIRED\",\"retryable\":true}",
+                prefix + "RESERVATION_EXPIRED\",\"retryable\":false,\"extra\":\""
                         + attacker + "\"}",
                 "{\"schemaVersion\":3,\"operation\":\"MEETING_STOP\","
-                        + "\"outcome\":\"FAILURE\",\"errorCode\":\"INTERNAL\","
+                        + "\"outcome\":\"FAILURE\","
+                        + "\"errorCode\":\"RESERVATION_EXPIRED\","
                         + "\"retryable\":false}",
                 "{\"schemaVersion\":3,\"outcome\":\"FAILURE\","
-                        + "\"errorCode\":\"INTERNAL\",\"retryable\":false}",
-                prefix + "INTERNAL\",\"errorCode\":\"INTERNAL\","
+                        + "\"errorCode\":\"RESERVATION_EXPIRED\","
+                        + "\"retryable\":false}",
+                prefix + "RESERVATION_EXPIRED\","
+                        + "\"errorCode\":\"RESERVATION_EXPIRED\","
                         + "\"retryable\":false}",
                 "{\"schemaVersion\":4,\"operation\":\"MEETING_CREATE\","
                         + "\"outcome\":\"FAILURE\","
-                        + "\"errorCode\":\"INTERNAL\",\"retryable\":false}",
+                        + "\"errorCode\":\"RESERVATION_EXPIRED\","
+                        + "\"retryable\":false}",
                 "{\"schemaVersion\":3,\"operation\":\"MEETING_CREATE\","
                         + "\"outcome\":\"FAILURE\","
-                        + "\"errorCode\":\"INTERNAL\"}"
+                        + "\"errorCode\":\"RESERVATION_EXPIRED\"}"
         }) {
             IllegalArgumentException error = assertThrows(
                     IllegalArgumentException.class,
@@ -138,14 +145,14 @@ class MeetingCreateOutcomeJsonTest {
     void failureRejectsTrailingCommaAndNonCanonicalSchemaVersionNumbers() {
         // 独立 Review 发现的两个输入：对象尾逗号和带前导零的整数。
         assertMalformed("{\"schemaVersion\":3,\"operation\":\"MEETING_CREATE\","
-                + "\"outcome\":\"FAILURE\",\"errorCode\":\"INTERNAL\","
+                + "\"outcome\":\"FAILURE\",\"errorCode\":\"RESERVATION_EXPIRED\","
                 + "\"retryable\":false,}");
         assertMalformed(failureJson("03"));
 
         // 相邻语法边界：JSON 子解析器不得接受双逗号、其它前导零、符号、
         // 小数或指数形式作为 schemaVersion 整数。
         assertMalformed("{\"schemaVersion\":3,,\"operation\":\"MEETING_CREATE\","
-                + "\"outcome\":\"FAILURE\",\"errorCode\":\"INTERNAL\","
+                + "\"outcome\":\"FAILURE\",\"errorCode\":\"RESERVATION_EXPIRED\","
                 + "\"retryable\":false}");
         for (String invalidVersion : new String[]{
                 "00", "+3", "-3", "3.0", "3e0", "3E+0"
@@ -158,7 +165,7 @@ class MeetingCreateOutcomeJsonTest {
         return "{\"schemaVersion\":" + schemaVersion
                 + ",\"operation\":\"MEETING_CREATE\""
                 + ",\"outcome\":\"FAILURE\""
-                + ",\"errorCode\":\"INTERNAL\",\"retryable\":false}";
+                + ",\"errorCode\":\"RESERVATION_EXPIRED\",\"retryable\":false}";
     }
 
     private static void assertMalformed(String invalid) {

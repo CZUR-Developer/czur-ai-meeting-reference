@@ -22,10 +22,11 @@ class MeetingCreateOutcomeContractTest {
     private static final Set<ErrorCode> FORBIDDEN = EnumSet.of(
             ErrorCode.IDEMPOTENCY_CONFLICT,
             ErrorCode.STORAGE_UNAVAILABLE,
-            ErrorCode.OUTCOME_UNKNOWN);
+            ErrorCode.OUTCOME_UNKNOWN,
+            ErrorCode.INTERNAL);
 
     @Test
-    void failureAcceptsOnlyNonRetryableDeterministicCodesIncludingInternal() {
+    void failureAcceptsOnlyNonRetryableDeterministicCodes() {
         for (ErrorCode code : ErrorCode.values()) {
             if (FORBIDDEN.contains(code)) {
                 assertThrows(IllegalArgumentException.class,
@@ -36,9 +37,9 @@ class MeetingCreateOutcomeContractTest {
         }
         assertThrows(IllegalArgumentException.class,
                 () -> new MeetingCreateFailure(ErrorCode.INTERNAL, true));
-        assertEquals(ErrorCode.INTERNAL,
-                new MeetingCreateFailure(ErrorCode.INTERNAL, false).code(),
-                "已确认回滚的 INTERNAL 属于允许持久化的确定失败");
+        assertThrows(IllegalArgumentException.class,
+                () -> new MeetingCreateFailure(ErrorCode.INTERNAL, false),
+                "INTERNAL 没有稳定业务语义，不得成为持久化创建失败");
     }
 
     @Test

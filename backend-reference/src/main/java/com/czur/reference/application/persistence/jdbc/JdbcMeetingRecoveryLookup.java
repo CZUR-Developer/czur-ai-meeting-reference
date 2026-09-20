@@ -12,10 +12,8 @@ import com.czur.reference.domain.meeting.MeetingState;
 import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.SQLException;
-import java.util.EnumSet;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -42,13 +40,6 @@ import java.util.logging.Logger;
 public final class JdbcMeetingRecoveryLookup implements MeetingRecoveryLookup {
     private static final Logger LOGGER = Logger.getLogger(
             JdbcMeetingRecoveryLookup.class.getName());
-    private static final Set<MeetingState> RECOVERABLE_CURRENT_STATES = EnumSet.of(
-            MeetingState.CREATED,
-            MeetingState.RUNNING,
-            MeetingState.STOPPING,
-            MeetingState.READY,
-            MeetingState.DELETED);
-
     private final DataSource dataSource;
     private final MeetingCreateReplayLookup replayLookup;
 
@@ -192,7 +183,11 @@ public final class JdbcMeetingRecoveryLookup implements MeetingRecoveryLookup {
             return inconsistent(InconsistencyReason.SUCCESS_OUTCOME_FACT_MISMATCH);
         }
         MeetingAggregate.MeetingSnapshot current = facts.meetingById().orElseThrow();
-        if (!RECOVERABLE_CURRENT_STATES.contains(current.state())
+        // UNKNOWN 只是公开协议解码时的占位哨兵，不是可持久化的会议生命周期事实。
+        // 除 UNKNOWN 外的每个枚举值都可能是创建交易成功后的合法演进状态，恢复查询
+        // 仍返回原始 CREATED Outcome，不用当前状态重建创建响应。状态放宽不会放宽
+        // 其它事实：下方仍严格校验 Meeting 不可变字段、Reservation 初始事实及绑定关系。
+        if (current.state() == MeetingState.UNKNOWN
                 || !sameMeetingImmutableFacts(current, created)) {
             return inconsistent(InconsistencyReason.SUCCESS_OUTCOME_FACT_MISMATCH);
         }

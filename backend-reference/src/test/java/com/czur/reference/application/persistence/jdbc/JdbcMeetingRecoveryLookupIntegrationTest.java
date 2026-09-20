@@ -95,12 +95,10 @@ class JdbcMeetingRecoveryLookupIntegrationTest {
     @Test
     void successReplaysOriginalCreatedOutcomeAcrossAllowedCurrentStates() throws Exception {
         CreatedScenario scenario = createMeeting("states");
-        for (MeetingState state : List.of(
-                MeetingState.CREATED,
-                MeetingState.RUNNING,
-                MeetingState.STOPPING,
-                MeetingState.READY,
-                MeetingState.DELETED)) {
+        for (MeetingState state : MeetingState.values()) {
+            if (state == MeetingState.UNKNOWN) {
+                continue;
+            }
             update("UPDATE meeting SET state=?, updated_at=? WHERE meeting_id=?",
                     state.name(), CREATE_AT.plusSeconds(state.ordinal() + 1),
                     scenario.request().meetingId());
@@ -119,10 +117,12 @@ class JdbcMeetingRecoveryLookupIntegrationTest {
         }
 
         update("UPDATE meeting SET state=?, updated_at=? WHERE meeting_id=?",
-                MeetingState.FINALIZING.name(), CREATE_AT.plusSeconds(120),
+                MeetingState.UNKNOWN.name(), CREATE_AT.plusSeconds(120),
                 scenario.request().meetingId());
+        TableCounts before = tableCounts();
         assertReason(MeetingRecoveryLookup.InconsistencyReason.SUCCESS_OUTCOME_FACT_MISMATCH,
                 lookup().lookup(scenario.request()));
+        assertEquals(before, tableCounts());
     }
 
     @Test
@@ -575,7 +575,8 @@ class JdbcMeetingRecoveryLookupIntegrationTest {
             OwnedMeetingCreationUnitOfWork.CreateRequest request) throws SQLException {
         MeetingCreateOutcome failure = MeetingCreateOutcome.failure(
                 new MeetingCreateFailure(
-                        OwnedMeetingCreationUnitOfWork.ErrorCode.INTERNAL, false));
+                        OwnedMeetingCreationUnitOfWork.ErrorCode.RESERVATION_EXPIRED,
+                        false));
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement("""
                      UPDATE idempotency_record
