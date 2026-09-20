@@ -6,6 +6,7 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.regex.Pattern;
 
 /**
  * 会议结果清单的最小完整表示。
@@ -16,16 +17,18 @@ import java.util.Objects;
  * 的 genTime、Profile 快照、时间范围、语言、Artifact 引用和降级告警。这里
  * 只保存协议字段，不保存模型厂商原始响应、会议正文或对象存储访问凭据。</p>
  *
- * <p>字段名称和约束与 {@code contracts/meeting-manifest.schema.json} 保持一致；
- * {@code genTime} 是结果 URL 上下文中的毫秒时间戳，-1 表示永不过期，且不把
- * 它序列化为 Manifest 正文中的额外业务字段。</p>
+ * <p>协议字段（{@code specVersion}、{@code meetingId}、嵌套的 {@code profile}、
+ * 可空 {@code title} 以及其余结果字段）与 {@code contracts/meeting-manifest.schema.json}
+ * 保持一致。{@code genTime} 是结果 URL 上下文中的毫秒时间戳，-1 表示永不过期；
+ * 它只属于查询上下文，不属于 Manifest 正文，序列化适配器不得把它写入结果清单。</p>
  */
 public record MeetingManifest(
+        String specVersion,
         String meetingId,
         long genTime,
         int manifestRevision,
-        String profileId,
-        int profileRevision,
+        Profile profile,
+        String title,
         ManifestStatus status,
         Instant startedAt,
         Instant endedAt,
@@ -35,14 +38,15 @@ public record MeetingManifest(
         List<Warning> warnings) {
 
     public MeetingManifest {
+        requireSpecVersion(specVersion);
         requireText("meetingId", meetingId);
         requireGenTime(genTime);
         if (manifestRevision < 1) {
             throw new IllegalArgumentException("manifestRevision must be positive");
         }
-        requireText("profileId", profileId);
-        if (profileRevision < 1) {
-            throw new IllegalArgumentException("profileRevision must be positive");
+        Objects.requireNonNull(profile, "profile");
+        if (title != null && title.length() > 256) {
+            throw new IllegalArgumentException("title must not exceed 256 characters");
         }
         Objects.requireNonNull(status, "status");
         Objects.requireNonNull(startedAt, "startedAt");
@@ -61,12 +65,43 @@ public record MeetingManifest(
     /** 诊断只显示清单规模和稳定版本，不输出会议正文、产物地址或告警文本。 */
     @Override
     public String toString() {
-        return "MeetingManifest[meetingId=redacted, genTime=" + genTime
+        return "MeetingManifest[specVersion=" + specVersion
+                + ", meetingId=redacted, genTime=" + genTime
                 + ", manifestRevision=" + manifestRevision
-                + ", profileId=redacted, profileRevision=" + profileRevision
+                + ", profile=" + profile
+                + ", titlePresent=" + (title != null)
                 + ", status=" + status
                 + ", artifactCount=" + artifacts.size()
                 + ", warningCount=" + warnings.size() + ']';
+    }
+
+    /**
+     * 兼容仍按扁平字段读取 Manifest 的旧应用层代码；该方法只是
+     * {@code profile.id} 的适配映射，不是协议字段，也不会改变嵌套 Profile 的
+     * canonical 表示。新代码应直接使用 {@link #profile()}。
+     */
+    @Deprecated
+    public String profileId() {
+        return profile.id();
+    }
+
+    /**
+     * 兼容旧应用层的扁平字段访问；该方法只是 {@code profile.revision} 的适配
+     * 映射，不是 Manifest Schema 的顶层字段。新代码应直接使用
+     * {@link Profile#revision()}。
+     */
+    @Deprecated
+    public int profileRevision() {
+        return profile.revision();
+    }
+
+    private static final Pattern SPEC_VERSION = Pattern.compile("^[0-9]+\\.[0-9]+$");
+
+    private static void requireSpecVersion(String specVersion) {
+        requireText("specVersion", specVersion);
+        if (!SPEC_VERSION.matcher(specVersion).matches()) {
+            throw new IllegalArgumentException("specVersion must match major.minor");
+        }
     }
 
     /** 结果 URL 的生成时间：非负毫秒时间戳，或 -1（永不过期）。 */
@@ -88,6 +123,21 @@ public record MeetingManifest(
     private static void requireText(String name, String value) {
         if (value == null || value.isBlank()) {
             throw new IllegalArgumentException(name + " must not be blank");
+        }
+    }
+
+    /** Manifest Schema 的规范 Profile 引用；id 与 revision 必须成对出现。 */
+    public record Profile(String id, int revision) {
+        public Profile {
+            requireText("profile.id", id);
+            if (revision < 1) {
+                throw new IllegalArgumentException("profile.revision must be positive");
+            }
+        }
+
+        @Override
+        public String toString() {
+            return "Profile[id=redacted, revision=" + revision + ']';
         }
     }
 

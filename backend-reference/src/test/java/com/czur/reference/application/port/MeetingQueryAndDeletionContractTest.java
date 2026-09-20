@@ -7,6 +7,7 @@ import com.czur.reference.domain.meeting.MeetingState;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
 
@@ -106,12 +107,53 @@ class MeetingQueryAndDeletionContractTest {
 
         assertEquals(MEETING, found.meetingId());
         assertEquals(-1, found.genTime());
+        assertEquals("0.1", found.manifest().specVersion());
         assertEquals(7, found.manifest().manifestRevision());
-        assertEquals("meeting-minutes/v1", found.manifest().profileId());
-        assertEquals(3, found.manifest().profileRevision());
+        assertEquals("meeting-minutes/v1", found.manifest().profile().id());
+        assertEquals(3, found.manifest().profile().revision());
+        assertEquals("会议标题", found.manifest().title());
         assertEquals(ManifestStatus.READY_WITH_WARNINGS, found.manifestState());
         assertEquals(1, found.manifest().artifacts().size());
         assertEquals(1, found.manifest().warnings().size());
+    }
+
+    @Test
+    void manifestUsesCanonicalNestedProfileAndAllowsNullTitle() {
+        MeetingManifest manifest = new MeetingManifest(
+                "0.1",
+                MEETING,
+                -1,
+                1,
+                new MeetingManifest.Profile("transcript-only/v1", 1),
+                null,
+                ManifestStatus.READY,
+                CREATED,
+                CREATED,
+                0,
+                new MeetingManifest.Languages("zh-CN", List.of()),
+                List.of(),
+                List.of());
+
+        assertEquals("transcript-only/v1", manifest.profile().id());
+        assertEquals(1, manifest.profile().revision());
+        assertEquals(null, manifest.title());
+        assertTrue(Arrays.stream(MeetingManifest.class.getRecordComponents())
+                .noneMatch(component -> component.getName().equals("profileId")
+                        || component.getName().equals("profileRevision")));
+        assertThrows(IllegalArgumentException.class,
+                () -> new MeetingManifest(
+                        "manifest-v1", MEETING, -1, 1,
+                        new MeetingManifest.Profile("profile", 1), null,
+                        ManifestStatus.READY, CREATED, CREATED, 0,
+                        new MeetingManifest.Languages("zh-CN", List.of()),
+                        List.of(), List.of()));
+        assertThrows(IllegalArgumentException.class,
+                () -> new MeetingManifest(
+                        "0.1", MEETING, -1, 1,
+                        new MeetingManifest.Profile("profile", 1), "x".repeat(257),
+                        ManifestStatus.READY, CREATED, CREATED, 0,
+                        new MeetingManifest.Languages("zh-CN", List.of()),
+                        List.of(), List.of()));
     }
 
     @Test
@@ -243,11 +285,12 @@ class MeetingQueryAndDeletionContractTest {
 
     private static MeetingManifest manifest() {
         return new MeetingManifest(
+                "0.1",
                 MEETING,
                 -1,
                 7,
-                "meeting-minutes/v1",
-                3,
+                new MeetingManifest.Profile("meeting-minutes/v1", 3),
+                "会议标题",
                 ManifestStatus.READY_WITH_WARNINGS,
                 CREATED,
                 CREATED.plusSeconds(60),
