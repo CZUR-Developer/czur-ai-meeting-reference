@@ -88,7 +88,6 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
                    occurred_at, spec_version, stream_id
               FROM meeting_event
              WHERE meeting_id = ?
-               AND stream_id = ?
                AND event_sequence > ?
              ORDER BY event_sequence ASC
              LIMIT ?
@@ -213,16 +212,18 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
     }
 
     /**
-     * 按会议、逻辑流和序号游标读取一页事件。
+     * 按会议全局序号游标读取一页事件。
      *
-     * <p>读取前会检查该会议是否存在无法证明 envelope 的历史行。即使该行不在
-     * 当前 stream 的过滤结果中，也拒绝返回部分事实，避免调用方误把跳过的历史
-     * 序号当成完整事件流。</p>
+     * <p>查询不接收也不使用 {@code streamId} 条件。事件上的逻辑流标识
+     * 仍是必填 envelope 元数据，但 {@code eventSequence} 在整场会议内分配；
+     * 对单流过滤会让返回页出现全局序号空洞，破坏 App 的断线补拉。</p>
+     *
+     * <p>读取前会检查该会议是否存在无法证明 envelope 的历史行。只要
+     * 任一行缺失必需元数据，就拒绝返回部分事实。</p>
      */
     @Override
-    public MeetingEventPage readPage(
-            String meetingId, String streamId, long afterSequence, int limit) {
-        EventLogStore.validatePage(meetingId, streamId, afterSequence, limit);
+    public MeetingEventPage readPage(String meetingId, long afterSequence, int limit) {
+        EventLogStore.validatePage(meetingId, afterSequence, limit);
         int queryLimit = Math.addExact(limit, 1);
         Connection connection = null;
         boolean previousAutoCommit = true;
@@ -238,7 +239,7 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
                         "会议事件包含无法证明协议版本、逻辑流或 canonical 正文的历史记录");
             }
             List<EventLog> rows = readPageRows(
-                    connection, meetingId, streamId, afterSequence, queryLimit);
+                    connection, meetingId, afterSequence, queryLimit);
             boolean hasMore = rows.size() > limit;
             if (hasMore) {
                 rows = new ArrayList<>(rows.subList(0, limit));
@@ -250,8 +251,8 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
             connection.commit();
             transactionStarted = false;
             LOGGER.log(Level.FINE,
-                    "JDBC 会议事件分页读取完成 meetingId={0} streamId={1} itemCount={2} lastSequence={3}",
-                    new Object[]{meetingId, streamId, page.items().size(), page.lastSequence()});
+                    "JDBC 会议全局事件分页读取完成 meetingId={0} itemCount={1} lastSequence={2}",
+                    new Object[]{meetingId, page.items().size(), page.lastSequence()});
             return page;
         } catch (RuntimeException | Error failure) {
             if (transactionStarted) {
@@ -313,15 +314,13 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
     private static List<EventLog> readPageRows(
             Connection connection,
             String meetingId,
-            String streamId,
             long afterSequence,
             int queryLimit) throws SQLException {
         List<EventLog> events = new ArrayList<>();
         try (PreparedStatement statement = connection.prepareStatement(PAGE_SQL)) {
             statement.setString(1, meetingId);
-            statement.setString(2, streamId);
-            statement.setLong(3, afterSequence);
-            statement.setInt(4, queryLimit);
+            statement.setLong(2, afterSequence);
+            statement.setInt(3, queryLimit);
             try (ResultSet rows = statement.executeQuery()) {
                 while (rows.next()) {
                     events.add(readEvent(rows));

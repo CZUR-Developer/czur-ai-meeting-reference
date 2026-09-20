@@ -23,12 +23,18 @@ public interface EventLogStore {
     AppendResult append(EventLog event);
 
     /**
-     * 按会议、逻辑流和事件序号读取一页事件。
+     * 按会议全局事件序号读取一页事件。
+     *
+     * <p>{@code eventSequence} 是 meeting-global 游标，不是单个
+     * {@code streamId} 的局部游标。因此实现必须返回该会议中所有
+     * 逻辑流上序号大于 {@code afterSequence} 的事件，不得按每条事件
+     * 携带的 {@link EventLog#streamId()} 过滤，否则断线补拉会丢失其他流的
+     * 全局序号。</p>
      *
      * <p>结果按 {@code eventSequence} 严格递增；没有新事件时返回空页并保留
      * 调用方提供的 {@code afterSequence} 作为已知游标。</p>
      */
-    MeetingEventPage readPage(String meetingId, String streamId, long afterSequence, int limit);
+    MeetingEventPage readPage(String meetingId, long afterSequence, int limit);
 
     /** 追加结果；CONFLICT 时 event 是数据库中保留的原记录。 */
     record AppendResult(AppendStatus status, EventLog event) {
@@ -50,9 +56,8 @@ public interface EventLogStore {
     }
 
     /** 统一校验分页输入，避免内存和 JDBC 适配器产生不同边界。 */
-    static void validatePage(String meetingId, String streamId, long afterSequence, int limit) {
+    static void validatePage(String meetingId, long afterSequence, int limit) {
         requireText("meetingId", meetingId);
-        requireText("streamId", streamId);
         if (afterSequence < 0) {
             throw new IllegalArgumentException("afterSequence must not be negative");
         }

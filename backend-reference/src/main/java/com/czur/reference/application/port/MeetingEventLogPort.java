@@ -12,9 +12,13 @@ import java.util.Objects;
  * {@code MeetingAccessGuard} 校验部署和主体归属；历史
  * {@code LEGACY_UNOWNED} 会议与跨主体访问均返回同一个
  * {@link AccessDenied}，不能用事件页差异泄露会议存在性。</p>
+ *
+ * <p>{@link Request#afterSequence()} 是会议全局事件游标。返回页可以交错包含
+ * 多个 {@link EventLog#streamId()} 的事件，适配器不得在访问校验后再按逻辑流
+ * 缩小结果，否则会破坏 App 保存的全局补拉游标。</p>
  */
 public interface MeetingEventLogPort {
-    /** 按会议和序号读取一页规范事件。 */
+    /** 按会议全局序号读取一页规范事件。 */
     Result read(Request request);
 
     /** 事件分页输入；幂等键、摘要和正文不属于读请求。 */

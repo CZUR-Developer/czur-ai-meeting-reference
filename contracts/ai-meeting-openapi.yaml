@@ -333,7 +333,7 @@ paths:
             default: 200
       responses:
         "200":
-          description: 标准事件页；payload 由 type 对应的版本化 Schema 解释
+          description: 标准事件页；每个事件与 realtime.proto 的 ServerEnvelope 对齐并且只携带一种 oneof 事件正文
           content:
             application/json:
               schema:
@@ -838,7 +838,8 @@ components:
     MeetingEvent:
       type: object
       additionalProperties: false
-      required: [specVersion, eventId, meetingId, eventSequence, emittedAt]
+      description: 会议全局序号的 ServerEnvelope JSON 表示；streamId 是每条事件的必填来源流元数据，不是分页过滤条件。
+      required: [specVersion, eventId, meetingId, streamId, eventSequence, emittedAt]
       properties:
         specVersion:
           type: string

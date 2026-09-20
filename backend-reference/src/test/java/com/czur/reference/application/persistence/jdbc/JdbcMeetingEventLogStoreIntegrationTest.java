@@ -24,6 +24,7 @@ import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
@@ -80,7 +81,8 @@ class JdbcMeetingEventLogStoreIntegrationTest {
         applyMigration("V004__meeting_event_envelope.sql");
         JdbcMeetingEventLogStore store = new JdbcMeetingEventLogStore(schemaDataSource);
 
-        EventLog first = event(1, "event-1", "TRANSCRIPT", "{\"a\":1,\"b\":2}");
+        EventLog first = event(
+                1, "stream-a", "event-1", "TRANSCRIPT", "{\"a\":1,\"b\":2}");
         EventLogStore.AppendResult appended = store.append(first);
         assertEquals(EventLogStore.AppendStatus.APPENDED, appended.status());
         assertEquals(first.canonicalPayloadJson(), appended.event().canonicalPayloadJson(),
@@ -94,26 +96,33 @@ class JdbcMeetingEventLogStoreIntegrationTest {
         assertEquals(first.canonicalPayloadJson(), replay.event().canonicalPayloadJson());
 
         EventLogStore.AppendResult reorderedConflict = store.append(
-                event(1, "event-1", "TRANSCRIPT", "{\"b\":2,\"a\":1}"));
+                event(1, "stream-a", "event-1", "TRANSCRIPT", "{\"b\":2,\"a\":1}"));
         assertEquals(EventLogStore.AppendStatus.CONFLICT, reorderedConflict.status(),
                 "上游 canonical 原文不同不能被 JDBC 擅自放宽为重放");
 
         EventLogStore.AppendResult conflict = store.append(
-                event(1, "event-1", "TRANSCRIPT", "{\"a\":999}"));
+                event(1, "stream-a", "event-1", "TRANSCRIPT", "{\"a\":999}"));
         assertEquals(EventLogStore.AppendStatus.CONFLICT, conflict.status());
         assertEquals(first.eventType(), conflict.event().eventType());
 
-        store.append(event(2, "event-2", "TRANSCRIPT", "{\"text\":\"two\"}"));
-        store.append(event(3, "event-3", "TRANSCRIPT", "{\"text\":\"three\"}"));
-        MeetingEventPage firstPage = store.readPage("meeting-event-log", "realtime", 0, 2);
+        store.append(event(2, "stream-b", "event-2", "TRANSCRIPT", "{\"text\":\"two\"}"));
+        store.append(event(3, "stream-a", "event-3", "TRANSCRIPT", "{\"text\":\"three\"}"));
+        MeetingEventPage firstPage = store.readPage("meeting-event-log", 0, 2);
         assertEquals(2, firstPage.items().size());
+        assertEquals(List.of(1L, 2L), firstPage.items().stream()
+                .map(EventLog::eventSequence).toList());
+        assertEquals(List.of("stream-a", "stream-b"), firstPage.items().stream()
+                .map(EventLog::streamId).toList());
         assertEquals(2, firstPage.lastSequence());
         assertTrue(firstPage.hasMore());
-        MeetingEventPage secondPage = store.readPage("meeting-event-log", "realtime", 2, 2);
+        MeetingEventPage secondPage = store.readPage("meeting-event-log", 2, 2);
         assertEquals(1, secondPage.items().size());
+        assertEquals(List.of(3L), secondPage.items().stream()
+                .map(EventLog::eventSequence).toList());
+        assertEquals("stream-a", secondPage.items().getFirst().streamId());
         assertEquals(3, secondPage.lastSequence());
         assertTrue(!secondPage.hasMore());
-        assertEquals(0, store.readPage("meeting-event-log", "other", 0, 10).items().size());
+        assertEquals(0, store.readPage("meeting-without-events", 0, 10).items().size());
     }
 
     @Test
@@ -125,7 +134,7 @@ class JdbcMeetingEventLogStoreIntegrationTest {
                 () -> store.append(event(2, "event-gap", "TRANSCRIPT", "{}")));
         assertThrows(IllegalStateException.class,
                 () -> store.append(event(1, "event-invalid-json", "TRANSCRIPT", "not-json")));
-        assertEquals(0, store.readPage("meeting-event-log", "realtime", 0, 10).items().size());
+        assertEquals(0, store.readPage("meeting-event-log", 0, 10).items().size());
     }
 
     @Test
@@ -153,7 +162,7 @@ class JdbcMeetingEventLogStoreIntegrationTest {
         assertThrowableDoesNotContain(rollbackFailure, rollbackSentinel);
         assertNull(rollbackFailure.getCause(), "rollback 失败也不得恢复原始数据库 cause");
 
-        assertEquals(0, store.readPage("meeting-event-log", "realtime", 0, 10).items().size(),
+        assertEquals(0, store.readPage("meeting-event-log", 0, 10).items().size(),
                 "数据库错误和 rollback 错误都不能留下部分事件");
     }
 
@@ -189,7 +198,7 @@ class JdbcMeetingEventLogStoreIntegrationTest {
 
         JdbcMeetingEventLogStore cleanStore = new JdbcMeetingEventLogStore(schemaDataSource);
         assertEquals(0,
-                cleanStore.readPage("meeting-event-log", "realtime", 0, 10).items().size(),
+                cleanStore.readPage("meeting-event-log", 0, 10).items().size(),
                 "服务端 INSERT 后客户端失败也必须通过连接废弃回滚为零行");
         assertEquals(EventLogStore.AppendStatus.APPENDED, cleanStore.append(event).status(),
                 "故障连接废弃后同一事件应仍可作为首次写入");
@@ -219,7 +228,7 @@ class JdbcMeetingEventLogStoreIntegrationTest {
                     store.append(event(1, "event-reuse-1", "TRANSCRIPT", "{\"value\":1}")).status());
             assertEquals(EventLogStore.AppendStatus.APPENDED,
                     store.append(event(2, "event-reuse-2", "TRANSCRIPT", "{\"value\":2}")).status());
-            assertEquals(2, store.readPage("meeting-event-log", "realtime", 0, 10).items().size());
+            assertEquals(2, store.readPage("meeting-event-log", 0, 10).items().size());
             assertEquals(1, pool.getHikariPoolMXBean().getTotalConnections(),
                     "成功路径应恢复并复用唯一物理连接，而不是每次废弃");
         }
@@ -238,7 +247,7 @@ class JdbcMeetingEventLogStoreIntegrationTest {
         assertEquals(EventLogStore.AppendStatus.APPENDED, store.append(event).status());
         assertEquals(EventLogStore.AppendStatus.REPLAYED, store.append(event).status());
         assertEquals(event.emittedAt(),
-                store.readPage("meeting-event-log", "realtime", 0, 10)
+                store.readPage("meeting-event-log", 0, 10)
                         .items().getFirst().emittedAt());
     }
 
@@ -249,7 +258,7 @@ class JdbcMeetingEventLogStoreIntegrationTest {
         JdbcMeetingEventLogStore store = new JdbcMeetingEventLogStore(schemaDataSource);
 
         assertThrows(IllegalStateException.class,
-                () -> store.readPage("meeting-event-log", "realtime", 0, 10));
+                () -> store.readPage("meeting-event-log", 0, 10));
     }
 
     @Test
@@ -299,7 +308,7 @@ class JdbcMeetingEventLogStoreIntegrationTest {
                     java.util.stream.Stream.of(first, second)
                             .filter("SEQUENCE_REJECTED"::equals)
                             .count());
-            assertEquals(1, store.readPage("meeting-event-log", "realtime", 0, 10).items().size());
+            assertEquals(1, store.readPage("meeting-event-log", 0, 10).items().size());
         } finally {
             executor.shutdownNow();
         }
@@ -359,8 +368,13 @@ class JdbcMeetingEventLogStoreIntegrationTest {
     }
 
     private EventLog event(long sequence, String eventId, String type, String payload) {
+        return event(sequence, "realtime", eventId, type, payload);
+    }
+
+    private EventLog event(
+            long sequence, String streamId, String eventId, String type, String payload) {
         return new EventLog(
-                "0.1", "meeting-event-log", "realtime", eventId, sequence,
+                "0.1", "meeting-event-log", streamId, eventId, sequence,
                 NOW, type, payload);
     }
 

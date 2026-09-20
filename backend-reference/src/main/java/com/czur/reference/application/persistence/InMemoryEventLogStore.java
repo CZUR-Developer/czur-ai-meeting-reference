@@ -55,13 +55,11 @@ public final class InMemoryEventLogStore implements EventLogStore {
     }
 
     @Override
-    public MeetingEventPage readPage(
-            String meetingId, String streamId, long afterSequence, int limit) {
-        EventLogStore.validatePage(meetingId, streamId, afterSequence, limit);
+    public MeetingEventPage readPage(String meetingId, long afterSequence, int limit) {
+        EventLogStore.validatePage(meetingId, afterSequence, limit);
         synchronized (mutex) {
             List<EventLog> events = byMeeting.getOrDefault(meetingId, List.of());
             List<EventLog> page = events.stream()
-                    .filter(event -> event.streamId().equals(streamId))
                     .filter(event -> event.eventSequence() > afterSequence)
                     .limit(limit + 1L)
                     .toList();
