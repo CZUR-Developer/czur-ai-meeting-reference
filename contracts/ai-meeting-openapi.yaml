@@ -471,11 +471,11 @@ components:
       name: genTime
       in: query
       required: true
-      description: 结果 URL 生成时间；服务端按部署配置中的统一有效期判断是否过期。
+      description: 结果 URL 生成时间；服务端按部署配置中的统一有效期判断是否过期；值为 -1 时表示永不过期。
       schema:
         type: integer
         format: int64
-        minimum: 0
+        minimum: -1
     IdempotencyKey:
       name: Idempotency-Key
       in: header
@@ -778,7 +778,7 @@ components:
         finalizationReceipt:
           type: [string, "null"]
         manifestState:
-          enum: [NOT_STARTED, GENERATING, READY, FAILED]
+          enum: [NOT_STARTED, GENERATING, READY, READY_WITH_WARNINGS, FAILED, DELETION_PENDING, DELETED]
     MeetingStatus:
       type: object
       additionalProperties: false
@@ -791,7 +791,7 @@ components:
         inputState:
           enum: [INPUT_OPEN, INPUT_COMPLETE_PENDING, INPUT_ACCEPTED, INPUT_CANCELLED]
         manifestState:
-          enum: [NOT_STARTED, GENERATING, READY, FAILED, DELETED]
+          enum: [NOT_STARTED, GENERATING, READY, READY_WITH_WARNINGS, FAILED, DELETION_PENDING, DELETED]
         finalizationReceipt:
           type: [string, "null"]
         updatedAt:
@@ -828,7 +828,7 @@ components:
         inputState:
           enum: [INPUT_OPEN, INPUT_COMPLETE_PENDING, INPUT_ACCEPTED, INPUT_CANCELLED]
         manifestState:
-          enum: [NOT_STARTED, GENERATING, READY, FAILED, DELETED]
+          enum: [NOT_STARTED, GENERATING, READY, READY_WITH_WARNINGS, FAILED, DELETION_PENDING, DELETED]
         createdAt:
           type: string
           format: date-time
