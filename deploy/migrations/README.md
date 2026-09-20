@@ -22,6 +22,14 @@ Outbox，以及插件调用诊断。它不包含终端用户密码、模型密�
 一致：前者用于精确幂等比较和原样返回，后者继续用于 JSON 查询与索引。V004 尚未
 发布；进入共享环境后不得原地修改，应按后续版本迁移规则追加新文件。
 
+`V005__meeting_finalization_fact.sql` 在 `meeting` 上增加 meeting-level
+`input_state`，并约束只有 `INPUT_ACCEPTED` 可以且必须携带非空
+`finalization_receipt_id`。Stop 只写 `INPUT_COMPLETE_PENDING`；后续 Worker 在
+真正接管输入时才原子写入 receipt 并推进会议生命周期。`meeting_stream` 继续只
+保存实时逻辑流的游标/恢复事实，查询不得临时聚合 stream 行生成 receipt。参考
+Schema 尚未发布，V005 只验证 V001→最新版本的全新数据库，不为未发布的中间
+开发数据提供回填规则。
+
 V003 必须允许在“Schema 已提交但版本登记失败”后安全重跑。执行约束前会先
 检查历史 Reservation 状态，发现未知状态时整事务失败；不要绕过该检查手工登记
 版本。没有 PostgreSQL 时可以先运行静态门禁：

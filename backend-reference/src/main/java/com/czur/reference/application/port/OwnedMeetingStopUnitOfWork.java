@@ -25,6 +25,12 @@ import java.util.Objects;
  * 键/摘要或动态错误正文。只有 {@code Connection.commit()} 调用已经开始、
  * 因而无法确认最终提交或回滚时，才允许返回
  * {@link ErrorCode#OUTCOME_UNKNOWN}。</p>
+ *
+ * <p>停止幂等记录保存的是“停止意图已受理”的首次稳定快照，不是持续变化的
+ * 最终收口状态。后续 Worker 把会议推进到 {@code INPUT_ACCEPTED} 后，同键重放
+ * 仍可返回首次 STOPPING 快照；传输层必须另外读取
+ * {@link MeetingFinalizationStore} 的当前事实组装 Stop 响应，不能用旧幂等正文
+ * 覆盖或清空已经持久化的 receipt。</p>
  */
 public interface OwnedMeetingStopUnitOfWork {
 

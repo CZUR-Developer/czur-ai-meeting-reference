@@ -29,7 +29,7 @@ public final class DatabaseReadiness {
 
     /** 创建所有只读探针和必需迁移均通过的结果。 */
     public static DatabaseReadiness success() {
-        return new DatabaseReadiness(Status.READY, Set.of(), "数据库连接和 V001/V002 迁移检查通过");
+        return new DatabaseReadiness(Status.READY, Set.of(), "数据库连接和必需迁移检查通过");
     }
 
     /** 创建数据库连接不可用结果；detail 只能用于脱敏分类诊断。 */
@@ -38,7 +38,7 @@ public final class DatabaseReadiness {
                 Status.DATABASE_UNAVAILABLE, Set.of(), "数据库连接或只读探针不可用");
     }
 
-    /** 创建缺少 V001/V002 登记结果。 */
+    /** 创建缺少当前运行时必需迁移登记的结果。 */
     static DatabaseReadiness migrationMissing(Set<String> missing) {
         return new DatabaseReadiness(
                 Status.MIGRATION_MISSING,

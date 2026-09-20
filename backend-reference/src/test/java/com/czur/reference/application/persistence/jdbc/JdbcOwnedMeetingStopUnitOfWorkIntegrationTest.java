@@ -4,6 +4,8 @@ import com.czur.reference.application.command.MeetingCommandContext;
 import com.czur.reference.application.command.MeetingCommandEventFactory;
 import com.czur.reference.application.command.MeetingPermissions;
 import com.czur.reference.application.port.IdempotencyScopeCodec;
+import com.czur.reference.application.port.InputState;
+import com.czur.reference.application.port.MeetingFinalizationStore;
 import com.czur.reference.application.port.OwnedMeetingCreationUnitOfWork;
 import com.czur.reference.application.port.OwnedMeetingStopUnitOfWork;
 import com.czur.reference.application.port.entitlement.AuthorizedProfileSnapshot;
@@ -55,6 +57,7 @@ import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -62,7 +65,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * owned 会议停止工作单元的真实 PostgreSQL 16 原子性门禁。
  *
- * <p>每个用例创建独立 schema 并执行 V001/V002/V003，覆盖归属拒绝顺序、
+ * <p>每个用例创建独立 schema 并执行 V001～V005，覆盖归属拒绝顺序、
  * 状态规则、幂等、不同键并发、完整 CAS、Outbox 回滚、统一事实时间以及
  * commit/rollback/restore/close 故障语义。测试只在显式提供数据库环境变量时
  * 运行，并在结束后删除自己的 schema。</p>
@@ -92,6 +95,8 @@ class JdbcOwnedMeetingStopUnitOfWorkIntegrationTest {
         applyMigration("V001__initial_schema.sql");
         applyMigration("V002__outbox_lease_fencing.sql");
         applyMigration("V003__identity_entitlement.sql");
+        applyMigration("V004__meeting_event_envelope.sql");
+        applyMigration("V005__meeting_finalization_fact.sql");
     }
 
     @AfterEach
@@ -250,6 +255,138 @@ class JdbcOwnedMeetingStopUnitOfWorkIntegrationTest {
             assertEquals(STOP_AT, queryInstant(connection,
                     "SELECT available_at FROM outbox_event WHERE event_id = ?", eventId));
         }
+    }
+
+    @Test
+    void stableStopReplayDoesNotOverrideCurrentFinalizationFact() throws Exception {
+        createOwned("finalization-boundary", MeetingState.RUNNING,
+                DEPLOYMENT, SUBJECT, STOP_AT.plusSeconds(600));
+        var request = request(
+                "meeting-finalization-boundary", "key-finalization-boundary",
+                "digest-finalization-boundary");
+        var stop = unitOfWork(dataSource, STOP_CLOCK);
+
+        var first = success(stop.stop(request));
+        assertEquals(MeetingState.STOPPING, first.result().meeting().state());
+        var finalization = new JdbcMeetingFinalizationStore(
+                dataSource, () -> "receipt-finalization-boundary");
+        var pending = assertInstanceOf(MeetingFinalizationStore.Found.class,
+                finalization.find("meeting-finalization-boundary"));
+        assertEquals(InputState.INPUT_COMPLETE_PENDING,
+                pending.fact().inputState());
+
+        var accepted = assertInstanceOf(MeetingFinalizationStore.Applied.class,
+                finalization.acceptInput(
+                        "meeting-finalization-boundary", STOP_AT.plusSeconds(1)));
+        assertEquals(InputState.INPUT_ACCEPTED, accepted.fact().inputState());
+
+        var replay = success(stop.stop(request));
+        assertEquals(OwnedMeetingStopUnitOfWork.SuccessCode.REPLAYED, replay.code());
+        assertEquals(MeetingState.STOPPING, replay.result().meeting().state(),
+                "停止幂等正文保持首次停止意图，不伪装成持续状态查询");
+
+        var current = assertInstanceOf(MeetingFinalizationStore.Found.class,
+                new JdbcMeetingFinalizationStore(
+                        dataSource,
+                        () -> { throw new AssertionError("accepted 重读不得生成 receipt"); })
+                        .find("meeting-finalization-boundary"));
+        assertEquals("receipt-finalization-boundary",
+                current.fact().finalizationReceipt(),
+                "REST/查询必须组合当前数据库事实，不能使用旧 Stop body 覆盖 receipt");
+        assertEquals(MeetingState.FINALIZING,
+                new JdbcMeetingRepository(dataSource)
+                        .find("meeting-finalization-boundary").orElseThrow().state());
+    }
+
+    @Test
+    void concurrentPendingAndAcceptanceHaveOneWinnerAndSurviveNewAdapterInstance()
+            throws Exception {
+        createOwned("finalization-race", MeetingState.STOPPING,
+                DEPLOYMENT, SUBJECT, STOP_AT.plusSeconds(600));
+        AtomicInteger generated = new AtomicInteger();
+        var store = new JdbcMeetingFinalizationStore(dataSource, () ->
+                "receipt-race-" + generated.incrementAndGet());
+
+        List<MeetingFinalizationStore.Result> pendingResults = concurrently(10,
+                () -> store.requestInputCompletion("meeting-finalization-race"));
+        assertEquals(1, pendingResults.stream()
+                .filter(MeetingFinalizationStore.Applied.class::isInstance).count());
+        assertEquals(9, pendingResults.stream()
+                .filter(MeetingFinalizationStore.Replayed.class::isInstance).count());
+        assertEquals(0, generated.get());
+
+        List<MeetingFinalizationStore.Result> acceptanceResults = concurrently(10,
+                () -> store.acceptInput(
+                        "meeting-finalization-race", STOP_AT.plusSeconds(1)));
+        assertEquals(1, acceptanceResults.stream()
+                .filter(MeetingFinalizationStore.Applied.class::isInstance).count());
+        assertEquals(9, acceptanceResults.stream()
+                .filter(MeetingFinalizationStore.Replayed.class::isInstance).count());
+        assertEquals(1, generated.get());
+
+        var afterRestart = new JdbcMeetingFinalizationStore(
+                dataSource,
+                () -> { throw new AssertionError("重启重放不得生成第二个 receipt"); });
+        var found = assertInstanceOf(MeetingFinalizationStore.Found.class,
+                afterRestart.find("meeting-finalization-race"));
+        assertEquals("receipt-race-1", found.fact().finalizationReceipt());
+        assertEquals(MeetingState.FINALIZING,
+                new JdbcMeetingRepository(dataSource)
+                        .find("meeting-finalization-race").orElseThrow().state());
+        assertEquals(1L, aggregateVersion("meeting-finalization-race"));
+    }
+
+    @Test
+    void finalizationCommitUnknownAndRollbackFailureNeverPublishUnsafeOutcome()
+            throws Exception {
+        createOwned("receipt-commit-unknown", MeetingState.STOPPING,
+                DEPLOYMENT, SUBJECT, STOP_AT.plusSeconds(600));
+        new JdbcMeetingFinalizationStore(dataSource, () -> "unused")
+                .requestInputCompletion("meeting-receipt-commit-unknown");
+        FaultObservation commitObservation = new FaultObservation();
+        var commitUnknown = new JdbcMeetingFinalizationStore(
+                faultInjectingDataSource(dataSource, FaultPoint.AFTER_COMMIT, commitObservation),
+                () -> "receipt-commit-sensitive");
+        IllegalStateException unknown = assertThrows(IllegalStateException.class,
+                () -> commitUnknown.acceptInput(
+                        "meeting-receipt-commit-unknown", STOP_AT.plusSeconds(1)));
+        assertTrue(unknown.getMessage().contains("outcome=UNKNOWN"));
+        assertFalse(unknown.getMessage().contains("receipt-commit-sensitive"));
+        assertEquals(null, unknown.getCause());
+        assertEquals(0, unknown.getSuppressed().length);
+        assertFalse(commitObservation.restoreAutoCommitAttempted.get());
+        var committed = assertInstanceOf(MeetingFinalizationStore.Found.class,
+                new JdbcMeetingFinalizationStore(dataSource, () -> "must-not-run")
+                        .find("meeting-receipt-commit-unknown"));
+        assertEquals("receipt-commit-sensitive", committed.fact().finalizationReceipt(),
+                "commit ACK 丢失后必须以数据库查询恢复真实结果");
+
+        createOwned("receipt-rollback", MeetingState.STOPPING,
+                DEPLOYMENT, SUBJECT, STOP_AT.plusSeconds(600));
+        new JdbcMeetingFinalizationStore(dataSource, () -> "unused")
+                .requestInputCompletion("meeting-receipt-rollback");
+        FaultObservation rollbackObservation = new FaultObservation();
+        var rollbackFailure = new JdbcMeetingFinalizationStore(
+                faultInjectingDataSource(
+                        dataSource, FaultPoint.FINALIZATION_UPDATE_AND_ROLLBACK,
+                        rollbackObservation),
+                () -> "receipt-rollback-sensitive");
+        IllegalStateException rolledBack = assertThrows(IllegalStateException.class,
+                () -> rollbackFailure.acceptInput(
+                        "meeting-receipt-rollback", STOP_AT.plusSeconds(1)));
+        String fullDiagnostic = rolledBack.toString();
+        assertFalse(fullDiagnostic.contains("receipt-rollback-sensitive"));
+        assertEquals(null, rolledBack.getCause());
+        assertEquals(0, rolledBack.getSuppressed().length);
+        assertFalse(rollbackObservation.restoreAutoCommitAttempted.get());
+        assertTrue(rollbackObservation.abortAttempted.get());
+        var pending = assertInstanceOf(MeetingFinalizationStore.Found.class,
+                new JdbcMeetingFinalizationStore(dataSource, () -> "unused")
+                        .find("meeting-receipt-rollback"));
+        assertEquals(InputState.INPUT_COMPLETE_PENDING, pending.fact().inputState());
+        assertEquals(MeetingState.STOPPING,
+                new JdbcMeetingRepository(dataSource)
+                        .find("meeting-receipt-rollback").orElseThrow().state());
     }
 
     @Test
@@ -425,6 +562,7 @@ class JdbcOwnedMeetingStopUnitOfWorkIntegrationTest {
         assertEquals(OwnedMeetingStopUnitOfWork.ErrorCode.STORAGE_UNAVAILABLE,
                 rollbackSql.code());
         assertFalse(rollbackSqlObservation.restoreAutoCommitAttempted.get());
+        assertTrue(rollbackSqlObservation.abortAttempted.get());
         assertTrue(rollbackSqlObservation.closeAttempted.get());
         assertEquals(MeetingState.RUNNING,
                 new JdbcMeetingRepository(dataSource).find("meeting-rollback-sql")
@@ -442,6 +580,7 @@ class JdbcOwnedMeetingStopUnitOfWorkIntegrationTest {
         assertEquals(OwnedMeetingStopUnitOfWork.ErrorCode.INVALID_MEETING_STATE,
                 rollbackRuntime.code());
         assertFalse(rollbackRuntimeObservation.restoreAutoCommitAttempted.get());
+        assertTrue(rollbackRuntimeObservation.abortAttempted.get());
         assertTrue(rollbackRuntimeObservation.closeAttempted.get());
 
         createOwned("restore-runtime", MeetingState.RUNNING,
@@ -568,12 +707,18 @@ class JdbcOwnedMeetingStopUnitOfWorkIntegrationTest {
         if (state != MeetingState.CREATED) {
             try (Connection connection = dataSource.getConnection();
                  PreparedStatement statement = connection.prepareStatement("""
-                         UPDATE meeting SET state = ?, updated_at = ?
+                         UPDATE meeting
+                            SET state = ?, updated_at = ?,
+                                input_state = ?, finalization_receipt_id = ?
                           WHERE meeting_id = ?
                          """)) {
                 statement.setString(1, state.name());
                 statement.setTimestamp(2, Timestamp.from(CREATED_AT.plusSeconds(1)));
-                statement.setString(3, meetingId);
+                boolean accepted = state == MeetingState.FINALIZING;
+                statement.setString(3, accepted
+                        ? InputState.INPUT_ACCEPTED.name() : InputState.INPUT_OPEN.name());
+                statement.setString(4, accepted ? "setup-receipt-" + suffix : null);
+                statement.setString(5, meetingId);
                 assertEquals(1, statement.executeUpdate());
             }
         }
@@ -646,6 +791,32 @@ class JdbcOwnedMeetingStopUnitOfWorkIntegrationTest {
                 assertTrue(rows.next());
                 return rows.getLong(1);
             }
+        }
+    }
+
+    private static <T> List<T> concurrently(int count, CheckedSupplier<T> operation)
+            throws Exception {
+        CountDownLatch ready = new CountDownLatch(count);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(count);
+        try {
+            List<Future<T>> futures = new ArrayList<>();
+            for (int index = 0; index < count; index++) {
+                futures.add(executor.submit(() -> {
+                    ready.countDown();
+                    start.await();
+                    return operation.get();
+                }));
+            }
+            ready.await();
+            start.countDown();
+            List<T> results = new ArrayList<>(count);
+            for (Future<T> future : futures) {
+                results.add(future.get());
+            }
+            return results;
+        } finally {
+            executor.shutdownNow();
         }
     }
 
@@ -730,6 +901,36 @@ class JdbcOwnedMeetingStopUnitOfWorkIntegrationTest {
                             throw new SQLException(
                                     "dynamic outbox detail must stay hidden", "08006");
                         }
+                        if (faultPoint == FaultPoint.FINALIZATION_UPDATE_AND_ROLLBACK
+                                && sql.contains("SET input_state = 'INPUT_ACCEPTED'")) {
+                            PreparedStatement prepared;
+                            try {
+                                prepared = (PreparedStatement) method.invoke(delegate, arguments);
+                            } catch (InvocationTargetException reflected) {
+                                throw reflected.getCause();
+                            }
+                            return Proxy.newProxyInstance(
+                                    PreparedStatement.class.getClassLoader(),
+                                    new Class<?>[]{PreparedStatement.class},
+                                    (statementProxy, statementMethod, statementArguments) -> {
+                                        if ("executeUpdate".equals(statementMethod.getName())) {
+                                            try {
+                                                statementMethod.invoke(prepared, statementArguments);
+                                            } catch (InvocationTargetException reflected) {
+                                                throw reflected.getCause();
+                                            }
+                                            throw new SQLException(
+                                                    "dynamic receipt-rollback-sensitive detail",
+                                                    "08006");
+                                        }
+                                        try {
+                                            return statementMethod.invoke(
+                                                    prepared, statementArguments);
+                                        } catch (InvocationTargetException reflected) {
+                                            throw reflected.getCause();
+                                        }
+                                    });
+                        }
                     }
                     if (faultPoint == FaultPoint.OUTBOX_AND_ROLLBACK_SQL
                             && "rollback".equals(method.getName())) {
@@ -740,6 +941,12 @@ class JdbcOwnedMeetingStopUnitOfWorkIntegrationTest {
                             && "rollback".equals(method.getName())) {
                         throw new IllegalStateException(
                                 "dynamic rollback runtime detail must stay hidden");
+                    }
+                    if (faultPoint == FaultPoint.FINALIZATION_UPDATE_AND_ROLLBACK
+                            && "rollback".equals(method.getName())) {
+                        throw new SQLException(
+                                "dynamic receipt-rollback-sensitive rollback detail",
+                                "08006");
                     }
                     if (faultPoint == FaultPoint.BEFORE_COMMIT
                             && "commit".equals(method.getName())) {
@@ -773,6 +980,9 @@ class JdbcOwnedMeetingStopUnitOfWorkIntegrationTest {
                             throw new IllegalStateException(
                                     "dynamic close detail must stay hidden");
                         }
+                    }
+                    if ("abort".equals(method.getName())) {
+                        observation.abortAttempted.set(true);
                     }
                     try {
                         return method.invoke(delegate, arguments);
@@ -832,6 +1042,7 @@ class JdbcOwnedMeetingStopUnitOfWorkIntegrationTest {
         BEFORE_COMMIT,
         AFTER_COMMIT,
         RUNTIME_AFTER_COMMIT,
+        FINALIZATION_UPDATE_AND_ROLLBACK,
         RESTORE_AUTOCOMMIT_RUNTIME,
         CLOSE_RUNTIME
     }
@@ -840,6 +1051,12 @@ class JdbcOwnedMeetingStopUnitOfWorkIntegrationTest {
     private static final class FaultObservation {
         private final AtomicBoolean restoreAutoCommitAttempted = new AtomicBoolean();
         private final AtomicBoolean closeAttempted = new AtomicBoolean();
+        private final AtomicBoolean abortAttempted = new AtomicBoolean();
+    }
+
+    @FunctionalInterface
+    private interface CheckedSupplier<T> {
+        T get() throws Exception;
     }
 
     /** 只覆盖连接创建的测试 DataSource，其余标准配置透明委托。 */

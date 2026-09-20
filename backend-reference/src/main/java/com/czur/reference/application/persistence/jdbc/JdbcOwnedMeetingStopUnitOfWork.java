@@ -5,6 +5,7 @@ import com.czur.reference.application.command.MeetingCommandEventFactory;
 import com.czur.reference.application.command.MeetingCommandResult;
 import com.czur.reference.application.port.IdempotencyScopeCodec;
 import com.czur.reference.application.port.IdempotencyStore;
+import com.czur.reference.application.port.MeetingFinalizationStore;
 import com.czur.reference.application.port.OutboxStore;
 import com.czur.reference.application.port.OwnedMeetingStopUnitOfWork;
 import com.czur.reference.domain.meeting.MeetingAggregate;
@@ -36,14 +37,15 @@ import java.util.logging.Logger;
  *
  * <p>{@code STARTING}/{@code RUNNING} 首次停止会在同一事务中完成：保存停止
  * 幂等结果、以完整不可变事实和聚合版本 CAS 更新 Meeting、追加
+ * {@code INPUT_COMPLETE_PENDING} 会议级输入事实和
  * {@code MeetingStopRequested} Outbox。已经处于
  * {@code STOPPING}/{@code FINALIZING} 时，只为新的幂等键保存当时快照，不重复
- * 更新状态或追加事件。其它状态稳定返回
+ * 更新生命周期或追加事件，但仍核对数据库中的 pending/accepted 事实。其它状态稳定返回
  * {@link ErrorCode#INVALID_MEETING_STATE}。Grant 截止时间不参与停止判断。</p>
  *
  * <p>事务在行锁和状态校验后只读取一次注入的 {@link Clock}，并截断到
  * PostgreSQL {@code timestamptz} 的微秒精度。首次状态更新时，同一时刻用于
- * Meeting、停止幂等记录和 Outbox。日志不输出部署、主体、幂等 scope/key/
+ * Meeting、pending、停止幂等记录和 Outbox。日志不输出部署、主体、幂等 scope/key/
  * digest、Grant、Reservation、数据库地址或会议正文。</p>
  */
 public final class JdbcOwnedMeetingStopUnitOfWork
@@ -171,6 +173,22 @@ public final class JdbcOwnedMeetingStopUnitOfWork
                 JdbcMeetingRepository.updateOwnedExisting(
                         connection, locked, accepted.meeting());
 
+            }
+
+            // Stop 只持久化输入完成意图，绝不生成 receipt 或伪造 INPUT_ACCEPTED。
+            // 稳定 idempotency body 继续保存首次 STOPPING 快照；未来 REST 响应必须
+            // 另读 meeting-level finalization fact，不能让旧 body 覆盖新 receipt。
+            phase = Phase.INPUT_COMPLETION_PENDING;
+            MeetingFinalizationStore.Result completion =
+                    JdbcMeetingFinalizationStore.requestInputCompletion(
+                            connection, request.meetingId());
+            if (!(completion instanceof MeetingFinalizationStore.Applied)
+                    && !(completion instanceof MeetingFinalizationStore.Replayed)) {
+                return failAndRollback(
+                        connection, transactionResolution, ErrorCode.INTERNAL);
+            }
+
+            if (advancesState) {
                 phase = Phase.OUTBOX_APPEND;
                 OutboxStore.AppendResult append = JdbcOutboxStore.append(
                         connection,
@@ -227,6 +245,10 @@ public final class JdbcOwnedMeetingStopUnitOfWork
             // 因此只能直接关闭并丢弃连接。
             if (commitCompleted || transactionResolution.rollbackConfirmed()) {
                 restoreAutoCommitQuietly(connection, previousAutoCommit);
+            } else {
+                // commit 结果未知或 rollback 未确认时，不把可能带未决事务的物理
+                // 连接归还连接池；与事件日志/最终收口 JDBC 原语使用同一废弃规则。
+                abortQuietly(connection);
             }
             closeQuietly(connection);
         }
@@ -366,6 +388,17 @@ public final class JdbcOwnedMeetingStopUnitOfWork
         }
     }
 
+    private static void abortQuietly(Connection connection) {
+        if (connection == null) {
+            return;
+        }
+        try {
+            connection.abort(Runnable::run);
+        } catch (SQLException | RuntimeException abortFailure) {
+            LOGGER.log(Level.WARNING, "owned 会议停止工作单元废弃数据库连接失败");
+        }
+    }
+
     /** 记录本地事务是否已由数据库明确回滚，用于约束 finally 的连接恢复。 */
     private static final class TransactionResolution {
         private boolean rollbackConfirmed;
@@ -388,6 +421,7 @@ public final class JdbcOwnedMeetingStopUnitOfWork
         CLOCK_READ,
         IDEMPOTENCY_RESERVE,
         MEETING_UPDATE,
+        INPUT_COMPLETION_PENDING,
         OUTBOX_APPEND,
         COMMIT,
         BUSINESS_VALIDATION

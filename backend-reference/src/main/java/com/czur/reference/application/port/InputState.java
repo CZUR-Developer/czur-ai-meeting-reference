@@ -3,9 +3,10 @@ package com.czur.reference.application.port;
 /**
  * 服务端对会议输入接管进度的公开状态。
  *
- * <p>该状态与 {@code MeetingState} 分开保存：会议可以已经进入
- * {@code FINALIZING}，而音频输入仍处于 {@link #INPUT_COMPLETE_PENDING}；
- * 反过来，输入已经被持久化接管也不等于最终产物已经 {@code READY}。其中
+ * <p>该状态与 {@code MeetingState} 分开保存，但接管边界必须原子推进：
+ * {@code STOPPING + INPUT_COMPLETE_PENDING} 只能一起变为
+ * {@code FINALIZING + INPUT_ACCEPTED}，不能公布中间组合。输入已经被持久化接管
+ * 仍不等于最终产物已经 {@code READY}。其中
  * {@link #INPUT_COMPLETE_SENT} 不属于服务端状态，它只存在于 Android App
  * 的本地恢复日志，因此这里刻意不提供这个枚举值。</p>
  */
