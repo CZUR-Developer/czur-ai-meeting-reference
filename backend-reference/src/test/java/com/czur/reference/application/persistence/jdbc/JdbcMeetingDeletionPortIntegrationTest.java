@@ -1,0 +1,1485 @@
+package com.czur.reference.application.persistence.jdbc;
+
+import com.czur.reference.application.command.MeetingCommandContext;
+import com.czur.reference.application.command.MeetingCommandEventFactory;
+import com.czur.reference.application.command.MeetingPermissions;
+import com.czur.reference.application.port.DeleteRequest;
+import com.czur.reference.application.port.DeleteResult;
+import com.czur.reference.application.port.FinalizationFact;
+import com.czur.reference.application.port.IdempotencyScopeCodec;
+import com.czur.reference.application.port.InputState;
+import com.czur.reference.application.port.ManifestStatus;
+import com.czur.reference.application.port.MeetingStatus;
+import com.czur.reference.application.port.OutboxStore;
+import com.czur.reference.application.port.OwnedMeetingCreationUnitOfWork;
+import com.czur.reference.application.port.entitlement.AuthorizedProfileSnapshot;
+import com.czur.reference.application.port.entitlement.MeetingGrant;
+import com.czur.reference.application.port.entitlement.UsageEstimate;
+import com.czur.reference.application.port.entitlement.UsageOperationResult;
+import com.czur.reference.application.port.entitlement.UsageReservation;
+import com.czur.reference.application.port.entitlement.UsageUnit;
+import com.czur.reference.application.port.identity.Subject;
+import com.czur.reference.application.port.identity.VerifiedIdentity;
+import com.czur.reference.domain.meeting.MeetingAggregate;
+import com.czur.reference.domain.meeting.MeetingState;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.postgresql.ds.PGSimpleDataSource;
+
+import javax.sql.DataSource;
+import java.io.PrintWriter;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.sql.SQLFeatureNotSupportedException;
+import java.sql.Statement;
+import java.sql.Timestamp;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.logging.Handler;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/**
+ * 会议删除受理的 PostgreSQL 16 原子性、并发和故障语义门禁。
+ *
+ * <p>每个用例创建并删除自己的 schema，执行 V001～V006；数据库实例由测试命令
+ * 显式注入，测试不会连接、挂载或清理任何已有开发卷。故障代理只包装本用例取得
+ * 的连接，用于验证每个写点、commit/rollback 和连接恢复边界。</p>
+ */
+@EnabledIfEnvironmentVariable(named = "REFERENCE_TEST_DATABASE_URL", matches = ".+")
+class JdbcMeetingDeletionPortIntegrationTest {
+    private static final Instant CREATED_AT = Instant.parse("2026-09-20T08:00:00Z");
+    private static final Instant DELETE_CLOCK =
+            Instant.parse("2026-09-20T09:00:00.123456789Z");
+    private static final Instant DELETE_AT = DELETE_CLOCK.truncatedTo(ChronoUnit.MICROS);
+    private static final String DEPLOYMENT = "delete-deployment";
+    private static final String SUBJECT = "delete-subject";
+
+    private PGSimpleDataSource adminDataSource;
+    private PGSimpleDataSource dataSource;
+    private String schema;
+
+    @BeforeEach
+    void createSchemaAndMigrate() throws Exception {
+        adminDataSource = postgres(null);
+        schema = "delete_uow_" + UUID.randomUUID().toString().replace("-", "");
+        try (Connection connection = adminDataSource.getConnection();
+             Statement statement = connection.createStatement()) {
+            statement.execute("CREATE SCHEMA " + quoteIdentifier(schema));
+        }
+        dataSource = postgres(schema);
+        for (String migration : List.of(
+                "V001__initial_schema.sql",
+                "V002__outbox_lease_fencing.sql",
+                "V003__identity_entitlement.sql",
+                "V004__meeting_event_envelope.sql",
+                "V005__meeting_finalization_fact.sql",
+                "V006__meeting_read_model.sql")) {
+            applyMigration(migration);
+        }
+    }
+
+    @AfterEach
+    void dropSchema() throws Exception {
+        if (adminDataSource == null || schema == null) {
+            return;
+        }
+        try (Connection connection = adminDataSource.getConnection();
+             Statement statement = connection.createStatement()) {
+            statement.execute("DROP SCHEMA IF EXISTS "
+                    + quoteIdentifier(schema) + " CASCADE");
+        }
+    }
+
+    @Test
+    void lockedAccessDenialPrecedesSensitiveParsingAndIdempotencyRead() throws Exception {
+        createOwned("outer", MeetingState.READY, "other-deployment", SUBJECT);
+        createOwned("other-subject", MeetingState.READY, DEPLOYMENT, "other-subject");
+        insertLegacy("legacy", MeetingState.READY, DEPLOYMENT);
+
+        // 外域行故意写入非法状态；若 Repository 在归属检查前解析状态，本用例会
+        // 返回 STORAGE_FAILURE 而不是统一 AccessDenied。
+        try (Connection connection = dataSource.getConnection();
+             Statement statement = connection.createStatement()) {
+            statement.execute("ALTER TABLE meeting DROP CONSTRAINT meeting_state_ck");
+            statement.execute("UPDATE meeting SET state='private-broken-state' "
+                    + "WHERE meeting_id='meeting-outer'");
+        }
+
+        DataSource guarded = faultInjectingDataSource(
+                dataSource, FaultPoint.FAIL_IF_IDEMPOTENCY_READ,
+                new FaultObservation());
+        JdbcMeetingDeletionPort port = port(guarded, DELETE_CLOCK);
+
+        assertInstanceOf(DeleteResult.AccessDenied.class,
+                port.delete(request("meeting-outer", "outer-key", "outer-digest")));
+        assertInstanceOf(DeleteResult.AccessDenied.class,
+                port.delete(request("meeting-other-subject", "subject-key", "subject-digest")));
+        assertInstanceOf(DeleteResult.AccessDenied.class,
+                port.delete(request("meeting-legacy", "legacy-key", "legacy-digest")));
+        assertInstanceOf(DeleteResult.NotFound.class,
+                port.delete(request("meeting-missing", "missing-key", "missing-digest")));
+    }
+
+    @Test
+    void exactlyFourInitialStatesAreAcceptedAndAllOthersAreRejected() throws Exception {
+        for (MeetingState state : List.of(
+                MeetingState.READY,
+                MeetingState.READY_WITH_WARNINGS,
+                MeetingState.FAILED,
+                MeetingState.CANCELLED)) {
+            String suffix = "allowed-" + state.name().toLowerCase();
+            createOwned(suffix, state, DEPLOYMENT, SUBJECT);
+            DeleteResult.Accepted accepted = assertInstanceOf(
+                    DeleteResult.Accepted.class,
+                    port(dataSource, DELETE_CLOCK).delete(request(
+                            "meeting-" + suffix, "key-" + suffix, "digest-" + suffix)));
+            assertEquals(MeetingState.DELETION_PENDING, accepted.meeting().state());
+            assertEquals(ManifestStatus.DELETION_PENDING,
+                    accepted.meeting().manifestState());
+            assertEquals(1, deletionEventCount("meeting-" + suffix));
+        }
+
+        List<MeetingState> rejected = List.of(
+                MeetingState.CREATED,
+                MeetingState.AUTHORIZED,
+                MeetingState.STARTING,
+                MeetingState.RUNNING,
+                MeetingState.STOPPING,
+                MeetingState.FINALIZING,
+                MeetingState.DELETION_PENDING,
+                MeetingState.DELETED);
+        for (MeetingState state : rejected) {
+            String suffix = "rejected-" + state.name().toLowerCase();
+            createOwned(suffix, state, DEPLOYMENT, SUBJECT);
+            assertConflict(
+                    port(dataSource, DELETE_CLOCK).delete(request(
+                            "meeting-" + suffix, "key-" + suffix, "digest-" + suffix)),
+                    DeleteResult.ConflictReason.INVALID_MEETING_STATE);
+            assertEquals(0, deletionIdempotencyCount("key-" + suffix));
+            assertEquals(0, deletionEventCount("meeting-" + suffix));
+        }
+
+        createOwned("rejected-unknown", MeetingState.CREATED, DEPLOYMENT, SUBJECT);
+        try (Connection connection = dataSource.getConnection();
+             Statement statement = connection.createStatement()) {
+            statement.execute("ALTER TABLE meeting DROP CONSTRAINT meeting_state_ck");
+            statement.execute("UPDATE meeting SET state='UNKNOWN' "
+                    + "WHERE meeting_id='meeting-rejected-unknown'");
+        }
+        assertConflict(
+                port(dataSource, DELETE_CLOCK).delete(request(
+                        "meeting-rejected-unknown", "key-unknown", "digest-unknown")),
+                DeleteResult.ConflictReason.INVALID_MEETING_STATE);
+    }
+
+    @Test
+    void firstAcceptanceAllowsNonDeletionManifestStatesAndRejectsCrossDeletionFacts()
+            throws Exception {
+        for (ManifestStatus manifest : List.of(
+                ManifestStatus.NOT_STARTED,
+                ManifestStatus.GENERATING,
+                ManifestStatus.READY,
+                ManifestStatus.READY_WITH_WARNINGS,
+                ManifestStatus.FAILED)) {
+            String suffix = "manifest-allowed-" + manifest.name().toLowerCase();
+            createOwned(suffix, MeetingState.READY, DEPLOYMENT, SUBJECT);
+            updateManifest("meeting-" + suffix, manifest);
+            assertInstanceOf(DeleteResult.Accepted.class,
+                    port(dataSource, DELETE_CLOCK).delete(request(
+                            "meeting-" + suffix,
+                            "key-" + suffix,
+                            "digest-" + suffix)));
+        }
+
+        for (ManifestStatus manifest : List.of(
+                ManifestStatus.DELETION_PENDING,
+                ManifestStatus.DELETED)) {
+            String suffix = "manifest-cross-" + manifest.name().toLowerCase();
+            createOwned(suffix, MeetingState.READY, DEPLOYMENT, SUBJECT);
+            updateManifest("meeting-" + suffix, manifest);
+            assertConflict(
+                    port(dataSource, DELETE_CLOCK).delete(request(
+                            "meeting-" + suffix,
+                            "key-" + suffix,
+                            "digest-" + suffix)),
+                    DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT);
+            assertEquals(0, deletionIdempotencyCount("key-" + suffix));
+            assertEquals(0, deletionEventCount("meeting-" + suffix));
+        }
+    }
+
+    @Test
+    void ownedMalformedLockedFactsMapToSnapshotInconsistentBeforeIdempotencyRead()
+            throws Exception {
+        for (String suffix : List.of(
+                "bad-enum", "null-profile-revision", "null-aggregate-version",
+                "half-ownership", "bad-receipt")) {
+            createOwned(suffix, MeetingState.READY, DEPLOYMENT, SUBJECT);
+        }
+        try (Connection connection = dataSource.getConnection();
+             Statement statement = connection.createStatement()) {
+            statement.execute("ALTER TABLE meeting DROP CONSTRAINT meeting_state_ck");
+            statement.execute("ALTER TABLE meeting DROP CONSTRAINT "
+                    + "meeting_profile_revision_check");
+            statement.execute("ALTER TABLE meeting ALTER COLUMN profile_revision DROP NOT NULL");
+            statement.execute("ALTER TABLE meeting DROP CONSTRAINT "
+                    + "meeting_aggregate_version_check");
+            statement.execute("ALTER TABLE meeting ALTER COLUMN aggregate_version DROP NOT NULL");
+            statement.execute("ALTER TABLE meeting DROP CONSTRAINT "
+                    + "meeting_finalization_receipt_ck");
+            statement.execute("UPDATE meeting SET state='BROKEN_STATE' "
+                    + "WHERE meeting_id='meeting-bad-enum'");
+            statement.execute("UPDATE meeting SET profile_revision=NULL "
+                    + "WHERE meeting_id='meeting-null-profile-revision'");
+            statement.execute("UPDATE meeting SET aggregate_version=NULL "
+                    + "WHERE meeting_id='meeting-null-aggregate-version'");
+            statement.execute("UPDATE meeting SET grant_id=NULL "
+                    + "WHERE meeting_id='meeting-half-ownership'");
+            statement.execute("UPDATE meeting SET input_state='INPUT_OPEN', "
+                    + "finalization_receipt_id='illegal-receipt' "
+                    + "WHERE meeting_id='meeting-bad-receipt'");
+        }
+
+        DataSource guarded = faultInjectingDataSource(
+                dataSource, FaultPoint.FAIL_IF_IDEMPOTENCY_READ,
+                new FaultObservation());
+        for (String suffix : List.of(
+                "bad-enum", "null-profile-revision", "null-aggregate-version",
+                "half-ownership", "bad-receipt")) {
+            assertConflict(
+                    port(guarded, DELETE_CLOCK).delete(request(
+                            "meeting-" + suffix,
+                            "key-" + suffix,
+                            "digest-" + suffix)),
+                    DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT);
+            assertEquals(0, deletionIdempotencyCount("key-" + suffix));
+            assertEquals(0, deletionEventCount("meeting-" + suffix));
+        }
+    }
+
+    @Test
+    void firstAcceptanceReplayDigestConflictAndFactTimesAreStable() throws Exception {
+        createOwned("stable", MeetingState.READY, DEPLOYMENT, SUBJECT);
+        DeleteRequest request = request("meeting-stable", "key-stable", "digest-stable");
+        AtomicInteger clockReads = new AtomicInteger();
+        Clock countingClock = new Clock() {
+            @Override
+            public ZoneId getZone() {
+                return ZoneOffset.UTC;
+            }
+
+            @Override
+            public Clock withZone(ZoneId zone) {
+                return this;
+            }
+
+            @Override
+            public Instant instant() {
+                clockReads.incrementAndGet();
+                return DELETE_CLOCK;
+            }
+        };
+        JdbcMeetingDeletionPort port = new JdbcMeetingDeletionPort(dataSource, countingClock);
+
+        DeleteResult.Accepted first = assertInstanceOf(
+                DeleteResult.Accepted.class, port.delete(request));
+        assertEquals(DELETE_AT, first.meeting().updatedAt());
+        assertEquals(1, clockReads.get());
+        DeletionDbFacts facts = facts("meeting-stable");
+        assertEquals(MeetingState.DELETION_PENDING, facts.state());
+        assertEquals(ManifestStatus.DELETION_PENDING, facts.manifestState());
+        assertEquals(DELETE_AT, facts.updatedAt());
+        assertEquals(1, facts.aggregateVersion());
+        assertEquals(InputState.INPUT_ACCEPTED, facts.inputState());
+        assertEquals("setup-receipt-stable", facts.receipt());
+        assertEquals(1, deletionIdempotencyCount("key-stable"));
+        assertEquals(202, deletionResponseStatus("key-stable"));
+        assertEquals(DELETE_AT, deletionCreatedAt("key-stable"));
+        assertEquals(DELETE_AT, deletionOutboxTime("meeting-stable", "occurred_at"));
+        assertEquals(DELETE_AT, deletionOutboxTime("meeting-stable", "available_at"));
+
+        DeleteResult.Replayed replay = assertInstanceOf(
+                DeleteResult.Replayed.class, port.delete(request));
+        assertEquals(first.meeting(), replay.meeting());
+        assertEquals(1, clockReads.get(), "重放不得读取时钟");
+        assertEquals(1, deletionEventCount("meeting-stable"));
+
+        assertConflict(port.delete(request(
+                        "meeting-stable", "key-stable", "digest-other")),
+                DeleteResult.ConflictReason.REQUEST_DIGEST_MISMATCH);
+        assertEquals(1, clockReads.get(), "摘要冲突不得读取时钟");
+    }
+
+    @Test
+    void malformedStatusBodyMeetingAndCurrentSnapshotFailClosed() throws Exception {
+        // 摘要必须先比较：即使正文损坏，不同摘要仍只返回摘要冲突。
+        accept("bad-body", "key-bad-body", "digest-bad-body");
+        mutateIdempotency("key-bad-body",
+                "response_body='{" + "\"private-attacker\":true}'::jsonb");
+        assertConflict(port(dataSource, DELETE_CLOCK).delete(request(
+                        "meeting-bad-body", "key-bad-body", "different-digest")),
+                DeleteResult.ConflictReason.REQUEST_DIGEST_MISMATCH);
+        assertConflict(port(dataSource, DELETE_CLOCK).delete(request(
+                        "meeting-bad-body", "key-bad-body", "digest-bad-body")),
+                DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT);
+
+        accept("bad-status", "key-bad-status", "digest-bad-status");
+        mutateIdempotency("key-bad-status", "response_status=200");
+        assertConflict(port(dataSource, DELETE_CLOCK).delete(request(
+                        "meeting-bad-status", "key-bad-status", "digest-bad-status")),
+                DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT);
+
+        accept("bad-meeting", "key-bad-meeting", "digest-bad-meeting");
+        mutateIdempotency("key-bad-meeting", "response_body=jsonb_set(response_body, "
+                + "'{meetingId}', '\"meeting-other\"'::jsonb)");
+        assertConflict(port(dataSource, DELETE_CLOCK).delete(request(
+                        "meeting-bad-meeting", "key-bad-meeting", "digest-bad-meeting")),
+                DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT);
+
+        accept("bad-current", "key-bad-current", "digest-bad-current");
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement("""
+                     UPDATE meeting SET updated_at = updated_at + interval '1 second'
+                      WHERE meeting_id = 'meeting-bad-current'
+                     """)) {
+            assertEquals(1, statement.executeUpdate());
+        }
+        assertConflict(port(dataSource, DELETE_CLOCK).delete(request(
+                        "meeting-bad-current", "key-bad-current", "digest-bad-current")),
+                DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT);
+    }
+
+    @Test
+    void replayAfterWorkerDeletionReturnsFirstPendingSnapshot() throws Exception {
+        DeleteResult.Accepted first = accept(
+                "worker-deleted", "key-worker-deleted", "digest-worker-deleted");
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement("""
+                     UPDATE meeting
+                        SET state='DELETED', manifest_state='DELETED',
+                            updated_at=?, aggregate_version=aggregate_version+1
+                      WHERE meeting_id='meeting-worker-deleted'
+                     """)) {
+            statement.setTimestamp(1, Timestamp.from(DELETE_AT.plusSeconds(5)));
+            assertEquals(1, statement.executeUpdate());
+        }
+
+        DeleteResult.Replayed replay = assertInstanceOf(
+                DeleteResult.Replayed.class,
+                port(dataSource, DELETE_CLOCK).delete(request(
+                        "meeting-worker-deleted",
+                        "key-worker-deleted",
+                        "digest-worker-deleted")));
+        assertEquals(first.meeting(), replay.meeting());
+        assertEquals(MeetingState.DELETION_PENDING, replay.meeting().state());
+
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement("""
+                     UPDATE meeting SET finalization_receipt_id='changed-receipt'
+                      WHERE meeting_id='meeting-worker-deleted'
+                     """)) {
+            assertEquals(1, statement.executeUpdate());
+        }
+        assertConflict(port(dataSource, DELETE_CLOCK).delete(request(
+                        "meeting-worker-deleted",
+                        "key-worker-deleted",
+                        "digest-worker-deleted")),
+                DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT);
+    }
+
+    @Test
+    void concurrentSameAndDifferentKeysAndCrossMeetingScopeAreDeterministic()
+            throws Exception {
+        createOwned("same-key", MeetingState.READY, DEPLOYMENT, SUBJECT);
+        DeleteRequest same = request(
+                "meeting-same-key", "key-same", "digest-same");
+        List<DeleteResult> sameResults = concurrently(8,
+                () -> port(dataSource, DELETE_CLOCK).delete(same));
+        assertEquals(1, sameResults.stream()
+                .filter(DeleteResult.Accepted.class::isInstance).count());
+        assertEquals(7, sameResults.stream()
+                .filter(DeleteResult.Replayed.class::isInstance).count());
+        assertEquals(1, deletionEventCount("meeting-same-key"));
+
+        createOwned("different-key", MeetingState.READY, DEPLOYMENT, SUBJECT);
+        AtomicInteger keySequence = new AtomicInteger();
+        List<DeleteResult> different = concurrently(8, () -> {
+            int index = keySequence.incrementAndGet();
+            return port(dataSource, DELETE_CLOCK).delete(request(
+                    "meeting-different-key", "key-different-" + index,
+                    "digest-different-" + index));
+        });
+        assertEquals(1, different.stream()
+                .filter(DeleteResult.Accepted.class::isInstance).count());
+        assertEquals(7, different.stream()
+                .filter(result -> result instanceof DeleteResult.Conflict conflict
+                        && conflict.reason()
+                        == DeleteResult.ConflictReason.INVALID_MEETING_STATE).count());
+        assertEquals(1, deletionEventCount("meeting-different-key"));
+
+        createOwned("cross-a", MeetingState.READY, DEPLOYMENT, SUBJECT);
+        createOwned("cross-b", MeetingState.READY, DEPLOYMENT, SUBJECT);
+        CountDownLatch start = new CountDownLatch(1);
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            Future<DeleteResult> first = executor.submit(() -> {
+                start.await();
+                return port(dataSource, DELETE_CLOCK).delete(request(
+                        "meeting-cross-a", "key-cross", "digest-cross"));
+            });
+            Future<DeleteResult> second = executor.submit(() -> {
+                start.await();
+                return port(dataSource, DELETE_CLOCK).delete(request(
+                        "meeting-cross-b", "key-cross", "digest-cross"));
+            });
+            start.countDown();
+            List<DeleteResult> cross = List.of(first.get(), second.get());
+            assertEquals(1, cross.stream()
+                    .filter(DeleteResult.Accepted.class::isInstance).count());
+            assertEquals(1, cross.stream()
+                    .filter(result -> result instanceof DeleteResult.Conflict conflict
+                            && conflict.reason()
+                            == DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT).count());
+        }
+        assertEquals(1, deletionEventCount("meeting-cross-a")
+                + deletionEventCount("meeting-cross-b"));
+    }
+
+    @Test
+    void everyWritePointFailureRollsBackAllThreeFacts() throws Exception {
+        List<FaultPoint> faults = List.of(
+                FaultPoint.BEFORE_IDEMPOTENCY_INSERT,
+                FaultPoint.AFTER_IDEMPOTENCY_INSERT,
+                FaultPoint.BEFORE_MEETING_UPDATE,
+                FaultPoint.AFTER_MEETING_UPDATE,
+                FaultPoint.BEFORE_OUTBOX_INSERT,
+                FaultPoint.AFTER_OUTBOX_INSERT);
+        for (FaultPoint fault : faults) {
+            String suffix = "fault-" + fault.name().toLowerCase();
+            createOwned(suffix, MeetingState.READY, DEPLOYMENT, SUBJECT);
+            FaultObservation observation = new FaultObservation();
+            DeleteResult.Unavailable result = assertInstanceOf(
+                    DeleteResult.Unavailable.class,
+                    port(faultInjectingDataSource(dataSource, fault, observation), DELETE_CLOCK)
+                            .delete(request(
+                                    "meeting-" + suffix,
+                                    "key-" + suffix,
+                                    "digest-" + suffix)));
+            assertTrue(result.retryable());
+            assertEquals(DeleteResult.UnavailableReason.TRANSIENT_STORAGE_FAILURE,
+                    result.reason());
+            assertEquals(MeetingState.READY, facts("meeting-" + suffix).state());
+            assertEquals(0, deletionIdempotencyCount("key-" + suffix));
+            assertEquals(0, deletionEventCount("meeting-" + suffix));
+            assertTrue(observation.restoreAutoCommitAttempted.get());
+        }
+    }
+
+    @Test
+    void sqlDataExceptionsBeforeCommitBecomeSnapshotConflictsAndRollback()
+            throws Exception {
+        TestLogHandler logs = new TestLogHandler();
+        Logger logger = Logger.getLogger(JdbcMeetingDeletionPort.class.getName());
+        logger.addHandler(logs);
+        try {
+            for (FaultPoint fault : List.of(
+                    FaultPoint.DATA_EXCEPTION_MEETING_LOCK,
+                    FaultPoint.DATA_EXCEPTION_IDEMPOTENCY_READ)) {
+                String suffix = "data-exception-" + fault.name().toLowerCase();
+                createOwned(suffix, MeetingState.READY, DEPLOYMENT, SUBJECT);
+                FaultObservation observation = new FaultObservation();
+                assertConflict(
+                        port(faultInjectingDataSource(dataSource, fault, observation),
+                                DELETE_CLOCK).delete(request(
+                                "meeting-" + suffix,
+                                "private-key-" + suffix,
+                                "private-digest-" + suffix)),
+                        DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT);
+                assertTrue(observation.rollbackAttempted.get());
+                assertTrue(observation.restoreAutoCommitAttempted.get());
+                assertFalse(observation.abortAttempted.get());
+                assertEquals(MeetingState.READY, facts("meeting-" + suffix).state());
+                assertEquals(0, deletionIdempotencyCount("private-key-" + suffix));
+                assertEquals(0, deletionEventCount("meeting-" + suffix));
+            }
+        } finally {
+            logger.removeHandler(logs);
+        }
+
+        String diagnostic = logs.text();
+        assertTrue(diagnostic.contains("SNAPSHOT_INCONSISTENT"));
+        assertTrue(diagnostic.contains("22000"));
+        assertTrue(diagnostic.contains("MEETING_LOCK_AND_ACCESS_CHECK"));
+        assertTrue(diagnostic.contains("IDEMPOTENCY_READ"));
+        for (String forbidden : List.of(
+                "private-dynamic-failure-detail",
+                "private-key-data-exception",
+                "private-digest-data-exception",
+                DEPLOYMENT,
+                SUBJECT)) {
+            assertFalse(diagnostic.contains(forbidden),
+                    () -> "SQL 数据异常日志泄露动态文本: " + forbidden);
+        }
+    }
+
+    @Test
+    void deletionCasPrimitiveRejectsUnprovedTransitionsBeforePreparingUpdate()
+            throws Exception {
+        createOwned("primitive-running", MeetingState.RUNNING, DEPLOYMENT, SUBJECT);
+        assertDeletionPrimitiveRejected(
+                "primitive-running",
+                MeetingState.RUNNING,
+                ManifestStatus.NOT_STARTED,
+                DELETE_AT,
+                null);
+
+        createOwned("primitive-manifest", MeetingState.READY, DEPLOYMENT, SUBJECT);
+        updateManifest("meeting-primitive-manifest", ManifestStatus.DELETION_PENDING);
+        assertDeletionPrimitiveRejected(
+                "primitive-manifest",
+                MeetingState.READY,
+                ManifestStatus.DELETION_PENDING,
+                DELETE_AT,
+                null);
+
+        createOwned("primitive-backward", MeetingState.READY, DEPLOYMENT, SUBJECT);
+        assertDeletionPrimitiveRejected(
+                "primitive-backward",
+                MeetingState.READY,
+                ManifestStatus.READY,
+                CREATED_AT,
+                null);
+
+        createOwned("primitive-forged", MeetingState.READY, DEPLOYMENT, SUBJECT);
+        assertDeletionPrimitiveRejected(
+                "primitive-forged",
+                MeetingState.READY,
+                ManifestStatus.READY,
+                DELETE_AT,
+                "forged-profile");
+    }
+
+    @Test
+    void preexistingOutboxReplayAndConflictRejectAndRollback() throws Exception {
+        for (boolean sameMessage : List.of(true, false)) {
+            String suffix = sameMessage ? "outbox-replay" : "outbox-conflict";
+            createOwned(suffix, MeetingState.READY, DEPLOYMENT, SUBJECT);
+            DeletionDbFacts before = facts("meeting-" + suffix);
+            MeetingStatus pending = new MeetingStatus(
+                    "meeting-" + suffix,
+                    MeetingState.DELETION_PENDING,
+                    new FinalizationFact(before.inputState(), before.receipt()),
+                    ManifestStatus.DELETION_PENDING,
+                    DELETE_AT);
+            OutboxStore.OutboxEvent expected =
+                    MeetingCommandEventFactory.meetingDeletionRequested(DEPLOYMENT, pending);
+            OutboxStore.OutboxEvent inserted = sameMessage
+                    ? expected
+                    : OutboxStore.OutboxEvent.pending(
+                            expected.eventId(), expected.aggregateType(), expected.aggregateId(),
+                            expected.eventType(), expected.payload().replace(
+                                    "DELETION_PENDING", "DELETED"),
+                            expected.occurredAt(), expected.availableAt());
+            assertEquals(OutboxStore.AppendStatus.APPENDED,
+                    new JdbcOutboxStore(dataSource).append(inserted).status());
+
+            assertConflict(port(dataSource, DELETE_CLOCK).delete(request(
+                            "meeting-" + suffix,
+                            "key-" + suffix,
+                            "digest-" + suffix)),
+                    DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT);
+            assertEquals(MeetingState.READY, facts("meeting-" + suffix).state());
+            assertEquals(0, deletionIdempotencyCount("key-" + suffix));
+            assertEquals(1, deletionEventCount("meeting-" + suffix));
+        }
+    }
+
+    @Test
+    void clockFailuresBackwardTimeAndCasZeroAreClosedWithoutPartialFacts()
+            throws Exception {
+        createOwned("clock-runtime", MeetingState.READY, DEPLOYMENT, SUBJECT);
+        Clock brokenClock = new Clock() {
+            @Override
+            public ZoneId getZone() {
+                return ZoneOffset.UTC;
+            }
+
+            @Override
+            public Clock withZone(ZoneId zone) {
+                return this;
+            }
+
+            @Override
+            public Instant instant() {
+                throw new IllegalStateException("private-clock-detail");
+            }
+        };
+        assertUnavailable(
+                new JdbcMeetingDeletionPort(dataSource, brokenClock).delete(request(
+                        "meeting-clock-runtime", "key-clock-runtime", "digest-clock-runtime")),
+                DeleteResult.UnavailableReason.STORAGE_FAILURE,
+                false);
+
+        createOwned("clock-backward", MeetingState.READY, DEPLOYMENT, SUBJECT);
+        assertConflict(
+                port(dataSource, CREATED_AT.minusSeconds(1)).delete(request(
+                        "meeting-clock-backward", "key-clock-backward", "digest-clock-backward")),
+                DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT);
+        assertEquals(0, deletionIdempotencyCount("key-clock-backward"));
+        assertEquals(0, deletionEventCount("meeting-clock-backward"));
+
+        createOwned("cas-zero", MeetingState.READY, DEPLOYMENT, SUBJECT);
+        assertConflict(
+                port(faultInjectingDataSource(
+                                dataSource, FaultPoint.CAS_ZERO, new FaultObservation()),
+                        DELETE_CLOCK).delete(request(
+                                "meeting-cas-zero", "key-cas-zero", "digest-cas-zero")),
+                DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT);
+        assertEquals(MeetingState.READY, facts("meeting-cas-zero").state());
+        assertEquals(0, deletionIdempotencyCount("key-cas-zero"));
+        assertEquals(0, deletionEventCount("meeting-cas-zero"));
+    }
+
+    @Test
+    void commitRollbackRestoreAndCloseFaultsPreserveOutcomeAndRedaction()
+            throws Exception {
+        String privateMarker = "private-dynamic-failure-detail";
+        TestLogHandler logs = new TestLogHandler();
+        Logger logger = Logger.getLogger(JdbcMeetingDeletionPort.class.getName());
+        logger.addHandler(logs);
+        try {
+            createOwned("commit-before", MeetingState.READY, DEPLOYMENT, SUBJECT);
+            FaultObservation before = new FaultObservation();
+            assertUnavailable(port(faultInjectingDataSource(
+                                    dataSource, FaultPoint.BEFORE_COMMIT, before), DELETE_CLOCK)
+                            .delete(request(
+                                    "meeting-commit-before", "private-key-before",
+                                    "private-digest-before")),
+                    DeleteResult.UnavailableReason.OUTCOME_UNKNOWN, true);
+            assertFalse(before.restoreAutoCommitAttempted.get());
+            assertTrue(before.abortAttempted.get());
+            assertEquals(MeetingState.READY, facts("meeting-commit-before").state());
+
+            createOwned("commit-after", MeetingState.READY, DEPLOYMENT, SUBJECT);
+            FaultObservation after = new FaultObservation();
+            assertUnavailable(port(faultInjectingDataSource(
+                                    dataSource, FaultPoint.AFTER_COMMIT, after), DELETE_CLOCK)
+                            .delete(request(
+                                    "meeting-commit-after", "private-key-after",
+                                    "private-digest-after")),
+                    DeleteResult.UnavailableReason.OUTCOME_UNKNOWN, true);
+            assertFalse(after.restoreAutoCommitAttempted.get());
+            assertTrue(after.abortAttempted.get());
+            assertEquals(MeetingState.DELETION_PENDING,
+                    facts("meeting-commit-after").state());
+
+            createOwned("commit-runtime", MeetingState.READY, DEPLOYMENT, SUBJECT);
+            assertUnavailable(port(faultInjectingDataSource(
+                                    dataSource, FaultPoint.RUNTIME_AFTER_COMMIT,
+                                    new FaultObservation()), DELETE_CLOCK)
+                            .delete(request(
+                                    "meeting-commit-runtime", "key-runtime",
+                                    "digest-runtime")),
+                    DeleteResult.UnavailableReason.OUTCOME_UNKNOWN, true);
+
+            for (FaultPoint rollbackFault : List.of(
+                    FaultPoint.ROLLBACK_SQL, FaultPoint.ROLLBACK_RUNTIME)) {
+                String suffix = rollbackFault.name().toLowerCase();
+                createOwned(suffix, MeetingState.CREATED, DEPLOYMENT, SUBJECT);
+                FaultObservation observation = new FaultObservation();
+                assertConflict(port(faultInjectingDataSource(
+                                        dataSource, rollbackFault, observation), DELETE_CLOCK)
+                                .delete(request(
+                                        "meeting-" + suffix,
+                                        "key-" + suffix,
+                                        "digest-" + suffix)),
+                        DeleteResult.ConflictReason.INVALID_MEETING_STATE);
+                assertFalse(observation.restoreAutoCommitAttempted.get());
+                assertTrue(observation.abortAttempted.get());
+                assertTrue(observation.closeAttempted.get());
+            }
+
+            createOwned("restore-runtime", MeetingState.CREATED, DEPLOYMENT, SUBJECT);
+            assertConflict(port(faultInjectingDataSource(
+                                    dataSource, FaultPoint.RESTORE_AUTOCOMMIT_RUNTIME,
+                                    new FaultObservation()), DELETE_CLOCK)
+                            .delete(request(
+                                    "meeting-restore-runtime", "key-restore",
+                                    "digest-restore")),
+                    DeleteResult.ConflictReason.INVALID_MEETING_STATE);
+
+            createOwned("close-runtime", MeetingState.CREATED, DEPLOYMENT, SUBJECT);
+            assertConflict(port(faultInjectingDataSource(
+                                    dataSource, FaultPoint.CLOSE_RUNTIME,
+                                    new FaultObservation()), DELETE_CLOCK)
+                            .delete(request(
+                                    "meeting-close-runtime", "key-close",
+                                    "digest-close")),
+                    DeleteResult.ConflictReason.INVALID_MEETING_STATE);
+        } finally {
+            logger.removeHandler(logs);
+        }
+
+        String diagnostic = logs.text();
+        for (String forbidden : List.of(
+                privateMarker,
+                "private-key-before",
+                "private-digest-before",
+                DEPLOYMENT,
+                SUBJECT,
+                "setup-receipt-commit-before",
+                System.getenv("REFERENCE_TEST_DATABASE_URL"))) {
+            if (forbidden != null) {
+                assertFalse(diagnostic.contains(forbidden),
+                        () -> "日志泄露敏感文本: " + forbidden);
+            }
+        }
+    }
+
+    private DeleteResult.Accepted accept(String suffix, String key, String digest)
+            throws Exception {
+        createOwned(suffix, MeetingState.READY, DEPLOYMENT, SUBJECT);
+        return assertInstanceOf(DeleteResult.Accepted.class,
+                port(dataSource, DELETE_CLOCK).delete(request(
+                        "meeting-" + suffix, key, digest)));
+    }
+
+    private JdbcMeetingDeletionPort port(DataSource source, Instant instant) {
+        return new JdbcMeetingDeletionPort(
+                source, Clock.fixed(instant, ZoneOffset.UTC));
+    }
+
+    private DeleteRequest request(String meetingId, String key, String digest) {
+        return new DeleteRequest(context(DEPLOYMENT, SUBJECT), meetingId, key, digest);
+    }
+
+    private static MeetingCommandContext context(String deployment, String subject) {
+        return new MeetingCommandContext(
+                deployment,
+                new VerifiedIdentity(
+                        new Subject(subject),
+                        Set.of("ROLE_USER"),
+                        Set.of(MeetingPermissions.DELETE),
+                        CREATED_AT.minusSeconds(60),
+                        DELETE_AT.plusSeconds(600),
+                        "credential-reference"));
+    }
+
+    private MeetingAggregate.MeetingSnapshot createOwned(
+            String suffix,
+            MeetingState state,
+            String deployment,
+            String subject) throws Exception {
+        String meetingId = "meeting-" + suffix;
+        Instant grantExpiresAt = DELETE_AT.plusSeconds(600);
+        MeetingGrant grant = new MeetingGrant(
+                "grant-" + suffix,
+                deployment,
+                subject,
+                "profile-owned",
+                7,
+                Set.of("transcript.realtime"),
+                Set.of("transcript.realtime"),
+                3_600_000,
+                CREATED_AT.minusSeconds(20),
+                grantExpiresAt);
+        UsageReservation reservation = UsageReservation.reserved(
+                "reservation-" + suffix,
+                grant,
+                meetingId,
+                new UsageEstimate(UsageUnit.MEETING_DURATION_MS, 60_000),
+                CREATED_AT.minusSeconds(10),
+                grantExpiresAt.minusMillis(1));
+        UsageOperationResult reserve = UsageOperationResult.reserve(
+                deployment,
+                subject,
+                "reserve-key-" + suffix,
+                "reserve-digest-" + suffix,
+                grantExpiresAt,
+                AuthorizedProfileSnapshot.from(grant),
+                reservation);
+        try (Connection connection = transaction()) {
+            JdbcUsageReservationStore.insertReservation(connection, reservation);
+            assertTrue(JdbcUsageReservationStore.insertOperation(
+                    connection, reserve, CREATED_AT.minusSeconds(10)));
+            connection.commit();
+        }
+        var created = new JdbcOwnedMeetingCreationUnitOfWork(
+                dataSource, Clock.fixed(CREATED_AT, ZoneOffset.UTC))
+                .create(new OwnedMeetingCreationUnitOfWork.CreateRequest(
+                        deployment,
+                        subject,
+                        meetingId,
+                        "session-" + suffix,
+                        "create-key-" + suffix,
+                        "create-digest-" + suffix,
+                        reserve));
+        assertTrue(created instanceof OwnedMeetingCreationUnitOfWork.Success,
+                () -> "owned setup failed: " + created);
+
+        if (state != MeetingState.CREATED) {
+            InputState inputState = inputStateFor(state);
+            String receipt = inputState == InputState.INPUT_ACCEPTED
+                    ? "setup-receipt-" + suffix : null;
+            try (Connection connection = dataSource.getConnection();
+                 PreparedStatement statement = connection.prepareStatement("""
+                         UPDATE meeting
+                            SET state=?, manifest_state=?, updated_at=?,
+                                input_state=?, finalization_receipt_id=?
+                          WHERE meeting_id=?
+                         """)) {
+                statement.setString(1, state.name());
+                statement.setString(2, manifestFor(state).name());
+                statement.setTimestamp(3, Timestamp.from(CREATED_AT.plusSeconds(1)));
+                statement.setString(4, inputState.name());
+                statement.setString(5, receipt);
+                statement.setString(6, meetingId);
+                assertEquals(1, statement.executeUpdate());
+            }
+        }
+        return new JdbcMeetingRepository(dataSource).find(meetingId).orElseThrow();
+    }
+
+    private void insertLegacy(String suffix, MeetingState state, String deployment) {
+        new JdbcMeetingRepository(dataSource).save(
+                MeetingAggregate.MeetingSnapshot.legacyUnowned(
+                        "meeting-" + suffix,
+                        deployment,
+                        "session-" + suffix,
+                        "profile-legacy",
+                        1,
+                        state,
+                        CREATED_AT,
+                        CREATED_AT.plusSeconds(1)));
+    }
+
+    private static InputState inputStateFor(MeetingState state) {
+        return switch (state) {
+            case READY, READY_WITH_WARNINGS, FAILED, FINALIZING -> InputState.INPUT_ACCEPTED;
+            case CANCELLED, DELETED -> InputState.INPUT_CANCELLED;
+            default -> InputState.INPUT_OPEN;
+        };
+    }
+
+    private static ManifestStatus manifestFor(MeetingState state) {
+        return switch (state) {
+            case READY -> ManifestStatus.READY;
+            case READY_WITH_WARNINGS -> ManifestStatus.READY_WITH_WARNINGS;
+            case FAILED, CANCELLED -> ManifestStatus.FAILED;
+            case FINALIZING -> ManifestStatus.GENERATING;
+            case DELETION_PENDING -> ManifestStatus.DELETION_PENDING;
+            case DELETED -> ManifestStatus.DELETED;
+            default -> ManifestStatus.NOT_STARTED;
+        };
+    }
+
+    private void mutateIdempotency(String key, String assignment) throws SQLException {
+        String scope = IdempotencyScopeCodec.meetingDelete(DEPLOYMENT, SUBJECT);
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "UPDATE idempotency_record SET " + assignment
+                             + " WHERE subject_scope=? AND idempotency_key=?")) {
+            statement.setString(1, scope);
+            statement.setString(2, key);
+            assertEquals(1, statement.executeUpdate());
+        }
+    }
+
+    private void updateManifest(String meetingId, ManifestStatus manifest) throws SQLException {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "UPDATE meeting SET manifest_state=? WHERE meeting_id=?")) {
+            statement.setString(1, manifest.name());
+            statement.setString(2, meetingId);
+            assertEquals(1, statement.executeUpdate());
+        }
+    }
+
+    private void assertDeletionPrimitiveRejected(
+            String suffix,
+            MeetingState expectedState,
+            ManifestStatus expectedManifest,
+            Instant advancedAt,
+            String profileOverride) throws Exception {
+        DataSource guarded = faultInjectingDataSource(
+                dataSource, FaultPoint.FAIL_IF_MEETING_UPDATE,
+                new FaultObservation());
+        try (Connection connection = guarded.getConnection()) {
+            connection.setAutoCommit(false);
+            JdbcMeetingRepository.DeletionFound found = assertInstanceOf(
+                    JdbcMeetingRepository.DeletionFound.class,
+                    JdbcMeetingRepository.lockForDeletion(
+                            connection,
+                            "meeting-" + suffix,
+                            context(DEPLOYMENT, SUBJECT)));
+            JdbcMeetingRepository.DeletionMeeting before = found.meeting();
+            MeetingAggregate.MeetingSnapshot snapshot = before.snapshot();
+            MeetingAggregate.MeetingSnapshot advanced =
+                    new MeetingAggregate.MeetingSnapshot(
+                            snapshot.meetingId(),
+                            snapshot.deploymentScope(),
+                            snapshot.clientSessionId(),
+                            snapshot.subjectScope(),
+                            snapshot.grantId(),
+                            snapshot.grantExpiresAt(),
+                            snapshot.usageReservationId(),
+                            profileOverride == null ? snapshot.profileId() : profileOverride,
+                            snapshot.profileRevision(),
+                            MeetingState.DELETION_PENDING,
+                            snapshot.createdAt(),
+                            advancedAt);
+            MeetingStatus accepted = new MeetingStatus(
+                    advanced.meetingId(),
+                    MeetingState.DELETION_PENDING,
+                    before.finalization(),
+                    ManifestStatus.DELETION_PENDING,
+                    advanced.updatedAt());
+
+            assertThrows(IllegalArgumentException.class,
+                    () -> JdbcMeetingRepository.markDeletionPending(
+                            connection, before, advanced, accepted));
+            connection.rollback();
+        }
+
+        DeletionDbFacts after = facts("meeting-" + suffix);
+        assertEquals(expectedState, after.state());
+        assertEquals(expectedManifest, after.manifestState());
+        assertEquals(0, deletionEventCount("meeting-" + suffix));
+    }
+
+    private int deletionIdempotencyCount(String key) throws SQLException {
+        String scope = IdempotencyScopeCodec.meetingDelete(DEPLOYMENT, SUBJECT);
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement("""
+                     SELECT count(*) FROM idempotency_record
+                      WHERE subject_scope=? AND idempotency_key=?
+                     """)) {
+            statement.setString(1, scope);
+            statement.setString(2, key);
+            try (var rows = statement.executeQuery()) {
+                assertTrue(rows.next());
+                return rows.getInt(1);
+            }
+        }
+    }
+
+    private int deletionResponseStatus(String key) throws SQLException {
+        return queryDeleteInt("response_status", key);
+    }
+
+    private Instant deletionCreatedAt(String key) throws SQLException {
+        String scope = IdempotencyScopeCodec.meetingDelete(DEPLOYMENT, SUBJECT);
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement("""
+                     SELECT created_at FROM idempotency_record
+                      WHERE subject_scope=? AND idempotency_key=?
+                     """)) {
+            statement.setString(1, scope);
+            statement.setString(2, key);
+            try (var rows = statement.executeQuery()) {
+                assertTrue(rows.next());
+                return rows.getTimestamp(1).toInstant();
+            }
+        }
+    }
+
+    private int queryDeleteInt(String column, String key) throws SQLException {
+        String scope = IdempotencyScopeCodec.meetingDelete(DEPLOYMENT, SUBJECT);
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "SELECT " + column + " FROM idempotency_record "
+                             + "WHERE subject_scope=? AND idempotency_key=?")) {
+            statement.setString(1, scope);
+            statement.setString(2, key);
+            try (var rows = statement.executeQuery()) {
+                assertTrue(rows.next());
+                return rows.getInt(1);
+            }
+        }
+    }
+
+    private int deletionEventCount(String meetingId) throws SQLException {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement("""
+                     SELECT count(*) FROM outbox_event
+                      WHERE aggregate_id=? AND event_type='MeetingDeletionRequested'
+                     """)) {
+            statement.setString(1, meetingId);
+            try (var rows = statement.executeQuery()) {
+                assertTrue(rows.next());
+                return rows.getInt(1);
+            }
+        }
+    }
+
+    private Instant deletionOutboxTime(String meetingId, String column) throws SQLException {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "SELECT " + column + " FROM outbox_event "
+                             + "WHERE aggregate_id=? "
+                             + "AND event_type='MeetingDeletionRequested'")) {
+            statement.setString(1, meetingId);
+            try (var rows = statement.executeQuery()) {
+                assertTrue(rows.next());
+                return rows.getTimestamp(1).toInstant();
+            }
+        }
+    }
+
+    private DeletionDbFacts facts(String meetingId) throws SQLException {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement("""
+                     SELECT state, manifest_state, input_state,
+                            finalization_receipt_id, updated_at, aggregate_version
+                       FROM meeting WHERE meeting_id=?
+                     """)) {
+            statement.setString(1, meetingId);
+            try (var rows = statement.executeQuery()) {
+                assertTrue(rows.next());
+                return new DeletionDbFacts(
+                        MeetingState.valueOf(rows.getString("state")),
+                        ManifestStatus.valueOf(rows.getString("manifest_state")),
+                        InputState.valueOf(rows.getString("input_state")),
+                        rows.getString("finalization_receipt_id"),
+                        rows.getTimestamp("updated_at").toInstant(),
+                        rows.getLong("aggregate_version"));
+            }
+        }
+    }
+
+    private Connection transaction() throws SQLException {
+        Connection connection = dataSource.getConnection();
+        connection.setAutoCommit(false);
+        return connection;
+    }
+
+    private static void assertConflict(
+            DeleteResult result,
+            DeleteResult.ConflictReason reason) {
+        assertEquals(reason,
+                assertInstanceOf(DeleteResult.Conflict.class, result).reason());
+    }
+
+    private static void assertUnavailable(
+            DeleteResult result,
+            DeleteResult.UnavailableReason reason,
+            boolean retryable) {
+        DeleteResult.Unavailable unavailable = assertInstanceOf(
+                DeleteResult.Unavailable.class, result);
+        assertEquals(reason, unavailable.reason());
+        assertEquals(retryable, unavailable.retryable());
+    }
+
+    private static <T> List<T> concurrently(int count, CheckedSupplier<T> operation)
+            throws Exception {
+        CountDownLatch ready = new CountDownLatch(count);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(count);
+        try {
+            List<Future<T>> futures = new ArrayList<>();
+            for (int index = 0; index < count; index++) {
+                futures.add(executor.submit(() -> {
+                    ready.countDown();
+                    start.await();
+                    return operation.get();
+                }));
+            }
+            ready.await();
+            start.countDown();
+            List<T> results = new ArrayList<>();
+            for (Future<T> future : futures) {
+                results.add(future.get());
+            }
+            return results;
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    private static DataSource faultInjectingDataSource(
+            DataSource delegate,
+            FaultPoint faultPoint,
+            FaultObservation observation) {
+        return new DelegatingDataSource(delegate) {
+            @Override
+            public Connection getConnection() throws SQLException {
+                return faultInjectingConnection(
+                        super.getConnection(), faultPoint, observation);
+            }
+
+            @Override
+            public Connection getConnection(String username, String password)
+                    throws SQLException {
+                return faultInjectingConnection(
+                        super.getConnection(username, password), faultPoint, observation);
+            }
+        };
+    }
+
+    private static Connection faultInjectingConnection(
+            Connection delegate,
+            FaultPoint faultPoint,
+            FaultObservation observation) {
+        return (Connection) Proxy.newProxyInstance(
+                Connection.class.getClassLoader(),
+                new Class<?>[]{Connection.class},
+                (proxy, method, arguments) -> {
+                    if ("prepareStatement".equals(method.getName())
+                            && arguments != null
+                            && arguments.length > 0
+                            && arguments[0] instanceof String sql) {
+                        if (faultPoint == FaultPoint.DATA_EXCEPTION_MEETING_LOCK
+                                && sql.contains("FROM meeting")
+                                && sql.contains("FOR UPDATE")) {
+                            throw new SQLException(
+                                    "private-dynamic-failure-detail", "22000");
+                        }
+                        if (faultPoint == FaultPoint.DATA_EXCEPTION_IDEMPOTENCY_READ
+                                && sql.contains("FROM idempotency_record")) {
+                            throw new SQLException(
+                                    "private-dynamic-failure-detail", "22000");
+                        }
+                        if (faultPoint == FaultPoint.FAIL_IF_IDEMPOTENCY_READ
+                                && sql.contains("FROM idempotency_record")) {
+                            throw new AssertionError(
+                                    "access denial must precede idempotency read");
+                        }
+                        if (faultPoint == FaultPoint.FAIL_IF_MEETING_UPDATE
+                                && sql.contains("UPDATE meeting")
+                                && sql.contains("aggregate_version = aggregate_version + 1")) {
+                            throw new AssertionError(
+                                    "invalid primitive input must not prepare update SQL");
+                        }
+                        FaultTiming timing = timing(faultPoint, sql);
+                        if (timing != FaultTiming.NONE) {
+                            PreparedStatement prepared = invokePrepared(
+                                    delegate, method, arguments);
+                            return faultInjectingStatement(prepared, timing);
+                        }
+                    }
+                    if ("rollback".equals(method.getName())) {
+                        observation.rollbackAttempted.set(true);
+                        if (faultPoint == FaultPoint.ROLLBACK_SQL) {
+                            throw new SQLException(
+                                    "private-dynamic-failure-detail", "08006");
+                        }
+                        if (faultPoint == FaultPoint.ROLLBACK_RUNTIME) {
+                            throw new IllegalStateException(
+                                    "private-dynamic-failure-detail");
+                        }
+                    }
+                    if ("commit".equals(method.getName())) {
+                        if (faultPoint == FaultPoint.BEFORE_COMMIT) {
+                            throw new SQLException(
+                                    "private-dynamic-failure-detail", "08006");
+                        }
+                        if (faultPoint == FaultPoint.AFTER_COMMIT) {
+                            delegate.commit();
+                            throw new SQLException(
+                                    "private-dynamic-failure-detail", "08006");
+                        }
+                        if (faultPoint == FaultPoint.RUNTIME_AFTER_COMMIT) {
+                            delegate.commit();
+                            throw new IllegalStateException(
+                                    "private-dynamic-failure-detail");
+                        }
+                    }
+                    if ("setAutoCommit".equals(method.getName())
+                            && arguments != null
+                            && arguments.length == 1
+                            && Boolean.TRUE.equals(arguments[0])) {
+                        observation.restoreAutoCommitAttempted.set(true);
+                        if (faultPoint == FaultPoint.RESTORE_AUTOCOMMIT_RUNTIME) {
+                            throw new IllegalStateException(
+                                    "private-dynamic-failure-detail");
+                        }
+                    }
+                    if ("abort".equals(method.getName())) {
+                        observation.abortAttempted.set(true);
+                    }
+                    if ("close".equals(method.getName())) {
+                        observation.closeAttempted.set(true);
+                        if (faultPoint == FaultPoint.CLOSE_RUNTIME) {
+                            delegate.close();
+                            throw new IllegalStateException(
+                                    "private-dynamic-failure-detail");
+                        }
+                    }
+                    return invoke(delegate, method, arguments);
+                });
+    }
+
+    private static PreparedStatement invokePrepared(
+            Connection delegate,
+            java.lang.reflect.Method method,
+            Object[] arguments) throws Throwable {
+        return (PreparedStatement) invoke(delegate, method, arguments);
+    }
+
+    private static PreparedStatement faultInjectingStatement(
+            PreparedStatement delegate,
+            FaultTiming timing) {
+        return (PreparedStatement) Proxy.newProxyInstance(
+                PreparedStatement.class.getClassLoader(),
+                new Class<?>[]{PreparedStatement.class},
+                (proxy, method, arguments) -> {
+                    if ("executeUpdate".equals(method.getName())) {
+                        if (timing == FaultTiming.BEFORE) {
+                            throw new SQLException(
+                                    "private-dynamic-failure-detail", "08006");
+                        }
+                        if (timing == FaultTiming.CAS_ZERO) {
+                            return 0;
+                        }
+                        Object result = invoke(delegate, method, arguments);
+                        if (timing == FaultTiming.AFTER) {
+                            throw new SQLException(
+                                    "private-dynamic-failure-detail", "08006");
+                        }
+                        return result;
+                    }
+                    return invoke(delegate, method, arguments);
+                });
+    }
+
+    private static FaultTiming timing(FaultPoint point, String sql) {
+        boolean idempotencyInsert = sql.contains("INSERT INTO idempotency_record");
+        boolean meetingUpdate = sql.contains("UPDATE meeting")
+                && sql.contains("aggregate_version = aggregate_version + 1");
+        boolean outboxInsert = sql.contains("INSERT INTO outbox_event");
+        if (point == FaultPoint.BEFORE_IDEMPOTENCY_INSERT && idempotencyInsert) {
+            return FaultTiming.BEFORE;
+        }
+        if (point == FaultPoint.AFTER_IDEMPOTENCY_INSERT && idempotencyInsert) {
+            return FaultTiming.AFTER;
+        }
+        if (point == FaultPoint.BEFORE_MEETING_UPDATE && meetingUpdate) {
+            return FaultTiming.BEFORE;
+        }
+        if (point == FaultPoint.AFTER_MEETING_UPDATE && meetingUpdate) {
+            return FaultTiming.AFTER;
+        }
+        if (point == FaultPoint.BEFORE_OUTBOX_INSERT && outboxInsert) {
+            return FaultTiming.BEFORE;
+        }
+        if (point == FaultPoint.AFTER_OUTBOX_INSERT && outboxInsert) {
+            return FaultTiming.AFTER;
+        }
+        if (point == FaultPoint.CAS_ZERO && meetingUpdate) {
+            return FaultTiming.CAS_ZERO;
+        }
+        return FaultTiming.NONE;
+    }
+
+    private static Object invoke(
+            Object delegate,
+            java.lang.reflect.Method method,
+            Object[] arguments) throws Throwable {
+        try {
+            return method.invoke(delegate, arguments);
+        } catch (InvocationTargetException reflected) {
+            throw reflected.getCause();
+        }
+    }
+
+    private void applyMigration(String filename) throws Exception {
+        Path[] candidates = {
+                Path.of("deploy", "migrations", filename),
+                Path.of("..", "deploy", "migrations", filename)
+        };
+        Path migration = null;
+        for (Path candidate : candidates) {
+            if (Files.isRegularFile(candidate)) {
+                migration = candidate;
+                break;
+            }
+        }
+        if (migration == null) {
+            throw new IllegalStateException("migration file not found: " + filename);
+        }
+        try (Connection connection = dataSource.getConnection();
+             Statement statement = connection.createStatement()) {
+            statement.execute(Files.readString(migration, StandardCharsets.UTF_8));
+        }
+    }
+
+    private static PGSimpleDataSource postgres(String currentSchema) {
+        PGSimpleDataSource postgres = new PGSimpleDataSource();
+        postgres.setUrl(System.getenv("REFERENCE_TEST_DATABASE_URL"));
+        String user = System.getenv("REFERENCE_TEST_DATABASE_USER");
+        String password = System.getenv("REFERENCE_TEST_DATABASE_PASSWORD");
+        if (user != null && !user.isBlank()) {
+            postgres.setUser(user);
+        }
+        if (password != null) {
+            postgres.setPassword(password);
+        }
+        if (currentSchema != null) {
+            postgres.setCurrentSchema(currentSchema);
+        }
+        return postgres;
+    }
+
+    private static String quoteIdentifier(String identifier) {
+        return '"' + identifier.replace("\"", "\"\"") + '"';
+    }
+
+    private record DeletionDbFacts(
+            MeetingState state,
+            ManifestStatus manifestState,
+            InputState inputState,
+            String receipt,
+            Instant updatedAt,
+            long aggregateVersion) {
+    }
+
+    private enum FaultPoint {
+        FAIL_IF_IDEMPOTENCY_READ,
+        FAIL_IF_MEETING_UPDATE,
+        DATA_EXCEPTION_MEETING_LOCK,
+        DATA_EXCEPTION_IDEMPOTENCY_READ,
+        BEFORE_IDEMPOTENCY_INSERT,
+        AFTER_IDEMPOTENCY_INSERT,
+        BEFORE_MEETING_UPDATE,
+        AFTER_MEETING_UPDATE,
+        BEFORE_OUTBOX_INSERT,
+        AFTER_OUTBOX_INSERT,
+        CAS_ZERO,
+        BEFORE_COMMIT,
+        AFTER_COMMIT,
+        RUNTIME_AFTER_COMMIT,
+        ROLLBACK_SQL,
+        ROLLBACK_RUNTIME,
+        RESTORE_AUTOCOMMIT_RUNTIME,
+        CLOSE_RUNTIME
+    }
+
+    private enum FaultTiming {
+        NONE,
+        BEFORE,
+        AFTER,
+        CAS_ZERO
+    }
+
+    private static final class FaultObservation {
+        private final AtomicBoolean rollbackAttempted = new AtomicBoolean();
+        private final AtomicBoolean restoreAutoCommitAttempted = new AtomicBoolean();
+        private final AtomicBoolean abortAttempted = new AtomicBoolean();
+        private final AtomicBoolean closeAttempted = new AtomicBoolean();
+    }
+
+    private static final class TestLogHandler extends Handler {
+        private final StringBuilder text = new StringBuilder();
+
+        @Override
+        public void publish(LogRecord record) {
+            text.append(record.getMessage()).append('\n');
+            Object[] parameters = record.getParameters();
+            if (parameters != null) {
+                for (Object parameter : parameters) {
+                    text.append(parameter).append('\n');
+                }
+            }
+        }
+
+        @Override
+        public void flush() {
+        }
+
+        @Override
+        public void close() {
+        }
+
+        String text() {
+            return text.toString();
+        }
+    }
+
+    @FunctionalInterface
+    private interface CheckedSupplier<T> {
+        T get() throws Exception;
+    }
+
+    private static class DelegatingDataSource implements DataSource {
+        private final DataSource delegate;
+
+        DelegatingDataSource(DataSource delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public Connection getConnection() throws SQLException {
+            return delegate.getConnection();
+        }
+
+        @Override
+        public Connection getConnection(String username, String password)
+                throws SQLException {
+            return delegate.getConnection(username, password);
+        }
+
+        @Override
+        public PrintWriter getLogWriter() throws SQLException {
+            return delegate.getLogWriter();
+        }
+
+        @Override
+        public void setLogWriter(PrintWriter out) throws SQLException {
+            delegate.setLogWriter(out);
+        }
+
+        @Override
+        public void setLoginTimeout(int seconds) throws SQLException {
+            delegate.setLoginTimeout(seconds);
+        }
+
+        @Override
+        public int getLoginTimeout() throws SQLException {
+            return delegate.getLoginTimeout();
+        }
+
+        @Override
+        public Logger getParentLogger() throws SQLFeatureNotSupportedException {
+            return delegate.getParentLogger();
+        }
+
+        @Override
+        public <T> T unwrap(Class<T> iface) throws SQLException {
+            return delegate.unwrap(iface);
+        }
+
+        @Override
+        public boolean isWrapperFor(Class<?> iface) throws SQLException {
+            return delegate.isWrapperFor(iface);
+        }
+    }
+}

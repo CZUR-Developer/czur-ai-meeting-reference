@@ -2,6 +2,7 @@ package com.czur.reference.application.persistence.jdbc;
 
 import com.czur.reference.application.command.MeetingCommandResult;
 import com.czur.reference.application.port.IdempotencyStore;
+import com.czur.reference.application.port.MeetingStatus;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
@@ -48,6 +49,13 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
     private static final String DELETE_SQL = """
             DELETE FROM idempotency_record
              WHERE subject_scope = ? AND idempotency_key = ? AND request_hash = ?
+            """;
+
+    /** 删除端口必须先比较摘要，再决定是否解析响应正文。 */
+    private static final String FIND_DELETION_SQL = """
+            SELECT request_hash, response_status, response_body
+              FROM idempotency_record
+             WHERE subject_scope = ? AND idempotency_key = ?
             """;
 
     private final DataSource dataSource;
@@ -196,6 +204,100 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
             statement.setString(2, candidate.key());
             statement.setString(3, candidate.requestDigest());
             statement.executeUpdate();
+        }
+    }
+
+    /**
+     * 在调用方事务内读取删除幂等原始事实。
+     *
+     * <p>返回值刻意不解析 {@code response_body}；删除端口必须先比较请求摘要，
+     * 摘要一致后才能调用 {@link #decodeDeletion(DeletionRawRecord)}。
+     * 这样同键不同摘要不会借助损坏正文形成额外侧信道。</p>
+     */
+    static Optional<DeletionRawRecord> findDeletion(
+            Connection connection,
+            String scope,
+            String key) throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        requireText("scope", scope);
+        requireText("key", key);
+        try (PreparedStatement statement = connection.prepareStatement(FIND_DELETION_SQL)) {
+            statement.setString(1, scope);
+            statement.setString(2, key);
+            try (ResultSet rows = statement.executeQuery()) {
+                if (!rows.next()) {
+                    return Optional.empty();
+                }
+                Object status = rows.getObject("response_status");
+                return Optional.of(new DeletionRawRecord(
+                        rows.getString("request_hash"),
+                        status == null ? null : ((Number) status).intValue(),
+                        rows.getString("response_body")));
+            }
+        }
+    }
+
+    /**
+     * 预占删除幂等事实，并读取唯一键下最终可见的原始记录。
+     *
+     * <p>该原语固定写入 HTTP 202 和 {@link MeetingDeletionResultJson}，不经过
+     * {@link MeetingCommandResult} 或 {@link IdempotencyResultJson}。它不提交、
+     * 回滚或关闭连接，也不记录 scope、key、digest、正文或 receipt。</p>
+     */
+    static DeletionReservation reserveDeletion(
+            Connection connection,
+            String scope,
+            String key,
+            String requestDigest,
+            MeetingStatus accepted,
+            Instant createdAt) throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        requireText("scope", scope);
+        requireText("key", key);
+        requireText("requestDigest", requestDigest);
+        Objects.requireNonNull(accepted, "accepted");
+        Objects.requireNonNull(createdAt, "createdAt");
+        int inserted;
+        try (PreparedStatement statement = connection.prepareStatement(INSERT_SQL)) {
+            statement.setString(1, scope);
+            statement.setString(2, key);
+            statement.setString(3, requestDigest);
+            statement.setInt(4, 202);
+            statement.setString(5, MeetingDeletionResultJson.encode(accepted));
+            statement.setTimestamp(6, Timestamp.from(createdAt));
+            inserted = statement.executeUpdate();
+        }
+        DeletionRawRecord current = findDeletion(connection, scope, key)
+                .orElseThrow(() -> new IllegalStateException(
+                        "删除幂等记录插入后不可见"));
+        return new DeletionReservation(inserted == 1, current);
+    }
+
+    /** 严格解码摘要已经匹配的删除结果；错误状态或正文统一由调用方关闭式映射。 */
+    static MeetingStatus decodeDeletion(DeletionRawRecord record) {
+        Objects.requireNonNull(record, "record");
+        if (!Integer.valueOf(202).equals(record.responseStatus())
+                || record.responseBody() == null) {
+            throw new IllegalArgumentException("删除幂等持久事实格式非法");
+        }
+        return MeetingDeletionResultJson.decode(record.responseBody());
+    }
+
+    /** 删除幂等原始事实；诊断文本永远不显示摘要或正文。 */
+    record DeletionRawRecord(
+            String requestDigest,
+            Integer responseStatus,
+            String responseBody) {
+        @Override
+        public String toString() {
+            return "DeletionRawRecord[redacted]";
+        }
+    }
+
+    /** 删除幂等插入竞争结果和数据库最终行。 */
+    record DeletionReservation(boolean acquired, DeletionRawRecord record) {
+        DeletionReservation {
+            Objects.requireNonNull(record, "record");
         }
     }
 

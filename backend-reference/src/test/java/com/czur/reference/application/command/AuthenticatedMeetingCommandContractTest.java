@@ -38,6 +38,7 @@ class AuthenticatedMeetingCommandContractTest {
     void permissionValuesAndIntentComponentsAreFrozen() {
         assertEquals("meeting:create", MeetingPermissions.CREATE);
         assertEquals("meeting:stop", MeetingPermissions.STOP);
+        assertEquals("meeting:delete", MeetingPermissions.DELETE);
         assertEquals(1, MeetingRequestCanonicalizer.CREATE_SCHEMA_VERSION);
         assertEquals(1, MeetingRequestCanonicalizer.STOP_SCHEMA_VERSION);
 

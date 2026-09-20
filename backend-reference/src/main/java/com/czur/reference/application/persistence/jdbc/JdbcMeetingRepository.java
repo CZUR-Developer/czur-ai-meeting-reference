@@ -1,7 +1,14 @@
 package com.czur.reference.application.persistence.jdbc;
 
+import com.czur.reference.application.command.MeetingAccessGuard;
+import com.czur.reference.application.command.MeetingCommandContext;
+import com.czur.reference.application.port.FinalizationFact;
+import com.czur.reference.application.port.InputState;
+import com.czur.reference.application.port.ManifestStatus;
 import com.czur.reference.application.port.MeetingRepository;
+import com.czur.reference.application.port.MeetingStatus;
 import com.czur.reference.domain.meeting.MeetingAggregate;
+import com.czur.reference.domain.meeting.MeetingEvent;
 import com.czur.reference.domain.meeting.MeetingOwnership;
 import com.czur.reference.domain.meeting.MeetingState;
 
@@ -12,6 +19,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.EnumSet;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.logging.Level;
@@ -33,6 +41,17 @@ import java.util.logging.Logger;
  */
 public final class JdbcMeetingRepository implements MeetingRepository {
     private static final Logger LOGGER = Logger.getLogger(JdbcMeetingRepository.class.getName());
+    private static final EnumSet<MeetingState> DELETION_SOURCE_STATES = EnumSet.of(
+            MeetingState.READY,
+            MeetingState.READY_WITH_WARNINGS,
+            MeetingState.FAILED,
+            MeetingState.CANCELLED);
+    private static final EnumSet<ManifestStatus> DELETION_SOURCE_MANIFEST_STATES = EnumSet.of(
+            ManifestStatus.NOT_STARTED,
+            ManifestStatus.GENERATING,
+            ManifestStatus.READY,
+            ManifestStatus.READY_WITH_WARNINGS,
+            ManifestStatus.FAILED);
     private static final String FIND_SQL = """
             SELECT stored.meeting_id, stored.deployment_scope, stored.client_session_id,
                    stored.subject_scope, stored.profile_id, stored.profile_revision,
@@ -140,6 +159,50 @@ public final class JdbcMeetingRepository implements MeetingRepository {
                AND profile_revision = ?
                AND created_at = ?
                AND state = ?
+               AND updated_at = ?
+               AND aggregate_version = ?
+            """;
+
+    /**
+     * 删除事务使用的单次锁读。查询取齐删除 CAS 和重放校验所需字段，但调用方
+     * 只能先读取原始 deployment/subject 并执行访问守卫；守卫放行后才解析状态、
+     * receipt、Manifest、时间和不可变归属事实。
+     */
+    private static final String FIND_DELETION_FOR_UPDATE_SQL = """
+            SELECT meeting_id, deployment_scope, client_session_id, subject_scope,
+                   grant_id, grant_expires_at, usage_reservation_id,
+                   profile_id, profile_revision, state, aggregate_version,
+                   input_state, finalization_receipt_id, manifest_state,
+                   created_at, updated_at
+              FROM meeting
+             WHERE meeting_id = ?
+             FOR UPDATE
+            """;
+
+    /**
+     * 删除受理只改变四个可变事实。WHERE 重放锁读得到的全部不可变字段、旧状态、
+     * 输入事实、Manifest、时间和聚合版本，防止旧快照或意外改写被静默覆盖。
+     */
+    private static final String MARK_DELETION_PENDING_SQL = """
+            UPDATE meeting
+               SET state = ?,
+                   manifest_state = ?,
+                   updated_at = ?,
+                   aggregate_version = aggregate_version + 1
+             WHERE meeting_id = ?
+               AND deployment_scope = ?
+               AND client_session_id = ?
+               AND subject_scope = ?
+               AND grant_id = ?
+               AND grant_expires_at = ?
+               AND usage_reservation_id = ?
+               AND profile_id = ?
+               AND profile_revision = ?
+               AND created_at = ?
+               AND state = ?
+               AND input_state = ?
+               AND finalization_receipt_id IS NOT DISTINCT FROM ?
+               AND manifest_state = ?
                AND updated_at = ?
                AND aggregate_version = ?
             """;
@@ -347,6 +410,132 @@ public final class JdbcMeetingRepository implements MeetingRepository {
     }
 
     /**
+     * 锁定删除目标，并在同一个 ResultSet 中先完成原始归属检查。
+     *
+     * <p>该方法必须由已经关闭 auto-commit 的删除事务调用。不存在、拒绝和放行
+     * 使用显式联合结果，避免调用方在访问拒绝后继续解析仅所有者可见的状态、
+     * receipt 或损坏字段。行锁持续到外层事务提交或回滚。</p>
+     */
+    static DeletionLockResult lockForDeletion(
+            Connection connection,
+            String meetingId,
+            MeetingCommandContext context) throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(context, "context");
+        requireText("meetingId", meetingId);
+        try (PreparedStatement statement = connection.prepareStatement(
+                FIND_DELETION_FOR_UPDATE_SQL)) {
+            statement.setString(1, meetingId);
+            try (ResultSet rows = statement.executeQuery()) {
+                if (!rows.next()) {
+                    return new DeletionNotFound();
+                }
+
+                // 安全顺序不可调整：外域/跨主体/legacy 行只允许读取这两个原始列。
+                String storedDeployment = rows.getString("deployment_scope");
+                String storedSubject = rows.getString("subject_scope");
+                if (MeetingAccessGuard.evaluate(context, storedDeployment, storedSubject)
+                        != MeetingAccessGuard.Decision.ALLOWED) {
+                    return new DeletionAccessDenied();
+                }
+                try {
+                    return new DeletionFound(readDeletionMeeting(
+                            rows, storedDeployment, storedSubject));
+                } catch (DeletionSnapshotException inconsistent) {
+                    // 归属已经通过后，非法枚举、NULL 标量、半归属或 receipt
+                    // 不变量破坏都属于已锁定事实损坏，而不是数据库可用性故障。
+                    // 异常不携带原始列值，避免把敏感事实带入上层日志。
+                    return new DeletionSnapshotInconsistent();
+                }
+            }
+        }
+    }
+
+    /**
+     * 用锁读事实把会议原子推进为删除待处理。
+     *
+     * @return 仅当完整旧事实仍完全一致且恰好更新一行时返回 {@code true}
+     */
+    static boolean markDeletionPending(
+            Connection connection,
+            DeletionMeeting before,
+            MeetingAggregate.MeetingSnapshot advanced,
+            MeetingStatus accepted) throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(before, "before");
+        Objects.requireNonNull(advanced, "advanced");
+        Objects.requireNonNull(accepted, "accepted");
+        validateDeletionTransition(before, advanced, accepted);
+        MeetingAggregate.MeetingSnapshot snapshot = before.snapshot();
+        try (PreparedStatement statement = connection.prepareStatement(
+                MARK_DELETION_PENDING_SQL)) {
+            statement.setString(1, advanced.state().name());
+            statement.setString(2, accepted.manifestState().name());
+            statement.setTimestamp(3, Timestamp.from(advanced.updatedAt()));
+            statement.setString(4, snapshot.meetingId());
+            statement.setString(5, snapshot.deploymentScope());
+            statement.setString(6, snapshot.clientSessionId());
+            statement.setString(7, snapshot.subjectScope());
+            statement.setString(8, snapshot.grantId());
+            statement.setTimestamp(9, Timestamp.from(snapshot.grantExpiresAt()));
+            statement.setString(10, snapshot.usageReservationId());
+            statement.setString(11, snapshot.profileId());
+            statement.setInt(12, snapshot.profileRevision());
+            statement.setTimestamp(13, Timestamp.from(snapshot.createdAt()));
+            statement.setString(14, snapshot.state().name());
+            statement.setString(15, before.finalization().inputState().name());
+            statement.setString(16, before.finalization().finalizationReceipt());
+            statement.setString(17, before.manifestState().name());
+            statement.setTimestamp(18, Timestamp.from(snapshot.updatedAt()));
+            statement.setLong(19, before.aggregateVersion());
+            return statement.executeUpdate() == 1;
+        }
+    }
+
+    /**
+     * 在准备 SQL 之前重新证明删除转换，避免包内调用方绕过领域状态机后直接
+     * 覆盖数据库。验证失败抛出固定参数错误，且不会创建 PreparedStatement。
+     */
+    private static void validateDeletionTransition(
+            DeletionMeeting before,
+            MeetingAggregate.MeetingSnapshot advanced,
+            MeetingStatus accepted) {
+        MeetingAggregate.MeetingSnapshot snapshot = before.snapshot();
+        if (!DELETION_SOURCE_STATES.contains(snapshot.state())) {
+            throw new IllegalArgumentException("before meeting state cannot be deleted");
+        }
+        if (!DELETION_SOURCE_MANIFEST_STATES.contains(before.manifestState())) {
+            throw new IllegalArgumentException("before manifest state cannot be deleted");
+        }
+        if (advanced.updatedAt().isBefore(snapshot.updatedAt())) {
+            throw new IllegalArgumentException("advanced time cannot move backwards");
+        }
+
+        final MeetingAggregate.MeetingSnapshot expected;
+        try {
+            MeetingAggregate aggregate = MeetingAggregate.fromSnapshot(snapshot);
+            MeetingState next = aggregate.apply(
+                    MeetingEvent.DELETE_REQUESTED, advanced.updatedAt());
+            if (next != MeetingState.DELETION_PENDING) {
+                throw new IllegalArgumentException("domain transition did not reach pending");
+            }
+            expected = aggregate.snapshot();
+        } catch (RuntimeException invalidTransition) {
+            throw new IllegalArgumentException("invalid deletion domain transition");
+        }
+        if (!expected.equals(advanced)) {
+            throw new IllegalArgumentException("advanced snapshot is not the domain result");
+        }
+        if (!accepted.meetingId().equals(advanced.meetingId())
+                || accepted.state() != MeetingState.DELETION_PENDING
+                || accepted.manifestState() != ManifestStatus.DELETION_PENDING
+                || !accepted.finalization().equals(before.finalization())
+                || !accepted.updatedAt().equals(advanced.updatedAt())) {
+            throw new IllegalArgumentException("accepted status does not match transition");
+        }
+    }
+
+    /**
      * JDBC 内部的带版本会议事实；版本仅用于数据库 CAS，不属于领域快照。
      */
     record VersionedMeeting(
@@ -358,6 +547,129 @@ public final class JdbcMeetingRepository implements MeetingRepository {
                 throw new IllegalArgumentException("aggregateVersion must not be negative");
             }
         }
+    }
+
+    /** 删除锁读的显式结果，防止 AccessDenied 分支携带或解析完整事实。 */
+    sealed interface DeletionLockResult
+            permits DeletionNotFound, DeletionAccessDenied,
+            DeletionSnapshotInconsistent, DeletionFound {
+    }
+
+    /** 目标会议不存在。 */
+    record DeletionNotFound() implements DeletionLockResult {
+    }
+
+    /** 原始部署、主体或 legacy 归属不允许当前调用者访问。 */
+    record DeletionAccessDenied() implements DeletionLockResult {
+    }
+
+    /** 归属放行后发现锁定行不能恢复为完整删除读模型。 */
+    record DeletionSnapshotInconsistent() implements DeletionLockResult {
+    }
+
+    /** 已锁定并完成归属验证的完整 owned 删除事实。 */
+    record DeletionFound(DeletionMeeting meeting) implements DeletionLockResult {
+        DeletionFound {
+            Objects.requireNonNull(meeting, "meeting");
+        }
+    }
+
+    /**
+     * 删除 CAS 与重放一致性校验所需的完整事实；不会进入公开协议或日志。
+     */
+    record DeletionMeeting(
+            MeetingAggregate.MeetingSnapshot snapshot,
+            long aggregateVersion,
+            FinalizationFact finalization,
+            ManifestStatus manifestState) {
+        DeletionMeeting {
+            Objects.requireNonNull(snapshot, "snapshot");
+            Objects.requireNonNull(finalization, "finalization");
+            Objects.requireNonNull(manifestState, "manifestState");
+            if (aggregateVersion < 0) {
+                throw new IllegalArgumentException("aggregateVersion must not be negative");
+            }
+            if (MeetingOwnership.LEGACY_UNOWNED_SUBJECT_SCOPE.equals(
+                    snapshot.subjectScope())) {
+                throw new IllegalArgumentException("deletion meeting must be owned");
+            }
+        }
+
+        MeetingStatus status() {
+            return new MeetingStatus(
+                    snapshot.meetingId(), snapshot.state(), finalization,
+                    manifestState, snapshot.updatedAt());
+        }
+
+        MeetingStatus pendingStatus(MeetingAggregate advanced) {
+            Objects.requireNonNull(advanced, "advanced");
+            MeetingAggregate.MeetingSnapshot after = advanced.snapshot();
+            if (!snapshot.meetingId().equals(after.meetingId())
+                    || after.state() != MeetingState.DELETION_PENDING) {
+                throw new IllegalArgumentException(
+                        "aggregate must represent this meeting in DELETION_PENDING");
+            }
+            return new MeetingStatus(
+                    after.meetingId(), after.state(), finalization,
+                    ManifestStatus.DELETION_PENDING, after.updatedAt());
+        }
+    }
+
+    private static DeletionMeeting readDeletionMeeting(
+            ResultSet rows,
+            String storedDeployment,
+            String storedSubject) throws SQLException, DeletionSnapshotException {
+        // JDBC 数值 getter 会把 SQL NULL 折叠为 0；必须紧邻 getter 调用
+        // wasNull()，否则 NULL aggregate_version 会被误认为合法的初始版本。
+        int profileRevision = rows.getInt("profile_revision");
+        boolean profileRevisionNull = rows.wasNull();
+        long aggregateVersion = rows.getLong("aggregate_version");
+        boolean aggregateVersionNull = rows.wasNull();
+        Timestamp grantExpiresAt = rows.getTimestamp("grant_expires_at");
+        Timestamp createdAt = rows.getTimestamp("created_at");
+        Timestamp updatedAt = rows.getTimestamp("updated_at");
+        String meetingId = rows.getString("meeting_id");
+        String clientSessionId = rows.getString("client_session_id");
+        String grantId = rows.getString("grant_id");
+        String usageReservationId = rows.getString("usage_reservation_id");
+        String profileId = rows.getString("profile_id");
+        String state = rows.getString("state");
+        String inputState = rows.getString("input_state");
+        String finalizationReceipt = rows.getString("finalization_receipt_id");
+        String manifestState = rows.getString("manifest_state");
+
+        if (profileRevisionNull || aggregateVersionNull) {
+            throw new DeletionSnapshotException();
+        }
+        try {
+            MeetingAggregate.MeetingSnapshot snapshot =
+                    new MeetingAggregate.MeetingSnapshot(
+                            meetingId,
+                            storedDeployment,
+                            clientSessionId,
+                            storedSubject,
+                            grantId,
+                            grantExpiresAt == null ? null : grantExpiresAt.toInstant(),
+                            usageReservationId,
+                            profileId,
+                            profileRevision,
+                            MeetingState.valueOf(state),
+                            createdAt == null ? null : createdAt.toInstant(),
+                            updatedAt == null ? null : updatedAt.toInstant());
+            FinalizationFact finalization = new FinalizationFact(
+                    InputState.valueOf(inputState), finalizationReceipt);
+            return new DeletionMeeting(
+                    snapshot,
+                    aggregateVersion,
+                    finalization,
+                    ManifestStatus.valueOf(manifestState));
+        } catch (IllegalArgumentException | NullPointerException malformed) {
+            throw new DeletionSnapshotException();
+        }
+    }
+
+    /** 只标识持久化事实不能恢复；禁止携带数据库原始值或动态异常文本。 */
+    private static final class DeletionSnapshotException extends Exception {
     }
 
     private static MeetingAggregate.MeetingSnapshot readSnapshot(ResultSet resultSet) throws SQLException {

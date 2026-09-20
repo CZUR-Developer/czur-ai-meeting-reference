@@ -234,8 +234,8 @@ class MeetingQueryAndDeletionContractTest {
                 FinalizationFact.pending(InputState.INPUT_CANCELLED),
                 ManifestStatus.DELETED,
                 CREATED);
-        assertEquals(DeleteResult.Status.REPLAYED,
-                new DeleteResult.Replayed(deleted).status());
+        assertThrows(IllegalArgumentException.class,
+                () -> new DeleteResult.Replayed(deleted));
         assertThrows(IllegalArgumentException.class,
                 () -> new DeleteResult.Replayed(new MeetingStatus(
                         MEETING,
@@ -256,8 +256,8 @@ class MeetingQueryAndDeletionContractTest {
                 new DeleteResult.Accepted(pending).status());
         assertEquals(DeleteResult.Status.REPLAYED,
                 new DeleteResult.Replayed(pending).status());
-        assertEquals(DeleteResult.Status.REPLAYED,
-                new DeleteResult.Replayed(deleted).status());
+        assertThrows(IllegalArgumentException.class,
+                () -> new DeleteResult.Replayed(deleted));
 
         for (MeetingStatus invalid : List.of(
                 deletionStatus(MeetingState.DELETION_PENDING, ManifestStatus.DELETED),
@@ -313,6 +313,13 @@ class MeetingQueryAndDeletionContractTest {
         assertThrows(IllegalArgumentException.class,
                 () -> new DeleteResult.Unavailable(
                         DeleteResult.UnavailableReason.TRANSIENT_STORAGE_FAILURE, false));
+        assertThrows(IllegalArgumentException.class,
+                () -> new DeleteResult.Unavailable(
+                        DeleteResult.UnavailableReason.OUTCOME_UNKNOWN, false));
+        assertEquals(new DeleteResult.Unavailable(
+                        DeleteResult.UnavailableReason.OUTCOME_UNKNOWN, true),
+                new DeleteResult.Unavailable(
+                        DeleteResult.UnavailableReason.OUTCOME_UNKNOWN, true));
     }
 
     private static EventLog event(long sequence, String type, String payload) {

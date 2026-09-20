@@ -15,6 +15,9 @@ public final class MeetingPermissions {
     /** 允许当前已验证主体对自己拥有的会议提交停止意图。 */
     public static final String STOP = "meeting:stop";
 
+    /** 允许当前已验证主体对自己拥有的会议发起异步删除。 */
+    public static final String DELETE = "meeting:delete";
+
     private MeetingPermissions() {
     }
 }

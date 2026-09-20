@@ -47,23 +47,18 @@ public sealed interface DeleteResult
     /**
      * 相同幂等键和摘要已经受理过删除，复用第一次稳定结果。
      *
-     * <p>重放发生在清理 Worker 已经完成时，事实源可能已经是
-     * {@code DELETED}；这仍然是同一删除请求的稳定重放，而不是一次新的受理。
-     * 因此这里仅允许 Meeting/Manifest 同为 {@code DELETION_PENDING}，或同为
-     * {@code DELETED}；交叉组合和其它中间状态都会关闭式拒绝。</p>
+     * <p>本结果永远携带第一次持久化的 pending/pending 快照。即使清理 Worker
+     * 已把当前事实推进为 {@code DELETED}，端口也只能用当前行校验首次事实，
+     * 不能把返回正文改写为 deleted/deleted。</p>
      */
     record Replayed(MeetingStatus meeting) implements DeleteResult {
         public Replayed {
             Objects.requireNonNull(meeting, "meeting");
-            boolean pending = isMatchingDeletionState(meeting,
+            if (!isMatchingDeletionState(meeting,
                     com.czur.reference.domain.meeting.MeetingState.DELETION_PENDING,
-                    ManifestStatus.DELETION_PENDING);
-            boolean deleted = isMatchingDeletionState(meeting,
-                    com.czur.reference.domain.meeting.MeetingState.DELETED,
-                    ManifestStatus.DELETED);
-            if (!pending && !deleted) {
+                    ManifestStatus.DELETION_PENDING)) {
                 throw new IllegalArgumentException(
-                        "replayed deletion requires matching pending or deleted states");
+                        "replayed deletion requires the first pending snapshot");
             }
         }
 
@@ -124,7 +119,9 @@ public sealed interface DeleteResult
     record Unavailable(UnavailableReason reason, boolean retryable) implements DeleteResult {
         public Unavailable {
             Objects.requireNonNull(reason, "reason");
-            if ((reason == UnavailableReason.TRANSIENT_STORAGE_FAILURE) != retryable) {
+            boolean expectedRetryable = reason == UnavailableReason.TRANSIENT_STORAGE_FAILURE
+                    || reason == UnavailableReason.OUTCOME_UNKNOWN;
+            if (expectedRetryable != retryable) {
                 throw new IllegalArgumentException(
                         "retryable must match delete unavailable reason");
             }
@@ -153,12 +150,14 @@ public sealed interface DeleteResult
 
     enum ConflictReason {
         REQUEST_DIGEST_MISMATCH,
-        SNAPSHOT_INCONSISTENT
+        SNAPSHOT_INCONSISTENT,
+        INVALID_MEETING_STATE
     }
 
     enum UnavailableReason {
         TRANSIENT_STORAGE_FAILURE,
-        STORAGE_FAILURE
+        STORAGE_FAILURE,
+        OUTCOME_UNKNOWN
     }
 
     private static boolean isMatchingDeletionState(
