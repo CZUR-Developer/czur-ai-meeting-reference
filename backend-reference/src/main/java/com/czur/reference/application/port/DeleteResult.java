@@ -5,7 +5,7 @@ import java.util.Objects;
 /**
  * 删除会议的稳定结果联合类型。
  *
- * <p>删除的首次成功结果是 {@link Accepted}，其会议状态必须为
+ * <p>删除的首次成功结果是 {@link Accepted}，其会议和 Manifest 状态必须同时为
  * {@code DELETION_PENDING}；重复同一幂等请求返回 {@link Replayed}。端口不
  * 假定数据库、对象存储或备份已经同步物理删除，最终 {@code DELETED} 由后续
  * 清理 Worker 写入事实源并通过普通查询观察。冲突、访问拒绝和存储不可用
@@ -25,9 +25,11 @@ public sealed interface DeleteResult
     record Accepted(MeetingStatus meeting) implements DeleteResult {
         public Accepted {
             Objects.requireNonNull(meeting, "meeting");
-            if (meeting.state() != com.czur.reference.domain.meeting.MeetingState.DELETION_PENDING) {
+            if (!isMatchingDeletionState(meeting,
+                    com.czur.reference.domain.meeting.MeetingState.DELETION_PENDING,
+                    ManifestStatus.DELETION_PENDING)) {
                 throw new IllegalArgumentException(
-                        "accepted deletion requires DELETION_PENDING meeting state");
+                        "accepted deletion requires matching DELETION_PENDING states");
             }
         }
 
@@ -47,16 +49,21 @@ public sealed interface DeleteResult
      *
      * <p>重放发生在清理 Worker 已经完成时，事实源可能已经是
      * {@code DELETED}；这仍然是同一删除请求的稳定重放，而不是一次新的受理。
-     * 因此这里允许 {@code DELETION_PENDING} 和 {@code DELETED}，但不接受其它
-     * 中间或非删除状态。</p>
+     * 因此这里仅允许 Meeting/Manifest 同为 {@code DELETION_PENDING}，或同为
+     * {@code DELETED}；交叉组合和其它中间状态都会关闭式拒绝。</p>
      */
     record Replayed(MeetingStatus meeting) implements DeleteResult {
         public Replayed {
             Objects.requireNonNull(meeting, "meeting");
-            if (meeting.state() != com.czur.reference.domain.meeting.MeetingState.DELETION_PENDING
-                    && meeting.state() != com.czur.reference.domain.meeting.MeetingState.DELETED) {
+            boolean pending = isMatchingDeletionState(meeting,
+                    com.czur.reference.domain.meeting.MeetingState.DELETION_PENDING,
+                    ManifestStatus.DELETION_PENDING);
+            boolean deleted = isMatchingDeletionState(meeting,
+                    com.czur.reference.domain.meeting.MeetingState.DELETED,
+                    ManifestStatus.DELETED);
+            if (!pending && !deleted) {
                 throw new IllegalArgumentException(
-                        "replayed deletion result requires DELETION_PENDING or DELETED meeting state");
+                        "replayed deletion requires matching pending or deleted states");
             }
         }
 
@@ -152,5 +159,12 @@ public sealed interface DeleteResult
     enum UnavailableReason {
         TRANSIENT_STORAGE_FAILURE,
         STORAGE_FAILURE
+    }
+
+    private static boolean isMatchingDeletionState(
+            MeetingStatus meeting,
+            com.czur.reference.domain.meeting.MeetingState meetingState,
+            ManifestStatus manifestState) {
+        return meeting.state() == meetingState && meeting.manifestState() == manifestState;
     }
 }

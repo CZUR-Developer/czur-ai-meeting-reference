@@ -3,6 +3,7 @@ package com.czur.reference.application.port;
 import com.czur.reference.domain.meeting.MeetingOwnership;
 
 import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
@@ -35,6 +36,9 @@ public final class IdempotencyScopeCodec {
 
     /** 新认证停止命令写入编码范围时使用的稳定操作名。 */
     public static final String MEETING_STOP_OPERATION = "meeting.stop.v1";
+
+    /** 新认证删除命令写入编码范围时使用的稳定操作名。 */
+    public static final String MEETING_DELETE_OPERATION = "meeting.delete.v1";
 
     private static final String PREFIX = "AIMS|1|";
     private static final Base64.Encoder ENCODER = Base64.getUrlEncoder().withoutPadding();
@@ -76,6 +80,17 @@ public final class IdempotencyScopeCodec {
     }
 
     /**
+     * 为新认证删除命令生成范围。
+     *
+     * <p>该范围只绑定服务端确认的部署和主体，调用方提供的幂等键与请求摘要
+     * 仍由持久化端口作为独立主键维度和冲突证据处理。范围、幂等键和摘要都
+     * 不得写入日志或拼进异常正文。</p>
+     */
+    public static String meetingDelete(String deploymentScope, String subjectScope) {
+        return encode(deploymentScope, subjectScope, MEETING_DELETE_OPERATION);
+    }
+
+    /**
      * 严格解码新格式，主要用于诊断、迁移验证和契约测试。
      *
      * <p>业务查询不需要先解码：应使用 {@link #encode(String, String, String)}
@@ -111,7 +126,19 @@ public final class IdempotencyScopeCodec {
 
     private static String encodeComponent(String name, String value) {
         requireText(name, value);
-        return ENCODER.encodeToString(value.getBytes(StandardCharsets.UTF_8));
+        final ByteBuffer encoded;
+        try {
+            encoded = StandardCharsets.UTF_8.newEncoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .encode(CharBuffer.wrap(value));
+        } catch (CharacterCodingException invalidUnicode) {
+            // 不保留 cause，避免上层日志链记录调用方提供的原始范围组件。
+            throw new IllegalArgumentException(name + " contains invalid Unicode");
+        }
+        byte[] bytes = new byte[encoded.remaining()];
+        encoded.get(bytes);
+        return ENCODER.encodeToString(bytes);
     }
 
     private static String decodeComponent(String name, String encoded) {

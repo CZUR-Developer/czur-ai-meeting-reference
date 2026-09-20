@@ -1,7 +1,10 @@
 package com.czur.reference.application.command;
 
+import com.czur.reference.application.port.ManifestStatus;
+import com.czur.reference.application.port.MeetingStatus;
 import com.czur.reference.application.port.OutboxStore;
 import com.czur.reference.domain.meeting.MeetingAggregate;
+import com.czur.reference.domain.meeting.MeetingState;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -21,6 +24,7 @@ import java.util.Objects;
 public final class MeetingCommandEventFactory {
     private static final String MEETING_CREATED = "MeetingCreated";
     private static final String MEETING_STOP_REQUESTED = "MeetingStopRequested";
+    private static final String MEETING_DELETION_REQUESTED = "MeetingDeletionRequested";
 
     private MeetingCommandEventFactory() {
     }
@@ -35,6 +39,43 @@ public final class MeetingCommandEventFactory {
     public static OutboxStore.OutboxEvent meetingStopRequested(
             MeetingAggregate.MeetingSnapshot meeting, Instant occurredAt) {
         return commandEvent(meeting, MEETING_STOP_REQUESTED, occurredAt);
+    }
+
+    /**
+     * 为首次删除受理构造稳定事件；事务适配器只能在状态更新成功后追加一次。
+     *
+     * <p>载荷只暴露下游执行清理所需的会议 ID、部署范围、删除状态和权威
+     * 更新时间。主体、幂等键、请求摘要、finalization receipt、会议正文和
+     * 对象存储位置都不属于该事件。发生时间与首次可用时间统一使用删除状态
+     * 的 {@link MeetingStatus#updatedAt()}，因此相同删除事实可稳定重建。</p>
+     *
+     * @param deploymentScope 会议行中已经完成归属校验的部署范围
+     * @param meeting 同一事务准备持久化的删除待处理状态
+     * @return 尚未追加到 Outbox 的稳定 PENDING 事件
+     */
+    public static OutboxStore.OutboxEvent meetingDeletionRequested(
+            String deploymentScope,
+            MeetingStatus meeting) {
+        requireText("deploymentScope", deploymentScope);
+        Objects.requireNonNull(meeting, "meeting");
+        if (meeting.state() != MeetingState.DELETION_PENDING
+                || meeting.manifestState() != ManifestStatus.DELETION_PENDING) {
+            throw new IllegalArgumentException(
+                    "deletion event requires matching DELETION_PENDING states");
+        }
+        String eventId = "meeting-" + digest(MEETING_DELETION_REQUESTED, meeting.meetingId());
+        String payload = "{\"meetingId\":" + quote(meeting.meetingId())
+                + ",\"deploymentScope\":" + quote(deploymentScope)
+                + ",\"state\":" + quote(meeting.state().name())
+                + ",\"updatedAt\":" + quote(meeting.updatedAt().toString()) + "}";
+        return OutboxStore.OutboxEvent.pending(
+                eventId,
+                "Meeting",
+                meeting.meetingId(),
+                MEETING_DELETION_REQUESTED,
+                payload,
+                meeting.updatedAt(),
+                meeting.updatedAt());
     }
 
     private static OutboxStore.OutboxEvent commandEvent(
@@ -54,6 +95,8 @@ public final class MeetingCommandEventFactory {
     }
 
     private static String quote(String value) {
+        Objects.requireNonNull(value, "value");
+        requireValidUnicode(value);
         StringBuilder result = new StringBuilder(value.length() + 2).append('"');
         for (int i = 0; i < value.length(); i++) {
             char current = value.charAt(i);
@@ -75,16 +118,42 @@ public final class MeetingCommandEventFactory {
         return result.append('"').toString();
     }
 
+    /**
+     * Java 字符串允许包含未配对 surrogate，而 UTF-8/JSON 事件协议不允许。
+     * 必须在共用转义入口关闭式拒绝，不能让编码器宽松替换后造成不同会议 ID
+     * 或部署范围具有相同的线格式。异常使用固定文本，不拼接原始值。
+     */
+    private static void requireValidUnicode(String value) {
+        for (int index = 0; index < value.length(); index++) {
+            char current = value.charAt(index);
+            if (Character.isHighSurrogate(current)) {
+                if (index + 1 >= value.length()
+                        || !Character.isLowSurrogate(value.charAt(++index))) {
+                    throw new IllegalArgumentException("event JSON contains invalid Unicode");
+                }
+            } else if (Character.isLowSurrogate(current)) {
+                throw new IllegalArgumentException("event JSON contains invalid Unicode");
+            }
+        }
+    }
+
     private static String digest(String... values) {
         try {
             MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
             for (String value : values) {
+                requireValidUnicode(value);
                 sha256.update(value.getBytes(StandardCharsets.UTF_8));
                 sha256.update((byte) 0);
             }
             return HexFormat.of().formatHex(sha256.digest());
         } catch (NoSuchAlgorithmException impossible) {
             throw new AssertionError(impossible);
+        }
+    }
+
+    private static void requireText(String name, String value) {
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException(name + " must not be blank");
         }
     }
 }

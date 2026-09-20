@@ -214,7 +214,7 @@ class MeetingQueryAndDeletionContractTest {
                 MEETING,
                 MeetingState.DELETION_PENDING,
                 FinalizationFact.accepted(RECEIPT),
-                ManifestStatus.GENERATING,
+                ManifestStatus.DELETION_PENDING,
                 CREATED);
         DeleteResult accepted = new DeleteResult.Accepted(pending);
         DeleteResult replayed = new DeleteResult.Replayed(pending);
@@ -246,13 +246,40 @@ class MeetingQueryAndDeletionContractTest {
     }
 
     @Test
+    void deleteResultsRejectCrossedMeetingAndManifestStateMatrix() {
+        MeetingStatus pending = deletionStatus(
+                MeetingState.DELETION_PENDING, ManifestStatus.DELETION_PENDING);
+        MeetingStatus deleted = deletionStatus(
+                MeetingState.DELETED, ManifestStatus.DELETED);
+
+        assertEquals(DeleteResult.Status.DELETION_PENDING,
+                new DeleteResult.Accepted(pending).status());
+        assertEquals(DeleteResult.Status.REPLAYED,
+                new DeleteResult.Replayed(pending).status());
+        assertEquals(DeleteResult.Status.REPLAYED,
+                new DeleteResult.Replayed(deleted).status());
+
+        for (MeetingStatus invalid : List.of(
+                deletionStatus(MeetingState.DELETION_PENDING, ManifestStatus.DELETED),
+                deletionStatus(MeetingState.DELETED, ManifestStatus.DELETION_PENDING),
+                deletionStatus(MeetingState.READY, ManifestStatus.READY))) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> new DeleteResult.Accepted(invalid));
+            assertThrows(IllegalArgumentException.class,
+                    () -> new DeleteResult.Replayed(invalid));
+        }
+        assertThrows(IllegalArgumentException.class,
+                () -> new DeleteResult.Accepted(deleted));
+    }
+
+    @Test
     void recordsAndResultsDoNotPrintSensitiveFacts() {
         DeleteRequest request = new DeleteRequest(context(), MEETING, IDEMPOTENCY, DIGEST);
         MeetingStatus status = new MeetingStatus(
                 MEETING,
                 MeetingState.DELETION_PENDING,
                 FinalizationFact.accepted(RECEIPT),
-                ManifestStatus.GENERATING,
+                ManifestStatus.DELETION_PENDING,
                 CREATED);
         EventLog event = event(1, "transcriptUpsert", BODY);
         String output = List.of(
@@ -291,6 +318,17 @@ class MeetingQueryAndDeletionContractTest {
     private static EventLog event(long sequence, String type, String payload) {
         return new EventLog("0.1", MEETING, "stream-" + MEETING,
                 "event-" + sequence, sequence, CREATED, type, payload);
+    }
+
+    private static MeetingStatus deletionStatus(
+            MeetingState state,
+            ManifestStatus manifestStatus) {
+        return new MeetingStatus(
+                MEETING,
+                state,
+                FinalizationFact.accepted(RECEIPT),
+                manifestStatus,
+                CREATED);
     }
 
     private static MeetingManifest manifest() {
