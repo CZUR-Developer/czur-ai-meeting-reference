@@ -1,5 +1,7 @@
 package com.czur.reference.application.command;
 
+import com.czur.reference.domain.meeting.MeetingIdPolicy;
+
 import java.time.Instant;
 import java.util.Objects;
 
@@ -39,7 +41,7 @@ public record CreateMeetingCommand(
     }
 
     public CreateMeetingCommand {
-        requireText("meetingId", meetingId);
+        meetingId = MeetingIdPolicy.requireValid(meetingId);
         requireText("deploymentScope", deploymentScope);
         requireText("clientSessionId", clientSessionId);
         requireText("profileId", profileId);

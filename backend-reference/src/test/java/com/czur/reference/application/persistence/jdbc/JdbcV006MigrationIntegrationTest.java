@@ -136,6 +136,34 @@ class JdbcV006MigrationIntegrationTest {
         }
     }
 
+    @Test
+    void databaseEnforcesSharedMeetingIdUtf8Boundary() throws Exception {
+        Instant now = Instant.parse("2026-09-20T08:30:00Z");
+        new JdbcMeetingRepository(dataSource).save(
+                MeetingAggregate.MeetingSnapshot.legacyUnowned(
+                        "meeting-id-boundary", "deployment", "session-boundary", "profile", 1,
+                        MeetingState.CREATED, now, now));
+
+        String maximum = "x".repeat(1024);
+        try (Connection connection = dataSource.getConnection();
+             java.sql.PreparedStatement statement = connection.prepareStatement("""
+                     UPDATE meeting SET meeting_id = ?
+                      WHERE meeting_id = 'meeting-id-boundary'
+                     """)) {
+            statement.setString(1, maximum);
+            assertEquals(1, statement.executeUpdate());
+        }
+
+        assertConstraintViolation("""
+                UPDATE meeting SET meeting_id = repeat('x', 1025)
+                 WHERE meeting_id = repeat('x', 1024)
+                """);
+        assertConstraintViolation("""
+                UPDATE meeting SET meeting_id = '   '
+                 WHERE meeting_id = repeat('x', 1024)
+                """);
+    }
+
     private void assertConstraintViolation(String sql) throws Exception {
         try (Connection connection = dataSource.getConnection();
              Statement statement = connection.createStatement()) {

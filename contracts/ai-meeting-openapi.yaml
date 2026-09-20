@@ -467,6 +467,7 @@ components:
       schema:
         type: string
         pattern: "^mtg_[A-Za-z0-9_-]+$"
+        maxLength: 1024
     GenTime:
       name: genTime
       in: query
@@ -704,6 +705,8 @@ components:
       properties:
         meetingId:
           type: string
+          pattern: "^mtg_[A-Za-z0-9_-]+$"
+          maxLength: 1024
         state:
           $ref: "#/components/schemas/MeetingState"
         acceptedProfile:
@@ -771,6 +774,8 @@ components:
       properties:
         meetingId:
           type: string
+          pattern: "^mtg_[A-Za-z0-9_-]+$"
+          maxLength: 1024
         state:
           $ref: "#/components/schemas/MeetingState"
         inputState:
@@ -786,6 +791,8 @@ components:
       properties:
         meetingId:
           type: string
+          pattern: "^mtg_[A-Za-z0-9_-]+$"
+          maxLength: 1024
         state:
           $ref: "#/components/schemas/MeetingState"
         inputState:
@@ -821,6 +828,8 @@ components:
       properties:
         meetingId:
           type: string
+          pattern: "^mtg_[A-Za-z0-9_-]+$"
+          maxLength: 1024
         title:
           type: [string, "null"]
         state:
@@ -847,6 +856,8 @@ components:
           type: string
         meetingId:
           type: string
+          pattern: "^mtg_[A-Za-z0-9_-]+$"
+          maxLength: 1024
         streamId:
           type: string
         eventSequence:
@@ -932,6 +943,8 @@ components:
       properties:
         meetingId:
           type: [string, "null"]
+          pattern: "^mtg_[A-Za-z0-9_-]+$"
+          maxLength: 1024
           description: 用户范围授权时为空；单会议授权时为会议 ID。
         accessToken:
           type: string
@@ -951,6 +964,8 @@ components:
       properties:
         meetingId:
           type: [string, "null"]
+          pattern: "^mtg_[A-Za-z0-9_-]+$"
+          maxLength: 1024
           description: 为空表示用户范围授权；非空表示单会议授权。
         scopes:
           type: array

@@ -25,7 +25,8 @@
     },
     "meetingId": {
       "type": "string",
-      "pattern": "^mtg_[A-Za-z0-9_-]+$"
+      "pattern": "^mtg_[A-Za-z0-9_-]+$",
+      "maxLength": 1024
     },
     "manifestRevision": {
       "type": "integer",

@@ -1,5 +1,7 @@
 package com.czur.reference.application.command;
 
+import com.czur.reference.domain.meeting.MeetingIdPolicy;
+
 /**
  * 客户端提交的“停止会议”业务意图。
  *
@@ -12,7 +14,7 @@ public record StopMeetingIntent(
         String idempotencyKey) {
 
     public StopMeetingIntent {
-        requireText("meetingId", meetingId);
+        meetingId = MeetingIdPolicy.requireValid(meetingId);
         requireText("idempotencyKey", idempotencyKey);
     }
 

@@ -36,9 +36,32 @@ public final class MeetingAccessGuard {
         Objects.requireNonNull(context, "context");
         Objects.requireNonNull(meeting, "meeting");
 
-        if (!context.deploymentScope().equals(meeting.deploymentScope())
-                || MeetingOwnership.LEGACY_UNOWNED_SUBJECT_SCOPE.equals(meeting.subjectScope())
-                || !context.identity().subject().subjectScope().equals(meeting.subjectScope())) {
+        return evaluate(context, meeting.deploymentScope(), meeting.subjectScope());
+    }
+
+    /**
+     * 直接按持久化记录的原始归属字段判断访问权限。
+     *
+     * <p>JDBC 只读适配器必须在解析状态、Grant、receipt 等仅所有者可见的列之前
+     * 调用本入口。这样跨部署、跨主体或 {@code LEGACY_UNOWNED} 记录即使内部还
+     * 存在损坏字段，也只会得到统一的 {@link Decision#ACCESS_DENIED}，不会通过
+     * {@code SNAPSHOT_INCONSISTENT} 暴露外域行的归属类型或内部健康状态。数据库原始范围为
+     * {@code null}/空白时也不抛出动态异常，而是关闭式拒绝；一个有效的认证
+     * context 不可能与这些值相等。</p>
+     *
+     * @param context 只由服务端配置和已验证身份组成的调用上下文
+     * @param storedDeploymentScope 持久化记录原始部署范围，可能来自待校验数据
+     * @param storedSubjectScope 持久化记录原始主体范围，可能来自待校验数据
+     */
+    public static Decision evaluate(
+            MeetingCommandContext context,
+            String storedDeploymentScope,
+            String storedSubjectScope) {
+        Objects.requireNonNull(context, "context");
+
+        if (!context.deploymentScope().equals(storedDeploymentScope)
+                || MeetingOwnership.LEGACY_UNOWNED_SUBJECT_SCOPE.equals(storedSubjectScope)
+                || !context.identity().subject().subjectScope().equals(storedSubjectScope)) {
             return Decision.ACCESS_DENIED;
         }
         return Decision.ALLOWED;

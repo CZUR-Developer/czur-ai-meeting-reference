@@ -147,6 +147,18 @@ class AuthenticatedMeetingCommandContractTest {
                 MeetingAccessGuard.evaluate(context, legacy(DEPLOYMENT, "meeting-4")));
         assertEquals(MeetingAccessGuard.Decision.ACCESS_DENIED,
                 MeetingAccessGuard.evaluate(context, legacy("deployment-other", "meeting-5")));
+        assertEquals(MeetingAccessGuard.Decision.ALLOWED,
+                MeetingAccessGuard.evaluate(context, DEPLOYMENT, SUBJECT));
+        assertEquals(MeetingAccessGuard.Decision.ACCESS_DENIED,
+                MeetingAccessGuard.evaluate(context, "deployment-other", SUBJECT));
+        assertEquals(MeetingAccessGuard.Decision.ACCESS_DENIED,
+                MeetingAccessGuard.evaluate(context, DEPLOYMENT, "subject-other"));
+        assertEquals(MeetingAccessGuard.Decision.ACCESS_DENIED,
+                MeetingAccessGuard.evaluate(context, DEPLOYMENT, "LEGACY_UNOWNED"));
+        assertEquals(MeetingAccessGuard.Decision.ACCESS_DENIED,
+                MeetingAccessGuard.evaluate(context, null, SUBJECT));
+        assertEquals(MeetingAccessGuard.Decision.ACCESS_DENIED,
+                MeetingAccessGuard.evaluate(context, DEPLOYMENT, null));
 
         assertEquals(Set.of(
                         MeetingAccessGuard.Decision.ALLOWED,

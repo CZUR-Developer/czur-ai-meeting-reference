@@ -52,7 +52,7 @@ public final class MeetingAggregate {
             String profileId,
             int profileRevision,
             Instant createdAt) {
-        this.meetingId = requiredId("meetingId", meetingId);
+        this.meetingId = MeetingIdPolicy.requireValid(meetingId);
         this.deploymentScope = requiredId("deploymentScope", deploymentScope);
         this.clientSessionId = requiredId("clientSessionId", clientSessionId);
         this.subjectScope = requiredId("subjectScope", subjectScope);
@@ -313,7 +313,7 @@ public final class MeetingAggregate {
             Instant createdAt,
             Instant updatedAt) {
         public MeetingSnapshot {
-            Objects.requireNonNull(meetingId, "meetingId");
+            meetingId = MeetingIdPolicy.requireValid(meetingId);
             if (deploymentScope == null || deploymentScope.isBlank()) {
                 throw new IllegalArgumentException("deploymentScope must not be blank");
             }

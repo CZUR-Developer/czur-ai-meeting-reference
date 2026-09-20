@@ -6,6 +6,7 @@ import com.czur.reference.application.port.MeetingCreateOutcomeStore;
 import com.czur.reference.application.port.MeetingCreateFailure;
 import com.czur.reference.application.port.MeetingCreateReplayLookup;
 import com.czur.reference.application.port.MeetingIdGenerator;
+import com.czur.reference.domain.meeting.MeetingIdPolicy;
 import com.czur.reference.application.port.MeetingRecoveryLookup;
 import com.czur.reference.application.port.OwnedMeetingCreationUnitOfWork;
 import com.czur.reference.application.port.entitlement.AuthorizedProfileSnapshot;
@@ -508,10 +509,11 @@ public final class AuthenticatedMeetingApplicationService {
     }
 
     private static String requireGeneratedMeetingId(String meetingId) {
-        if (meetingId == null || meetingId.isBlank()) {
-            throw new IllegalStateException("meeting ID generator returned blank value");
+        try {
+            return MeetingIdPolicy.requireValid(meetingId);
+        } catch (IllegalArgumentException invalidMeetingId) {
+            throw new IllegalStateException("meeting ID generator returned invalid value");
         }
-        return meetingId;
     }
 
     private static String requireText(String name, String value) {

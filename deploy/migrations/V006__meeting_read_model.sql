@@ -14,6 +14,20 @@ ALTER TABLE meeting
 
 DO $$
 BEGIN
+    -- meetingId 同时进入路径参数、事件 envelope、关系主键和分页 token。统一按
+    -- UTF-8 字节限制为 1024；OpenAPI 的 ASCII pattern 下等价于 maxLength=1024。
+    IF NOT EXISTS (
+        SELECT 1
+          FROM pg_constraint
+         WHERE conrelid = 'meeting'::regclass
+           AND conname = 'meeting_id_text_ck'
+    ) THEN
+        ALTER TABLE meeting
+            ADD CONSTRAINT meeting_id_text_ck CHECK (
+                length(btrim(meeting_id)) > 0
+                AND octet_length(meeting_id) <= 1024);
+    END IF;
+
     -- UNKNOWN 只用于公开协议解码的防御性哨兵，不是可持久化生命周期事实。
     -- 其余值必须与 MeetingState 保持同步；新增领域状态时必须显式迁移数据库。
     IF NOT EXISTS (

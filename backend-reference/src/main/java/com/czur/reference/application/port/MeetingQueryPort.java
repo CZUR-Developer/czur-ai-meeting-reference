@@ -12,9 +12,9 @@ import java.util.Objects;
  *
  * <p>实现只能读取持久化会议事实，不得从 Worker 内存状态、模型连接或旧
  * Gateway DTO 合成结果。查询前必须复用 {@code MeetingAccessGuard}：真实 owned
- * 会议可以返回 {@link Found}，历史 {@code LEGACY_UNOWNED} 或跨主体/跨部署
- * 访问统一返回 {@link AccessDenied}，不允许通过 {@link NotFound} 暗示“会议
- * 不存在”。</p>
+ * 会议可以返回 {@link Found}，不存在的 meetingId 返回 {@link NotFound}；历史
+ * {@code LEGACY_UNOWNED} 或跨主体/跨部署访问统一返回 {@link AccessDenied}，
+ * 不得通过不同结果泄露外域行的归属类型或内部健康状态。</p>
  */
 public interface MeetingQueryPort {
     /** 查询单场会议的权威状态。 */
