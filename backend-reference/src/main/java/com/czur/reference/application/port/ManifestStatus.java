@@ -14,8 +14,12 @@ public enum ManifestStatus {
     GENERATING,
     /** 必选产物已经可读取。 */
     READY,
+    /** 产物已经可读取，但至少存在一条降级或缺失能力告警。 */
+    READY_WITH_WARNINGS,
     /** 生成已结束但至少一个必选产物失败。 */
     FAILED,
+    /** 会议删除已受理，清单正在等待清理 Worker 收口。 */
+    DELETION_PENDING,
     /** 会议删除流程已完成清理，清单不再可读取。 */
     DELETED
 }

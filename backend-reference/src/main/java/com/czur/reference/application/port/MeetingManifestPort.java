@@ -1,6 +1,5 @@
 package com.czur.reference.application.port;
 
-import java.time.Instant;
 import java.util.Objects;
 
 /**
@@ -15,22 +14,24 @@ public interface MeetingManifestPort {
     Result get(Request request);
 
     /**
-     * Manifest 查询输入；genTime 作为结果 URL 的统一有效期上下文。
+     * Manifest 查询输入；genTime 作为结果 URL 的统一有效期上下文，单位为
+     * 毫秒。现有结果 URL 约定 {@code -1} 表示永不过期，非负值表示生成时间；
+     * 其它负值一律拒绝。
      *
      * <p>参考 Web 沿用现有结果 URL，不在此端口要求 Web 再次登录。服务端仍须
      * 校验 opaque meetingId 与 genTime 的有效期、撤销和 Manifest 访问边界；
      * 需要用户身份的管理查询和删除继续使用其它认证端口。</p>
      */
-    record Request(String meetingId, Instant genTime) {
+    record Request(String meetingId, long genTime) {
         public Request {
             requireText("meetingId", meetingId);
-            Objects.requireNonNull(genTime, "genTime");
+            MeetingManifest.requireGenTime(genTime);
         }
 
         @Override
         public String toString() {
             return "MeetingManifestPort.Request[meetingId=" + meetingId
-                    + ", genTimePresent=true]";
+                    + ", genTime=" + genTime + ']';
         }
     }
 
@@ -38,10 +39,25 @@ public interface MeetingManifestPort {
         Status status();
     }
 
-    record Found(ManifestStatus manifestState, FinalizationFact finalization) implements Result {
+    record Found(MeetingManifest manifest, FinalizationFact finalization) implements Result {
         public Found {
-            Objects.requireNonNull(manifestState, "manifestState");
+            Objects.requireNonNull(manifest, "manifest");
             Objects.requireNonNull(finalization, "finalization");
+        }
+
+        /** 兼容状态查询调用方读取 Manifest 的状态投影。 */
+        public ManifestStatus manifestState() {
+            return manifest.status();
+        }
+
+        /** 结果 URL 对应的会议标识。 */
+        public String meetingId() {
+            return manifest.meetingId();
+        }
+
+        /** 结果 URL 的生成时间（毫秒）；-1 表示永不过期。 */
+        public long genTime() {
+            return manifest.genTime();
         }
 
         @Override
@@ -51,7 +67,7 @@ public interface MeetingManifestPort {
 
         @Override
         public String toString() {
-            return "MeetingManifestPort.Found[manifestState=" + manifestState
+            return "MeetingManifestPort.Found[manifestState=" + manifest.status()
                     + ", finalization=redacted]";
         }
     }

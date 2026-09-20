@@ -12,16 +12,20 @@ import java.util.Objects;
  * 事件模型。</p>
  */
 public record EventLog(
-        String eventId,
+        String specVersion,
         String meetingId,
+        String streamId,
+        String eventId,
         long eventSequence,
         Instant emittedAt,
         String eventType,
         String canonicalPayloadJson) {
 
     public EventLog {
-        requireText("eventId", eventId);
+        requireText("specVersion", specVersion);
         requireText("meetingId", meetingId);
+        requireText("streamId", streamId);
+        requireText("eventId", eventId);
         if (eventSequence <= 0) {
             throw new IllegalArgumentException("eventSequence must be positive");
         }
@@ -33,8 +37,10 @@ public record EventLog(
     /** 事件日志诊断只输出可定位元数据，不输出字幕、总结或模型响应正文。 */
     @Override
     public String toString() {
-        return "EventLog[eventId=" + eventId
+        return "EventLog[specVersion=" + specVersion
                 + ", meetingId=" + meetingId
+                + ", streamId=" + streamId
+                + ", eventId=" + eventId
                 + ", eventSequence=" + eventSequence
                 + ", eventType=" + eventType
                 + ", payload=redacted]";

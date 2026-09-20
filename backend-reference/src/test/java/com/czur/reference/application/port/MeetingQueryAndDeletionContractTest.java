@@ -88,6 +88,44 @@ class MeetingQueryAndDeletionContractTest {
     }
 
     @Test
+    void manifestRequestUsesMillisecondGenTimeAndPermanentSentinel() {
+        MeetingManifestPort.Request expiring = new MeetingManifestPort.Request(
+                MEETING, 1_758_326_400_123L);
+        MeetingManifestPort.Request permanent = new MeetingManifestPort.Request(MEETING, -1);
+        assertEquals(1_758_326_400_123L, expiring.genTime());
+        assertEquals(-1, permanent.genTime());
+        assertThrows(IllegalArgumentException.class,
+                () -> new MeetingManifestPort.Request(MEETING, -2));
+    }
+
+    @Test
+    void manifestFoundCarriesCompleteStandardSummary() {
+        MeetingManifest manifest = manifest();
+        MeetingManifestPort.Found found = new MeetingManifestPort.Found(
+                manifest, FinalizationFact.accepted(RECEIPT));
+
+        assertEquals(MEETING, found.meetingId());
+        assertEquals(-1, found.genTime());
+        assertEquals(7, found.manifest().manifestRevision());
+        assertEquals("meeting-minutes/v1", found.manifest().profileId());
+        assertEquals(3, found.manifest().profileRevision());
+        assertEquals(ManifestStatus.READY_WITH_WARNINGS, found.manifestState());
+        assertEquals(1, found.manifest().artifacts().size());
+        assertEquals(1, found.manifest().warnings().size());
+    }
+
+    @Test
+    void eventEnvelopeCarriesCanonicalRealtimeMetadata() {
+        EventLog event = event(1, "transcriptUpsert", BODY);
+        assertEquals("0.1", event.specVersion());
+        assertEquals("stream-" + MEETING, event.streamId());
+        assertEquals("event-1", event.eventId());
+        assertTrue(event.toString().contains("specVersion=0.1"));
+        assertTrue(event.toString().contains("streamId=stream-" + MEETING));
+        assertFalse(event.toString().contains(BODY));
+    }
+
+    @Test
     void eventRequestFreezesAfterSequenceAndLimitContract() {
         MeetingEventLogPort.Request request = new MeetingEventLogPort.Request(
                 context(), MEETING, 42, 200);
@@ -137,6 +175,22 @@ class MeetingQueryAndDeletionContractTest {
                         FinalizationFact.pending(InputState.INPUT_CANCELLED),
                         ManifestStatus.DELETED,
                         CREATED)));
+
+        MeetingStatus deleted = new MeetingStatus(
+                MEETING,
+                MeetingState.DELETED,
+                FinalizationFact.pending(InputState.INPUT_CANCELLED),
+                ManifestStatus.DELETED,
+                CREATED);
+        assertEquals(DeleteResult.Status.REPLAYED,
+                new DeleteResult.Replayed(deleted).status());
+        assertThrows(IllegalArgumentException.class,
+                () -> new DeleteResult.Replayed(new MeetingStatus(
+                        MEETING,
+                        MeetingState.RUNNING,
+                        FinalizationFact.pending(InputState.INPUT_OPEN),
+                        ManifestStatus.GENERATING,
+                        CREATED)));
     }
 
     @Test
@@ -157,7 +211,7 @@ class MeetingQueryAndDeletionContractTest {
                 new MeetingEventPage(List.of(event), 1, false),
                 new MeetingQueryPort.Found(status),
                 new MeetingEventLogPort.Page(new MeetingEventPage(List.of(event), 1, false)),
-                new MeetingManifestPort.Found(ManifestStatus.GENERATING,
+                new MeetingManifestPort.Found(manifest(),
                         FinalizationFact.accepted(RECEIPT)),
                 new DeleteResult.Accepted(status)).toString();
 
@@ -183,8 +237,39 @@ class MeetingQueryAndDeletionContractTest {
     }
 
     private static EventLog event(long sequence, String type, String payload) {
-        return new EventLog("event-" + sequence, MEETING, sequence, CREATED,
-                type, payload);
+        return new EventLog("0.1", MEETING, "stream-" + MEETING,
+                "event-" + sequence, sequence, CREATED, type, payload);
+    }
+
+    private static MeetingManifest manifest() {
+        return new MeetingManifest(
+                MEETING,
+                -1,
+                7,
+                "meeting-minutes/v1",
+                3,
+                ManifestStatus.READY_WITH_WARNINGS,
+                CREATED,
+                CREATED.plusSeconds(60),
+                60_000,
+                new MeetingManifest.Languages("zh-CN", List.of("en-US")),
+                List.of(new MeetingManifest.ArtifactRef(
+                        "art_transcript",
+                        "transcript.final",
+                        "text/plain",
+                        "zh-CN",
+                        1,
+                        1024,
+                        "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                        MeetingManifest.ArtifactStatus.READY,
+                        CREATED,
+                        null,
+                        null)),
+                List.of(new MeetingManifest.Warning(
+                        "CAPABILITY_UNAVAILABLE",
+                        "speaker.identity",
+                        "meeting.warning.speakerIdentityUnavailable",
+                        "diagnostic-1")));
     }
 
     private static MeetingCommandContext context() {

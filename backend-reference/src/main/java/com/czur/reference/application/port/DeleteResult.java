@@ -42,13 +42,21 @@ public sealed interface DeleteResult
         }
     }
 
-    /** 相同幂等键和摘要已经受理过删除，复用第一次稳定结果。 */
+    /**
+     * 相同幂等键和摘要已经受理过删除，复用第一次稳定结果。
+     *
+     * <p>重放发生在清理 Worker 已经完成时，事实源可能已经是
+     * {@code DELETED}；这仍然是同一删除请求的稳定重放，而不是一次新的受理。
+     * 因此这里允许 {@code DELETION_PENDING} 和 {@code DELETED}，但不接受其它
+     * 中间或非删除状态。</p>
+     */
     record Replayed(MeetingStatus meeting) implements DeleteResult {
         public Replayed {
             Objects.requireNonNull(meeting, "meeting");
-            if (meeting.state() != com.czur.reference.domain.meeting.MeetingState.DELETION_PENDING) {
+            if (meeting.state() != com.czur.reference.domain.meeting.MeetingState.DELETION_PENDING
+                    && meeting.state() != com.czur.reference.domain.meeting.MeetingState.DELETED) {
                 throw new IllegalArgumentException(
-                        "replayed deletion result requires DELETION_PENDING meeting state");
+                        "replayed deletion result requires DELETION_PENDING or DELETED meeting state");
             }
         }
 
