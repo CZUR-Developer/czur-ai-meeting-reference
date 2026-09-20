@@ -100,11 +100,39 @@ class MeetingQueryAndDeletionContractTest {
     }
 
     @Test
+    void manifestPendingAcceptsOnlyTheTwoInProgressStates() {
+        for (ManifestStatus state : List.of(
+                ManifestStatus.NOT_STARTED, ManifestStatus.GENERATING)) {
+            MeetingStatus meetingStatus = manifestStatus(state);
+            MeetingManifestPort.Pending pending =
+                    new MeetingManifestPort.Pending(meetingStatus);
+
+            assertEquals(MeetingManifestPort.Status.PENDING, pending.status());
+            assertEquals(MEETING, pending.meetingId());
+            assertEquals(state, pending.manifestState());
+            assertFalse(pending.toString().contains(MEETING));
+            assertFalse(pending.toString().contains(RECEIPT));
+        }
+
+        for (ManifestStatus state : List.of(
+                ManifestStatus.READY,
+                ManifestStatus.READY_WITH_WARNINGS,
+                ManifestStatus.FAILED,
+                ManifestStatus.DELETION_PENDING,
+                ManifestStatus.DELETED)) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> new MeetingManifestPort.Pending(manifestStatus(state)));
+        }
+        assertThrows(NullPointerException.class,
+                () -> new MeetingManifestPort.Pending(null));
+    }
+
+    @Test
     void manifestFoundCarriesCompleteStandardSummary() {
         MeetingManifest manifest = manifest();
-        MeetingManifestPort.Found found = new MeetingManifestPort.Found(
-                manifest, FinalizationFact.accepted(RECEIPT));
+        MeetingManifestPort.Found found = new MeetingManifestPort.Found(manifest);
 
+        assertEquals(MeetingManifestPort.Status.FOUND, found.status());
         assertEquals(MEETING, found.meetingId());
         assertEquals(-1, found.genTime());
         assertEquals("0.1", found.manifest().specVersion());
@@ -115,6 +143,42 @@ class MeetingQueryAndDeletionContractTest {
         assertEquals(ManifestStatus.READY_WITH_WARNINGS, found.manifestState());
         assertEquals(1, found.manifest().artifacts().size());
         assertEquals(1, found.manifest().warnings().size());
+    }
+
+    @Test
+    void manifestFoundAcceptsEveryCompleteSchemaStateAndNoInProgressState() {
+        for (ManifestStatus state : List.of(
+                ManifestStatus.READY,
+                ManifestStatus.READY_WITH_WARNINGS,
+                ManifestStatus.FAILED,
+                ManifestStatus.DELETION_PENDING,
+                ManifestStatus.DELETED)) {
+            MeetingManifest manifest = completeManifest(state);
+            MeetingManifestPort.Found found = new MeetingManifestPort.Found(manifest);
+
+            assertEquals(MeetingManifestPort.Status.FOUND, found.status());
+            assertEquals(state, found.manifestState());
+            assertTrue(found.manifest().artifacts().isEmpty(),
+                    "完整状态不得被擅自附加非空 Artifact 约束");
+            assertTrue(found.manifest().warnings().isEmpty(),
+                    "完整状态不得被擅自附加告警数量约束");
+        }
+
+        for (ManifestStatus state : List.of(
+                ManifestStatus.NOT_STARTED, ManifestStatus.GENERATING)) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> completeManifest(state));
+        }
+        assertThrows(NullPointerException.class,
+                () -> new MeetingManifestPort.Found(null));
+    }
+
+    @Test
+    void manifestPendingAndFoundExposeOnlyTheirFrozenRecordComponents() {
+        assertEquals(List.of("meetingStatus:MeetingStatus"),
+                recordComponentShape(MeetingManifestPort.Pending.class));
+        assertEquals(List.of("manifest:MeetingManifest"),
+                recordComponentShape(MeetingManifestPort.Found.class));
     }
 
     @Test
@@ -290,8 +354,9 @@ class MeetingQueryAndDeletionContractTest {
                 new MeetingEventPage(List.of(event), 1, false),
                 new MeetingQueryPort.Found(status),
                 new MeetingEventLogPort.Page(new MeetingEventPage(List.of(event), 1, false)),
-                new MeetingManifestPort.Found(manifest(),
-                        FinalizationFact.accepted(RECEIPT)),
+                new MeetingManifestPort.Pending(
+                        manifestStatus(ManifestStatus.GENERATING)),
+                new MeetingManifestPort.Found(manifest()),
                 new DeleteResult.Accepted(status)).toString();
 
         for (String secret : Set.of(SUBJECT, IDEMPOTENCY, DIGEST, RECEIPT, BODY)) {
@@ -336,6 +401,39 @@ class MeetingQueryAndDeletionContractTest {
                 FinalizationFact.accepted(RECEIPT),
                 manifestStatus,
                 CREATED);
+    }
+
+    private static MeetingStatus manifestStatus(ManifestStatus manifestStatus) {
+        return new MeetingStatus(
+                MEETING,
+                MeetingState.FINALIZING,
+                FinalizationFact.accepted(RECEIPT),
+                manifestStatus,
+                CREATED);
+    }
+
+    private static MeetingManifest completeManifest(ManifestStatus status) {
+        return new MeetingManifest(
+                "0.1",
+                MEETING,
+                -1,
+                1,
+                new MeetingManifest.Profile("transcript-only/v1", 1),
+                null,
+                status,
+                CREATED,
+                CREATED,
+                0,
+                new MeetingManifest.Languages("zh-CN", List.of()),
+                List.of(),
+                List.of());
+    }
+
+    private static List<String> recordComponentShape(Class<?> recordType) {
+        return Arrays.stream(recordType.getRecordComponents())
+                .map(component -> component.getName() + ':'
+                        + component.getType().getSimpleName())
+                .toList();
     }
 
     private static MeetingManifest manifest() {

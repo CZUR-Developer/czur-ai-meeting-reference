@@ -49,6 +49,7 @@ public record MeetingManifest(
             throw new IllegalArgumentException("title must not exceed 256 characters");
         }
         Objects.requireNonNull(status, "status");
+        requireCompleteStatus(status);
         Objects.requireNonNull(startedAt, "startedAt");
         Objects.requireNonNull(endedAt, "endedAt");
         if (endedAt.isBefore(startedAt)) {
@@ -96,6 +97,21 @@ public record MeetingManifest(
     }
 
     private static final Pattern SPEC_VERSION = Pattern.compile("^[0-9]+\\.[0-9]+$");
+
+    /**
+     * 完整 Manifest 只表达 Schema 已冻结的最终或删除状态。生成尚未开始或仍在
+     * 进行时必须使用 {@link MeetingManifestPort.Pending}，不能用带虚构字段的空
+     * Manifest 代替。这里不附加 Artifact 数量、告警数量或时长之间的业务推断。
+     */
+    private static void requireCompleteStatus(ManifestStatus status) {
+        switch (status) {
+            case READY, READY_WITH_WARNINGS, FAILED, DELETION_PENDING, DELETED -> {
+                // 与 meeting-manifest.schema.json 的顶层 status 枚举完全一致。
+            }
+            case NOT_STARTED, GENERATING -> throw new IllegalArgumentException(
+                    "complete manifest must not use an in-progress status");
+        }
+    }
 
     private static void requireSpecVersion(String specVersion) {
         requireText("specVersion", specVersion);

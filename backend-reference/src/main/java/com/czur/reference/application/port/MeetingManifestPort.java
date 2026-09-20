@@ -3,11 +3,13 @@ package com.czur.reference.application.port;
 import java.util.Objects;
 
 /**
- * 会议 Manifest 状态事实的只读端口。
+ * 会议 Manifest 事实的只读端口。
  *
- * <p>P2-T13 只冻结状态和最终收口事实，不在此端口携带 Artifact 路径、永久
- * URL、对象存储 Key 或会议正文。完整 Manifest 与 Artifact 内容由后续契约适配器
- * 提供；本端口先保证 App/Web 能安全判断是否可以继续查询或等待。</p>
+ * <p>端口以互斥结果区分“最终产物仍在生成”和“完整 Manifest 已经形成”：
+ * {@link Pending} 只携带现有会议状态投影，传输适配器应映射为 HTTP 202；
+ * {@link Found} 只携带可直接按 Manifest Schema 输出的完整结果，传输适配器应
+ * 映射为 HTTP 200。生成中的状态不得通过空 Manifest 或虚构的产物、语言和时间
+ * 字段表达。</p>
  */
 public interface MeetingManifestPort {
     /** 查询指定会议在统一 genTime 上下文中的 Manifest 状态。 */
@@ -35,14 +37,53 @@ public interface MeetingManifestPort {
         }
     }
 
-    sealed interface Result permits Found, NotFound, Conflict, AccessDenied, Unavailable {
+    sealed interface Result permits Pending, Found, NotFound, Conflict, AccessDenied, Unavailable {
         Status status();
     }
 
-    record Found(MeetingManifest manifest, FinalizationFact finalization) implements Result {
+    /**
+     * 最终清单尚未形成时的权威状态投影。
+     *
+     * <p>该结果只接受 {@link ManifestStatus#NOT_STARTED} 或
+     * {@link ManifestStatus#GENERATING}。它不会携带部分 Manifest，避免调用方把
+     * 尚未冻结的 Profile、语言、时间范围或 Artifact 当成最终事实。</p>
+     */
+    record Pending(MeetingStatus meetingStatus) implements Result {
+        public Pending {
+            Objects.requireNonNull(meetingStatus, "meetingStatus");
+            if (meetingStatus.manifestState() != ManifestStatus.NOT_STARTED
+                    && meetingStatus.manifestState() != ManifestStatus.GENERATING) {
+                throw new IllegalArgumentException(
+                        "pending result requires NOT_STARTED or GENERATING manifest state");
+            }
+        }
+
+        /** 委托读取会议标识；不会复制或改写状态快照。 */
+        public String meetingId() {
+            return meetingStatus.meetingId();
+        }
+
+        /** 委托读取仍在生成阶段的 Manifest 状态。 */
+        public ManifestStatus manifestState() {
+            return meetingStatus.manifestState();
+        }
+
+        @Override
+        public Status status() {
+            return Status.PENDING;
+        }
+
+        /** 诊断只显示公开状态，不输出会议标识或 finalization receipt。 */
+        @Override
+        public String toString() {
+            return "MeetingManifestPort.Pending[manifestState=" + manifestState() + ']';
+        }
+    }
+
+    /** 已经形成完整、可按 Manifest Schema 输出的最终清单。 */
+    record Found(MeetingManifest manifest) implements Result {
         public Found {
             Objects.requireNonNull(manifest, "manifest");
-            Objects.requireNonNull(finalization, "finalization");
         }
 
         /** 兼容状态查询调用方读取 Manifest 的状态投影。 */
@@ -67,8 +108,7 @@ public interface MeetingManifestPort {
 
         @Override
         public String toString() {
-            return "MeetingManifestPort.Found[manifestState=" + manifest.status()
-                    + ", finalization=redacted]";
+            return "MeetingManifestPort.Found[manifestState=" + manifest.status() + ']';
         }
     }
 
@@ -134,6 +174,7 @@ public interface MeetingManifestPort {
     }
 
     enum Status {
+        PENDING,
         FOUND,
         NOT_FOUND,
         CONFLICT,
