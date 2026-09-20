@@ -330,39 +330,58 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
         return events;
     }
 
-    private static EventLog readEvent(ResultSet rows) throws SQLException {
+    /**
+     * 从当前结果行解码规范事件。
+     *
+     * <p>包内认证读取适配器必须复用这里的 canonical envelope 映射，避免同一张
+     * 表在公开读取和持久化原语中形成两套字段解释。该方法只读取事件列，不读取
+     * 或判断会议归属；调用方必须先完成自己的访问控制。</p>
+     */
+    static EventLog readEvent(ResultSet rows) throws SQLException {
         String specVersion = rows.getString("spec_version");
         String streamId = rows.getString("stream_id");
         // V001 历史行和任何半迁移行都不能转换成 EventLog；不要用默认值猜测。
         if (specVersion == null || specVersion.isBlank()
                 || streamId == null || streamId.isBlank()) {
-            throw new IllegalStateException("会议事件 envelope 元数据为空，拒绝读取");
+            throw new InvalidStoredEvent();
         }
         String canonicalPayload = rows.getString("canonical_payload");
         if (canonicalPayload == null || canonicalPayload.isBlank()) {
-            throw new IllegalStateException("会议事件 canonical payload 为空，拒绝读取");
+            throw new InvalidStoredEvent();
         }
         Timestamp occurredAt = rows.getTimestamp("occurred_at");
         if (occurredAt == null) {
-            throw new IllegalStateException("会议事件 occurred_at 为空，拒绝读取");
+            throw new InvalidStoredEvent();
         }
-        return new EventLog(
-                specVersion,
-                requiredColumn(rows, "meeting_id"),
-                streamId,
-                requiredColumn(rows, "event_id"),
-                rows.getLong("event_sequence"),
-                occurredAt.toInstant(),
-                requiredColumn(rows, "event_type"),
-                canonicalPayload);
+        try {
+            return new EventLog(
+                    specVersion,
+                    requiredColumn(rows, "meeting_id"),
+                    streamId,
+                    requiredColumn(rows, "event_id"),
+                    rows.getLong("event_sequence"),
+                    occurredAt.toInstant(),
+                    requiredColumn(rows, "event_type"),
+                    canonicalPayload);
+        } catch (IllegalArgumentException | NullPointerException failure) {
+            // EventLog 的构造校验不能把数据库原值或列级异常正文带到公开适配器。
+            throw new InvalidStoredEvent();
+        }
     }
 
     private static String requiredColumn(ResultSet rows, String column) throws SQLException {
         String value = rows.getString(column);
         if (value == null || value.isBlank()) {
-            throw new IllegalStateException("会议事件列为空：" + column);
+            throw new InvalidStoredEvent();
         }
         return value;
+    }
+
+    /** 固定诊断文本的持久化坏事件标记；不得携带列值、正文或驱动异常。 */
+    static final class InvalidStoredEvent extends IllegalStateException {
+        private InvalidStoredEvent() {
+            super("stored meeting event is invalid");
+        }
     }
 
     private static AppendResult classifyExisting(
