@@ -91,3 +91,48 @@ docker rm -f -- <日志中的精确-container-name>
 docker volume rm -- <日志中的精确-volume-name>
 rm -rf -- <日志中的精确-state-directory>
 ```
+
+## P2-T14-04-03 Outbox 类型领取与栅栏总门禁
+
+`test-t14-outbox-fence.sh` 使用本次随机命名、带 T14 Outbox 专属 ownership
+label 的 `postgres:16` Debian 容器和 named volume。脚本把仓库 `deploy/`
+只读挂载后执行真实 `deploy/migrate.sh`，精确确认 V001～V007，再在三个相互
+独立的 Maven/JVM 中依次完成以下验证：
+
+1. 空或未知类型白名单不领取，已注册类型在排序和 limit 前过滤，未知类型保持
+   `PENDING` 且 attempt、lease 和 version 均不变化；
+2. 双 Worker 并发领取单赢家、过期 lease 被另一 Worker 重领、续租旋转 token/
+   version/expiry、并发续租单赢家；
+3. 旧 owner、旧 token、旧 version 和旧 expiresAt 对 renew/publish/fail 全部被
+   栅栏拒绝，并区分不存在、过期、已发布和已死信；
+4. 第三个 JVM 从真实数据库核对最终持久状态，而不只相信操作返回值。
+
+运行方式：
+
+```bash
+tools/test-t14-outbox-fence.sh
+```
+
+脚本每个 JVM 启动前都会重新读取随机的 IPv4 loopback 端口；不使用固定端口，
+不连接、停止、挂载或删除已有 PostgreSQL。宿主机无需安装 `psql`，迁移登记检查
+使用本次 PostgreSQL 容器内的客户端。跨 JVM 必须交接的 lease token 仅短暂保存
+在本次 `0700` 状态目录的 `0600` 文件中，从不写日志，并在第二阶段使用后立即
+覆盖；正常退出、测试失败、`INT`、`TERM` 和 `HUP` 都会精确清理本次资源。
+
+`SIGKILL` 无法触发 shell trap。强制终止后，只能使用脚本启动日志打印的三个
+精确名称。先逐字代入以下命令，并确认 label 值与名称中的同一次 run-id 完全一致；
+任一名称不匹配、label 缺失或 label 不一致时必须停止，禁止删除：
+
+```bash
+docker container inspect --format '{{index .Config.Labels "com.czur.ai-meeting.t14-outbox-fence.run-id"}}' <日志中的精确-container-name>
+docker volume inspect --format '{{index .Labels "com.czur.ai-meeting.t14-outbox-fence.run-id"}}' <日志中的精确-volume-name>
+```
+
+确认归属后才可执行以下精确恢复，禁止使用通配符、名称前缀、
+`docker compose down`、`docker system prune` 或 `docker volume prune`：
+
+```bash
+docker rm -f -- <日志中的精确-container-name>
+docker volume rm -- <日志中的精确-volume-name>
+rm -rf -- <日志中的精确-state-directory>
+```
