@@ -37,7 +37,15 @@ Schema 尚未发布，V005 只验证 V001→最新版本的全新数据库，不
 认证查询适配器按所有者隔离并进行稳定的 keyset 分页；V006 本身不实现分页 Token、
 查询端口或 Manifest 内容存储。
 
-V003 必须允许在“Schema 已提交但版本登记失败”后安全重跑。执行约束前会先
+`V007__meeting_manifest_revision.sql` 新增追加式 `meeting_manifest_revision` 表。
+每一版同时保存 T14-01 codec 产生的 canonical JSON、等价 JSONB 镜像和 canonical
+UTF-8 的原始 32 字节 SHA-256；数据库关闭式校验 12 个顶层字段、会议身份、revision、
+最终状态和摘要。revision 1 必须没有前序，后续版本必须通过复合自外键精确引用同场
+会议的前一版。该迁移不引入 `pgcrypto`、head/`is_latest`、额外索引、trigger、回填
+或业务 DML；最新版本由复合主键反向读取。V007 会精确核对已有同名表，只有“DDL 已
+提交但尚未登记版本”的完整结构可以安全重跑，半表、错列和同名弱约束都会失败。
+
+V003 和 V007 必须允许在“Schema 已提交但版本登记失败”后安全重跑。执行约束前会先
 检查历史 Reservation 状态，发现未知状态时整事务失败；不要绕过该检查手工登记
 版本。没有 PostgreSQL 时可以先运行静态门禁：
 

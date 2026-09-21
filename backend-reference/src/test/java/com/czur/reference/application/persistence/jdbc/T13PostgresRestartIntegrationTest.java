@@ -12,6 +12,7 @@ import com.czur.reference.application.port.InputState;
 import com.czur.reference.application.port.ManifestStatus;
 import com.czur.reference.application.port.MeetingEventLogPort;
 import com.czur.reference.application.port.MeetingFinalizationStore;
+import com.czur.reference.application.port.MeetingManifest;
 import com.czur.reference.application.port.MeetingQueryPort;
 import com.czur.reference.application.port.MeetingStatus;
 import com.czur.reference.application.port.MeetingSummary;
@@ -28,6 +29,7 @@ import com.czur.reference.application.port.identity.VerifiedIdentity;
 import com.czur.reference.domain.meeting.MeetingAggregate;
 import com.czur.reference.domain.meeting.MeetingEvent;
 import com.czur.reference.domain.meeting.MeetingState;
+import com.czur.reference.protocol.json.MeetingManifestJson;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
@@ -41,6 +43,8 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -57,6 +61,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -73,7 +78,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * PostgreSQL 和权限受限的状态文件交接，绝不依赖测试类静态字段或连接池内存。</p>
  *
  * <p>测试不会创建、停止或删除容器，也不会执行迁移。数据库生命周期、V001～
- * V006 迁移和精确资源清理由 {@code tools/test-t13-postgres-restart.sh} 负责；本类
+ * V007 迁移和精确资源清理由 {@code tools/test-t13-postgres-restart.sh} 负责；本类
  * 只使用 {@link JdbcDatabaseRuntime} 和仓库现有 JDBC 业务端口建立、读取事实。
  * 普通 PostgreSQL 集成测试只设置数据库环境变量时，本门禁保持禁用；只有脚本
  * 同时提供权限受限的 {@code T13_RESTART_STATE_FILE} 才允许执行。</p>
@@ -99,6 +104,7 @@ class T13PostgresRestartIntegrationTest {
     private static final Instant DELETE_ACCEPTED_AT = BASE.plusSeconds(111);
     private static final Instant DELETE_READY_AT = BASE.plusSeconds(112);
     private static final Instant DELETE_AT = BASE.plusSeconds(113);
+    private static final Instant MANIFEST_RECORDED_AT = BASE.plusSeconds(114);
     private static final byte[] PAGE_TOKEN_SIGNING_KEY = pageTokenSecret();
     private static final Set<PosixFilePermission> PRIVATE_DIRECTORY_PERMISSIONS =
             PosixFilePermissions.fromString("rwx------");
@@ -119,7 +125,7 @@ class T13PostgresRestartIntegrationTest {
     void prepareBeforeRestart() throws Exception {
         Path stateFile = newStateFile();
         try (JdbcDatabaseRuntime runtime = startRuntime()) {
-            assertTrue(runtime.checkReadiness().ready(), "V001-V006 readiness must pass");
+            assertTrue(runtime.checkReadiness().ready(), "V001-V007 readiness must pass");
             DataSource dataSource = runtime.dataSource();
             Instant postmasterStart = postmasterStart(dataSource);
 
@@ -151,6 +157,7 @@ class T13PostgresRestartIntegrationTest {
                             .delete(deleteRequest()));
             assertDeletionSnapshot(deletion.meeting());
             long deletionVersion = aggregateVersion(dataSource, DELETE_MEETING);
+            insertNativeManifestRevision(dataSource);
 
             JdbcMeetingEventLogStore events = new JdbcMeetingEventLogStore(dataSource);
             assertEquals(EventLogStore.AppendStatus.APPENDED,
@@ -183,7 +190,7 @@ class T13PostgresRestartIntegrationTest {
     void verifyAfterRestart() throws Exception {
         RestartState expected = readState(existingStateFile());
         try (JdbcDatabaseRuntime runtime = startRuntime()) {
-            assertTrue(runtime.checkReadiness().ready(), "V001-V006 readiness must survive restart");
+            assertTrue(runtime.checkReadiness().ready(), "V001-V007 readiness must survive restart");
             DataSource dataSource = runtime.dataSource();
             assertTrue(postmasterStart(dataSource).isAfter(expected.postmasterStart()),
                     "PostgreSQL postmaster start time must advance after docker restart");
@@ -256,6 +263,7 @@ class T13PostgresRestartIntegrationTest {
                     "stable replay must not advance aggregate_version");
             assertEquals(1L, deletionIdempotencyCount(dataSource));
             assertEquals(1L, deletionOutboxCount(dataSource));
+            assertNativeManifestRevision(dataSource);
         }
     }
 
@@ -478,6 +486,84 @@ class T13PostgresRestartIntegrationTest {
                 SELECT count(*) FROM outbox_event
                  WHERE aggregate_id=? AND event_type='MeetingDeletionRequested'
                 """, DELETE_MEETING);
+    }
+
+    /**
+     * 直接写入一条 V007 原生物理事实，专门验证表、JSON 镜像和摘要跨真重启持久化。
+     *
+     * <p>本方法刻意不封装为 Store，也不推进会议状态；T14-03 才实现正式的
+     * Manifest UoW。这里使用 T14-01 codec 生成 canonical 文本，并把同一文本、
+     * JSONB 镜像及 Java 计算的原始 SHA-256 一次写入。</p>
+     */
+    private static void insertNativeManifestRevision(DataSource dataSource) throws SQLException {
+        String canonical = nativeManifestCanonical();
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement("""
+                     INSERT INTO meeting_manifest_revision (
+                         meeting_id, manifest_revision, previous_revision,
+                         canonical_json, manifest_json, content_sha256, recorded_at)
+                     VALUES (?, 1, NULL, ?, ?::jsonb, ?, ?)
+                     """)) {
+            statement.setString(1, DELETE_MEETING);
+            statement.setString(2, canonical);
+            statement.setString(3, canonical);
+            statement.setBytes(4, sha256(canonical));
+            statement.setTimestamp(5, Timestamp.from(MANIFEST_RECORDED_AT));
+            assertEquals(1, statement.executeUpdate());
+        }
+    }
+
+    /** 在第二个 JVM 中只读验证 V007 原生事实没有依赖连接池或进程内对象。 */
+    private static void assertNativeManifestRevision(DataSource dataSource) throws SQLException {
+        String canonical = nativeManifestCanonical();
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement("""
+                     SELECT canonical_json,
+                            manifest_json::text,
+                            content_sha256,
+                            recorded_at
+                       FROM meeting_manifest_revision
+                      WHERE meeting_id = ? AND manifest_revision = 1
+                     """)) {
+            connection.setReadOnly(true);
+            statement.setString(1, DELETE_MEETING);
+            try (ResultSet rows = statement.executeQuery()) {
+                assertTrue(rows.next());
+                assertEquals(canonical, rows.getString(1));
+                assertEquals(
+                        MeetingManifestJson.decode(canonical),
+                        MeetingManifestJson.decode(rows.getString(2)));
+                assertArrayEquals(sha256(canonical), rows.getBytes(3));
+                assertEquals(MANIFEST_RECORDED_AT, rows.getTimestamp(4).toInstant());
+                assertFalse(rows.next());
+            }
+        }
+    }
+
+    private static String nativeManifestCanonical() {
+        MeetingManifest manifest = new MeetingManifest(
+                "0.1",
+                DELETE_MEETING,
+                1,
+                new MeetingManifest.Profile("profile-t13-restart", 1),
+                "T13 restart manifest",
+                ManifestStatus.DELETION_PENDING,
+                BASE.plusSeconds(10),
+                DELETE_AT,
+                Duration.between(BASE.plusSeconds(10), DELETE_AT).toMillis(),
+                new MeetingManifest.Languages("zh-CN", List.of()),
+                List.of(),
+                List.of());
+        return MeetingManifestJson.encode(manifest);
+    }
+
+    private static byte[] sha256(String value) {
+        try {
+            return MessageDigest.getInstance("SHA-256")
+                    .digest(value.getBytes(StandardCharsets.UTF_8));
+        } catch (NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException("JDK does not provide SHA-256", impossible);
+        }
     }
 
     /** 只执行带文本参数的只读标量查询，避免把动态值拼进 SQL。 */

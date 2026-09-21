@@ -284,7 +284,7 @@ wait_for_loopback_port() {
 
 wait_for_loopback_port || fail "数据库宿主 loopback 端口在限定时间内未就绪"
 
-log INFO "使用仓库 deploy/migrate.sh 应用并登记 V001-V006（连接信息已隐藏）"
+log INFO "使用仓库 deploy/migrate.sh 应用并登记 V001-V007（连接信息已隐藏）"
 docker exec \
   --env "DATABASE_URL=postgresql://127.0.0.1:5432/${DB_NAME}" \
   --env "DATABASE_USER=${DB_USER}" \
@@ -296,7 +296,7 @@ MIGRATION_COUNT="$(docker exec --env "PGPASSWORD=${DB_PASSWORD}" \
   "${CONTAINER_NAME}" psql --username "${DB_USER}" --dbname "${DB_NAME}" \
   --tuples-only --no-align --command \
   "SELECT count(*) FROM schema_migrations WHERE version LIKE 'V00%';")"
-[[ "${MIGRATION_COUNT}" == "6" ]] || fail "迁移登记数量不是预期的 6"
+[[ "${MIGRATION_COUNT}" == "7" ]] || fail "迁移登记数量不是预期的 7"
 
 postmaster_start_time() {
   docker exec --env "PGPASSWORD=${DB_PASSWORD}" \

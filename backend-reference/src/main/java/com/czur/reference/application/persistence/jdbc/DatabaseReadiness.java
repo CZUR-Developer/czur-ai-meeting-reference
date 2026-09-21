@@ -13,6 +13,7 @@ public final class DatabaseReadiness {
         READY,
         DATABASE_UNAVAILABLE,
         MIGRATION_MISSING,
+        SCHEMA_INVALID,
         INVALID_CONFIGURATION,
         CLOSED
     }
@@ -44,6 +45,17 @@ public final class DatabaseReadiness {
                 Status.MIGRATION_MISSING,
                 missing,
                 missing.isEmpty() ? "数据库迁移未登记" : "缺少数据库迁移登记");
+    }
+
+    /**
+     * 创建迁移已经登记、但关键物理对象不符合冻结契约的结果。
+     *
+     * <p>调用方传入的诊断只用于就地判断，绝不进入返回值、日志或异常正文，
+     * 避免暴露 schema 名称、对象定义或外部数据库错误详情。</p>
+     */
+    static DatabaseReadiness schemaInvalid(String ignoredDetail) {
+        return new DatabaseReadiness(
+                Status.SCHEMA_INVALID, Set.of(), "数据库物理结构不符合当前运行时契约");
     }
 
     /** 创建配置未通过结果，供装配层统一表达失败分类。 */

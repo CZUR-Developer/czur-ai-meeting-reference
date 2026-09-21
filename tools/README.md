@@ -15,8 +15,9 @@ python3 tools/check-outbox-migration.py
 `test-t13-postgres-restart.sh` 使用本次专属的 `postgres:16` Debian 容器和
 named volume，执行仓库 `deploy/migrate.sh`，再分别在两个 Maven/JVM 中运行
 `prepareBeforeRestart` 与 `verifyAfterRestart`。中间会真实 stop/start 同一
-PostgreSQL 容器，验证 V001～V006 readiness、会议状态与 receipt、旧 HMAC 分页
-token、meeting-global 事件分页，以及删除幂等和 Outbox 不会因重放增加：
+PostgreSQL 容器，验证 V001～V007 readiness、V007 原生 Manifest 文本/JSONB/摘要、
+会议状态与 receipt、旧 HMAC 分页 token、meeting-global 事件分页，以及删除幂等和
+Outbox 不会因重放增加：
 
 ```bash
 tools/test-t13-postgres-restart.sh
