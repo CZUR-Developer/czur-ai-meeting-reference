@@ -84,6 +84,27 @@ final class JdbcManifestFactStore implements ManifestFactStore {
     @Override
     public Optional<MeetingManifest> findLatest(String meetingId) {
         requireMeetingId(meetingId);
+        return findLatestInCurrentTransaction(meetingId);
+    }
+
+    /**
+     * 读取已由同一事务锁定的 Meeting 所对应的 latest revision。
+     *
+     * <p>历史兼容 Meeting 的标识可能早于公开 {@code mtg_...} 协议，因此删除
+     * 受理不能在确认“没有 revision”之前先用新协议格式拒绝它。该内部入口只供
+     * 已经按数据库 meeting 主键完成锁读和归属校验的工作单元使用；若历史标识
+     * 没有 revision，就返回空并允许只推进 Meeting 删除状态。若数据库中反而
+     * 存在这种 revision，严格 Manifest 解码仍会把它判为损坏，不能绕过公开
+     * 协议校验。</p>
+     */
+    Optional<MeetingManifest> findLatestForLockedMeeting(String meetingId) {
+        if (meetingId == null || meetingId.isBlank()) {
+            throw new IllegalArgumentException("locked meetingId must not be blank");
+        }
+        return findLatestInCurrentTransaction(meetingId);
+    }
+
+    private Optional<MeetingManifest> findLatestInCurrentTransaction(String meetingId) {
         requireExplicitTransaction();
         try {
             Optional<StoredRevision> latest = selectLatest(meetingId);

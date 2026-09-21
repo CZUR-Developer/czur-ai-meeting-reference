@@ -1,11 +1,14 @@
 package com.czur.reference.application.persistence.jdbc;
 
 import com.czur.reference.application.command.MeetingCommandEventFactory;
+import com.czur.reference.application.manifest.ManifestDeletionRevisionFactory;
 import com.czur.reference.application.port.DeleteRequest;
 import com.czur.reference.application.port.DeleteResult;
 import com.czur.reference.application.port.IdempotencyScopeCodec;
+import com.czur.reference.application.port.ManifestFactStore;
 import com.czur.reference.application.port.ManifestStatus;
 import com.czur.reference.application.port.MeetingDeletionPort;
+import com.czur.reference.application.port.MeetingManifest;
 import com.czur.reference.application.port.MeetingStatus;
 import com.czur.reference.application.port.OutboxStore;
 import com.czur.reference.domain.meeting.MeetingAggregate;
@@ -30,10 +33,13 @@ import java.util.logging.Logger;
  * <p>调用方负责验证 credential 和 {@code meeting:delete} 权限；本端口负责在
  * {@code meeting FOR UPDATE} 行锁内再次按数据库原始部署/主体校验归属。访问
  * 拒绝发生在任何删除幂等读取之前。首次请求严格按“锁行、访问检查、幂等读取、
- * 状态检查、单次时钟、幂等预占、Meeting CAS、Outbox、commit”执行，三份事实
- * 要么全部提交，要么全部回滚。</p>
+ * 状态检查、Manifest latest 校验、单次时钟、幂等预占、可选删除 revision、
+ * Meeting CAS、Outbox、commit”执行，全部事实要么同时提交，要么同时回滚。</p>
  *
- * <p>同键重放只返回首次持久化的 pending/pending 快照；当前行已经由 Worker
+ * <p>已有完整 Manifest 时，本事务通过 {@link ManifestDeletionRevisionFactory}
+ * 逐字段保留其正文，只把 revision 加一并把状态改成 {@code DELETION_PENDING}；
+ * 从未产生 revision 时不构造空壳正文。同键重放只返回首次持久化的
+ * pending/pending 快照，不重复追加 revision 或 Outbox；当前行已经由 Worker
  * 推进为 deleted/deleted 时，只用于验证首次事实仍然可信，不能改写响应正文。
  * 本类不物理删除 Meeting、Artifact 或对象存储，也不实现 T14 Worker。</p>
  *
@@ -119,8 +125,23 @@ public final class JdbcMeetingDeletionPort implements MeetingDeletionPort {
                     JdbcIdempotencyStore.findDeletion(
                             connection, scope, request.idempotencyKey());
             if (previous.isPresent()) {
+                // 摘要冲突必须先于 Manifest 正文读取裁决；调用方不能用一个已
+                // 冲突的幂等键探测该会议是否存在、是否损坏或包含删除 revision。
+                if (!sameDigest(
+                        previous.orElseThrow().requestDigest(),
+                        request.canonicalRequestDigest())) {
+                    return rollbackResult(
+                            connection,
+                            transactionResolution,
+                            conflict(DeleteResult.ConflictReason.REQUEST_DIGEST_MISMATCH),
+                            phase);
+                }
+                phase = Phase.MANIFEST_READ;
+                Optional<MeetingManifest> latest =
+                        new JdbcManifestFactStore(connection)
+                                .findLatestForLockedMeeting(request.meetingId());
                 DeleteResult replay = classifyExisting(
-                        previous.get(), request, current);
+                        previous.get(), request, current, latest);
                 return rollbackResult(
                         connection, transactionResolution, replay, phase);
             }
@@ -141,6 +162,35 @@ public final class JdbcMeetingDeletionPort implements MeetingDeletionPort {
                         transactionResolution,
                         conflict(DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT),
                         phase);
+            }
+
+            phase = Phase.MANIFEST_READ;
+            JdbcManifestFactStore manifestStore = new JdbcManifestFactStore(connection);
+            Optional<MeetingManifest> latest =
+                    manifestStore.findLatestForLockedMeeting(request.meetingId());
+            Optional<MeetingManifest> deletionRevision;
+            if (latest.isEmpty()) {
+                // 取消或早期失败可能从未产生完整 Manifest。这里有意只推进
+                // Meeting 删除状态，不能猜测语言、时间、时长或 Artifact。
+                deletionRevision = Optional.empty();
+            } else if (!isConsistentDeletionSource(current, latest.orElseThrow())) {
+                return rollbackResult(
+                        connection,
+                        transactionResolution,
+                        conflict(DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT),
+                        phase);
+            } else {
+                try {
+                    deletionRevision = Optional.of(
+                            ManifestDeletionRevisionFactory.deletionPendingAfter(
+                                    latest.orElseThrow()));
+                } catch (IllegalArgumentException malformedSource) {
+                    return rollbackResult(
+                            connection,
+                            transactionResolution,
+                            conflict(DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT),
+                            phase);
+                }
             }
 
             phase = Phase.CLOCK_READ;
@@ -188,7 +238,7 @@ public final class JdbcMeetingDeletionPort implements MeetingDeletionPort {
                             acceptedAt);
             if (!reservation.acquired()) {
                 DeleteResult replay = classifyExisting(
-                        reservation.record(), request, current);
+                        reservation.record(), request, current, latest);
                 return rollbackResult(
                         connection, transactionResolution, replay, phase);
             }
@@ -211,6 +261,26 @@ public final class JdbcMeetingDeletionPort implements MeetingDeletionPort {
                         transactionResolution,
                         conflict(DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT),
                         phase);
+            }
+
+            if (deletionRevision.isPresent()) {
+                MeetingManifest candidate = deletionRevision.orElseThrow();
+                MeetingManifest source = latest.orElseThrow();
+                phase = Phase.MANIFEST_APPEND;
+                ManifestFactStore.AppendResult appended = manifestStore.append(
+                        new ManifestFactStore.AppendRequest(
+                                candidate,
+                                new ManifestFactStore.ExpectedPreviousRevision.Present(
+                                        source.manifestRevision())));
+                // meeting 行锁已经串行化 publish/delete；目标 revision 若已存在、
+                // 前序变化或正文冲突，都说明数据库事实不再满足首次删除前提。
+                if (appended.status() != ManifestFactStore.AppendStatus.APPENDED) {
+                    return rollbackResult(
+                            connection,
+                            transactionResolution,
+                            conflict(DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT),
+                            phase);
+                }
             }
 
             phase = Phase.MEETING_UPDATE;
@@ -242,6 +312,20 @@ public final class JdbcMeetingDeletionPort implements MeetingDeletionPort {
             commitCompleted = true;
             LOGGER.log(Level.FINE, "会议删除受理事务已提交 result=ACCEPTED");
             return new DeleteResult.Accepted(accepted);
+        } catch (JdbcManifestFactStore.StoredFactException manifestFailure) {
+            if (commitStarted) {
+                return loggedUnavailable(
+                        DeleteResult.UnavailableReason.OUTCOME_UNKNOWN,
+                        Phase.COMMIT,
+                        null);
+            }
+            DeleteResult result = manifestFailure.kind()
+                    == JdbcManifestFactStore.FailureKind.CORRUPT_DATA
+                    ? conflict(DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT)
+                    : unavailable(DeleteResult.UnavailableReason.STORAGE_FAILURE);
+            return transactionStarted
+                    ? rollbackResult(connection, transactionResolution, result, phase)
+                    : result;
         } catch (SQLException sqlFailure) {
             if (commitStarted) {
                 return loggedUnavailable(
@@ -249,12 +333,9 @@ public final class JdbcMeetingDeletionPort implements MeetingDeletionPort {
                         Phase.COMMIT,
                         sqlFailure.getSQLState());
             }
-            if (transactionStarted) {
-                transactionResolution.rollback(connection);
-            }
             JdbcReadLookupSupport.FailureKind failureKind =
                     JdbcReadLookupSupport.classify(sqlFailure);
-            return switch (failureKind) {
+            DeleteResult result = switch (failureKind) {
                 case INCONSISTENT -> loggedSqlConflict(phase, sqlFailure);
                 case RETRYABLE_UNAVAILABLE -> loggedUnavailable(
                         DeleteResult.UnavailableReason.TRANSIENT_STORAGE_FAILURE,
@@ -265,6 +346,9 @@ public final class JdbcMeetingDeletionPort implements MeetingDeletionPort {
                         phase,
                         sqlFailure.getSQLState());
             };
+            return transactionStarted
+                    ? rollbackResult(connection, transactionResolution, result, phase)
+                    : result;
         } catch (RuntimeException runtimeFailure) {
             // DataSource、Clock、JDBC 代理和驱动均可能用运行时异常报告故障。
             // 动态异常文本和 cause 不进入结果或日志。
@@ -274,11 +358,11 @@ public final class JdbcMeetingDeletionPort implements MeetingDeletionPort {
                         Phase.COMMIT,
                         null);
             }
-            if (transactionStarted) {
-                transactionResolution.rollback(connection);
-            }
-            return loggedUnavailable(
+            DeleteResult result = loggedUnavailable(
                     DeleteResult.UnavailableReason.STORAGE_FAILURE, phase, null);
+            return transactionStarted
+                    ? rollbackResult(connection, transactionResolution, result, phase)
+                    : result;
         } finally {
             if (commitCompleted || transactionResolution.rollbackConfirmed()) {
                 restoreAutoCommitQuietly(connection, previousAutoCommit);
@@ -293,7 +377,8 @@ public final class JdbcMeetingDeletionPort implements MeetingDeletionPort {
     private static DeleteResult classifyExisting(
             JdbcIdempotencyStore.DeletionRawRecord record,
             DeleteRequest request,
-            JdbcMeetingRepository.DeletionMeeting current) {
+            JdbcMeetingRepository.DeletionMeeting current,
+            Optional<MeetingManifest> latest) {
         // 必须先比较摘要；摘要冲突时不能解析潜在损坏的响应正文。
         if (!sameDigest(record.requestDigest(), request.canonicalRequestDigest())) {
             return conflict(DeleteResult.ConflictReason.REQUEST_DIGEST_MISMATCH);
@@ -311,17 +396,60 @@ public final class JdbcMeetingDeletionPort implements MeetingDeletionPort {
         MeetingStatus now = current.status();
         if (now.state() == MeetingState.DELETION_PENDING
                 && now.manifestState() == ManifestStatus.DELETION_PENDING) {
-            return stored.equals(now)
+            return stored.equals(now) && isConsistentDeletionLatest(current, latest)
                     ? new DeleteResult.Replayed(stored)
                     : conflict(DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT);
         }
         if (now.state() == MeetingState.DELETED
                 && now.manifestState() == ManifestStatus.DELETED
                 && !now.updatedAt().isBefore(stored.updatedAt())
-                && now.finalization().equals(stored.finalization())) {
+                && now.finalization().equals(stored.finalization())
+                && isConsistentDeletionLatest(current, latest)) {
             return new DeleteResult.Replayed(stored);
         }
         return conflict(DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT);
+    }
+
+    /** 证明现有完整 Manifest 可以作为本次删除 revision 的唯一源正文。 */
+    private static boolean isConsistentDeletionSource(
+            JdbcMeetingRepository.DeletionMeeting current,
+            MeetingManifest latest) {
+        if (!current.snapshot().meetingId().equals(latest.meetingId())
+                || !current.snapshot().profileId().equals(latest.profile().id())
+                || current.snapshot().profileRevision() != latest.profile().revision()
+                || current.manifestState() != latest.status()) {
+            return false;
+        }
+        return switch (latest.status()) {
+            case READY -> current.snapshot().state() == MeetingState.READY;
+            case READY_WITH_WARNINGS ->
+                    current.snapshot().state() == MeetingState.READY_WITH_WARNINGS;
+            case FAILED -> current.snapshot().state() == MeetingState.FAILED;
+            default -> false;
+        };
+    }
+
+    /**
+     * 校验重放时 Meeting 删除状态与 latest revision 的最小一致性。
+     *
+     * <p>latest 为空表示首次删除时原本没有完整 Manifest，是合法分支；latest
+     * 存在时必须是由至少一版完整正文派生出的删除 revision。未来删除 Worker
+     * 可以继续追加 {@code DELETED}，但不得让旧完整结果重新成为 latest。</p>
+     */
+    private static boolean isConsistentDeletionLatest(
+            JdbcMeetingRepository.DeletionMeeting current,
+            Optional<MeetingManifest> latest) {
+        if (latest.isEmpty()) {
+            return true;
+        }
+        MeetingManifest manifest = latest.orElseThrow();
+        return current.snapshot().meetingId().equals(manifest.meetingId())
+                && current.snapshot().profileId().equals(manifest.profile().id())
+                && current.snapshot().profileRevision() == manifest.profile().revision()
+                && manifest.manifestRevision() > 1
+                && (manifest.status() == ManifestStatus.DELETION_PENDING
+                    || (current.snapshot().state() == MeetingState.DELETED
+                        && manifest.status() == ManifestStatus.DELETED));
     }
 
     private static MeetingStatus decodeDeletion(
@@ -340,7 +468,10 @@ public final class JdbcMeetingDeletionPort implements MeetingDeletionPort {
             TransactionResolution resolution,
             DeleteResult result,
             Phase phase) {
-        resolution.rollback(connection);
+        if (!resolution.rollback(connection)) {
+            return loggedUnavailable(
+                    DeleteResult.UnavailableReason.OUTCOME_UNKNOWN, phase, null);
+        }
         LOGGER.log(Level.FINE,
                 "会议删除受理事务结束 phase={0} status={1}",
                 new Object[]{phase.name(), result.status().name()});
@@ -442,8 +573,11 @@ public final class JdbcMeetingDeletionPort implements MeetingDeletionPort {
     private static final class TransactionResolution {
         private boolean rollbackConfirmed;
 
-        void rollback(Connection connection) {
-            rollbackConfirmed = rollbackQuietly(connection);
+        boolean rollback(Connection connection) {
+            if (!rollbackConfirmed) {
+                rollbackConfirmed = rollbackQuietly(connection);
+            }
+            return rollbackConfirmed;
         }
 
         boolean rollbackConfirmed() {
@@ -456,8 +590,10 @@ public final class JdbcMeetingDeletionPort implements MeetingDeletionPort {
         MEETING_LOCK_AND_ACCESS_CHECK,
         IDEMPOTENCY_READ,
         STATE_CHECK,
+        MANIFEST_READ,
         CLOCK_READ,
         IDEMPOTENCY_RESERVE,
+        MANIFEST_APPEND,
         MEETING_UPDATE,
         OUTBOX_APPEND,
         COMMIT

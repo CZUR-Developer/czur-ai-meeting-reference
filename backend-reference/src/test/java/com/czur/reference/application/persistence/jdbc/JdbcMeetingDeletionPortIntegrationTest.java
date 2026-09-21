@@ -3,13 +3,19 @@ package com.czur.reference.application.persistence.jdbc;
 import com.czur.reference.application.command.MeetingCommandContext;
 import com.czur.reference.application.command.MeetingCommandEventFactory;
 import com.czur.reference.application.command.MeetingPermissions;
+import com.czur.reference.application.manifest.ManifestDeletionRevisionFactory;
+import com.czur.reference.application.manifest.ManifestResultAccessPolicy;
 import com.czur.reference.application.port.DeleteRequest;
 import com.czur.reference.application.port.DeleteResult;
 import com.czur.reference.application.port.FinalizationFact;
 import com.czur.reference.application.port.IdempotencyScopeCodec;
 import com.czur.reference.application.port.InputState;
+import com.czur.reference.application.port.ManifestFactStore;
+import com.czur.reference.application.port.ManifestPublicationUnitOfWork;
 import com.czur.reference.application.port.ManifestStatus;
 import com.czur.reference.application.port.MeetingStatus;
+import com.czur.reference.application.port.MeetingManifest;
+import com.czur.reference.application.port.MeetingManifestPort;
 import com.czur.reference.application.port.OutboxStore;
 import com.czur.reference.application.port.OwnedMeetingCreationUnitOfWork;
 import com.czur.reference.application.port.entitlement.AuthorizedProfileSnapshot;
@@ -42,6 +48,7 @@ import java.sql.SQLFeatureNotSupportedException;
 import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
@@ -71,7 +78,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * 会议删除受理的 PostgreSQL 16 原子性、并发和故障语义门禁。
  *
- * <p>每个用例创建并删除自己的 schema，执行 V001～V006；数据库实例由测试命令
+ * <p>每个用例创建并删除自己的 schema，执行 V001～V007；数据库实例由测试命令
  * 显式注入，测试不会连接、挂载或清理任何已有开发卷。故障代理只包装本用例取得
  * 的连接，用于验证每个写点、commit/rollback 和连接恢复边界。</p>
  */
@@ -103,7 +110,8 @@ class JdbcMeetingDeletionPortIntegrationTest {
                 "V003__identity_entitlement.sql",
                 "V004__meeting_event_envelope.sql",
                 "V005__meeting_finalization_fact.sql",
-                "V006__meeting_read_model.sql")) {
+                "V006__meeting_read_model.sql",
+                "V007__meeting_manifest_revision.sql")) {
             applyMigration(migration);
         }
     }
@@ -333,6 +341,8 @@ class JdbcMeetingDeletionPortIntegrationTest {
         assertEquals(first.meeting(), replay.meeting());
         assertEquals(1, clockReads.get(), "重放不得读取时钟");
         assertEquals(1, deletionEventCount("meeting-stable"));
+        assertEquals(0, manifestRevisionCount("meeting-stable"),
+                "没有旧完整 Manifest 时不得虚构删除正文");
 
         assertConflict(port.delete(request(
                         "meeting-stable", "key-stable", "digest-other")),
@@ -472,6 +482,176 @@ class JdbcMeetingDeletionPortIntegrationTest {
         }
         assertEquals(1, deletionEventCount("meeting-cross-a")
                 + deletionEventCount("meeting-cross-b"));
+    }
+
+    @Test
+    void completeManifestDeletionAppendsOnePreservingRevisionAndRevokesQuery()
+            throws Exception {
+        String suffix = "manifest-closed-loop";
+        String meetingId = "mtg_manifest_closed_loop";
+        createOwnedWithMeetingId(
+                meetingId, suffix, MeetingState.READY, DEPLOYMENT, SUBJECT);
+        MeetingManifest source = manifest(meetingId, 1, ManifestStatus.READY);
+        appendManifest(source, new ManifestFactStore.ExpectedPreviousRevision.None());
+
+        DeleteRequest request = request(meetingId, "key-manifest-loop", "digest-manifest-loop");
+        DeleteResult.Accepted accepted = assertInstanceOf(
+                DeleteResult.Accepted.class,
+                port(dataSource, DELETE_CLOCK).delete(request));
+
+        assertEquals(MeetingState.DELETION_PENDING, accepted.meeting().state());
+        assertEquals(2, manifestRevisionCount(meetingId));
+        assertEquals(
+                ManifestDeletionRevisionFactory.deletionPendingAfter(source),
+                latestManifest(meetingId));
+        assertEquals(1, deletionEventCount(meetingId));
+        assertEquals(1, deletionIdempotencyCount("key-manifest-loop"));
+        assertInstanceOf(
+                MeetingManifestPort.AccessDenied.class,
+                new JdbcMeetingManifestQueryPort(
+                        dataSource,
+                        new ManifestResultAccessPolicy(
+                                Clock.fixed(DELETE_AT, ZoneOffset.UTC),
+                                Duration.ofDays(1)))
+                        .get(new MeetingManifestPort.Request(meetingId, -1)));
+
+        DeleteResult.Replayed replay = assertInstanceOf(
+                DeleteResult.Replayed.class,
+                port(dataSource, DELETE_CLOCK.plusSeconds(30)).delete(request));
+        assertEquals(accepted.meeting(), replay.meeting());
+        assertEquals(2, manifestRevisionCount(meetingId));
+        assertEquals(1, deletionEventCount(meetingId));
+        assertEquals(1, deletionIdempotencyCount("key-manifest-loop"));
+    }
+
+    @Test
+    void latestManifestMustMatchLockedMeetingBeforeAnyDeletionFactIsWritten()
+            throws Exception {
+        String suffix = "manifest-mismatch";
+        String meetingId = "mtg_manifest_mismatch";
+        createOwnedWithMeetingId(
+                meetingId, suffix, MeetingState.READY, DEPLOYMENT, SUBJECT);
+        MeetingManifest mismatchedStatus = manifest(
+                meetingId, 1, ManifestStatus.READY_WITH_WARNINGS);
+        appendManifest(
+                mismatchedStatus,
+                new ManifestFactStore.ExpectedPreviousRevision.None());
+
+        assertConflict(
+                port(dataSource, DELETE_CLOCK).delete(request(
+                        meetingId, "key-manifest-mismatch", "digest-manifest-mismatch")),
+                DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT);
+        assertEquals(MeetingState.READY, facts(meetingId).state());
+        assertEquals(1, manifestRevisionCount(meetingId));
+        assertEquals(0, deletionIdempotencyCount("key-manifest-mismatch"));
+        assertEquals(0, deletionEventCount(meetingId));
+    }
+
+    @Test
+    void publishAndDeleteSerializeOnMeetingRowWithoutLosingARevision()
+            throws Exception {
+        String suffix = "publish-delete-race";
+        String meetingId = "mtg_publish_delete_race";
+        createOwnedWithMeetingId(
+                meetingId, suffix, MeetingState.READY, DEPLOYMENT, SUBJECT);
+        appendManifest(
+                manifest(meetingId, 1, ManifestStatus.READY),
+                new ManifestFactStore.ExpectedPreviousRevision.None());
+
+        CountDownLatch start = new CountDownLatch(1);
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            Future<ManifestPublicationUnitOfWork.PublishResult> publication =
+                    executor.submit(() -> {
+                        start.await();
+                        return new JdbcManifestPublicationUnitOfWork(
+                                dataSource,
+                                Clock.fixed(DELETE_AT.minusNanos(1_000), ZoneOffset.UTC))
+                                .publish(new ManifestPublicationUnitOfWork.PublishRequest(
+                                        meetingId,
+                                        expectedFacts(suffix),
+                                        manifest(meetingId, 2, ManifestStatus.READY)));
+                    });
+            Future<DeleteResult> deletion = executor.submit(() -> {
+                start.await();
+                return port(dataSource, DELETE_CLOCK).delete(request(
+                        meetingId, "key-publish-delete", "digest-publish-delete"));
+            });
+            start.countDown();
+
+            ManifestPublicationUnitOfWork.PublishResult publicationResult = publication.get();
+            assertInstanceOf(DeleteResult.Accepted.class, deletion.get());
+            assertTrue(publicationResult instanceof ManifestPublicationUnitOfWork.PublishApplied
+                            || publicationResult instanceof ManifestPublicationUnitOfWork.Conflict,
+                    () -> "unexpected publication result: " + publicationResult);
+        }
+
+        MeetingManifest latest = latestManifest(meetingId);
+        assertEquals(ManifestStatus.DELETION_PENDING, latest.status());
+        assertTrue(latest.manifestRevision() == 2 || latest.manifestRevision() == 3);
+        assertEquals(latest.manifestRevision(), manifestRevisionCount(meetingId));
+        assertEquals(MeetingState.DELETION_PENDING, facts(meetingId).state());
+        assertEquals(1, deletionIdempotencyCount("key-publish-delete"));
+        assertEquals(1, deletionEventCount(meetingId));
+    }
+
+    @Test
+    void manifestAppendFailuresAndCommitUnknownKeepAllFactsAtomic()
+            throws Exception {
+        for (FaultPoint fault : List.of(
+                FaultPoint.BEFORE_MANIFEST_INSERT,
+                FaultPoint.AFTER_MANIFEST_INSERT)) {
+            String suffix = "manifest-fault-" + fault.name().toLowerCase();
+            String meetingId = "mtg_" + suffix.replace('-', '_');
+            createOwnedWithMeetingId(
+                    meetingId, suffix, MeetingState.READY, DEPLOYMENT, SUBJECT);
+            appendManifest(
+                    manifest(meetingId, 1, ManifestStatus.READY),
+                    new ManifestFactStore.ExpectedPreviousRevision.None());
+
+            assertUnavailable(
+                    port(faultInjectingDataSource(
+                                    dataSource, fault, new FaultObservation()), DELETE_CLOCK)
+                            .delete(request(
+                                    meetingId,
+                                    "key-" + suffix,
+                                    "digest-" + suffix)),
+                    DeleteResult.UnavailableReason.STORAGE_FAILURE,
+                    false);
+            assertEquals(MeetingState.READY, facts(meetingId).state());
+            assertEquals(1, manifestRevisionCount(meetingId));
+            assertEquals(0, deletionIdempotencyCount("key-" + suffix));
+            assertEquals(0, deletionEventCount(meetingId));
+        }
+
+        for (FaultPoint fault : List.of(FaultPoint.BEFORE_COMMIT, FaultPoint.AFTER_COMMIT)) {
+            String suffix = "manifest-commit-" + fault.name().toLowerCase();
+            String meetingId = "mtg_" + suffix.replace('-', '_');
+            createOwnedWithMeetingId(
+                    meetingId, suffix, MeetingState.READY, DEPLOYMENT, SUBJECT);
+            appendManifest(
+                    manifest(meetingId, 1, ManifestStatus.READY),
+                    new ManifestFactStore.ExpectedPreviousRevision.None());
+            FaultObservation observation = new FaultObservation();
+
+            assertUnavailable(
+                    port(faultInjectingDataSource(dataSource, fault, observation), DELETE_CLOCK)
+                            .delete(request(
+                                    meetingId,
+                                    "key-" + suffix,
+                                    "digest-" + suffix)),
+                    DeleteResult.UnavailableReason.OUTCOME_UNKNOWN,
+                    true);
+            assertTrue(observation.abortAttempted.get());
+            if (fault == FaultPoint.BEFORE_COMMIT) {
+                assertEquals(MeetingState.READY, facts(meetingId).state());
+                assertEquals(1, manifestRevisionCount(meetingId));
+                assertEquals(0, deletionEventCount(meetingId));
+            } else {
+                assertEquals(MeetingState.DELETION_PENDING, facts(meetingId).state());
+                assertEquals(2, manifestRevisionCount(meetingId));
+                assertEquals(1, deletionEventCount(meetingId));
+            }
+        }
     }
 
     @Test
@@ -716,13 +896,14 @@ class JdbcMeetingDeletionPortIntegrationTest {
                 String suffix = rollbackFault.name().toLowerCase();
                 createOwned(suffix, MeetingState.CREATED, DEPLOYMENT, SUBJECT);
                 FaultObservation observation = new FaultObservation();
-                assertConflict(port(faultInjectingDataSource(
+                assertUnavailable(port(faultInjectingDataSource(
                                         dataSource, rollbackFault, observation), DELETE_CLOCK)
                                 .delete(request(
                                         "meeting-" + suffix,
                                         "key-" + suffix,
                                         "digest-" + suffix)),
-                        DeleteResult.ConflictReason.INVALID_MEETING_STATE);
+                        DeleteResult.UnavailableReason.OUTCOME_UNKNOWN,
+                        true);
                 assertFalse(observation.restoreAutoCommitAttempted.get());
                 assertTrue(observation.abortAttempted.get());
                 assertTrue(observation.closeAttempted.get());
@@ -799,7 +980,16 @@ class JdbcMeetingDeletionPortIntegrationTest {
             MeetingState state,
             String deployment,
             String subject) throws Exception {
-        String meetingId = "meeting-" + suffix;
+        return createOwnedWithMeetingId(
+                "meeting-" + suffix, suffix, state, deployment, subject);
+    }
+
+    private MeetingAggregate.MeetingSnapshot createOwnedWithMeetingId(
+            String meetingId,
+            String suffix,
+            MeetingState state,
+            String deployment,
+            String subject) throws Exception {
         Instant grantExpiresAt = DELETE_AT.plusSeconds(600);
         MeetingGrant grant = new MeetingGrant(
                 "grant-" + suffix,
@@ -867,6 +1057,72 @@ class JdbcMeetingDeletionPortIntegrationTest {
             }
         }
         return new JdbcMeetingRepository(dataSource).find(meetingId).orElseThrow();
+    }
+
+    private ManifestPublicationUnitOfWork.ExpectedMeetingFacts expectedFacts(String suffix) {
+        return new ManifestPublicationUnitOfWork.ExpectedMeetingFacts(
+                DEPLOYMENT,
+                SUBJECT,
+                "session-" + suffix,
+                "profile-owned",
+                7,
+                FinalizationFact.accepted("setup-receipt-" + suffix));
+    }
+
+    private static MeetingManifest manifest(
+            String meetingId,
+            int revision,
+            ManifestStatus status) {
+        Instant endedAt = CREATED_AT.plusSeconds(300);
+        return new MeetingManifest(
+                "0.1",
+                meetingId,
+                revision,
+                new MeetingManifest.Profile("profile-owned", 7),
+                "Deletion transaction test",
+                status,
+                CREATED_AT,
+                endedAt,
+                300_000,
+                new MeetingManifest.Languages("zh-CN", List.of("en-US")),
+                List.of(new MeetingManifest.ArtifactRef(
+                        "art_transcript_" + meetingId.substring(4),
+                        "transcript.final",
+                        "application/json",
+                        "zh-CN",
+                        1,
+                        128,
+                        "sha256:" + "ab".repeat(32),
+                        MeetingManifest.ArtifactStatus.READY,
+                        endedAt,
+                        null,
+                        null)),
+                List.of(new MeetingManifest.Warning(
+                        "OPTIONAL_SUMMARY_SKIPPED",
+                        "summary",
+                        "ai_meeting.summary_skipped",
+                        null)));
+    }
+
+    private void appendManifest(
+            MeetingManifest manifest,
+            ManifestFactStore.ExpectedPreviousRevision previous) throws SQLException {
+        try (Connection connection = transaction()) {
+            ManifestFactStore.AppendResult result = new JdbcManifestFactStore(connection).append(
+                    new ManifestFactStore.AppendRequest(manifest, previous));
+            assertEquals(ManifestFactStore.AppendStatus.APPENDED, result.status());
+            connection.commit();
+        }
+    }
+
+    private MeetingManifest latestManifest(String meetingId) throws SQLException {
+        try (Connection connection = transaction()) {
+            MeetingManifest latest = new JdbcManifestFactStore(connection)
+                    .findLatest(meetingId)
+                    .orElseThrow();
+            connection.rollback();
+            return latest;
+        }
     }
 
     private void insertLegacy(String suffix, MeetingState state, String deployment) {
@@ -1033,6 +1289,18 @@ class JdbcMeetingDeletionPortIntegrationTest {
                      SELECT count(*) FROM outbox_event
                       WHERE aggregate_id=? AND event_type='MeetingDeletionRequested'
                      """)) {
+            statement.setString(1, meetingId);
+            try (var rows = statement.executeQuery()) {
+                assertTrue(rows.next());
+                return rows.getInt(1);
+            }
+        }
+    }
+
+    private int manifestRevisionCount(String meetingId) throws SQLException {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "SELECT count(*) FROM meeting_manifest_revision WHERE meeting_id=?")) {
             statement.setString(1, meetingId);
             try (var rows = statement.executeQuery()) {
                 assertTrue(rows.next());
@@ -1273,6 +1541,7 @@ class JdbcMeetingDeletionPortIntegrationTest {
 
     private static FaultTiming timing(FaultPoint point, String sql) {
         boolean idempotencyInsert = sql.contains("INSERT INTO idempotency_record");
+        boolean manifestInsert = sql.contains("INSERT INTO meeting_manifest_revision");
         boolean meetingUpdate = sql.contains("UPDATE meeting")
                 && sql.contains("aggregate_version = aggregate_version + 1");
         boolean outboxInsert = sql.contains("INSERT INTO outbox_event");
@@ -1280,6 +1549,12 @@ class JdbcMeetingDeletionPortIntegrationTest {
             return FaultTiming.BEFORE;
         }
         if (point == FaultPoint.AFTER_IDEMPOTENCY_INSERT && idempotencyInsert) {
+            return FaultTiming.AFTER;
+        }
+        if (point == FaultPoint.BEFORE_MANIFEST_INSERT && manifestInsert) {
+            return FaultTiming.BEFORE;
+        }
+        if (point == FaultPoint.AFTER_MANIFEST_INSERT && manifestInsert) {
             return FaultTiming.AFTER;
         }
         if (point == FaultPoint.BEFORE_MEETING_UPDATE && meetingUpdate) {
@@ -1369,6 +1644,8 @@ class JdbcMeetingDeletionPortIntegrationTest {
         DATA_EXCEPTION_IDEMPOTENCY_READ,
         BEFORE_IDEMPOTENCY_INSERT,
         AFTER_IDEMPOTENCY_INSERT,
+        BEFORE_MANIFEST_INSERT,
+        AFTER_MANIFEST_INSERT,
         BEFORE_MEETING_UPDATE,
         AFTER_MEETING_UPDATE,
         BEFORE_OUTBOX_INSERT,
