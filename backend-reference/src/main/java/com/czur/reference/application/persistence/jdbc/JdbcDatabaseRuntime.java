@@ -22,8 +22,8 @@ import java.util.logging.Logger;
  * PostgreSQL 数据库运行时边界。
  *
  * <p>启动时创建唯一的 HikariCP 连接池，执行只读 {@code SELECT 1} 探针并检查
- * {@code schema_migrations} 中的 V001～V007，再以只读 catalog 查询核对 V007
- * Manifest revision 表的精确物理契约。任一检查失败都会关闭已经创建的池并抛出
+ * {@code schema_migrations} 中的 V001～V008，再以只读 catalog 查询核对 V007
+ * Manifest revision 与 V008 durable input fact 表的精确物理契约。任一检查失败都会关闭已经创建的池并抛出
  * {@link DatabaseStartupException}；本类没有 InMemory fallback，也不会自动执行
  * 迁移或修补半成品表。成功启动后，所有 JDBC Repository、会议工作单元和提交后的
  * Outbox Worker 端口都共享同一个 {@link DataSource}。</p>
@@ -37,7 +37,7 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
     private static final String MIGRATION_QUERY = """
             SELECT version
               FROM schema_migrations
-             WHERE version IN (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             WHERE version IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """;
     private static final Set<String> REQUIRED_MIGRATIONS = Set.of(
             "V001__initial_schema",
@@ -46,7 +46,8 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
             "V004__meeting_event_envelope",
             "V005__meeting_finalization_fact",
             "V006__meeting_read_model",
-            "V007__meeting_manifest_revision");
+            "V007__meeting_manifest_revision",
+            "V008__durable_input_fact");
     private static final List<ColumnContract> MANIFEST_REVISION_COLUMNS = List.of(
             new ColumnContract("meeting_id", "text", true, null),
             new ColumnContract("manifest_revision", "integer", true, null),
@@ -86,6 +87,15 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
             CHECK (octet_length(content_sha256) = 32
             AND content_sha256 = sha256(convert_to(canonical_json, 'UTF8'::name)))
             """;
+    private static final List<ColumnContract> DURABLE_INPUT_FACT_COLUMNS = List.of(
+            new ColumnContract("meeting_id", "text", true, null),
+            new ColumnContract("input_binding", "text", true, null),
+            new ColumnContract("last_accepted_sequence", "bigint", true, null),
+            new ColumnContract("audio_duration_ms", "bigint", true, null),
+            new ColumnContract("source_language", "text", true, null),
+            new ColumnContract("target_languages", "text[]", true, null),
+            new ColumnContract("accepted_at", "timestamp with time zone", true, null),
+            new ColumnContract("content_digest", "text", true, null));
 
     private final DatabaseRuntimeConfig config;
     private final HikariDataSource dataSource;
@@ -185,6 +195,7 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
                 // 识别这两个已存在别名，但新迁移只接受完整不可歧义的文件名。
                 migrations.setString(8, "V001");
                 migrations.setString(9, "V002");
+                migrations.setString(10, "V008__durable_input_fact");
                 try (ResultSet rows = migrations.executeQuery()) {
                     while (rows.next()) {
                         String version = rows.getString(1);
@@ -207,6 +218,13 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
             if (!hasExactManifestRevisionSchema(connection)) {
                 DatabaseReadiness invalid = DatabaseReadiness.schemaInvalid(
                         "meeting_manifest_revision catalog contract mismatch");
+                LOGGER.log(Level.WARNING,
+                        "数据库 readiness 物理契约校验失败 status={0}", invalid.status());
+                return invalid;
+            }
+            if (!hasExactDurableInputFactSchema(connection)) {
+                DatabaseReadiness invalid = DatabaseReadiness.schemaInvalid(
+                        "durable_input_fact catalog contract mismatch");
                 LOGGER.log(Level.WARNING,
                         "数据库 readiness 物理契约校验失败 status={0}", invalid.status());
                 return invalid;
@@ -407,6 +425,107 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
     }
 
     /**
+     * 只读核对 V008 durable input fact 表的冻结物理契约。
+     *
+     * <p>该探针只检查 schema 对象，不读取业务行，也不自动创建或修补表。它要求
+     * 八列按迁移顺序存在、单列主键和 meeting 的 RESTRICT 外键存在，以及六个
+     * 已校验的基本字段约束仍保留关键语义。数组约束按关键片段核对，避免把
+     * PostgreSQL 对复杂表达式的无害括号重排当成结构漂移。</p>
+     */
+    private static boolean hasExactDurableInputFactSchema(Connection connection)
+            throws SQLException {
+        Long factTable = relationOid(connection, "durable_input_fact");
+        Long meetingTable = relationOid(connection, "meeting");
+        if (factTable == null || meetingTable == null
+                || !isOrdinaryTable(connection, factTable)) {
+            return false;
+        }
+
+        List<ColumnContract> actualColumns = new ArrayList<>();
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT a.attname,
+                       format_type(a.atttypid, a.atttypmod) AS data_type,
+                       a.attnotnull,
+                       pg_get_expr(d.adbin, d.adrelid) AS default_expression
+                  FROM pg_attribute a
+                  LEFT JOIN pg_attrdef d
+                    ON d.adrelid = a.attrelid
+                   AND d.adnum = a.attnum
+                 WHERE a.attrelid = ?
+                   AND a.attnum > 0
+                   AND NOT a.attisdropped
+                 ORDER BY a.attnum
+                """)) {
+            statement.setLong(1, factTable);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    actualColumns.add(new ColumnContract(
+                            rows.getString("attname"),
+                            rows.getString("data_type"),
+                            rows.getBoolean("attnotnull"),
+                            rows.getString("default_expression")));
+                }
+            }
+        }
+        if (!DURABLE_INPUT_FACT_COLUMNS.equals(actualColumns)) {
+            return false;
+        }
+
+        List<ConstraintContract> constraints = new ArrayList<>();
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT conname,
+                       contype,
+                       convalidated,
+                       coalesce(array_to_string(conkey, ','), '') AS source_keys,
+                       confrelid::bigint AS referenced_relation,
+                       coalesce(array_to_string(confkey, ','), '') AS target_keys,
+                       confdeltype,
+                       pg_get_constraintdef(oid, TRUE) AS definition
+                  FROM pg_constraint
+                 WHERE conrelid = ?
+                 ORDER BY conname
+                """)) {
+            statement.setLong(1, factTable);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    constraints.add(new ConstraintContract(
+                            rows.getString("conname"),
+                            rows.getString("contype"),
+                            rows.getBoolean("convalidated"),
+                            rows.getString("source_keys"),
+                            rows.getLong("referenced_relation"),
+                            rows.getString("target_keys"),
+                            rows.getString("confdeltype"),
+                            rows.getString("definition")));
+                }
+            }
+        }
+        if (constraints.size() != 8
+                || !constraints.contains(ConstraintContract.primaryKey(
+                        "durable_input_fact_pkey", "1"))
+                || !constraints.contains(ConstraintContract.foreignKey(
+                        "durable_input_fact_meeting_fk", "1", meetingTable, "1"))) {
+            return false;
+        }
+        return containsCheckFragment(
+                        constraints, "durable_input_fact_sequence_ck", "last_accepted_sequence >= 0")
+                && containsCheckFragment(
+                        constraints, "durable_input_fact_duration_ck", "audio_duration_ms >= 0")
+                && containsCheckFragment(
+                        constraints, "durable_input_fact_input_binding_ck",
+                        "length(btrim(input_binding)) > 0")
+                && containsCheckFragment(
+                        constraints, "durable_input_fact_source_language_ck",
+                        "length(btrim(source_language)) > 0")
+                && containsCheckFragment(
+                        constraints, "durable_input_fact_target_languages_ck",
+                        "array_position(target_languages")
+                && containsCheckFragment(
+                        constraints, "durable_input_fact_content_digest_ck",
+                        "length(btrim(content_digest)) > 0");
+    }
+
+    /**
      * CHECK 的 {@code conkey} 是 PostgreSQL 从表达式推导出的引用列集合，不是契约
      * 输入，并可能随等价表达式内部遍历变化。物理门禁因此精确比较名称、类型、
      * validated 状态和完整定义，列级语义已经包含在完整定义中。
@@ -420,7 +539,19 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
                 constraint.name().equals(name)
                         && constraint.type().equals("c")
                         && constraint.validated()
-                        && constraint.definition().equals(normalized));
+                && constraint.definition().equals(normalized));
+    }
+
+    private static boolean containsCheckFragment(
+            List<ConstraintContract> constraints,
+            String name,
+            String fragment) {
+        String normalizedFragment = normalizeDefinition(fragment);
+        return constraints.stream().anyMatch(constraint ->
+                constraint.name().equals(name)
+                        && constraint.type().equals("c")
+                        && constraint.validated()
+                        && constraint.definition().contains(normalizedFragment));
     }
 
     /** 返回当前 schema 中的精确关系 OID；不沿 search_path 接受其它 schema。 */
@@ -476,9 +607,14 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
         }
 
         private static ConstraintContract primaryKey(String name, String sourceKeys) {
+            String definition = switch (name) {
+                case "meeting_manifest_revision_pkey" ->
+                        "PRIMARY KEY (meeting_id, manifest_revision)";
+                case "durable_input_fact_pkey" -> "PRIMARY KEY (meeting_id)";
+                default -> throw new IllegalArgumentException("unknown primary key contract");
+            };
             return new ConstraintContract(
-                    name, "p", true, sourceKeys, 0L, "", " ",
-                    "PRIMARY KEY (meeting_id, manifest_revision)");
+                    name, "p", true, sourceKeys, 0L, "", " ", definition);
         }
 
         private static ConstraintContract foreignKey(
@@ -494,6 +630,8 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
                         REFERENCES meeting_manifest_revision(meeting_id, manifest_revision)
                         ON DELETE RESTRICT
                         """;
+                case "durable_input_fact_meeting_fk" ->
+                        "FOREIGN KEY (meeting_id) REFERENCES meeting(meeting_id) ON DELETE RESTRICT";
                 default -> throw new IllegalArgumentException("unknown foreign key contract");
             };
             return new ConstraintContract(
