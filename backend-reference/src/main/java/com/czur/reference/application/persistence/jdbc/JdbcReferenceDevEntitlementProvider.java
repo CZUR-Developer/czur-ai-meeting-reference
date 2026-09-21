@@ -8,6 +8,9 @@ import com.czur.reference.application.port.entitlement.CommitUsageRequest;
 import com.czur.reference.application.port.entitlement.EntitlementProvider;
 import com.czur.reference.application.port.entitlement.EntitlementProviderError;
 import com.czur.reference.application.port.entitlement.EntitlementProviderResult;
+import com.czur.reference.application.port.entitlement.ExpiredReservationStore;
+import com.czur.reference.application.port.entitlement.LeaseAwareCancelReservationRequest;
+import com.czur.reference.application.port.entitlement.LeaseAwareReservationCanceller;
 import com.czur.reference.application.port.entitlement.MeetingGrant;
 import com.czur.reference.application.port.entitlement.ReserveUsageRequest;
 import com.czur.reference.application.port.entitlement.UsageOperationResult;
@@ -18,6 +21,8 @@ import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.time.Clock;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.logging.Level;
@@ -42,7 +47,8 @@ import java.util.logging.Logger;
  * 重试 INTERNAL。日志只有固定操作名、稳定原因码和 SQLState，不记录主体、
  * Reservation、幂等键、摘要、结果正文或数据库地址。</p>
  */
-public final class JdbcReferenceDevEntitlementProvider implements EntitlementProvider {
+public final class JdbcReferenceDevEntitlementProvider
+        implements EntitlementProvider, LeaseAwareReservationCanceller {
     private static final Logger LOGGER = Logger.getLogger(
             JdbcReferenceDevEntitlementProvider.class.getName());
 
@@ -283,6 +289,143 @@ public final class JdbcReferenceDevEntitlementProvider implements EntitlementPro
         } catch (SQLException connectionFailure) {
             return unavailable("CANCEL_CONNECTION", connectionFailure);
         }
+    }
+
+    /**
+     * 使用过期 Reservation Worker 的 lease 完成清理取消。
+     *
+     * <p>普通 cancel 路径故意不能替代此方法：清理请求必须在 Reservation
+     * 行锁事务内同时校验当前 lease 栅栏，并把取消结果写入同一事务的
+     * {@code usage_operation}。幂等结果先查且相同摘要可重放，因此 Worker
+     * 在成功提交后即使 lease 已过期，也不会因为重试而重新修改 Reservation。</p>
+     */
+    @Override
+    public EntitlementProviderResult<UsageOperationResult> cancelReservationWithLease(
+            LeaseAwareCancelReservationRequest request) {
+        if (request == null) {
+            return failure(EntitlementProviderError.Code.INVALID_REQUEST, false,
+                    "CANCEL_LEASE_REQUEST_MISSING");
+        }
+        CancelReservationRequest cancel = request.cancel();
+        ExpiredReservationStore.LeaseToken lease = request.lease();
+        OperationIdentity identity = OperationIdentity.cancel(cancel);
+        try (Connection connection = dataSource.getConnection()) {
+            boolean previousAutoCommit = connection.getAutoCommit();
+            connection.setAutoCommit(false);
+            try {
+                Optional<JdbcUsageReservationStore.UsageOperationRow> existing =
+                        findOperation(connection, identity);
+                if (existing.isPresent()) {
+                    EntitlementProviderResult<UsageOperationResult> replay =
+                            replayOrConflict(existing.get(), identity);
+                    connection.rollback();
+                    return replay;
+                }
+
+                Optional<JdbcUsageReservationStore.LockedReservation> lockedOptional =
+                        JdbcUsageReservationStore.lockReservationForOwnedCreation(
+                                connection,
+                                cancel.deploymentScope(),
+                                cancel.subjectScope(),
+                                cancel.reservationId());
+                if (lockedOptional.isEmpty()) {
+                    connection.rollback();
+                    return failure(EntitlementProviderError.Code.RESERVATION_NOT_FOUND, false,
+                            "CANCEL_LEASE_RESERVATION_NOT_FOUND");
+                }
+
+                // 行锁等待期间同一幂等键可能已经由另一个 Worker 提交；优先稳定重放。
+                existing = findOperation(connection, identity);
+                if (existing.isPresent()) {
+                    EntitlementProviderResult<UsageOperationResult> replay =
+                            replayOrConflict(existing.get(), identity);
+                    connection.rollback();
+                    return replay;
+                }
+
+                JdbcUsageReservationStore.LockedReservation locked = lockedOptional.get();
+                UsageReservation current = locked.reservation();
+                if (!current.expectedMeetingId().equals(cancel.expectedMeetingId())) {
+                    connection.rollback();
+                    return failure(EntitlementProviderError.Code.RESERVATION_STATE_CONFLICT,
+                            false, "CANCEL_LEASE_EXPECTED_MEETING_MISMATCH");
+                }
+                if (current.state() != UsageReservation.State.RESERVED
+                        || current.isBound()) {
+                    connection.rollback();
+                    return failure(EntitlementProviderError.Code.RESERVATION_STATE_CONFLICT,
+                            false, "CANCEL_LEASE_TERMINAL_OR_BOUND");
+                }
+
+                Instant cancelledAt = Objects.requireNonNull(clock.instant(), "clock.instant()");
+                if (!matchesLease(locked, lease, cancelledAt)) {
+                    connection.rollback();
+                    return failure(EntitlementProviderError.Code.RESERVATION_STATE_CONFLICT,
+                            false, "CANCEL_LEASE_FENCE_REJECTED");
+                }
+
+                Instant persistedCancelledAt = persistedOperationTime(cancelledAt);
+                UsageReservation cancelled;
+                try {
+                    // PostgreSQL timestamptz 只保留微秒；先用原始时刻校验 lease，
+                    // 再规范持久化时刻，避免 +1ns 被驱动舍入回有效窗口。
+                    cancelled = current.cancel(
+                            cancel.reasonCode(), persistedCancelledAt, cancel.expectedVersion());
+                    if (!JdbcUsageReservationStore.cancelWithLease(
+                            connection, current, cancelled, lease, cancelledAt)) {
+                        connection.rollback();
+                        return failure(EntitlementProviderError.Code.RESERVATION_STATE_CONFLICT,
+                                false, "CANCEL_LEASE_CAS_REJECTED");
+                    }
+                } catch (UsageReservationTransitionException transition) {
+                    connection.rollback();
+                    return transitionFailure(transition, "CANCEL_LEASE");
+                } catch (IllegalArgumentException invalidRequest) {
+                    connection.rollback();
+                    return failure(EntitlementProviderError.Code.INVALID_REQUEST, false,
+                            "CANCEL_LEASE_REQUEST_INVALID");
+                }
+
+                UsageOperationResult candidate = identity.terminalResult(cancelled);
+                if (!JdbcUsageReservationStore.insertOperation(
+                        connection, candidate, persistedOperationTime(cancelledAt))) {
+                    return rollbackAndReadWinner(connection, identity);
+                }
+                connection.commit();
+                LOGGER.log(Level.FINE,
+                        "JDBC 权益清理取消首次完成 operation=CANCEL_LEASE");
+                return EntitlementProviderResult.success(candidate);
+            } catch (JdbcUsageReservationStore.CorruptUsageDataException corruption) {
+                rollbackQuietly(connection);
+                return corrupted("CANCEL_LEASE_CORRUPT_DATA");
+            } catch (IllegalArgumentException invalidPersistedData) {
+                rollbackQuietly(connection);
+                return corrupted("CANCEL_LEASE_INVALID_PERSISTED_RESULT");
+            } catch (SQLException sqlFailure) {
+                rollbackQuietly(connection);
+                return unavailable("CANCEL_LEASE", sqlFailure);
+            } finally {
+                restoreAutoCommit(connection, previousAutoCommit);
+            }
+        } catch (SQLException connectionFailure) {
+            return unavailable("CANCEL_LEASE_CONNECTION", connectionFailure);
+        }
+    }
+
+    private static boolean matchesLease(
+            JdbcUsageReservationStore.LockedReservation current,
+            ExpiredReservationStore.LeaseToken requested,
+            Instant cancelledAt) {
+        return requested.owner().equals(current.leaseOwner())
+                && requested.token().equals(current.leaseToken())
+                && requested.leaseVersion() == current.leaseVersion()
+                && requested.expiresAt().equals(current.leaseUntil())
+                && current.leaseUntil() != null
+                && cancelledAt.isBefore(current.leaseUntil());
+    }
+
+    private static Instant persistedOperationTime(Instant operationTime) {
+        return operationTime.truncatedTo(ChronoUnit.MICROS);
     }
 
     private static Optional<JdbcUsageReservationStore.UsageOperationRow> findOperation(

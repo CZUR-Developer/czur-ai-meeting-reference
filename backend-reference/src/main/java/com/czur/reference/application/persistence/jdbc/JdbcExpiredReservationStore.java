@@ -9,6 +9,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -94,31 +95,48 @@ public final class JdbcExpiredReservationStore implements ExpiredReservationStor
     @Override
     public ClaimBatch claimExpired(ClaimRequest request) {
         Objects.requireNonNull(request, "request");
+        /*
+         * PostgreSQL 的 TIMESTAMPTZ（以及 pgjdbc 的 Timestamp 绑定）只保留微秒，
+         * 并且采用四舍五入而不是简单截断。claim 返回的 LeaseToken 会在后续
+         * release/lease-aware cancel 中作为 fencing 条件再次与数据库比较，因此
+         * 写入值和返回句柄必须先经过同一套规范化。这里同时规范 now 与 leaseUntil，
+         * 避免请求中的纳秒部分只在其中一侧被舍入，造成 ClaimBatch 或 lease 栅栏
+         * 的时间不一致。规范化后的 ClaimRequest 也让批次结果明确记录数据库实际
+         * 使用的时间边界；普通的业务 cancel 不经过此路径，语义不受影响。
+         */
+        Instant claimedAt = postgresTimestamp(request.now());
+        Instant leaseUntil = postgresTimestamp(request.leaseUntil());
+        if (!leaseUntil.isAfter(claimedAt)) {
+            throw new IllegalArgumentException(
+                    "leaseDuration must advance expiry at PostgreSQL microsecond precision");
+        }
+        ClaimRequest effectiveRequest = new ClaimRequest(
+                request.deploymentScope(), request.leaseOwner(), claimedAt,
+                Duration.between(claimedAt, leaseUntil), request.limit());
         try (Connection connection = dataSource.getConnection()) {
             boolean previousAutoCommit = connection.getAutoCommit();
             connection.setAutoCommit(false);
             try {
                 List<ClaimedReservation> claims = new ArrayList<>();
                 try (PreparedStatement select = connection.prepareStatement(CLAIM_SQL)) {
-                    select.setString(1, request.deploymentScope());
-                    select.setTimestamp(2, Timestamp.from(request.now()));
-                    select.setTimestamp(3, Timestamp.from(request.now()));
-                    select.setInt(4, request.limit());
+                    select.setString(1, effectiveRequest.deploymentScope());
+                    select.setTimestamp(2, Timestamp.from(claimedAt));
+                    select.setTimestamp(3, Timestamp.from(claimedAt));
+                    select.setInt(4, effectiveRequest.limit());
                     try (ResultSet rows = select.executeQuery()) {
                         while (rows.next()) {
                             LeaseRow previous = readLeaseRow(rows);
                             String token = requireToken(idGenerator.newLeaseToken());
-                            Instant leaseUntil = request.leaseUntil();
                             try (PreparedStatement update = connection.prepareStatement(
                                     CLAIM_UPDATE_SQL)) {
-                                update.setString(1, request.leaseOwner());
+                                update.setString(1, effectiveRequest.leaseOwner());
                                 update.setString(2, token);
                                 update.setTimestamp(3, Timestamp.from(leaseUntil));
-                                update.setString(4, request.deploymentScope());
+                                update.setString(4, effectiveRequest.deploymentScope());
                                 update.setString(5, previous.reservation().subjectScope());
                                 update.setString(6, previous.reservation().reservationId());
-                                update.setTimestamp(7, Timestamp.from(request.now()));
-                                update.setTimestamp(8, Timestamp.from(request.now()));
+                                update.setTimestamp(7, Timestamp.from(claimedAt));
+                                update.setTimestamp(8, Timestamp.from(claimedAt));
                                 if (update.executeUpdate() != 1) {
                                     throw new SQLException("expired reservation claim lost race");
                                 }
@@ -128,7 +146,7 @@ public final class JdbcExpiredReservationStore implements ExpiredReservationStor
                                             previous.reservation().deploymentScope(),
                                             previous.reservation().subjectScope(),
                                             previous.reservation().reservationId(),
-                                            request.leaseOwner(), token, request.now(), leaseUntil,
+                                            effectiveRequest.leaseOwner(), token, claimedAt, leaseUntil,
                                             previous.leaseVersion() + 1);
                             claims.add(new ClaimedReservation(previous.reservation(), lease));
                         }
@@ -136,7 +154,7 @@ public final class JdbcExpiredReservationStore implements ExpiredReservationStor
                 }
                 connection.commit();
                 LOGGER.log(Level.FINE, "JDBC 到期 Reservation 已领取 count={0}", claims.size());
-                return new ClaimBatch(request, claims);
+                return new ClaimBatch(effectiveRequest, claims);
             } catch (JdbcUsageReservationStore.CorruptUsageDataException corruption) {
                 rollbackQuietly(connection);
                 throw sanitized("领取到期 Reservation 的持久事实损坏");
@@ -240,6 +258,23 @@ public final class JdbcExpiredReservationStore implements ExpiredReservationStor
     private static Instant nullableInstant(ResultSet rows, String column) throws SQLException {
         Timestamp value = rows.getTimestamp(column);
         return value == null ? null : value.toInstant();
+    }
+
+    /**
+     * 使用 PostgreSQL/pgjdbc 对 TIMESTAMPTZ 的微秒四舍五入规则规范化时间。
+     *
+     * <p>不能使用 {@link Instant#truncatedTo(java.time.temporal.TemporalUnit)}：
+     * 那会向下截断，并在纳秒部分达到 999999500 时与 pgjdbc 的跨秒进位结果
+     * 不一致。LeaseToken 的 expiresAt 是后续 release 与 lease-aware cancel 的
+     * 栅栏字段，必须和实际写入数据库的 {@code lease_until} 精确相等。</p>
+     */
+    private static Instant postgresTimestamp(Instant value) {
+        int nanos = value.getNano();
+        int roundedMicros = (nanos + 500) / 1_000;
+        if (roundedMicros == 1_000_000) {
+            return Instant.ofEpochSecond(Math.addExact(value.getEpochSecond(), 1L));
+        }
+        return Instant.ofEpochSecond(value.getEpochSecond(), roundedMicros * 1_000L);
     }
 
     private static IllegalStateException sanitized(String message) {

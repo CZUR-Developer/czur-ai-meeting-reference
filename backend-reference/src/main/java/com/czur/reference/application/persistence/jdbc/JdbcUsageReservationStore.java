@@ -1,6 +1,7 @@
 package com.czur.reference.application.persistence.jdbc;
 
 import com.czur.reference.application.port.entitlement.UsageActual;
+import com.czur.reference.application.port.entitlement.ExpiredReservationStore;
 import com.czur.reference.application.port.entitlement.UsageEstimate;
 import com.czur.reference.application.port.entitlement.UsageOperationResult;
 import com.czur.reference.application.port.entitlement.UsageReservation;
@@ -97,6 +98,18 @@ final class JdbcUsageReservationStore {
              WHERE deployment_scope = ? AND subject_scope = ? AND reservation_id = ?
                AND record_format = 'V3' AND status = 'RESERVED'
                AND bound_meeting_id IS NULL AND expected_meeting_id = ? AND version = ?
+            """;
+
+    private static final String LEASE_AWARE_CANCEL_SQL = """
+            UPDATE usage_reservation
+               SET status = 'CANCELLED', cancelled_at = ?, cancellation_reason_code = ?,
+                   version = ?, updated_at = ?, lease_owner = NULL,
+                   lease_token = NULL, lease_until = NULL
+             WHERE deployment_scope = ? AND subject_scope = ? AND reservation_id = ?
+               AND record_format = 'V3' AND status = 'RESERVED'
+               AND bound_meeting_id IS NULL AND expected_meeting_id = ? AND version = ?
+               AND lease_owner = ? AND lease_token = ? AND lease_until = ?
+               AND lease_version = ? AND ? < lease_until
             """;
 
     private static final String BIND_FOR_OWNED_MEETING_SQL = """
@@ -303,6 +316,56 @@ final class JdbcUsageReservationStore {
     }
 
     /**
+     * 使用清理 Worker 的完整 lease 栅栏原子取消 Reservation。
+     *
+     * <p>普通 cancel 原语不能用于孤儿清理，因为它只校验业务版本；本原语
+     * 还校验 owner、token、leaseVersion、数据库中的 lease 截止时间和取消时刻。
+     * 更新成功后同时清空 lease，但保留单调递增的 Reservation 业务 version。
+     * 调用方必须在同一事务中随后写入 usage_operation，并负责提交或回滚整个事务。</p>
+     */
+    static boolean cancelWithLease(
+            Connection connection,
+            UsageReservation previous,
+            UsageReservation cancelled,
+            ExpiredReservationStore.LeaseToken lease,
+            Instant cancelledAt) throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(previous, "previous");
+        Objects.requireNonNull(cancelled, "cancelled");
+        Objects.requireNonNull(lease, "lease");
+        Objects.requireNonNull(cancelledAt, "cancelledAt");
+        if (cancelled.state() != UsageReservation.State.CANCELLED) {
+            throw new IllegalArgumentException("cancelled snapshot is required");
+        }
+        if (!previous.deploymentScope().equals(lease.deploymentScope())
+                || !previous.subjectScope().equals(lease.subjectScope())
+                || !previous.reservationId().equals(lease.reservationId())) {
+            throw new IllegalArgumentException("lease scope does not match reservation");
+        }
+        if (!cancelledAt.isBefore(lease.expiresAt())) {
+            return false;
+        }
+        try (PreparedStatement statement = connection.prepareStatement(
+                LEASE_AWARE_CANCEL_SQL)) {
+            statement.setTimestamp(1, Timestamp.from(cancelled.cancelledAt()));
+            statement.setString(2, cancelled.cancellationReasonCode());
+            statement.setLong(3, cancelled.version());
+            statement.setTimestamp(4, Timestamp.from(cancelled.cancelledAt()));
+            statement.setString(5, previous.deploymentScope());
+            statement.setString(6, previous.subjectScope());
+            statement.setString(7, previous.reservationId());
+            statement.setString(8, previous.expectedMeetingId());
+            statement.setLong(9, previous.version());
+            statement.setString(10, lease.owner());
+            statement.setString(11, lease.token());
+            statement.setTimestamp(12, Timestamp.from(lease.expiresAt()));
+            statement.setLong(13, lease.leaseVersion());
+            statement.setTimestamp(14, Timestamp.from(cancelledAt));
+            return statement.executeUpdate() == 1;
+        }
+    }
+
+    /**
      * 在调用方事务连接上把尚未消费的 V3 Reservation 绑定到预期会议。
      *
      * <p>该操作是 5B2 owned 创建事务使用的 compare-and-set 原语：更新条件
@@ -390,7 +453,8 @@ final class JdbcUsageReservationStore {
         if (!noLease && !completeLease) {
             throw new CorruptUsageDataException("usage reservation lease facts are incomplete");
         }
-        return new LockedReservation(reservation, leaseUntil);
+        return new LockedReservation(
+                reservation, leaseOwner, leaseToken, leaseUntil, leaseVersion);
     }
 
     static long exactLong(BigDecimal value, String field) {
@@ -444,7 +508,12 @@ final class JdbcUsageReservationStore {
      * <p>{@code leaseUntil} 为空表示没有清理 lease；等于判断时刻表示 lease
      * 已到期，只有严格晚于判断时刻才阻止 bind，与 SQL CAS 条件保持一致。</p>
      */
-    record LockedReservation(UsageReservation reservation, Instant leaseUntil) {
+    record LockedReservation(
+            UsageReservation reservation,
+            String leaseOwner,
+            String leaseToken,
+            Instant leaseUntil,
+            long leaseVersion) {
         LockedReservation {
             Objects.requireNonNull(reservation, "reservation");
         }

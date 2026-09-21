@@ -10,6 +10,7 @@ import com.czur.reference.application.port.entitlement.EntitlementIdGenerator;
 import com.czur.reference.application.port.entitlement.EntitlementProviderError;
 import com.czur.reference.application.port.entitlement.EntitlementProviderResult;
 import com.czur.reference.application.port.entitlement.ExpiredReservationStore;
+import com.czur.reference.application.port.entitlement.LeaseAwareCancelReservationRequest;
 import com.czur.reference.application.port.entitlement.MeetingGrant;
 import com.czur.reference.application.port.entitlement.ReserveUsageRequest;
 import com.czur.reference.application.port.entitlement.UsageOperationResult;
@@ -49,6 +50,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -293,6 +295,135 @@ class JdbcEntitlementIntegrationTest {
     }
 
     @Test
+    void expiredClaimRoundsNanosecondsLikePostgresAndKeepsReleaseAndCancelUsable()
+            throws Exception {
+        JdbcExpiredReservationStore store = new JdbcExpiredReservationStore(
+                dataSource, new TestIds());
+
+        insertExpired("claim-round-cancel", SUBJECT, "grant-round-cancel",
+                "meeting-round-cancel");
+        Instant rawClaimedAt = NOW.plusNanos(123_456_500);
+        Instant expectedClaimedAt = NOW.plusNanos(123_457_000);
+        Instant expectedLeaseUntil = expectedClaimedAt.plusSeconds(30);
+        ExpiredReservationStore.ClaimBatch roundedBatch = store.claimExpired(
+                new ExpiredReservationStore.ClaimRequest(
+                        DEPLOYMENT, "worker-round-cancel", rawClaimedAt,
+                        Duration.ofSeconds(30), 1));
+        ExpiredReservationStore.LeaseToken roundedLease =
+                roundedBatch.claims().get(0).lease();
+
+        // ClaimBatch 返回数据库实际使用的规范时间，不能继续暴露写库前的纳秒值。
+        assertEquals(expectedClaimedAt, roundedBatch.request().now());
+        assertEquals(expectedLeaseUntil, roundedBatch.request().leaseUntil());
+        assertEquals(expectedClaimedAt, roundedLease.claimedAt());
+        assertEquals(expectedLeaseUntil, roundedLease.expiresAt());
+        assertEquals(expectedLeaseUntil, leaseUntil("claim-round-cancel"));
+
+        CancelReservationRequest cancel = new CancelReservationRequest(
+                DEPLOYMENT, SUBJECT, UsageOperationScopes.CANCEL,
+                "cancel-round", "cancel-round-digest", roundedLease.reservationId(),
+                "meeting-round-cancel", 0, "EXPIRED_UNBOUND");
+        EntitlementProviderResult<UsageOperationResult> cancelled =
+                provider(policyAt(expectedClaimedAt), expectedClaimedAt.plusSeconds(1))
+                        .cancelReservationWithLease(
+                                new LeaseAwareCancelReservationRequest(cancel, roundedLease));
+        assertTrue(cancelled.isSuccess(), () -> cancelled.errorOrThrow().code().name());
+        assertEquals(UsageReservation.State.CANCELLED,
+                cancelled.valueOrThrow().reservation().state());
+
+        insertExpired("claim-round-carry", SUBJECT, "grant-round-carry",
+                "meeting-round-carry");
+        Instant rawCarryAt = NOW.plusSeconds(2).plusNanos(999_999_500);
+        Instant expectedCarryAt = NOW.plusSeconds(3);
+        Instant expectedCarryUntil = NOW.plusSeconds(13);
+        ExpiredReservationStore.ClaimBatch carryBatch = store.claimExpired(
+                new ExpiredReservationStore.ClaimRequest(
+                        DEPLOYMENT, "worker-round-carry", rawCarryAt,
+                        Duration.ofSeconds(10), 1));
+        ExpiredReservationStore.LeaseToken carryLease = carryBatch.claims().get(0).lease();
+
+        // 999999500ns 必须像 pgjdbc 一样进位到下一秒，写库值与返回句柄仍完全相同。
+        assertEquals(expectedCarryAt, carryLease.claimedAt());
+        assertEquals(expectedCarryUntil, carryLease.expiresAt());
+        assertEquals(expectedCarryUntil, leaseUntil("claim-round-carry"));
+        assertEquals(ExpiredReservationStore.ReleaseStatus.RELEASED,
+                store.release(carryLease, expectedCarryAt.plusSeconds(1)).status());
+        assertNull(leaseUntil("claim-round-carry"));
+
+        insertExpired("claim-round-collapsed", SUBJECT, "grant-round-collapsed",
+                "meeting-round-collapsed");
+        Instant collapsedAt = NOW.plusSeconds(20).plusNanos(400);
+        assertThrows(IllegalArgumentException.class,
+                () -> store.claimExpired(new ExpiredReservationStore.ClaimRequest(
+                        DEPLOYMENT, "worker-round-collapsed", collapsedAt,
+                        Duration.ofNanos(50), 1)));
+        assertNull(leaseUntil("claim-round-collapsed"));
+    }
+
+    @Test
+    void leaseAwareCancelRejectsStaleWorkerAfterReclaimAndReplaysCommittedFact()
+            throws Exception {
+        insertExpired("cleanup-lease", SUBJECT, "grant-cleanup", "meeting-cleanup");
+        JdbcExpiredReservationStore store = new JdbcExpiredReservationStore(
+                dataSource, new TestIds());
+        ExpiredReservationStore.LeaseToken workerA = store.claimExpired(
+                new ExpiredReservationStore.ClaimRequest(
+                        DEPLOYMENT, "cleanup-worker-a", NOW,
+                        Duration.ofSeconds(30), 1))
+                .claims().get(0).lease();
+        ExpiredReservationStore.LeaseToken workerB = store.claimExpired(
+                new ExpiredReservationStore.ClaimRequest(
+                        DEPLOYMENT, "cleanup-worker-b", NOW.plusSeconds(31),
+                        Duration.ofSeconds(30), 1))
+                .claims().get(0).lease();
+        assertTrue(workerB.leaseVersion() > workerA.leaseVersion());
+
+        CancelReservationRequest staleCancel = new CancelReservationRequest(
+                DEPLOYMENT, SUBJECT, UsageOperationScopes.CANCEL,
+                "cleanup-a", "cleanup-a-digest", workerA.reservationId(),
+                "meeting-cleanup", 0, "EXPIRED_UNBOUND");
+        EntitlementProviderResult<UsageOperationResult> stale =
+                provider(policyAt(NOW), NOW.plusSeconds(32))
+                        .cancelReservationWithLease(
+                                new LeaseAwareCancelReservationRequest(staleCancel, workerA));
+        assertError(stale, EntitlementProviderError.Code.RESERVATION_STATE_CONFLICT);
+        assertEquals(0L, count("SELECT count(*) FROM usage_operation"));
+        assertEquals(1L, count("""
+                SELECT count(*) FROM usage_reservation
+                 WHERE reservation_id = 'cleanup-lease' AND status = 'RESERVED'
+                   AND lease_owner = 'cleanup-worker-b'
+                """));
+
+        CancelReservationRequest winningCancel = new CancelReservationRequest(
+                DEPLOYMENT, SUBJECT, UsageOperationScopes.CANCEL,
+                "cleanup-b", "cleanup-b-digest", workerB.reservationId(),
+                "meeting-cleanup", 0, "EXPIRED_UNBOUND");
+        JdbcReferenceDevEntitlementProvider winningProvider =
+                provider(policyAt(NOW), NOW.plusSeconds(32));
+        EntitlementProviderResult<UsageOperationResult> cancelled =
+                winningProvider.cancelReservationWithLease(
+                        new LeaseAwareCancelReservationRequest(winningCancel, workerB));
+        assertTrue(cancelled.isSuccess(), () -> cancelled.errorOrThrow().code().name());
+        assertEquals(UsageReservation.State.CANCELLED,
+                cancelled.valueOrThrow().reservation().state());
+        assertEquals(1L, count("SELECT count(*) FROM usage_operation"));
+        assertEquals(1L, count("""
+                SELECT count(*) FROM usage_reservation
+                 WHERE reservation_id = 'cleanup-lease' AND status = 'CANCELLED'
+                   AND lease_owner IS NULL AND lease_token IS NULL AND lease_until IS NULL
+                """));
+
+        // 取消事实已经写入 usage_operation 后，旧 lease 即使完全过期也只能稳定重放。
+        EntitlementProviderResult<UsageOperationResult> replay =
+                provider(policyAt(NOW), NOW.plusSeconds(90))
+                        .cancelReservationWithLease(
+                                new LeaseAwareCancelReservationRequest(winningCancel, workerB));
+        assertTrue(replay.isSuccess());
+        assertEquals(cancelled.valueOrThrow(), replay.valueOrThrow());
+        assertEquals(1L, count("SELECT count(*) FROM usage_operation"));
+    }
+
+    @Test
     void fractionalNumericIsRejectedAsInternalCorruptFact() throws Exception {
         ReferenceDevEntitlementPolicy policy = policyAt(NOW);
         JdbcReferenceDevEntitlementProvider provider = provider(policy, NOW);
@@ -460,6 +591,25 @@ class JdbcEntitlementIntegrationTest {
              var rows = statement.executeQuery(sql)) {
             assertTrue(rows.next());
             return rows.getLong(1);
+        }
+    }
+
+    /** 直接读取持久化 lease 截止时间，验证返回句柄没有隐藏 pgjdbc 舍入差异。 */
+    private Instant leaseUntil(String reservationId) throws SQLException {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement("""
+                     SELECT lease_until
+                       FROM usage_reservation
+                      WHERE deployment_scope = ? AND reservation_id = ?
+                     """)) {
+            statement.setString(1, DEPLOYMENT);
+            statement.setString(2, reservationId);
+            try (var rows = statement.executeQuery()) {
+                assertTrue(rows.next());
+                java.sql.Timestamp value = rows.getTimestamp(1);
+                assertFalse(rows.next());
+                return value == null ? null : value.toInstant();
+            }
         }
     }
 
