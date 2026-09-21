@@ -45,3 +45,49 @@ docker rm -f -- <日志中的精确-container-name>
 docker volume rm -- <日志中的精确-volume-name>
 rm -rf -- <日志中的精确-state-directory>
 ```
+
+## P2-T14-03-05 Manifest 正式端口双重启总门禁
+
+`test-t14-manifest-restart.sh` 使用本次随机命名、带 T14 专属 ownership label 的
+`postgres:16` Debian 容器和 named volume，并把仓库 `deploy/` 只读挂载后运行
+真实 `deploy/migrate.sh` 登记 V001～V007。脚本在三个相互独立的 Maven/JVM 中
+执行三个阶段，并在阶段之间对同一容器做两次真实 `docker stop`/`docker start`：
+
+1. 阶段 A 经正式 owned 建会、领域推进、Stop、输入接管、Manifest begin/publish
+   建立 READY revision 1，并以正式结果查询证明 Found；
+2. 第一次重启后的阶段 B 证明 postmaster 启动时间严格变晚、发布稳定重放且不增
+   revision，再经正式删除端口建立 DELETION_PENDING revision 2 并立即撤销结果；
+3. 第二次重启后的阶段 C 再次证明启动时间严格变晚，删除稳定重放且 revision、
+   删除幂等记录和 `MeetingDeletionRequested` Outbox 均不增加，最终 readiness 仍通过。
+
+运行方式：
+
+```bash
+tools/test-t14-manifest-restart.sh
+```
+
+脚本每次启动和重启后都同时验证容器内 `pg_isready` 与宿主动态 IPv4 loopback
+端口，并在每次重启后重新读取端口映射。它不会连接、停止、挂载或删除已有
+PostgreSQL（包括任何固定名称或固定端口实例），不会调用 Compose、`prune`、模糊
+搜索或通配删除。容器、数据卷在停止、启动和删除前都会按精确名称核对本次
+run-id label；正常退出、失败以及 `INT`、`TERM`、`HUP` 会精确清理本次三项资源。
+状态目录权限固定为 `700`、文件为 `600`，只保存阶段、revision 和 postmaster
+启动时间，不保存数据库地址、账号、密码、credential、receipt 或 Manifest 正文。
+
+`SIGKILL` 无法触发 shell trap。强制终止后的恢复只能使用脚本启动日志打印的三个
+精确名称。先逐字代入以下命令，确认两个 label 都存在，且值与容器/卷名称中同一次
+run-id 完全一致；名称不匹配、label 缺失或 label 不一致时必须停止，禁止删除：
+
+```bash
+docker container inspect --format '{{index .Config.Labels "com.czur.ai-meeting.t14-manifest-restart.run-id"}}' <日志中的精确-container-name>
+docker volume inspect --format '{{index .Labels "com.czur.ai-meeting.t14-manifest-restart.run-id"}}' <日志中的精确-volume-name>
+```
+
+只有核对通过后，才可执行以下精确恢复；禁止替换为通配符、名称前缀、
+`docker compose down`、`docker system prune` 或 `docker volume prune`：
+
+```bash
+docker rm -f -- <日志中的精确-container-name>
+docker volume rm -- <日志中的精确-volume-name>
+rm -rf -- <日志中的精确-state-directory>
+```
