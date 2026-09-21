@@ -2,9 +2,12 @@ package com.czur.reference.application.port;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
+import java.util.TreeSet;
 
 /**
  * 可靠事件 Outbox 的持久化端口。
@@ -63,6 +66,53 @@ public interface OutboxStore {
      * @return 已成功加 lease 的事件，顺序由实现保证为确定性顺序
      */
     List<ClaimedEvent> claim(String leaseOwner, Instant now, Duration leaseDuration, int limit);
+
+    /**
+     * 按 Worker 已显式注册的事件类型领取 Outbox 事件时使用的不可变请求。
+     *
+     * <p>{@code registeredEventTypes} 是关闭式消费边界：后续按本请求领取时，
+     * 只有集合中精确匹配的事件类型才允许进入候选集。空集合是合法输入，语义
+     * 是本轮不领取任何事件，绝不能退化成“领取全部”。构造时会校验每个元素，
+     * 再按自然顺序建立防御副本；因此调用方之后修改原集合不会影响请求，读取
+     * 到的集合也不可修改且迭代顺序确定。事件类型不会被 trim 或改写，避免把
+     * 两个不同的协议标识静默合并。</p>
+     *
+     * <p>本值对象先冻结 T14-04 的公共契约；领取端口切换到该请求后，适配器
+     * 还必须在筛选、排序和 limit 之前应用类型白名单，使未知类型既不改变状态，
+     * 也不占用本批次数量。</p>
+     *
+     * @param registeredEventTypes 当前 Worker 显式注册的事件类型；集合和元素均不可为 null，
+     *                             元素不可为空白，空集合合法
+     * @param leaseOwner Worker 实例稳定且非空白的 owner 标识
+     * @param now 本次领取的判定时间
+     * @param leaseDuration 本次领取的 lease 时长，必须严格为正
+     * @param limit 本次最多领取的事件数，必须严格为正
+     */
+    record ClaimRequest(
+            Set<String> registeredEventTypes,
+            String leaseOwner,
+            Instant now,
+            Duration leaseDuration,
+            int limit) {
+        public ClaimRequest {
+            Objects.requireNonNull(registeredEventTypes, "registeredEventTypes");
+            Set<String> orderedTypes = new TreeSet<>();
+            for (String eventType : registeredEventTypes) {
+                requireText("registeredEventTypes element", eventType);
+                orderedTypes.add(eventType);
+            }
+            registeredEventTypes = Collections.unmodifiableSet(orderedTypes);
+            requireText("leaseOwner", leaseOwner);
+            Objects.requireNonNull(now, "now");
+            Objects.requireNonNull(leaseDuration, "leaseDuration");
+            if (leaseDuration.isZero() || leaseDuration.isNegative()) {
+                throw new IllegalArgumentException("leaseDuration must be positive");
+            }
+            if (limit <= 0) {
+                throw new IllegalArgumentException("limit must be positive");
+            }
+        }
+    }
 
     /**
      * 以 lease token 标记发布成功。
@@ -180,6 +230,102 @@ public interface OutboxStore {
         public PublishResult {
             Objects.requireNonNull(status, "status");
             // NOT_FOUND 时没有可返回的快照；其它状态通常会携带当前记录。
+        }
+    }
+
+    /**
+     * 续租操作的关闭式状态集合。
+     *
+     * <p>{@link #RENEWED} 表示当前租约完成了原子旋转，并由
+     * {@link RenewResult#lease()} 返回新的唯一句柄；调用方必须立即丢弃旧句柄。
+     * 其它状态均不会返回可继续使用的 lease，调用方不得猜测续租成功。</p>
+     */
+    enum RenewStatus {
+        RENEWED,
+        NOT_FOUND,
+        NOT_OWNER,
+        LEASE_EXPIRED,
+        ALREADY_PUBLISHED,
+        ALREADY_DEAD
+    }
+
+    /**
+     * Outbox lease 续租结果。
+     *
+     * <p>该结果通过构造校验排除含糊组合：成功时必须同时携带 LEASED 事件快照
+     * 和新 lease，且两者的 eventId、owner、到期时间完全一致；NOT_FOUND 时
+     * 事件与 lease 均为空；其它失败状态必须携带与状态一致的当前事件快照且不得
+     * 携带 lease。LEASE_EXPIRED 只对应 LEASED 快照，两个终态结果分别只对应
+     * PUBLISHED 和 DEAD。NOT_OWNER 允许 PENDING 或 LEASED：旧句柄对应的事件
+     * 可能已经失败并回到 PENDING，也可能仍由另一个句柄保持 LEASED；终态快照
+     * 必须使用专门的 ALREADY_PUBLISHED 或 ALREADY_DEAD，不能归入 NOT_OWNER。
+     * 当前 {@link OutboxEvent} 不保存 token、leaseVersion 或 claimedAt，因而这些
+     * 字段只能由具体续租实现原子校验，结果值对象不臆造无法从快照证明的关系。</p>
+     *
+     * @param status 明确的续租结果状态
+     * @param event 续租后的或当前的事件快照；仅 NOT_FOUND 时为空
+     * @param lease 成功后旋转得到的新 lease；仅 RENEWED 时非空
+     */
+    record RenewResult(RenewStatus status, OutboxEvent event, LeaseToken lease) {
+        public RenewResult {
+            Objects.requireNonNull(status, "status");
+            switch (status) {
+                case RENEWED -> {
+                    Objects.requireNonNull(event, "event");
+                    Objects.requireNonNull(lease, "lease");
+                    if (event.status() != EventStatus.LEASED) {
+                        throw new IllegalArgumentException("RENEWED requires a LEASED event");
+                    }
+                    if (!event.eventId().equals(lease.eventId())
+                            || !lease.owner().equals(event.leaseOwner())
+                            || !lease.expiresAt().equals(event.leaseUntil())) {
+                        throw new IllegalArgumentException(
+                                "RENEWED event and lease must align on eventId, owner and expiresAt");
+                    }
+                }
+                case NOT_FOUND -> {
+                    if (event != null || lease != null) {
+                        throw new IllegalArgumentException("NOT_FOUND must not carry event or lease");
+                    }
+                }
+                case NOT_OWNER -> {
+                    requireRenewalFailureEventWithoutLease(event, lease);
+                    // 现有实现会在失败回队后返回 PENDING，句柄冲突时返回 LEASED；终态先单独分类。
+                    if (event.status() != EventStatus.PENDING
+                            && event.status() != EventStatus.LEASED) {
+                        throw new IllegalArgumentException(
+                                "NOT_OWNER requires a PENDING or LEASED event");
+                    }
+                }
+                case LEASE_EXPIRED -> {
+                    requireRenewalFailureEventWithoutLease(event, lease);
+                    requireRenewalEventStatus(status, event, EventStatus.LEASED);
+                }
+                case ALREADY_PUBLISHED -> {
+                    requireRenewalFailureEventWithoutLease(event, lease);
+                    requireRenewalEventStatus(status, event, EventStatus.PUBLISHED);
+                }
+                case ALREADY_DEAD -> {
+                    requireRenewalFailureEventWithoutLease(event, lease);
+                    requireRenewalEventStatus(status, event, EventStatus.DEAD);
+                }
+            }
+        }
+
+        private static void requireRenewalFailureEventWithoutLease(
+                OutboxEvent event, LeaseToken lease) {
+            if (event == null || lease != null) {
+                throw new IllegalArgumentException(
+                        "renewal failure must carry an event and must not carry a lease");
+            }
+        }
+
+        private static void requireRenewalEventStatus(
+                RenewStatus renewalStatus, OutboxEvent event, EventStatus requiredEventStatus) {
+            if (event.status() != requiredEventStatus) {
+                throw new IllegalArgumentException(
+                        renewalStatus + " requires a " + requiredEventStatus + " event");
+            }
         }
     }
 
