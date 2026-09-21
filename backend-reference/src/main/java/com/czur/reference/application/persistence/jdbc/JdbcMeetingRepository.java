@@ -180,6 +180,51 @@ public final class JdbcMeetingRepository implements MeetingRepository {
             """;
 
     /**
+     * Manifest 发布工作单元使用的锁读。与删除锁读分开命名，避免把删除专用的
+     * receipt/Manifest 解析误复用到最终产物发布路径。所有可变事实都在同一行
+     * 读取，外层事务在继续读取 V007 latest revision 前必须持有这把行锁。
+     */
+    private static final String FIND_MANIFEST_PUBLICATION_FOR_UPDATE_SQL = """
+            SELECT meeting_id, deployment_scope, client_session_id, subject_scope,
+                   grant_id, grant_expires_at, usage_reservation_id,
+                   profile_id, profile_revision, state, aggregate_version,
+                   input_state, finalization_receipt_id, manifest_state,
+                   created_at, updated_at
+              FROM meeting
+             WHERE meeting_id = ?
+             FOR UPDATE
+            """;
+
+    /**
+     * Manifest 发布的单行 CAS。V007 revision 插入与此更新必须复用同一连接和
+     * 事务；SQL 同时比较完整的不可变归属、Profile、输入 receipt、旧状态、时间
+     * 和聚合版本，防止包内调用方凭过期快照覆盖其它工作单元。
+     */
+    private static final String UPDATE_MANIFEST_PUBLICATION_SQL = """
+            UPDATE meeting
+               SET state = ?,
+                   manifest_state = ?,
+                   updated_at = ?,
+                   aggregate_version = aggregate_version + 1
+             WHERE meeting_id = ?
+               AND deployment_scope = ?
+               AND client_session_id = ?
+               AND subject_scope = ?
+               AND grant_id IS NOT DISTINCT FROM ?
+               AND grant_expires_at IS NOT DISTINCT FROM ?
+               AND usage_reservation_id IS NOT DISTINCT FROM ?
+               AND profile_id = ?
+               AND profile_revision = ?
+               AND created_at = ?
+               AND state = ?
+               AND input_state = ?
+               AND finalization_receipt_id IS NOT DISTINCT FROM ?
+               AND manifest_state = ?
+               AND updated_at = ?
+               AND aggregate_version = ?
+            """;
+
+    /**
      * 删除受理只改变四个可变事实。WHERE 重放锁读得到的全部不可变字段、旧状态、
      * 输入事实、Manifest、时间和聚合版本，防止旧快照或意外改写被静默覆盖。
      */
@@ -449,6 +494,196 @@ public final class JdbcMeetingRepository implements MeetingRepository {
                 }
             }
         }
+    }
+
+    /**
+     * 在 Manifest 发布事务中锁定会议并恢复全部公开状态事实。
+     *
+     * <p>该原语不创建独立事务，也不读取或写入 V007。调用方必须在继续访问
+     * {@link JdbcManifestFactStore} 前保持同一连接的行锁。归属、Profile、输入
+     * receipt 或枚举值无法恢复时抛出固定的 {@link PublicationSnapshotException}，
+     * 由发布端口映射为 {@code SNAPSHOT_INCONSISTENT}，不得猜测缺失事实。</p>
+     */
+    static Optional<PublicationMeeting> findManifestPublicationForUpdate(
+            Connection connection,
+            String meetingId) throws SQLException, PublicationSnapshotException {
+        Objects.requireNonNull(connection, "connection");
+        requireText("meetingId", meetingId);
+        try (PreparedStatement statement = connection.prepareStatement(
+                FIND_MANIFEST_PUBLICATION_FOR_UPDATE_SQL)) {
+            statement.setString(1, meetingId);
+            try (ResultSet rows = statement.executeQuery()) {
+                if (!rows.next()) {
+                    return Optional.empty();
+                }
+                PublicationMeeting result = readManifestPublicationMeeting(rows);
+                if (rows.next()) {
+                    throw new PublicationSnapshotException();
+                }
+                return Optional.of(result);
+            }
+        }
+    }
+
+    /**
+     * 在同一事务内 CAS 推进会议生命周期和 Manifest 状态。
+     *
+     * @return 恰好更新一行表示所有事实仍与锁读一致；零行表示快照损坏或
+     *         调用方越过了锁读边界，调用方必须回滚整个 revision 追加
+     */
+    static boolean updateManifestPublication(
+            Connection connection,
+            PublicationMeeting before,
+            MeetingState afterState,
+            ManifestStatus afterManifestState,
+            Instant afterUpdatedAt) throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(before, "before");
+        Objects.requireNonNull(afterState, "afterState");
+        Objects.requireNonNull(afterManifestState, "afterManifestState");
+        Objects.requireNonNull(afterUpdatedAt, "afterUpdatedAt");
+        validateManifestPublicationTransition(
+                before, afterState, afterManifestState, afterUpdatedAt);
+        MeetingAggregate.MeetingSnapshot snapshot = before.snapshot();
+        try (PreparedStatement statement = connection.prepareStatement(
+                UPDATE_MANIFEST_PUBLICATION_SQL)) {
+            statement.setString(1, afterState.name());
+            statement.setString(2, afterManifestState.name());
+            statement.setTimestamp(3, Timestamp.from(afterUpdatedAt));
+            statement.setString(4, snapshot.meetingId());
+            statement.setString(5, snapshot.deploymentScope());
+            statement.setString(6, snapshot.clientSessionId());
+            statement.setString(7, snapshot.subjectScope());
+            statement.setString(8, snapshot.grantId());
+            if (snapshot.grantExpiresAt() == null) {
+                statement.setNull(9, java.sql.Types.TIMESTAMP_WITH_TIMEZONE);
+            } else {
+                statement.setTimestamp(9, Timestamp.from(snapshot.grantExpiresAt()));
+            }
+            statement.setString(10, snapshot.usageReservationId());
+            statement.setString(11, snapshot.profileId());
+            statement.setInt(12, snapshot.profileRevision());
+            statement.setTimestamp(13, Timestamp.from(snapshot.createdAt()));
+            statement.setString(14, snapshot.state().name());
+            statement.setString(15, before.finalization().inputState().name());
+            statement.setString(16, before.finalization().finalizationReceipt());
+            statement.setString(17, before.manifestState().name());
+            statement.setTimestamp(18, Timestamp.from(snapshot.updatedAt()));
+            statement.setLong(19, before.aggregateVersion());
+            return statement.executeUpdate() == 1;
+        }
+    }
+
+    private static PublicationMeeting readManifestPublicationMeeting(ResultSet rows)
+            throws SQLException, PublicationSnapshotException {
+        try {
+            String meetingId = requiredColumn(rows, "meeting_id");
+            String deploymentScope = requiredColumn(rows, "deployment_scope");
+            String clientSessionId = requiredColumn(rows, "client_session_id");
+            String subjectScope = requiredColumn(rows, "subject_scope");
+            String grantId = rows.getString("grant_id");
+            Timestamp grantExpiresAt = rows.getTimestamp("grant_expires_at");
+            String usageReservationId = rows.getString("usage_reservation_id");
+            String profileId = requiredColumn(rows, "profile_id");
+            int profileRevision = rows.getInt("profile_revision");
+            if (rows.wasNull()) {
+                throw new PublicationSnapshotException();
+            }
+            MeetingState state = MeetingState.valueOf(requiredColumn(rows, "state"));
+            long aggregateVersion = rows.getLong("aggregate_version");
+            if (rows.wasNull() || aggregateVersion < 0) {
+                throw new PublicationSnapshotException();
+            }
+            InputState inputState = InputState.valueOf(requiredColumn(rows, "input_state"));
+            String receipt = rows.getString("finalization_receipt_id");
+            ManifestStatus manifestState = ManifestStatus.valueOf(
+                    requiredColumn(rows, "manifest_state"));
+            Timestamp createdAt = rows.getTimestamp("created_at");
+            Timestamp updatedAt = rows.getTimestamp("updated_at");
+            if (createdAt == null || updatedAt == null) {
+                throw new PublicationSnapshotException();
+            }
+            FinalizationFact finalization = new FinalizationFact(inputState, receipt);
+            MeetingAggregate.MeetingSnapshot snapshot = new MeetingAggregate.MeetingSnapshot(
+                    meetingId,
+                    deploymentScope,
+                    clientSessionId,
+                    subjectScope,
+                    grantId,
+                    grantExpiresAt == null ? null : grantExpiresAt.toInstant(),
+                    usageReservationId,
+                    profileId,
+                    profileRevision,
+                    state,
+                    createdAt.toInstant(),
+                    updatedAt.toInstant());
+            return new PublicationMeeting(snapshot, aggregateVersion, finalization, manifestState);
+        } catch (PublicationSnapshotException malformed) {
+            throw malformed;
+        } catch (IllegalArgumentException | NullPointerException malformed) {
+            throw new PublicationSnapshotException();
+        }
+    }
+
+    private static String requiredColumn(ResultSet rows, String name)
+            throws SQLException, PublicationSnapshotException {
+        String value = rows.getString(name);
+        if (value == null || value.isBlank()) {
+            throw new PublicationSnapshotException();
+        }
+        return value;
+    }
+
+    private static void validateManifestPublicationTransition(
+            PublicationMeeting before,
+            MeetingState afterState,
+            ManifestStatus afterManifestState,
+            Instant afterUpdatedAt) {
+        if (afterUpdatedAt.isBefore(before.snapshot().updatedAt())) {
+            throw new IllegalArgumentException("manifest publication time cannot move backwards");
+        }
+        if (before.finalization().inputState() != InputState.INPUT_ACCEPTED) {
+            throw new IllegalArgumentException("manifest publication requires accepted input");
+        }
+        if (afterState == MeetingState.FINALIZING
+                && afterManifestState == ManifestStatus.GENERATING) {
+            if (before.snapshot().state() != MeetingState.FINALIZING
+                    || before.manifestState() != ManifestStatus.NOT_STARTED) {
+                throw new IllegalArgumentException("begin generation state is inconsistent");
+            }
+            return;
+        }
+        if (before.snapshot().state() == MeetingState.FINALIZING) {
+            if (!EnumSet.of(
+                    MeetingState.READY,
+                    MeetingState.READY_WITH_WARNINGS,
+                    MeetingState.FAILED).contains(afterState)) {
+                throw new IllegalArgumentException("first publication requires final state");
+            }
+        } else if (before.snapshot().state() != afterState
+                || before.manifestState() != afterManifestState) {
+            throw new IllegalArgumentException("later publication cannot change completion state");
+        }
+    }
+
+    /** 发布事务锁读所需的完整会议级事实；不属于公开 API 或日志。 */
+    record PublicationMeeting(
+            MeetingAggregate.MeetingSnapshot snapshot,
+            long aggregateVersion,
+            FinalizationFact finalization,
+            ManifestStatus manifestState) {
+        PublicationMeeting {
+            Objects.requireNonNull(snapshot, "snapshot");
+            Objects.requireNonNull(finalization, "finalization");
+            Objects.requireNonNull(manifestState, "manifestState");
+            if (aggregateVersion < 0) {
+                throw new IllegalArgumentException("aggregateVersion must not be negative");
+            }
+        }
+    }
+
+    /** 锁定行无法恢复为完整发布事实；只允许映射为固定冲突类别。 */
+    static final class PublicationSnapshotException extends Exception {
     }
 
     /**
