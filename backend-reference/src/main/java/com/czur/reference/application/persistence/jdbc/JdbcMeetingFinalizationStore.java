@@ -221,6 +221,49 @@ public final class JdbcMeetingFinalizationStore implements MeetingFinalizationSt
         return new Applied(accepted);
     }
 
+    /**
+     * 在同一事务连接上锁定并预检输入接管，但不写入任何事实或生成 receipt。
+     *
+     * <p>{@link JdbcDurableInputAcceptanceUnitOfWork} 必须先通过此门禁确认会议仍为
+     * STOPPING + INPUT_COMPLETE_PENDING，再写入 V008；这样已 accepted 但缺失 V008
+     * 事实的旧数据不会被候选输入静默补写。</p>
+     */
+    static Result preflightAcceptInput(
+            Connection connection,
+            String meetingId,
+            Instant acceptedAt) throws SQLException {
+        requireTransactionalConnection(connection);
+        MeetingFinalizationStore.requireMeetingId(meetingId);
+        Objects.requireNonNull(acceptedAt, "acceptedAt");
+
+        Optional<JdbcMeetingRepository.VersionedMeeting> lockedOptional =
+                JdbcMeetingRepository.findVersionedForUpdate(connection, meetingId);
+        if (lockedOptional.isEmpty()) {
+            return new NotFound();
+        }
+        JdbcMeetingRepository.VersionedMeeting locked = lockedOptional.get();
+        Row row = readRow(connection, meetingId)
+                .orElseThrow(() -> new IllegalStateException("锁定后的会议事实不可见"));
+        if (row.fact().inputState() == InputState.INPUT_ACCEPTED) {
+            return isConsistent(row)
+                    ? new Replayed(row.fact())
+                    : new Conflict(ConflictReason.FACT_INCONSISTENT);
+        }
+        if (row.fact().inputState() != InputState.INPUT_COMPLETE_PENDING) {
+            return new Conflict(ConflictReason.INVALID_INPUT_STATE);
+        }
+        if (locked.snapshot().state() != MeetingState.STOPPING) {
+            return new Conflict(ConflictReason.INVALID_MEETING_STATE);
+        }
+        if (acceptedAt.isBefore(locked.snapshot().updatedAt())) {
+            return new Conflict(ConflictReason.FACT_TIME_BEFORE_CURRENT);
+        }
+        // Found + pending is a non-mutating "ready" marker. The caller must still
+        // persist V008 and then call the real acceptInput primitive; do not use Applied
+        // here because no durable fact has been written by this preflight.
+        return new Found(row.fact());
+    }
+
     private Result inTransaction(TransactionWork work, String failureMessage) {
         Connection connection = null;
         boolean previousAutoCommit = true;
