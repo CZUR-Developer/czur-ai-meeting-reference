@@ -18,7 +18,8 @@
       "revision": 1,
       "size": 64,
       "checksum": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-      "status": "READY"
+      "status": "READY",
+      "createdAt": "2026-09-15T02:01:01Z"
     }
   ],
   "warnings": [

@@ -25,7 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class MeetingQueryAndDeletionContractTest {
     private static final Instant CREATED = Instant.parse("2026-09-20T01:00:00Z");
-    private static final String MEETING = "meeting-t13-secret";
+    private static final String MEETING = "mtg_t13_secret";
     private static final String SUBJECT = "subject-t13-secret";
     private static final String IDEMPOTENCY = "idempotency-t13-secret";
     private static final String DIGEST = "digest-t13-secret";
@@ -97,6 +97,9 @@ class MeetingQueryAndDeletionContractTest {
         assertEquals(-1, permanent.genTime());
         assertThrows(IllegalArgumentException.class,
                 () -> new MeetingManifestPort.Request(MEETING, -2));
+        assertThrows(IllegalArgumentException.class,
+                () -> new MeetingManifestPort.Request("meeting-legacy", -1));
+        assertFalse(permanent.toString().contains(MEETING));
     }
 
     @Test
@@ -134,7 +137,6 @@ class MeetingQueryAndDeletionContractTest {
 
         assertEquals(MeetingManifestPort.Status.FOUND, found.status());
         assertEquals(MEETING, found.meetingId());
-        assertEquals(-1, found.genTime());
         assertEquals("0.1", found.manifest().specVersion());
         assertEquals(7, found.manifest().manifestRevision());
         assertEquals("meeting-minutes/v1", found.manifest().profile().id());
@@ -179,6 +181,10 @@ class MeetingQueryAndDeletionContractTest {
                 recordComponentShape(MeetingManifestPort.Pending.class));
         assertEquals(List.of("manifest:MeetingManifest"),
                 recordComponentShape(MeetingManifestPort.Found.class));
+        assertTrue(Arrays.stream(MeetingManifestPort.Found.class.getDeclaredMethods())
+                .noneMatch(method -> method.getName().equals("genTime")));
+        assertTrue(Arrays.stream(MeetingManifest.class.getRecordComponents())
+                .noneMatch(component -> component.getName().equals("genTime")));
     }
 
     @Test
@@ -186,7 +192,6 @@ class MeetingQueryAndDeletionContractTest {
         MeetingManifest manifest = new MeetingManifest(
                 "0.1",
                 MEETING,
-                -1,
                 1,
                 new MeetingManifest.Profile("transcript-only/v1", 1),
                 null,
@@ -206,18 +211,43 @@ class MeetingQueryAndDeletionContractTest {
                         || component.getName().equals("profileRevision")));
         assertThrows(IllegalArgumentException.class,
                 () -> new MeetingManifest(
-                        "manifest-v1", MEETING, -1, 1,
+                        "manifest-v1", MEETING, 1,
                         new MeetingManifest.Profile("profile", 1), null,
                         ManifestStatus.READY, CREATED, CREATED, 0,
                         new MeetingManifest.Languages("zh-CN", List.of()),
                         List.of(), List.of()));
         assertThrows(IllegalArgumentException.class,
                 () -> new MeetingManifest(
-                        "0.1", MEETING, -1, 1,
+                        "0.1", MEETING, 1,
                         new MeetingManifest.Profile("profile", 1), "x".repeat(257),
                         ManifestStatus.READY, CREATED, CREATED, 0,
                         new MeetingManifest.Languages("zh-CN", List.of()),
                         List.of(), List.of()));
+    }
+
+    @Test
+    void directConstructionRejectsEveryInstantOutsideFourDigitUtcRange() {
+        Instant beforeRange = Instant.parse("-0001-12-31T23:59:59.999999999Z");
+        Instant afterRange = Instant.parse("+10000-01-01T00:00:00Z");
+        Instant minimum = Instant.parse("0000-01-01T00:00:00Z");
+
+        assertThrows(IllegalArgumentException.class,
+                () -> manifestWithTimes(afterRange, afterRange));
+        assertThrows(IllegalArgumentException.class,
+                () -> manifestWithTimes(minimum, beforeRange));
+        assertThrows(IllegalArgumentException.class,
+                () -> new MeetingManifest.ArtifactRef(
+                        "art_out_of_range",
+                        "transcript.final",
+                        "application/json",
+                        "zh-CN",
+                        1,
+                        1,
+                        "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                        MeetingManifest.ArtifactStatus.READY,
+                        afterRange,
+                        null,
+                        null));
     }
 
     @Test
@@ -416,7 +446,6 @@ class MeetingQueryAndDeletionContractTest {
         return new MeetingManifest(
                 "0.1",
                 MEETING,
-                -1,
                 1,
                 new MeetingManifest.Profile("transcript-only/v1", 1),
                 null,
@@ -440,7 +469,6 @@ class MeetingQueryAndDeletionContractTest {
         return new MeetingManifest(
                 "0.1",
                 MEETING,
-                -1,
                 7,
                 new MeetingManifest.Profile("meeting-minutes/v1", 3),
                 "会议标题",
@@ -466,6 +494,22 @@ class MeetingQueryAndDeletionContractTest {
                         "speaker.identity",
                         "meeting.warning.speakerIdentityUnavailable",
                         "diagnostic-1")));
+    }
+
+    private static MeetingManifest manifestWithTimes(Instant startedAt, Instant endedAt) {
+        return new MeetingManifest(
+                "0.1",
+                MEETING,
+                1,
+                new MeetingManifest.Profile("transcript-only/v1", 1),
+                null,
+                ManifestStatus.READY,
+                startedAt,
+                endedAt,
+                0,
+                new MeetingManifest.Languages("zh-CN", List.of()),
+                List.of(),
+                List.of());
     }
 
     private static MeetingCommandContext context() {

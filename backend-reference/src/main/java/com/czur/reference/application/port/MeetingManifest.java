@@ -6,6 +6,7 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
@@ -13,19 +14,18 @@ import java.util.regex.Pattern;
  *
  * <p>Manifest 查询一旦返回成功，调用方就需要能够根据同一份结果决定要展示
  * 哪些模块以及从哪里读取产物。因此 {@link MeetingManifestPort.Found} 不能只
- * 返回“正在生成”状态或 finalization receipt，而必须携带 meetingId、结果 URL
- * 的 genTime、Profile 快照、时间范围、语言、Artifact 引用和降级告警。这里
+ * 返回“正在生成”状态或 finalization receipt，而必须携带 meetingId、Profile
+ * 快照、时间范围、语言、Artifact 引用和降级告警。这里
  * 只保存协议字段，不保存模型厂商原始响应、会议正文或对象存储访问凭据。</p>
  *
  * <p>协议字段（{@code specVersion}、{@code meetingId}、嵌套的 {@code profile}、
  * 可空 {@code title} 以及其余结果字段）与 {@code contracts/meeting-manifest.schema.json}
- * 保持一致。{@code genTime} 是结果 URL 上下文中的毫秒时间戳，-1 表示永不过期；
- * 它只属于查询上下文，不属于 Manifest 正文，序列化适配器不得把它写入结果清单。</p>
+ * 保持一致。结果 URL 使用的 {@code genTime} 只属于查询上下文，不属于 Manifest
+ * 正文、revision 或内容摘要。</p>
  */
 public record MeetingManifest(
         String specVersion,
         String meetingId,
-        long genTime,
         int manifestRevision,
         Profile profile,
         String title,
@@ -37,21 +37,44 @@ public record MeetingManifest(
         List<ArtifactRef> artifacts,
         List<Warning> warnings) {
 
+    private static final Pattern SPEC_VERSION = Pattern.compile("^[0-9]+\\.[0-9]+$");
+    private static final Pattern MEETING_ID = Pattern.compile("^mtg_[A-Za-z0-9_-]+$");
+    private static final Pattern ARTIFACT_ID = Pattern.compile("^art_[A-Za-z0-9_-]+$");
+    private static final Pattern CHECKSUM = Pattern.compile("^sha256:[A-Fa-f0-9]{64}$");
+    private static final Instant MIN_PROTOCOL_INSTANT =
+            Instant.parse("0000-01-01T00:00:00Z");
+    private static final Instant MAX_PROTOCOL_INSTANT =
+            Instant.parse("9999-12-31T23:59:59.999999999Z");
+    private static final Set<String> ARTIFACT_TYPES = Set.of(
+            "audio.original",
+            "transcript.raw",
+            "transcript.final",
+            "translation.final",
+            "speaker.session",
+            "speaker.identity",
+            "summary.structured",
+            "summary.markdown",
+            "chapters.structured",
+            "action-items.structured",
+            "presentation.capture",
+            "export.file");
+    private static final Set<String> FAILURE_DOMAINS = Set.of(
+            "MODEL", "STORAGE", "SUMMARY", "INTERNAL");
+
     public MeetingManifest {
         requireSpecVersion(specVersion);
-        requireText("meetingId", meetingId);
-        requireGenTime(genTime);
+        requireMeetingId(meetingId);
         if (manifestRevision < 1) {
             throw new IllegalArgumentException("manifestRevision must be positive");
         }
         Objects.requireNonNull(profile, "profile");
-        if (title != null && title.length() > 256) {
-            throw new IllegalArgumentException("title must not exceed 256 characters");
+        if (title != null && codePointLength(title) > 256) {
+            throw new IllegalArgumentException("title must not exceed 256 Unicode characters");
         }
         Objects.requireNonNull(status, "status");
         requireCompleteStatus(status);
-        Objects.requireNonNull(startedAt, "startedAt");
-        Objects.requireNonNull(endedAt, "endedAt");
+        startedAt = requireProtocolInstant("startedAt", startedAt);
+        endedAt = requireProtocolInstant("endedAt", endedAt);
         if (endedAt.isBefore(startedAt)) {
             throw new IllegalArgumentException("endedAt must not be before startedAt");
         }
@@ -67,8 +90,7 @@ public record MeetingManifest(
     @Override
     public String toString() {
         return "MeetingManifest[specVersion=" + specVersion
-                + ", meetingId=redacted, genTime=" + genTime
-                + ", manifestRevision=" + manifestRevision
+                + ", meetingId=redacted, manifestRevision=" + manifestRevision
                 + ", profile=" + profile
                 + ", titlePresent=" + (title != null)
                 + ", status=" + status
@@ -96,8 +118,6 @@ public record MeetingManifest(
         return profile.revision();
     }
 
-    private static final Pattern SPEC_VERSION = Pattern.compile("^[0-9]+\\.[0-9]+$");
-
     /**
      * 完整 Manifest 只表达 Schema 已冻结的最终或删除状态。生成尚未开始或仍在
      * 进行时必须使用 {@link MeetingManifestPort.Pending}，不能用带虚构字段的空
@@ -120,11 +140,45 @@ public record MeetingManifest(
         }
     }
 
-    /** 结果 URL 的生成时间：非负毫秒时间戳，或 -1（永不过期）。 */
-    public static void requireGenTime(long genTime) {
-        if (genTime < -1) {
-            throw new IllegalArgumentException("genTime must be -1 or non-negative milliseconds");
+    /** 同包查询端口与 Manifest 正文共享公开 meetingId 的关闭式校验。 */
+    static void requireMeetingId(String meetingId) {
+        requirePattern("meetingId", meetingId, MEETING_ID);
+        // 正则已经把取值限制为 ASCII，因此 Java length 与 Schema maxLength 等价。
+        if (meetingId.length() > 1024) {
+            throw new IllegalArgumentException("meetingId must not exceed 1024 characters");
         }
+    }
+
+    /**
+     * 校验所有 Manifest 时间字段共享的公开协议值域。
+     *
+     * <p>公开 JSON 使用固定四位年份，编码后必须是 UTC {@code Z} 表示，因此领域
+     * 值只允许从 {@code 0000-01-01T00:00:00Z} 到
+     * {@code 9999-12-31T23:59:59.999999999Z}（含边界）。JSON codec 在解码后和
+     * 编码前复用本方法，避免 Java 直接构造与外部协议形成不同值域。</p>
+     *
+     * @param field 仅用于本地编程错误诊断的字段名，不得包含外部数据
+     * @param value 待校验的时间
+     * @return 未经转换的原 Instant
+     */
+    public static Instant requireProtocolInstant(String field, Instant value) {
+        Objects.requireNonNull(field, "field");
+        Objects.requireNonNull(value, field);
+        if (value.isBefore(MIN_PROTOCOL_INSTANT) || value.isAfter(MAX_PROTOCOL_INSTANT)) {
+            throw new IllegalArgumentException(
+                    field + " must be within UTC canonical year 0000..9999");
+        }
+        return value;
+    }
+
+    /**
+     * 防御性校验后生成公开协议使用的 UTC canonical 时间文本。
+     *
+     * <p>即使 record 构造器已经校验，编码边界仍应调用本方法，以便未来新增恢复
+     * 或框架构造路径时继续关闭式保护协议输出。</p>
+     */
+    public static String toCanonicalInstantText(String field, Instant value) {
+        return requireProtocolInstant(field, value).toString();
     }
 
     private static <T> List<T> immutableList(List<T> values, String name) {
@@ -137,9 +191,35 @@ public record MeetingManifest(
     }
 
     private static void requireText(String name, String value) {
-        if (value == null || value.isBlank()) {
+        if (value == null || isEcmaScriptBlank(value)) {
             throw new IllegalArgumentException(name + " must not be blank");
         }
+    }
+
+    /**
+     * 与 JSON Schema ECMA-262 正则的 {@code \S} 保持同一空白集合。
+     *
+     * <p>{@link String#isBlank()} 使用 Java 自己的 Unicode whitespace 定义，既不把
+     * NBSP（U+00A0）视为空白，也不包含 ECMAScript 明确列出的 BOM（U+FEFF），
+     * 因而不能用于协议字段。本方法覆盖 ECMAScript WhiteSpace、LineTerminator
+     * 以及 Unicode Space_Separator（Zs），只要字符串包含一个其它 code point，
+     * Schema 的 {@code \S} 与 Java 都会判定其为非空白。</p>
+     */
+    private static boolean isEcmaScriptBlank(String value) {
+        if (value.isEmpty()) {
+            return true;
+        }
+        return value.codePoints().allMatch(MeetingManifest::isEcmaScriptWhitespace);
+    }
+
+    private static boolean isEcmaScriptWhitespace(int codePoint) {
+        return switch (codePoint) {
+            // ECMAScript WhiteSpace 中不属于 Unicode Zs 的显式字符。
+            case 0x0009, 0x000B, 0x000C, 0xFEFF,
+                    // ECMAScript LineTerminator。
+                    0x000A, 0x000D, 0x2028, 0x2029 -> true;
+            default -> Character.getType(codePoint) == Character.SPACE_SEPARATOR;
+        };
     }
 
     /** Manifest Schema 的规范 Profile 引用；id 与 revision 必须成对出现。 */
@@ -160,8 +240,8 @@ public record MeetingManifest(
     /** Manifest 中声明的源语言和翻译目标语言。 */
     public record Languages(String source, List<String> targets) {
         public Languages {
-            requireText("languages.source", source);
-            targets = immutableTextList(targets, "languages.targets");
+            requireMinCodePoints("languages.source", source, 2);
+            targets = immutableLanguageList(targets, "languages.targets");
             if (new HashSet<>(targets).size() != targets.size()) {
                 throw new IllegalArgumentException("languages.targets must be unique");
             }
@@ -188,11 +268,11 @@ public record MeetingManifest(
             ArtifactFailure failure) {
 
         public ArtifactRef {
-            requireText("artifactId", artifactId);
-            requireText("type", type);
-            requireText("mediaType", mediaType);
-            if (language != null && language.isBlank()) {
-                throw new IllegalArgumentException("language must be null or non-blank");
+            requirePattern("artifactId", artifactId, ARTIFACT_ID);
+            requireAllowed("type", type, ARTIFACT_TYPES);
+            requireMinCodePoints("mediaType", mediaType, 3);
+            if (language != null) {
+                requireMinCodePoints("language", language, 2);
             }
             if (revision < 1) {
                 throw new IllegalArgumentException("artifact revision must be positive");
@@ -200,12 +280,11 @@ public record MeetingManifest(
             if (size < 0) {
                 throw new IllegalArgumentException("artifact size must not be negative");
             }
-            requireText("checksum", checksum);
+            requirePattern("checksum", checksum, CHECKSUM);
             Objects.requireNonNull(status, "status");
-            Objects.requireNonNull(createdAt, "createdAt");
-            if (supersedesArtifactId != null && supersedesArtifactId.isBlank()) {
-                throw new IllegalArgumentException(
-                        "supersedesArtifactId must be null or non-blank");
+            createdAt = requireProtocolInstant("artifact.createdAt", createdAt);
+            if (supersedesArtifactId != null) {
+                requirePattern("supersedesArtifactId", supersedesArtifactId, ARTIFACT_ID);
             }
             if (status == ArtifactStatus.FAILED && failure == null) {
                 throw new IllegalArgumentException("failed artifact requires failure");
@@ -237,7 +316,7 @@ public record MeetingManifest(
     public record ArtifactFailure(String domain, String code, boolean retryable,
                                   String diagnosticId) {
         public ArtifactFailure {
-            requireText("failure.domain", domain);
+            requireAllowed("failure.domain", domain, FAILURE_DOMAINS);
             requireText("failure.code", code);
             requireText("failure.diagnosticId", diagnosticId);
         }
@@ -258,9 +337,8 @@ public record MeetingManifest(
             requireText("warning.code", code);
             requireText("warning.capability", capability);
             requireText("warning.messageKey", messageKey);
-            if (diagnosticId != null && diagnosticId.isBlank()) {
-                throw new IllegalArgumentException(
-                        "warning.diagnosticId must be null or non-blank");
+            if (diagnosticId != null) {
+                requireText("warning.diagnosticId", diagnosticId);
             }
         }
 
@@ -272,13 +350,39 @@ public record MeetingManifest(
         }
     }
 
-    private static List<String> immutableTextList(List<String> values, String name) {
+    private static List<String> immutableLanguageList(List<String> values, String name) {
         Objects.requireNonNull(values, name);
         List<String> copy = new ArrayList<>(values.size());
         for (String value : values) {
-            requireText(name + " item", value);
+            requireMinCodePoints(name + " item", value, 2);
             copy.add(value);
         }
         return Collections.unmodifiableList(copy);
+    }
+
+    private static void requireAllowed(String name, String value, Set<String> allowed) {
+        requireText(name, value);
+        if (!allowed.contains(value)) {
+            throw new IllegalArgumentException(name + " is not supported by the public protocol");
+        }
+    }
+
+    private static void requirePattern(String name, String value, Pattern pattern) {
+        requireText(name, value);
+        if (!pattern.matcher(value).matches()) {
+            throw new IllegalArgumentException(name + " does not match the public protocol");
+        }
+    }
+
+    private static void requireMinCodePoints(String name, String value, int minimum) {
+        requireText(name, value);
+        if (codePointLength(value) < minimum) {
+            throw new IllegalArgumentException(
+                    name + " must contain at least " + minimum + " Unicode characters");
+        }
+    }
+
+    private static int codePointLength(String value) {
+        return value.codePointCount(0, value.length());
     }
 }

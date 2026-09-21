@@ -241,3 +241,21 @@ HikariCP 连接池；修正提交 `71bef21` 收紧单主机 JDBC URL、IPv6 lite
 并回归 P2-T10 事务、并发 Stop、Fixture、公开边界、迁移、依赖树和 `jdeps`。
 本增量未实现 HTTP、Worker、认证、权益、模型、存储、Dockerfile、备份恢复或生产
 流量切换，不能单独宣称 P2 或参考后端已经完成。
+
+## P2-T14-01 Manifest 协议边界增量
+
+P2-T14-01 在数据库迁移和 Worker 实装之前，先冻结完整 Manifest 的纯应用契约与
+公开 JSON 表示。`MeetingManifest` 不再携带结果链接访问上下文中的 `genTime`；
+`genTime` 只保留在 `MeetingManifestPort.Request`，不会进入 Manifest revision、
+正文或后续内容摘要。`ManifestFactStore` 仅声明最新版本查询、显式前置 revision
+追加及重放/内容冲突/版本冲突语义，不包含 JSON、JDBC、hash、事务或 Worker 类型。
+
+严格 JSON codec 位于 `com.czur.reference.protocol.json` 基础设施边界，使用
+Jackson 2.15.4 的显式 tree 解码和 streaming 编码。Jackson 类型不进入
+application port；解码关闭式拒绝重复、未知、缺失和错误类型字段、数值强制转换、
+非法时间、额外 token 及闭集外取值，编码由 `JsonGenerator` 固定字段顺序与空值
+策略。对外编解码异常使用不带 cause 的固定脱敏文本；时间冻结为可无损映射
+`Instant` 的严格 RFC 3339 子集，领域与编码器共享 UTC canonical 年份
+`0000..9999` 值域，且边界年份外部文本只接受 `Z`；非空白规则与 JSON Schema 的
+ECMAScript `\S` 对齐。此切片没有新增数据库迁移、JDBC 实现、后台线程或 Worker；Manifest
+权威表和事务实现属于后续 T14 子任务。

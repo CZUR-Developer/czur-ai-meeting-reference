@@ -14,6 +14,21 @@
   </properties>
   <dependencies>
     <!--
+      公开 Manifest JSON 边界使用显式 tree codec，拒绝未知/重复/缺失字段及
+      数值强制转换。Jackson 类型只停留在 protocol.json 基础设施包，不进入
+      领域对象或 application port。
+    -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <version>2.15.4</version>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.datatype</groupId>
+      <artifactId>jackson-datatype-jsr310</artifactId>
+      <version>2.15.4</version>
+    </dependency>
+    <!--
       运行时唯一共享连接池。HikariCP 只位于数据库装配边界，不渗透到领域
       和 application port；连接池由 JdbcDatabaseRuntime 负责启动与关闭。
     -->

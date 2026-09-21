@@ -26,14 +26,18 @@ public interface MeetingManifestPort {
      */
     record Request(String meetingId, long genTime) {
         public Request {
-            requireText("meetingId", meetingId);
-            MeetingManifest.requireGenTime(genTime);
+            MeetingManifest.requireMeetingId(meetingId);
+            if (genTime < -1) {
+                throw new IllegalArgumentException(
+                        "genTime must be -1 or non-negative milliseconds");
+            }
         }
 
+        /** 查询诊断不得输出可被直接用于结果访问的会议标识。 */
         @Override
         public String toString() {
-            return "MeetingManifestPort.Request[meetingId=" + meetingId
-                    + ", genTime=" + genTime + ']';
+            return "MeetingManifestPort.Request[meetingId=redacted, genTime="
+                    + genTime + ']';
         }
     }
 
@@ -94,11 +98,6 @@ public interface MeetingManifestPort {
         /** 结果 URL 对应的会议标识。 */
         public String meetingId() {
             return manifest.meetingId();
-        }
-
-        /** 结果 URL 的生成时间（毫秒）；-1 表示永不过期。 */
-        public long genTime() {
-            return manifest.genTime();
         }
 
         @Override
@@ -192,9 +191,4 @@ public interface MeetingManifestPort {
         STORAGE_FAILURE
     }
 
-    private static void requireText(String name, String value) {
-        if (value == null || value.isBlank()) {
-            throw new IllegalArgumentException(name + " must not be blank");
-        }
-    }
 }
