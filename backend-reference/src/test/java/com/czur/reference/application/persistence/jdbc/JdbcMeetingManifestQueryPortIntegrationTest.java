@@ -155,6 +155,54 @@ class JdbcMeetingManifestQueryPortIntegrationTest {
     }
 
     @Test
+    void malformedCanonicalJsonFailsClosedAsSnapshotConflict() throws Exception {
+        String meetingId = "mtg_query_bad_canonical";
+        createMeeting(meetingId, MeetingState.READY, ManifestStatus.READY);
+        setAccepted(meetingId, ManifestStatus.READY, MeetingState.READY);
+        insertManifest(manifest(meetingId, 1, ManifestStatus.READY));
+        dropConstraints("meeting_manifest_revision_document_ck",
+                "meeting_manifest_revision_hash_ck");
+        String malformed = "not-json";
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement("""
+                     UPDATE meeting_manifest_revision
+                        SET canonical_json=?, content_sha256=?
+                      WHERE meeting_id=?
+                     """)) {
+            statement.setString(1, malformed);
+            statement.setBytes(2, sha256(malformed));
+            statement.setString(3, meetingId);
+            statement.executeUpdate();
+        }
+
+        assertEquals(MeetingManifestPort.Status.CONFLICT,
+                port(Duration.ofDays(1)).get(
+                        new MeetingManifestPort.Request(meetingId, -1)).status());
+    }
+
+    @Test
+    void malformedJsonbMirrorFailsClosedAsSnapshotConflict() throws Exception {
+        String meetingId = "mtg_query_bad_jsonb";
+        createMeeting(meetingId, MeetingState.READY, ManifestStatus.READY);
+        setAccepted(meetingId, ManifestStatus.READY, MeetingState.READY);
+        insertManifest(manifest(meetingId, 1, ManifestStatus.READY));
+        dropConstraints("meeting_manifest_revision_document_ck");
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement("""
+                     UPDATE meeting_manifest_revision
+                        SET manifest_json='{"broken":true}'::jsonb
+                      WHERE meeting_id=?
+                     """)) {
+            statement.setString(1, meetingId);
+            statement.executeUpdate();
+        }
+
+        assertEquals(MeetingManifestPort.Status.CONFLICT,
+                port(Duration.ofDays(1)).get(
+                        new MeetingManifestPort.Request(meetingId, -1)).status());
+    }
+
+    @Test
     void profileMismatchIsClosedEvenWhenManifestJsonIsValid() throws Exception {
         String meetingId = "mtg_query_profile_mismatch";
         createMeeting(meetingId, MeetingState.READY, ManifestStatus.READY);
@@ -233,6 +281,20 @@ class JdbcMeetingManifestQueryPortIntegrationTest {
             statement.setString(4, canonical);
             statement.setBytes(5, sha256(canonical));
             statement.executeUpdate();
+        }
+    }
+
+    private void dropConstraints(String... names) throws Exception {
+        StringBuilder sql = new StringBuilder("ALTER TABLE meeting_manifest_revision ");
+        for (int index = 0; index < names.length; index++) {
+            if (index > 0) {
+                sql.append(", ");
+            }
+            sql.append("DROP CONSTRAINT ").append(names[index]);
+        }
+        try (Connection connection = dataSource.getConnection();
+             Statement statement = connection.createStatement()) {
+            statement.execute(sql.toString());
         }
     }
 

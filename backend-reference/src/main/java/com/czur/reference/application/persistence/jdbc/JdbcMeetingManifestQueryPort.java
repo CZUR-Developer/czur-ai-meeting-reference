@@ -231,27 +231,34 @@ public final class JdbcMeetingManifestQueryPort implements MeetingManifestPort {
                 || !Boolean.TRUE.equals(snapshot.chainValid())) {
             throw new CorruptManifestSnapshot();
         }
-        String canonical = snapshot.canonicalJson();
-        MeetingManifest manifest = MeetingManifestJson.decode(canonical);
-        if (!canonical.equals(MeetingManifestJson.encode(manifest))
-                || !snapshot.meeting().meetingId().equals(manifest.meetingId())
-                || snapshot.latestRevision() != manifest.manifestRevision()
-                || !MessageDigest.isEqual(
-                        snapshot.contentSha256(), sha256(canonical))) {
+        try {
+            String canonical = snapshot.canonicalJson();
+            MeetingManifest manifest = MeetingManifestJson.decode(canonical);
+            if (!canonical.equals(MeetingManifestJson.encode(manifest))
+                    || !snapshot.meeting().meetingId().equals(manifest.meetingId())
+                    || snapshot.latestRevision() != manifest.manifestRevision()
+                    || !MessageDigest.isEqual(
+                            snapshot.contentSha256(), sha256(canonical))) {
+                throw new CorruptManifestSnapshot();
+            }
+            MeetingManifest mirror = MeetingManifestJson.decode(snapshot.manifestJsonText());
+            if (!manifest.equals(mirror)
+                    || !canonical.equals(MeetingManifestJson.encode(mirror))) {
+                throw new CorruptManifestSnapshot();
+            }
+            // 结果页不能把另一个 Profile 的产物当成本会议结果；Profile 是 meeting
+            // 事实，不属于 Manifest 内的可选展示字段，因此这里显式核对。
+            if (!snapshot.profileId().equals(manifest.profile().id())
+                    || snapshot.profileRevision() != manifest.profile().revision()) {
+                throw new CorruptManifestSnapshot();
+            }
+            return manifest;
+        } catch (IllegalArgumentException | IllegalStateException | NullPointerException failure) {
+            // MeetingManifestJson 的公开边界会把坏 JSON、未知字段、时间和领域
+            // 不变量统一映射为 IllegalArgumentException/IllegalStateException。
+            // 这些是持久事实损坏，不是数据库暂时不可用，必须稳定返回 Conflict。
             throw new CorruptManifestSnapshot();
         }
-        MeetingManifest mirror = MeetingManifestJson.decode(snapshot.manifestJsonText());
-        if (!manifest.equals(mirror)
-                || !canonical.equals(MeetingManifestJson.encode(mirror))) {
-            throw new CorruptManifestSnapshot();
-        }
-        // 结果页不能把另一个 Profile 的产物当成本会议结果；Profile 是 meeting
-        // 事实，不属于 Manifest 内的可选展示字段，因此这里显式核对。
-        if (!snapshot.profileId().equals(manifest.profile().id())
-                || snapshot.profileRevision() != manifest.profile().revision()) {
-            throw new CorruptManifestSnapshot();
-        }
-        return manifest;
     }
 
     private static <E extends Enum<E>> E readEnum(
