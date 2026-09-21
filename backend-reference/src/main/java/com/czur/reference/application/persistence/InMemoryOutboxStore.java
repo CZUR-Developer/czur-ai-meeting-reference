@@ -33,6 +33,7 @@ public final class InMemoryOutboxStore implements OutboxStore {
     private final Object mutex = new Object();
     private final Map<String, OutboxEvent> events = new HashMap<>();
     private final Map<String, LeaseToken> activeLeases = new HashMap<>();
+    private final Map<String, Long> leaseVersions = new HashMap<>();
 
     @Override
     public AppendResult append(OutboxEvent event) {
@@ -49,6 +50,7 @@ public final class InMemoryOutboxStore implements OutboxStore {
             OutboxEvent existing = events.get(event.eventId());
             if (existing == null) {
                 events.put(event.eventId(), event);
+                leaseVersions.put(event.eventId(), 0L);
                 LOGGER.log(Level.INFO, "Outbox 事件已追加 eventId={0} eventType={1}",
                         new Object[]{event.eventId(), event.eventType()});
                 return new AppendResult(AppendStatus.APPENDED, event);
@@ -71,40 +73,86 @@ public final class InMemoryOutboxStore implements OutboxStore {
     }
 
     @Override
-    public List<ClaimedEvent> claim(String leaseOwner, Instant now, Duration leaseDuration, int limit) {
-        requireText("leaseOwner", leaseOwner);
-        Objects.requireNonNull(now, "now");
-        Objects.requireNonNull(leaseDuration, "leaseDuration");
-        if (leaseDuration.isZero() || leaseDuration.isNegative()) {
-            throw new IllegalArgumentException("leaseDuration must be positive");
+    public List<ClaimedEvent> claim(ClaimRequest request) {
+        Objects.requireNonNull(request, "request");
+        if (request.registeredEventTypes().isEmpty()) {
+            return List.of();
         }
-        if (limit <= 0) {
-            throw new IllegalArgumentException("limit must be positive");
-        }
-        Instant leaseUntil = now.plus(leaseDuration);
+        Instant leaseUntil = request.now().plus(request.leaseDuration());
         synchronized (mutex) {
             List<OutboxEvent> candidates = events.values().stream()
-                    .filter(event -> isClaimable(event, now))
+                    .filter(event -> request.registeredEventTypes().contains(event.eventType()))
+                    .filter(event -> isClaimable(event, request.now()))
                     .sorted(CLAIM_ORDER)
-                    .limit(limit)
+                    .limit(request.limit())
                     .toList();
             List<ClaimedEvent> claimed = new ArrayList<>(candidates.size());
             for (OutboxEvent event : candidates) {
+                long nextLeaseVersion = Math.addExact(
+                        leaseVersions.getOrDefault(event.eventId(), 0L), 1L);
                 LeaseToken lease = new LeaseToken(
-                        event.eventId(), leaseOwner, UUID.randomUUID().toString(), leaseUntil, now);
+                        event.eventId(), request.leaseOwner(), UUID.randomUUID().toString(),
+                        leaseUntil, request.now(), nextLeaseVersion);
                 OutboxEvent leased = new OutboxEvent(
                         event.eventId(), event.aggregateType(), event.aggregateId(), event.eventType(), event.payload(),
                         event.occurredAt(), event.availableAt(), EventStatus.LEASED, event.attemptCount(),
-                        leaseOwner, leaseUntil, null, event.lastError());
+                        request.leaseOwner(), leaseUntil, null, event.lastError());
                 events.put(event.eventId(), leased);
                 activeLeases.put(event.eventId(), lease);
+                leaseVersions.put(event.eventId(), nextLeaseVersion);
                 claimed.add(new ClaimedEvent(leased, lease));
             }
             if (!claimed.isEmpty()) {
                 LOGGER.log(Level.FINE, "Outbox 事件已领取 owner={0} count={1}",
-                        new Object[]{leaseOwner, claimed.size()});
+                        new Object[]{request.leaseOwner(), claimed.size()});
             }
             return List.copyOf(claimed);
+        }
+    }
+
+    @Override
+    public RenewResult renew(LeaseToken lease, Instant renewedAt, Duration leaseDuration) {
+        Objects.requireNonNull(lease, "lease");
+        Objects.requireNonNull(renewedAt, "renewedAt");
+        Objects.requireNonNull(leaseDuration, "leaseDuration");
+        if (leaseDuration.isZero() || leaseDuration.isNegative()) {
+            throw new IllegalArgumentException("leaseDuration must be positive");
+        }
+        Instant newExpiry = renewedAt.plus(leaseDuration);
+        synchronized (mutex) {
+            OutboxEvent current = events.get(lease.eventId());
+            if (current == null) {
+                return new RenewResult(RenewStatus.NOT_FOUND, null, null);
+            }
+            if (current.status() == EventStatus.PUBLISHED) {
+                return new RenewResult(RenewStatus.ALREADY_PUBLISHED, current, null);
+            }
+            if (current.status() == EventStatus.DEAD) {
+                return new RenewResult(RenewStatus.ALREADY_DEAD, current, null);
+            }
+            if (!leaseMatches(current, lease)) {
+                return new RenewResult(RenewStatus.NOT_OWNER, current, null);
+            }
+            if (renewedAt.isBefore(lease.claimedAt())
+                    || !renewedAt.isBefore(lease.expiresAt())
+                    || !newExpiry.isAfter(lease.expiresAt())) {
+                return new RenewResult(RenewStatus.LEASE_EXPIRED, current, null);
+            }
+
+            long nextLeaseVersion = Math.addExact(lease.leaseVersion(), 1L);
+            LeaseToken renewedLease = new LeaseToken(
+                    lease.eventId(), lease.owner(), UUID.randomUUID().toString(),
+                    newExpiry, renewedAt, nextLeaseVersion);
+            OutboxEvent renewedEvent = new OutboxEvent(
+                    current.eventId(), current.aggregateType(), current.aggregateId(), current.eventType(),
+                    current.payload(), current.occurredAt(), current.availableAt(), EventStatus.LEASED,
+                    current.attemptCount(), current.leaseOwner(), newExpiry, null, current.lastError());
+            events.put(current.eventId(), renewedEvent);
+            activeLeases.put(current.eventId(), renewedLease);
+            leaseVersions.put(current.eventId(), nextLeaseVersion);
+            LOGGER.log(Level.FINE, "Outbox lease 已续租 eventId={0} owner={1}",
+                    new Object[]{current.eventId(), current.leaseOwner()});
+            return new RenewResult(RenewStatus.RENEWED, renewedEvent, renewedLease);
         }
     }
 
@@ -211,21 +259,31 @@ public final class InMemoryOutboxStore implements OutboxStore {
     }
 
     private PublishStatus verifyLease(OutboxEvent current, LeaseToken requested, Instant at) {
-        if (current.status() != EventStatus.LEASED) {
-            return PublishStatus.NOT_OWNER;
-        }
-        LeaseToken active = activeLeases.get(current.eventId());
-        if (active == null
-                || !active.token().equals(requested.token())
-                || !active.owner().equals(requested.owner())
-                || !current.leaseOwner().equals(requested.owner())
-                || !current.leaseUntil().equals(requested.expiresAt())) {
+        if (!leaseMatches(current, requested)) {
             return PublishStatus.NOT_OWNER;
         }
         if (at.isBefore(requested.claimedAt()) || !at.isBefore(requested.expiresAt())) {
             return PublishStatus.LEASE_EXPIRED;
         }
         return PublishStatus.PUBLISHED;
+    }
+
+    private boolean leaseMatches(OutboxEvent current, LeaseToken requested) {
+        if (current.status() != EventStatus.LEASED) {
+            return false;
+        }
+        LeaseToken active = activeLeases.get(current.eventId());
+        return active != null
+                && requested.eventId().equals(current.eventId())
+                && requested.eventId().equals(active.eventId())
+                && requested.owner().equals(active.owner())
+                && requested.token().equals(active.token())
+                && requested.leaseVersion() == active.leaseVersion()
+                && requested.expiresAt().equals(active.expiresAt())
+                && requested.leaseVersion()
+                == leaseVersions.getOrDefault(current.eventId(), -1L)
+                && requested.owner().equals(current.leaseOwner())
+                && requested.expiresAt().equals(current.leaseUntil());
     }
 
     private static void requireText(String name, String value) {

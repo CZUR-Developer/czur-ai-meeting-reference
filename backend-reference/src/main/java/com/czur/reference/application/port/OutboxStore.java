@@ -46,26 +46,29 @@ public interface OutboxStore {
     Optional<OutboxEvent> find(String eventId);
 
     /**
-     * 原子领取当前可发布的事件。
+     * 按 Worker 已注册的事件类型原子领取当前可发布事件。
+     *
+     * <p>只有 {@link ClaimRequest#registeredEventTypes()} 中精确匹配的类型
+     * 才能进入候选集。实现必须先应用类型白名单，再按
+     * {@code availableAt}、{@code occurredAt}、{@code eventId} 的确定性顺序
+     * 排序并应用 limit。未注册类型不得占用批次名额，也不得改变
+     * status、attempt 或 lease；空白名单必须立即返回空集合，不能退化为
+     * “领取全部”。</p>
      *
      * <p>可领取条件为 {@code availableAt <= now}，且记录处于 PENDING，或
-     * 处于 LEASED 但原 lease 已过期。领取会把记录更新为 LEASED，并返回
-     * 一次性的 {@link LeaseToken}。其它 Worker 在 lease 未过期前看不到该
-     * 事件；lease 过期后可以重新领取。{@code limit} 是本次批量上限，不是
-     * 全局消费者上限。</p>
+     * 处于 LEASED 但原 lease 已过期。成功领取会把记录更新为 LEASED，
+     * 旋转不透明 token，并使 {@code leaseVersion} 在事件的当前值上单调递增。
+     * lease 过期后允许其它 Worker 重新领取，但旧句柄的续租、完成和
+     * 失败回报都必须被栅栏拒绝。</p>
      *
-     * <p>实现必须使用数据库行锁、条件 UPDATE/RETURNING 或等价的原子机制。
-     * “先查询再更新”在多实例下会导致重复发布。lease token 不应由调用方
-     * 自行构造，完成和失败操作必须携带本次 claim 返回的 token，旧 owner
-     * 的迟到操作必须被拒绝。</p>
+     * <p>生产实现必须使用数据库行锁、条件 UPDATE/RETURNING 或等价的
+     * 原子机制，不得以“先无锁查询、后无条件更新”代替。返回值只包含
+     * 本次真正成功持有 lease 的事件。</p>
      *
-     * @param leaseOwner Worker 实例稳定且可观测的 owner 标识
-     * @param now 当前时间；生产实现应使用数据库时间或时钟偏差可控的时间
-     * @param leaseDuration 本次领取的 lease 时长，必须为正
-     * @param limit 最多领取的事件数，必须为正
-     * @return 已成功加 lease 的事件，顺序由实现保证为确定性顺序
+     * @param request 包含关闭式类型白名单、owner、判定时间、lease 时长和批次上限
+     * @return 已成功加 lease 的事件，按确定性候选顺序返回
      */
-    List<ClaimedEvent> claim(String leaseOwner, Instant now, Duration leaseDuration, int limit);
+    List<ClaimedEvent> claim(ClaimRequest request);
 
     /**
      * 按 Worker 已显式注册的事件类型领取 Outbox 事件时使用的不可变请求。
@@ -77,9 +80,8 @@ public interface OutboxStore {
      * 到的集合也不可修改且迭代顺序确定。事件类型不会被 trim 或改写，避免把
      * 两个不同的协议标识静默合并。</p>
      *
-     * <p>本值对象先冻结 T14-04 的公共契约；领取端口切换到该请求后，适配器
-     * 还必须在筛选、排序和 limit 之前应用类型白名单，使未知类型既不改变状态，
-     * 也不占用本批次数量。</p>
+     * <p>适配器必须在筛选、排序和 limit 之前应用类型白名单，
+     * 使未知类型既不改变状态，也不占用本批次数量。</p>
      *
      * @param registeredEventTypes 当前 Worker 显式注册的事件类型；集合和元素均不可为 null，
      *                             元素不可为空白，空集合合法
@@ -113,6 +115,32 @@ public interface OutboxStore {
             }
         }
     }
+
+    /**
+     * 原子续租一个尚未过期的 Outbox lease。
+     *
+     * <p>只有事件仍为 LEASED，且当前记录与 {@code lease} 的 eventId、
+     * owner、不透明 token、leaseVersion 和 expiresAt 全部一致时才允许续租。
+     * {@code renewedAt} 不得早于本句柄的 claimedAt，且必须严格早于
+     * 旧 expiresAt；{@code renewedAt + leaseDuration} 还必须严格晚于旧
+     * expiresAt，以防止续租缩短 lease 或原地不动。</p>
+     *
+     * <p>续租成功必须在同一原子更新中生成新 token、将 leaseVersion
+     * 加一，并把 claimedAt 更新为 renewedAt；返回的 {@link RenewResult#lease()}
+     * 是唯一可继续使用的新句柄。旧句柄必须立即失效，其后的 renew、
+     * markPublished 和 markFailed 均按 NOT_OWNER 拒绝。续租不得改变
+     * attemptCount、availableAt、payload 或业务事件类型。</p>
+     *
+     * <p>失败结果必须使用 {@link RenewStatus} 的关闭式分类：不存在、
+     * 栅栏不匹配、租约过期、已发布和已死信不得相互混淆；任何失败
+     * 都不得返回可使用的 lease。</p>
+     *
+     * @param lease 当前 claim 或上一次成功 renew 返回的完整句柄
+     * @param renewedAt 本次续租的判定时间
+     * @param leaseDuration 从 renewedAt 开始计算的新 lease 时长，必须严格为正
+     * @return 旋转后的新句柄及事件快照，或一个明确的失败分类
+     */
+    RenewResult renew(LeaseToken lease, Instant renewedAt, Duration leaseDuration);
 
     /**
      * 以 lease token 标记发布成功。
@@ -153,6 +181,7 @@ public interface OutboxStore {
      * 便于调用方按 lease 时长领取事件的值对象。
      *
      * <p>该 token 是不透明的完成凭证；调用方只能原样传回
+     * {@link #renew(LeaseToken, Instant, Duration)}、
      * {@link #markPublished(LeaseToken, Instant)} 或
      * {@link #markFailed(LeaseToken, Instant, Instant, String, int)}，不能持久化
      * 它来跨进程恢复。{@code leaseVersion} 来自数据库单调递增的

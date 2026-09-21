@@ -200,8 +200,12 @@ public final class JdbcMeetingUnitOfWork implements MeetingUnitOfWork {
         }
 
         @Override
-        public List<ClaimedEvent> claim(
-                String leaseOwner, Instant now, Duration leaseDuration, int limit) {
+        public List<ClaimedEvent> claim(ClaimRequest request) {
+            throw workerOperationOutsideUnitOfWork();
+        }
+
+        @Override
+        public RenewResult renew(LeaseToken lease, Instant renewedAt, Duration leaseDuration) {
             throw workerOperationOutsideUnitOfWork();
         }
 

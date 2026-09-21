@@ -14,6 +14,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -178,6 +179,173 @@ class OutboxStoreTest {
     }
 
     @Test
+    void claimUsesExactTypeAllowlistBeforeOrderingAndLimit() {
+        InMemoryOutboxStore store = new InMemoryOutboxStore();
+        store.append(event("event-00-unknown", "UnknownType"));
+        store.append(event("event-01-known", "MeetingCreated"));
+
+        assertTrue(store.claim(new OutboxStore.ClaimRequest(
+                Set.of(), "worker", T0, Duration.ofSeconds(30), 1)).isEmpty());
+        assertTrue(store.claim(new OutboxStore.ClaimRequest(
+                Set.of("Unknown"), "worker", T0, Duration.ofSeconds(30), 1)).isEmpty());
+
+        List<OutboxStore.ClaimedEvent> claimed = store.claim(new OutboxStore.ClaimRequest(
+                Set.of("MeetingCreated"), "worker", T0, Duration.ofSeconds(30), 1));
+        assertEquals(List.of("event-01-known"), claimed.stream()
+                .map(item -> item.event().eventId()).toList());
+        assertEquals(OutboxStore.EventStatus.PENDING,
+                store.find("event-00-unknown").orElseThrow().status());
+    }
+
+    @Test
+    void renewRotatesFenceAndRejectsOldLeaseForEveryOperation() {
+        InMemoryOutboxStore store = new InMemoryOutboxStore();
+        store.append(event("event-renew", "MeetingCreated"));
+        OutboxStore.ClaimedEvent claimed = store.claim(new OutboxStore.ClaimRequest(
+                Set.of("MeetingCreated"), "worker", T0, Duration.ofSeconds(10), 1)).get(0);
+
+        OutboxStore.RenewResult renewed = store.renew(
+                claimed.lease(), T0.plusSeconds(5), Duration.ofSeconds(10));
+
+        assertEquals(OutboxStore.RenewStatus.RENEWED, renewed.status());
+        assertNotEquals(claimed.lease().token(), renewed.lease().token());
+        assertEquals(claimed.lease().leaseVersion() + 1, renewed.lease().leaseVersion());
+        assertEquals(T0.plusSeconds(15), renewed.lease().expiresAt());
+        assertEquals(T0.plusSeconds(5), renewed.lease().claimedAt());
+        assertEquals(OutboxStore.RenewStatus.NOT_OWNER,
+                store.renew(claimed.lease(), T0.plusSeconds(6), Duration.ofSeconds(10)).status());
+        assertEquals(OutboxStore.PublishStatus.NOT_OWNER,
+                store.markPublished(claimed.lease(), T0.plusSeconds(6)).status());
+        assertEquals(OutboxStore.FailureStatus.NOT_OWNER,
+                store.markFailed(claimed.lease(), T0.plusSeconds(6), T0.plusSeconds(7),
+                        "stale lease", 3).status());
+        assertEquals(OutboxStore.PublishStatus.PUBLISHED,
+                store.markPublished(renewed.lease(), T0.plusSeconds(6)).status());
+    }
+
+    @Test
+    void claimedAtIsOnlyAnOperationWindowAndNotAnOwnershipFence() {
+        InMemoryOutboxStore renewStore = new InMemoryOutboxStore();
+        renewStore.append(event("event-claimed-at-renew", "ClaimedAtRenew"));
+        OutboxStore.LeaseToken renewLease = renewStore.claim(new OutboxStore.ClaimRequest(
+                Set.of("ClaimedAtRenew"), "worker", T0, Duration.ofSeconds(10), 1)).get(0).lease();
+        OutboxStore.LeaseToken shiftedRenewLease = withClaimedAt(
+                renewLease, renewLease.claimedAt().plusNanos(1_000));
+        assertEquals(OutboxStore.RenewStatus.RENEWED,
+                renewStore.renew(
+                        shiftedRenewLease, T0.plusSeconds(5), Duration.ofSeconds(10)).status());
+
+        InMemoryOutboxStore publishStore = new InMemoryOutboxStore();
+        publishStore.append(event("event-claimed-at-publish", "ClaimedAtPublish"));
+        OutboxStore.LeaseToken publishLease = publishStore.claim(new OutboxStore.ClaimRequest(
+                Set.of("ClaimedAtPublish"), "worker", T0, Duration.ofSeconds(10), 1)).get(0).lease();
+        assertEquals(OutboxStore.PublishStatus.PUBLISHED,
+                publishStore.markPublished(
+                        withClaimedAt(publishLease, publishLease.claimedAt().plusNanos(1_000)),
+                        T0.plusSeconds(1)).status());
+
+        InMemoryOutboxStore failureStore = new InMemoryOutboxStore();
+        failureStore.append(event("event-claimed-at-fail", "ClaimedAtFail"));
+        OutboxStore.LeaseToken failureLease = failureStore.claim(new OutboxStore.ClaimRequest(
+                Set.of("ClaimedAtFail"), "worker", T0, Duration.ofSeconds(10), 1)).get(0).lease();
+        assertEquals(OutboxStore.FailureStatus.RETRY_SCHEDULED,
+                failureStore.markFailed(
+                        withClaimedAt(failureLease, failureLease.claimedAt().plusNanos(1_000)),
+                        T0.plusSeconds(1), T0.plusSeconds(2), "retry", 3).status());
+    }
+
+    @Test
+    void frozenLeaseFieldsRemainOwnershipFences() {
+        InMemoryOutboxStore store = new InMemoryOutboxStore();
+        store.append(event("event-field-fences", "FieldFences"));
+        OutboxStore.LeaseToken legal = store.claim(new OutboxStore.ClaimRequest(
+                Set.of("FieldFences"), "worker", T0, Duration.ofSeconds(10), 1)).get(0).lease();
+        List<OutboxStore.LeaseToken> mismatched = List.of(
+                new OutboxStore.LeaseToken(
+                        legal.eventId(), "other-worker", legal.token(), legal.expiresAt(),
+                        legal.claimedAt(), legal.leaseVersion()),
+                new OutboxStore.LeaseToken(
+                        legal.eventId(), legal.owner(), "other-token", legal.expiresAt(),
+                        legal.claimedAt(), legal.leaseVersion()),
+                new OutboxStore.LeaseToken(
+                        legal.eventId(), legal.owner(), legal.token(), legal.expiresAt(),
+                        legal.claimedAt(), legal.leaseVersion() + 1),
+                new OutboxStore.LeaseToken(
+                        legal.eventId(), legal.owner(), legal.token(), legal.expiresAt().plusSeconds(1),
+                        legal.claimedAt(), legal.leaseVersion()));
+
+        for (OutboxStore.LeaseToken invalid : mismatched) {
+            assertEquals(OutboxStore.RenewStatus.NOT_OWNER,
+                    store.renew(invalid, T0.plusSeconds(1), Duration.ofSeconds(20)).status());
+            assertEquals(OutboxStore.PublishStatus.NOT_OWNER,
+                    store.markPublished(invalid, T0.plusSeconds(1)).status());
+            assertEquals(OutboxStore.FailureStatus.NOT_OWNER,
+                    store.markFailed(invalid, T0.plusSeconds(1), T0.plusSeconds(2),
+                            "invalid fence", 3).status());
+        }
+        assertEquals(OutboxStore.PublishStatus.PUBLISHED,
+                store.markPublished(legal, T0.plusSeconds(1)).status());
+    }
+
+    @Test
+    void renewClassifiesMissingExpiredAndTerminalEvents() {
+        InMemoryOutboxStore store = new InMemoryOutboxStore();
+        OutboxStore.LeaseToken missing = new OutboxStore.LeaseToken(
+                "missing-renew", "worker", "token", T0.plusSeconds(10), T0, 1);
+        assertEquals(OutboxStore.RenewStatus.NOT_FOUND,
+                store.renew(missing, T0.plusSeconds(1), Duration.ofSeconds(10)).status());
+
+        store.append(event("event-expired", "Expired"));
+        OutboxStore.ClaimedEvent expired = store.claim(new OutboxStore.ClaimRequest(
+                Set.of("Expired"), "worker", T0, Duration.ofSeconds(10), 1)).get(0);
+        assertEquals(OutboxStore.RenewStatus.LEASE_EXPIRED,
+                store.renew(expired.lease(), T0.plusSeconds(10), Duration.ofSeconds(10)).status());
+
+        store.append(event("event-published", "Published"));
+        OutboxStore.ClaimedEvent published = store.claim(new OutboxStore.ClaimRequest(
+                Set.of("Published"), "worker", T0, Duration.ofSeconds(10), 1)).get(0);
+        store.markPublished(published.lease(), T0.plusSeconds(1));
+        assertEquals(OutboxStore.RenewStatus.ALREADY_PUBLISHED,
+                store.renew(published.lease(), T0.plusSeconds(2), Duration.ofSeconds(10)).status());
+
+        store.append(event("event-dead", "Dead"));
+        OutboxStore.ClaimedEvent dead = store.claim(new OutboxStore.ClaimRequest(
+                Set.of("Dead"), "worker", T0, Duration.ofSeconds(10), 1)).get(0);
+        store.markFailed(dead.lease(), T0.plusSeconds(1), T0.plusSeconds(2), "dead", 1);
+        assertEquals(OutboxStore.RenewStatus.ALREADY_DEAD,
+                store.renew(dead.lease(), T0.plusSeconds(2), Duration.ofSeconds(10)).status());
+    }
+
+    @Test
+    void concurrentRenewHasExactlyOneWinner() throws Exception {
+        InMemoryOutboxStore store = new InMemoryOutboxStore();
+        store.append(event("event-concurrent-renew", "MeetingCreated"));
+        OutboxStore.LeaseToken lease = store.claim(new OutboxStore.ClaimRequest(
+                Set.of("MeetingCreated"), "worker", T0, Duration.ofSeconds(10), 1)).get(0).lease();
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<OutboxStore.RenewResult> first = executor.submit(() -> {
+                start.await();
+                return store.renew(lease, T0.plusSeconds(5), Duration.ofSeconds(10));
+            });
+            Future<OutboxStore.RenewResult> second = executor.submit(() -> {
+                start.await();
+                return store.renew(lease, T0.plusSeconds(5), Duration.ofSeconds(10));
+            });
+            start.countDown();
+            List<OutboxStore.RenewStatus> statuses = List.of(
+                    first.get(5, TimeUnit.SECONDS).status(), second.get(5, TimeUnit.SECONDS).status());
+            assertEquals(1, statuses.stream()
+                    .filter(status -> status == OutboxStore.RenewStatus.RENEWED).count());
+            assertEquals(1, statuses.stream()
+                    .filter(status -> status == OutboxStore.RenewStatus.NOT_OWNER).count());
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     void concurrentClaimsGiveOneWorkerTheSameEvent() throws Exception {
         InMemoryOutboxStore store = new InMemoryOutboxStore();
         store.append(event("event-2", "InputAccepted"));
@@ -192,7 +360,8 @@ class OutboxStoreTest {
             futures.add(executor.submit(() -> {
                 ready.countDown();
                 start.await();
-                return store.claim(owner, T0, Duration.ofSeconds(30), 1);
+                return store.claim(new OutboxStore.ClaimRequest(
+                        Set.of("InputAccepted"), owner, T0, Duration.ofSeconds(30), 1));
             }));
         }
         ready.await();
@@ -216,12 +385,13 @@ class OutboxStoreTest {
         InMemoryOutboxStore store = new InMemoryOutboxStore();
         store.append(event("event-3", "TranscriptFinalized"));
 
-        OutboxStore.ClaimedEvent first = store.claim(
-                "worker-a", T0, Duration.ofSeconds(10), 1).get(0);
-        assertTrue(store.claim("worker-b", T0.plusSeconds(5), Duration.ofSeconds(10), 1).isEmpty());
+        OutboxStore.ClaimedEvent first = store.claim(new OutboxStore.ClaimRequest(
+                Set.of("TranscriptFinalized"), "worker-a", T0, Duration.ofSeconds(10), 1)).get(0);
+        assertTrue(store.claim(new OutboxStore.ClaimRequest(
+                Set.of("TranscriptFinalized"), "worker-b", T0.plusSeconds(5), Duration.ofSeconds(10), 1)).isEmpty());
 
-        OutboxStore.ClaimedEvent second = store.claim(
-                "worker-b", T0.plusSeconds(10), Duration.ofSeconds(10), 1).get(0);
+        OutboxStore.ClaimedEvent second = store.claim(new OutboxStore.ClaimRequest(
+                Set.of("TranscriptFinalized"), "worker-b", T0.plusSeconds(10), Duration.ofSeconds(10), 1)).get(0);
         assertNotEquals(first.lease().token(), second.lease().token());
         assertEquals(OutboxStore.PublishStatus.NOT_OWNER,
                 store.markPublished(first.lease(), T0.plusSeconds(10)).status());
@@ -234,12 +404,13 @@ class OutboxStoreTest {
         InMemoryOutboxStore store = new InMemoryOutboxStore();
         OutboxStore.OutboxEvent original = event("event-4", "ArtifactReady");
         store.append(original);
-        OutboxStore.ClaimedEvent claimed = store.claim(
-                "worker", T0, Duration.ofMinutes(1), 1).get(0);
+        OutboxStore.ClaimedEvent claimed = store.claim(new OutboxStore.ClaimRequest(
+                Set.of("ArtifactReady"), "worker", T0, Duration.ofMinutes(1), 1)).get(0);
 
         OutboxStore.PublishResult result = store.markPublished(claimed.lease(), T0.plusSeconds(1));
         assertEquals(OutboxStore.PublishStatus.PUBLISHED, result.status());
-        assertTrue(store.claim("worker-2", T0.plus(Duration.ofMinutes(2)), Duration.ofMinutes(1), 1).isEmpty());
+        assertTrue(store.claim(new OutboxStore.ClaimRequest(
+                Set.of("ArtifactReady"), "worker-2", T0.plus(Duration.ofMinutes(2)), Duration.ofMinutes(1), 1)).isEmpty());
         assertEquals(OutboxStore.EventStatus.PUBLISHED,
                 store.find("event-4").orElseThrow().status());
         assertEquals(OutboxStore.PublishStatus.ALREADY_PUBLISHED,
@@ -267,34 +438,36 @@ class OutboxStoreTest {
         OutboxStore.OutboxEvent original = event("event-5", "NotificationRequested");
         store.append(original);
 
-        OutboxStore.ClaimedEvent first = store.claim(
-                "worker", T0, Duration.ofSeconds(30), 1).get(0);
+        OutboxStore.ClaimedEvent first = store.claim(new OutboxStore.ClaimRequest(
+                Set.of("NotificationRequested"), "worker", T0, Duration.ofSeconds(30), 1)).get(0);
         OutboxStore.FailureResult retry1 = store.markFailed(
                 first.lease(), T0.plusSeconds(1), T0.plusSeconds(10), "timeout", 3);
         assertEquals(OutboxStore.FailureStatus.RETRY_SCHEDULED, retry1.status());
         assertEquals(1, retry1.event().attemptCount());
-        assertTrue(store.claim("worker", T0.plusSeconds(9), Duration.ofSeconds(30), 1).isEmpty());
+        assertTrue(store.claim(new OutboxStore.ClaimRequest(
+                Set.of("NotificationRequested"), "worker", T0.plusSeconds(9), Duration.ofSeconds(30), 1)).isEmpty());
         OutboxStore.AppendResult retryReplay = store.append(original);
         assertEquals(OutboxStore.AppendStatus.REPLAYED, retryReplay.status());
         assertEquals(T0.plusSeconds(10), retryReplay.event().availableAt());
         assertEquals(1, retryReplay.event().attemptCount());
 
-        OutboxStore.ClaimedEvent second = store.claim(
-                "worker", T0.plusSeconds(10), Duration.ofSeconds(30), 1).get(0);
+        OutboxStore.ClaimedEvent second = store.claim(new OutboxStore.ClaimRequest(
+                Set.of("NotificationRequested"), "worker", T0.plusSeconds(10), Duration.ofSeconds(30), 1)).get(0);
         OutboxStore.FailureResult retry2 = store.markFailed(
                 second.lease(), T0.plusSeconds(11), T0.plusSeconds(20), "provider unavailable", 3);
         assertEquals(OutboxStore.FailureStatus.RETRY_SCHEDULED, retry2.status());
         assertEquals(2, retry2.event().attemptCount());
 
-        OutboxStore.ClaimedEvent third = store.claim(
-                "worker", T0.plusSeconds(20), Duration.ofSeconds(30), 1).get(0);
+        OutboxStore.ClaimedEvent third = store.claim(new OutboxStore.ClaimRequest(
+                Set.of("NotificationRequested"), "worker", T0.plusSeconds(20), Duration.ofSeconds(30), 1)).get(0);
         OutboxStore.FailureResult dead = store.markFailed(
                 third.lease(), T0.plusSeconds(21), T0.plusSeconds(30), "permanent failure", 3);
         assertEquals(OutboxStore.FailureStatus.DEAD, dead.status());
         assertEquals(3, dead.event().attemptCount());
         assertEquals(OutboxStore.EventStatus.DEAD, dead.event().status());
         assertFalse(store.find("event-5").orElseThrow().lastError().isBlank());
-        assertTrue(store.claim("worker", T0.plus(Duration.ofMinutes(1)), Duration.ofSeconds(30), 1).isEmpty());
+        assertTrue(store.claim(new OutboxStore.ClaimRequest(
+                Set.of("NotificationRequested"), "worker", T0.plus(Duration.ofMinutes(1)), Duration.ofSeconds(30), 1)).isEmpty());
         OutboxStore.AppendResult deadReplay = store.append(original);
         assertEquals(OutboxStore.AppendStatus.REPLAYED, deadReplay.status());
         assertEquals(OutboxStore.EventStatus.DEAD, deadReplay.event().status());
@@ -330,6 +503,13 @@ class OutboxStoreTest {
     private static OutboxStore.LeaseToken lease(String eventId, String owner, Instant expiresAt) {
         return new OutboxStore.LeaseToken(
                 eventId, owner, "opaque-token", expiresAt, T0.plusSeconds(1), 2);
+    }
+
+    private static OutboxStore.LeaseToken withClaimedAt(
+            OutboxStore.LeaseToken lease, Instant claimedAt) {
+        return new OutboxStore.LeaseToken(
+                lease.eventId(), lease.owner(), lease.token(), lease.expiresAt(),
+                claimedAt, lease.leaseVersion());
     }
 
     private static void assertRenewalFailure(

@@ -285,8 +285,9 @@ class MeetingCommandServiceTest {
         assertEquals(result.meeting(), transactionalMeetings.find("m-1").orElseThrow());
         assertEquals(result, transactionalIdempotency
                 .find("meeting.create", "uow-create").orElseThrow().result());
-        OutboxStore.ClaimedEvent event = transactionalOutbox.claim(
-                "test-worker", CREATED, java.time.Duration.ofMinutes(1), 1)
+        OutboxStore.ClaimedEvent event = transactionalOutbox.claim(new OutboxStore.ClaimRequest(
+                java.util.Set.of("MeetingCreated"), "test-worker", CREATED,
+                java.time.Duration.ofMinutes(1), 1))
                 .stream().findFirst().orElseThrow();
         assertEquals("MeetingCreated", event.event().eventType());
         assertEquals("m-1", event.event().aggregateId());
