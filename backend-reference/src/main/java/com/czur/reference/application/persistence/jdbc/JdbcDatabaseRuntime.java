@@ -22,8 +22,8 @@ import java.util.logging.Logger;
  * PostgreSQL 数据库运行时边界。
  *
  * <p>启动时创建唯一的 HikariCP 连接池，执行只读 {@code SELECT 1} 探针并检查
- * {@code schema_migrations} 中的 V001～V008，再以只读 catalog 查询核对 V007
- * Manifest revision 与 V008 durable input fact 表的精确物理契约。任一检查失败都会关闭已经创建的池并抛出
+ * {@code schema_migrations} 中的 V001～V009，再以只读 catalog 查询核对 V007
+ * Manifest revision、V008 durable input fact 与 V009 final usage fact 表的精确物理契约。任一检查失败都会关闭已经创建的池并抛出
  * {@link DatabaseStartupException}；本类没有 InMemory fallback，也不会自动执行
  * 迁移或修补半成品表。成功启动后，所有 JDBC Repository、会议工作单元和提交后的
  * Outbox Worker 端口都共享同一个 {@link DataSource}。</p>
@@ -37,7 +37,7 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
     private static final String MIGRATION_QUERY = """
             SELECT version
               FROM schema_migrations
-             WHERE version IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             WHERE version IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """;
     private static final Set<String> REQUIRED_MIGRATIONS = Set.of(
             "V001__initial_schema",
@@ -47,7 +47,8 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
             "V005__meeting_finalization_fact",
             "V006__meeting_read_model",
             "V007__meeting_manifest_revision",
-            "V008__durable_input_fact");
+            "V008__durable_input_fact",
+            "V009__final_usage_fact");
     private static final List<ColumnContract> MANIFEST_REVISION_COLUMNS = List.of(
             new ColumnContract("meeting_id", "text", true, null),
             new ColumnContract("manifest_revision", "integer", true, null),
@@ -96,6 +97,21 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
             new ColumnContract("target_languages", "text[]", true, null),
             new ColumnContract("accepted_at", "timestamp with time zone", true, null),
             new ColumnContract("content_digest", "text", true, null));
+    private static final List<ColumnContract> FINAL_USAGE_FACT_COLUMNS = List.of(
+            new ColumnContract("meeting_id", "text", true, null),
+            new ColumnContract("actual_unit", "text", true, null),
+            new ColumnContract("actual_amount", "bigint", true, null),
+            new ColumnContract("source_input_binding", "text", true, null),
+            new ColumnContract("source_input_digest", "text", true, null),
+            new ColumnContract("source_accepted_at", "timestamp with time zone", true, null));
+    private static final String FINAL_USAGE_UNIT_CHECK =
+            "CHECK (actual_unit = 'MEETING_DURATION_MS'::text)";
+    private static final String FINAL_USAGE_AMOUNT_CHECK =
+            "CHECK (actual_amount >= 0)";
+    private static final String FINAL_USAGE_BINDING_CHECK =
+            "CHECK (length(btrim(source_input_binding)) > 0)";
+    private static final String FINAL_USAGE_DIGEST_CHECK =
+            "CHECK (length(btrim(source_input_digest)) > 0)";
 
     private final DatabaseRuntimeConfig config;
     private final HikariDataSource dataSource;
@@ -196,6 +212,7 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
                 migrations.setString(8, "V001");
                 migrations.setString(9, "V002");
                 migrations.setString(10, "V008__durable_input_fact");
+                migrations.setString(11, "V009__final_usage_fact");
                 try (ResultSet rows = migrations.executeQuery()) {
                     while (rows.next()) {
                         String version = rows.getString(1);
@@ -225,6 +242,13 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
             if (!hasExactDurableInputFactSchema(connection)) {
                 DatabaseReadiness invalid = DatabaseReadiness.schemaInvalid(
                         "durable_input_fact catalog contract mismatch");
+                LOGGER.log(Level.WARNING,
+                        "数据库 readiness 物理契约校验失败 status={0}", invalid.status());
+                return invalid;
+            }
+            if (!hasExactFinalUsageFactSchema(connection)) {
+                DatabaseReadiness invalid = DatabaseReadiness.schemaInvalid(
+                        "final_usage_fact catalog contract mismatch");
                 LOGGER.log(Level.WARNING,
                         "数据库 readiness 物理契约校验失败 status={0}", invalid.status());
                 return invalid;
@@ -526,6 +550,102 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
     }
 
     /**
+     * 只读核对 V009 final usage fact 表的冻结物理契约。
+     *
+     * <p>该探针精确检查六列、一对一主键、meeting 的 RESTRICT 外键，以及首版
+     * 标准单位、非负金额和来源字段非空约束。它不读取业务行，也不创建或修复
+     * schema 对象。</p>
+     */
+    private static boolean hasExactFinalUsageFactSchema(Connection connection)
+            throws SQLException {
+        Long factTable = relationOid(connection, "final_usage_fact");
+        Long meetingTable = relationOid(connection, "meeting");
+        if (factTable == null || meetingTable == null
+                || !isOrdinaryTable(connection, factTable)) {
+            return false;
+        }
+
+        List<ColumnContract> actualColumns = new ArrayList<>();
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT a.attname,
+                       format_type(a.atttypid, a.atttypmod) AS data_type,
+                       a.attnotnull,
+                       pg_get_expr(d.adbin, d.adrelid) AS default_expression
+                  FROM pg_attribute a
+                  LEFT JOIN pg_attrdef d
+                    ON d.adrelid = a.attrelid
+                   AND d.adnum = a.attnum
+                 WHERE a.attrelid = ?
+                   AND a.attnum > 0
+                   AND NOT a.attisdropped
+                 ORDER BY a.attnum
+                """)) {
+            statement.setLong(1, factTable);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    actualColumns.add(new ColumnContract(
+                            rows.getString("attname"),
+                            rows.getString("data_type"),
+                            rows.getBoolean("attnotnull"),
+                            rows.getString("default_expression")));
+                }
+            }
+        }
+        if (!FINAL_USAGE_FACT_COLUMNS.equals(actualColumns)) {
+            return false;
+        }
+
+        List<ConstraintContract> constraints = new ArrayList<>();
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT conname,
+                       contype,
+                       convalidated,
+                       coalesce(array_to_string(conkey, ','), '') AS source_keys,
+                       confrelid::bigint AS referenced_relation,
+                       coalesce(array_to_string(confkey, ','), '') AS target_keys,
+                       confdeltype,
+                       pg_get_constraintdef(oid, TRUE) AS definition
+                  FROM pg_constraint
+                 WHERE conrelid = ?
+                 ORDER BY conname
+                """)) {
+            statement.setLong(1, factTable);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    constraints.add(new ConstraintContract(
+                            rows.getString("conname"),
+                            rows.getString("contype"),
+                            rows.getBoolean("convalidated"),
+                            rows.getString("source_keys"),
+                            rows.getLong("referenced_relation"),
+                            rows.getString("target_keys"),
+                            rows.getString("confdeltype"),
+                            rows.getString("definition")));
+                }
+            }
+        }
+        if (constraints.size() != 6
+                || !constraints.contains(ConstraintContract.primaryKey(
+                        "final_usage_fact_pkey", "1"))
+                || !constraints.contains(ConstraintContract.foreignKey(
+                        "final_usage_fact_meeting_fk", "1", meetingTable, "1"))) {
+            return false;
+        }
+        return containsExactCheck(
+                        constraints, "final_usage_fact_actual_unit_ck",
+                        FINAL_USAGE_UNIT_CHECK)
+                && containsExactCheck(
+                        constraints, "final_usage_fact_actual_amount_ck",
+                        FINAL_USAGE_AMOUNT_CHECK)
+                && containsExactCheck(
+                        constraints, "final_usage_fact_source_input_binding_ck",
+                        FINAL_USAGE_BINDING_CHECK)
+                && containsExactCheck(
+                        constraints, "final_usage_fact_source_input_digest_ck",
+                        FINAL_USAGE_DIGEST_CHECK);
+    }
+
+    /**
      * CHECK 的 {@code conkey} 是 PostgreSQL 从表达式推导出的引用列集合，不是契约
      * 输入，并可能随等价表达式内部遍历变化。物理门禁因此精确比较名称、类型、
      * validated 状态和完整定义，列级语义已经包含在完整定义中。
@@ -611,6 +731,7 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
                 case "meeting_manifest_revision_pkey" ->
                         "PRIMARY KEY (meeting_id, manifest_revision)";
                 case "durable_input_fact_pkey" -> "PRIMARY KEY (meeting_id)";
+                case "final_usage_fact_pkey" -> "PRIMARY KEY (meeting_id)";
                 default -> throw new IllegalArgumentException("unknown primary key contract");
             };
             return new ConstraintContract(
@@ -631,6 +752,8 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
                         ON DELETE RESTRICT
                         """;
                 case "durable_input_fact_meeting_fk" ->
+                        "FOREIGN KEY (meeting_id) REFERENCES meeting(meeting_id) ON DELETE RESTRICT";
+                case "final_usage_fact_meeting_fk" ->
                         "FOREIGN KEY (meeting_id) REFERENCES meeting(meeting_id) ON DELETE RESTRICT";
                 default -> throw new IllegalArgumentException("unknown foreign key contract");
             };

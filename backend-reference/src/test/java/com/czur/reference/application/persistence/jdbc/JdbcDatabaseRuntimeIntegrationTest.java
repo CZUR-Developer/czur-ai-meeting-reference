@@ -31,13 +31,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 显式 PostgreSQL 运行时门禁。
  *
  * <p>默认跳过，只有调用方显式提供测试数据库 URL、账号和密码时才启动真实
- * HikariCP。目标数据库必须预先执行并登记 V001～V008；常规业务用例不自动迁移、不清理
+ * HikariCP。目标数据库必须预先执行并登记 V001～V009；常规业务用例不自动迁移、不清理
  * 共享数据库，也不在运行失败时静默切换到内存实现。</p>
  */
 @EnabledIfEnvironmentVariable(named = "REFERENCE_TEST_DATABASE_URL", matches = ".+")
 class JdbcDatabaseRuntimeIntegrationTest {
     @Test
-    void refusesSchemaThatHasNotRegisteredV007AndV008() throws Exception {
+    void refusesSchemaThatHasNotRegisteredV007ThroughV009() throws Exception {
         String url = System.getenv("REFERENCE_TEST_DATABASE_URL");
         String user = System.getenv("REFERENCE_TEST_DATABASE_USER");
         String password = System.getenv("REFERENCE_TEST_DATABASE_PASSWORD");
@@ -71,7 +71,8 @@ class JdbcDatabaseRuntimeIntegrationTest {
                     failure.readiness().status());
             assertEquals(java.util.Set.of(
                             "V007__meeting_manifest_revision",
-                            "V008__durable_input_fact"),
+                            "V008__durable_input_fact",
+                            "V009__final_usage_fact"),
                     failure.readiness().missingMigrations());
         } finally {
             try (Connection admin = DriverManager.getConnection(url, user, password);
@@ -86,7 +87,7 @@ class JdbcDatabaseRuntimeIntegrationTest {
     void registeredV007WithoutPhysicalTableIsSchemaInvalid() throws Exception {
         String schema = createMigrationRegistryOnlySchema("runtime_v007_no_table_");
         try {
-            registerMigrations(schema, 8);
+            registerMigrations(schema, 9);
             assertSchemaInvalid(schema);
         } finally {
             dropSchema(schema);
@@ -101,7 +102,7 @@ class JdbcDatabaseRuntimeIntegrationTest {
                  Statement statement = connection.createStatement()) {
                 statement.execute("CREATE TABLE meeting_manifest_revision (meeting_id TEXT)");
             }
-            registerMigrations(schema, 8);
+            registerMigrations(schema, 9);
             assertSchemaInvalid(schema);
         } finally {
             dropSchema(schema);
@@ -110,7 +111,7 @@ class JdbcDatabaseRuntimeIntegrationTest {
 
     @Test
     void registeredV007WithSameNameWeakCheckIsSchemaInvalid() throws Exception {
-        String schema = createMigratedSchema("runtime_v007_weak_", 8);
+        String schema = createMigratedSchema("runtime_v007_weak_", 9);
         try {
             try (Connection connection = scopedConnection(schema);
                  Statement statement = connection.createStatement()) {
@@ -118,6 +119,35 @@ class JdbcDatabaseRuntimeIntegrationTest {
                         ALTER TABLE meeting_manifest_revision
                             DROP CONSTRAINT meeting_manifest_revision_hash_ck,
                             ADD CONSTRAINT meeting_manifest_revision_hash_ck CHECK (true)
+                        """);
+            }
+            assertSchemaInvalid(schema);
+        } finally {
+            dropSchema(schema);
+        }
+    }
+
+    @Test
+    void registeredV009WithoutPhysicalTableIsSchemaInvalid() throws Exception {
+        String schema = createMigratedSchema("runtime_v009_no_table_", 8);
+        try {
+            registerMigrations(schema, 9);
+            assertSchemaInvalid(schema);
+        } finally {
+            dropSchema(schema);
+        }
+    }
+
+    @Test
+    void registeredV009WithSameNameWeakCheckIsSchemaInvalid() throws Exception {
+        String schema = createMigratedSchema("runtime_v009_weak_", 9);
+        try {
+            try (Connection connection = scopedConnection(schema);
+                 Statement statement = connection.createStatement()) {
+                statement.execute("""
+                        ALTER TABLE final_usage_fact
+                            DROP CONSTRAINT final_usage_fact_actual_amount_ck,
+                            ADD CONSTRAINT final_usage_fact_actual_amount_ck CHECK (true)
                         """);
             }
             assertSchemaInvalid(schema);
@@ -259,7 +289,8 @@ class JdbcDatabaseRuntimeIntegrationTest {
                 "V005__meeting_finalization_fact.sql",
                 "V006__meeting_read_model.sql",
                 "V007__meeting_manifest_revision.sql",
-                "V008__durable_input_fact.sql");
+                "V008__durable_input_fact.sql",
+                "V009__final_usage_fact.sql");
         try {
             for (String migration : migrations.subList(0, count)) {
                 try (Connection connection = scopedConnection(schema);
@@ -284,7 +315,8 @@ class JdbcDatabaseRuntimeIntegrationTest {
                 "V005__meeting_finalization_fact",
                 "V006__meeting_read_model",
                 "V007__meeting_manifest_revision",
-                "V008__durable_input_fact");
+                "V008__durable_input_fact",
+                "V009__final_usage_fact");
         try (Connection connection = scopedConnection(schema);
              PreparedStatement statement = connection.prepareStatement("""
                      INSERT INTO schema_migrations(version)
