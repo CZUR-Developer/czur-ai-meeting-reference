@@ -311,6 +311,25 @@ public final class JdbcWorkflowStepStore implements WorkflowStepStore {
         return queryStored(connection, key, false).map(StoredStep::step);
     }
 
+    /**
+     * 只读核对已经持久化的 Workflow Definition 是否与候选完全一致。
+     *
+     * <p>该原语不会执行 INSERT，也不会改变 lease、状态或调度时间。Admission 在
+     * commit acknowledgement unknown 后只能用它恢复：即使步骤已经被 Worker 领取
+     * 或完成，比较仍使用数据库中不可变的 {@code initial_available_at}，而不是把
+     * 当前 {@code next_attempt_at} 误当作首次 Definition。</p>
+     *
+     * @return 空表示不存在；true 表示完整 Definition 相同；false 表示稳定冲突
+     */
+    static Optional<Boolean> definitionMatches(
+            Connection connection,
+            WorkflowStep candidate) throws SQLException {
+        requireTransactionalConnection(connection);
+        validateInitial(candidate);
+        return queryStored(connection, candidate.key(), false)
+                .map(stored -> stored.sameDefinition(candidate));
+    }
+
     /** 在调用方事务连接上领取；整个批次由调用方统一提交或回滚。 */
     static List<ClaimedStep> claim(
             Connection connection,

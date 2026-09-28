@@ -150,8 +150,8 @@ public final class JdbcMeetingFinalizationStore implements MeetingFinalizationSt
         FinalizationFact pending = FinalizationFact.pending(
                 InputState.INPUT_COMPLETE_PENDING);
         LOGGER.log(Level.FINE,
-                "会议输入完成意图已持久化 meetingId={0} inputState={1}",
-                new Object[]{meetingId, pending.inputState()});
+                "会议输入完成意图已持久化 inputState={0}",
+                pending.inputState());
         return new Applied(pending);
     }
 
@@ -216,8 +216,8 @@ public final class JdbcMeetingFinalizationStore implements MeetingFinalizationSt
         }
         FinalizationFact accepted = FinalizationFact.accepted(receipt);
         LOGGER.log(Level.INFO,
-                "会议输入已由后端接管 meetingId={0} inputState={1} receiptPresent=true",
-                new Object[]{meetingId, accepted.inputState()});
+                "会议输入已由后端接管 inputState={0} receiptPresent=true",
+                accepted.inputState());
         return new Applied(accepted);
     }
 

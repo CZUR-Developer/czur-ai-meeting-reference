@@ -32,7 +32,8 @@ import java.util.TreeSet;
  * 事实或 Reservation 漂移仍命中原 identity，再由 checkpoint Definition、Artifact
  * spec 或 commit request digest 比较产生冲突。</p>
  */
-public final class DeterministicMockFinalizationPlanner {
+public final class DeterministicMockFinalizationPlanner
+        implements FinalizationAdmissionPlanner {
     private static final int ARTIFACT_REVISION = 1;
     private static final Set<String> SUPPORTED_ARTIFACT_TYPES = Set.of(
             "transcript.final", "summary.structured");
@@ -46,6 +47,7 @@ public final class DeterministicMockFinalizationPlanner {
      * @param executionFact 创建会议前冻结并在 Admission 中核对的 09-01 执行事实
      * @param lockedReservation Admission 行锁下读取的已绑定 RESERVED Reservation
      */
+    @Override
     public Plan derive(
             String deploymentScope,
             String subjectScope,

@@ -192,7 +192,20 @@ public final class JdbcMeetingRepository implements MeetingRepository {
                    created_at, updated_at
               FROM meeting
              WHERE meeting_id = ?
-             FOR UPDATE
+            FOR UPDATE
+            """;
+
+    /**
+     * commit-unknown 只读恢复使用的同形快照；禁止附带行锁或其它写意图。
+     */
+    private static final String FIND_MANIFEST_PUBLICATION_SQL = """
+            SELECT meeting_id, deployment_scope, client_session_id, subject_scope,
+                   grant_id, grant_expires_at, usage_reservation_id,
+                   profile_id, profile_revision, state, aggregate_version,
+                   input_state, finalization_receipt_id, manifest_state,
+                   created_at, updated_at
+              FROM meeting
+             WHERE meeting_id = ?
             """;
 
     /**
@@ -511,6 +524,32 @@ public final class JdbcMeetingRepository implements MeetingRepository {
         requireText("meetingId", meetingId);
         try (PreparedStatement statement = connection.prepareStatement(
                 FIND_MANIFEST_PUBLICATION_FOR_UPDATE_SQL)) {
+            statement.setString(1, meetingId);
+            try (ResultSet rows = statement.executeQuery()) {
+                if (!rows.next()) {
+                    return Optional.empty();
+                }
+                PublicationMeeting result = readManifestPublicationMeeting(rows);
+                if (rows.next()) {
+                    throw new PublicationSnapshotException();
+                }
+                return Optional.of(result);
+            }
+        }
+    }
+
+    /**
+     * 在调用方只读事务中恢复 Manifest/Meeting 完整快照，不取得 {@code FOR UPDATE}
+     * 行锁，也不提交、回滚或关闭连接。仅供 outcome-unknown 恢复使用；任何首次
+     * 写入路径仍必须调用带行锁版本并在同一事务内完成 CAS。
+     */
+    static Optional<PublicationMeeting> findManifestPublication(
+            Connection connection,
+            String meetingId) throws SQLException, PublicationSnapshotException {
+        Objects.requireNonNull(connection, "connection");
+        requireText("meetingId", meetingId);
+        try (PreparedStatement statement = connection.prepareStatement(
+                FIND_MANIFEST_PUBLICATION_SQL)) {
             statement.setString(1, meetingId);
             try (ResultSet rows = statement.executeQuery()) {
                 if (!rows.next()) {
