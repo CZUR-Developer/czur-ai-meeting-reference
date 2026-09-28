@@ -36,6 +36,25 @@ final class JdbcUsageReservationStore {
                AND operation_scope = ? AND idempotency_key = ?
             """;
 
+    /**
+     * 通过 Meeting 持久保存的主 Reservation 反查首次 reserve 结果。
+     *
+     * <p>V003 没有把 reserve 的幂等键复制到 Meeting；稳定关联链是
+     * {@code meeting.usage_reservation_id -> usage_operation.reservation_id}。
+     * 正常创建事务只会产生一条 RESERVE 行。这里最多读取两条，若同一个
+     * Reservation 出现多个首次 reserve 赢家则按损坏事实关闭式失败，绝不按
+     * created_at 或字典序挑选一个“看起来最早”的结果。</p>
+     */
+    private static final String FIND_RESERVE_OPERATION_BY_RESERVATION_SQL = """
+            SELECT operation_scope, idempotency_key, request_digest,
+                   reservation_id, result_body::text
+              FROM usage_operation
+             WHERE deployment_scope = ? AND subject_scope = ?
+               AND reservation_id = ? AND operation_scope = 'usage.reserve.v1'
+             ORDER BY idempotency_key
+             LIMIT 2
+            """;
+
     private static final String INSERT_OPERATION_SQL = """
             INSERT INTO usage_operation (
                 deployment_scope, subject_scope, operation_scope, idempotency_key,
@@ -153,6 +172,43 @@ final class JdbcUsageReservationStore {
                     throw new CorruptUsageDataException("usage operation fields are incomplete");
                 }
                 return Optional.of(new UsageOperationRow(digest, reservationId, resultBody));
+            }
+        }
+    }
+
+    /**
+     * 在完整部署、主体和 Reservation 范围中读取唯一首次 reserve 结果。
+     *
+     * <p>该原语不锁定或改变任何行，也不提交、回滚或关闭连接。调用方必须先
+     * 锁定并验证 Meeting，再使用返回的幂等键/摘要严格解码 v2 结果正文。其它
+     * 部署或主体统一表现为不存在；重复 reserve 行属于不可恢复的数据损坏。</p>
+     */
+    static Optional<ReserveOperationRow> findReserveOperationByReservation(
+            Connection connection,
+            String deploymentScope,
+            String subjectScope,
+            String reservationId) throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        try (PreparedStatement statement = connection.prepareStatement(
+                FIND_RESERVE_OPERATION_BY_RESERVATION_SQL)) {
+            statement.setString(1, deploymentScope);
+            statement.setString(2, subjectScope);
+            statement.setString(3, reservationId);
+            try (ResultSet rows = statement.executeQuery()) {
+                if (!rows.next()) {
+                    return Optional.empty();
+                }
+                ReserveOperationRow result = new ReserveOperationRow(
+                        requireText(rows, "operation_scope"),
+                        requireText(rows, "idempotency_key"),
+                        requireText(rows, "request_digest"),
+                        requireText(rows, "reservation_id"),
+                        requireText(rows, "result_body"));
+                if (rows.next()) {
+                    throw new CorruptUsageDataException(
+                            "reservation has multiple reserve operation facts");
+                }
+                return Optional.of(result);
             }
         }
     }
@@ -499,6 +555,34 @@ final class JdbcUsageReservationStore {
             Objects.requireNonNull(requestDigest, "requestDigest");
             Objects.requireNonNull(reservationId, "reservationId");
             Objects.requireNonNull(resultBody, "resultBody");
+        }
+    }
+
+    /**
+     * 由 Reservation 稳定关联得到的首次 reserve 原始事实。
+     *
+     * <p>正文只允许交给严格 codec；record 不覆盖 {@code toString()} 是安全的，
+     * 因为该 package-private 类型不得离开 JDBC 包，也不得直接进入日志。调用者
+     * 仍禁止记录实例或其中任一字段。</p>
+     */
+    record ReserveOperationRow(
+            String operationScope,
+            String idempotencyKey,
+            String requestDigest,
+            String reservationId,
+            String resultBody) {
+        ReserveOperationRow {
+            Objects.requireNonNull(operationScope, "operationScope");
+            Objects.requireNonNull(idempotencyKey, "idempotencyKey");
+            Objects.requireNonNull(requestDigest, "requestDigest");
+            Objects.requireNonNull(reservationId, "reservationId");
+            Objects.requireNonNull(resultBody, "resultBody");
+        }
+
+        /** 防止未来调试日志误输出幂等键、摘要或完整授权结果。 */
+        @Override
+        public String toString() {
+            return "ReserveOperationRow[redacted]";
         }
     }
 

@@ -68,8 +68,9 @@ public final class CapabilityPlanner {
         Set<String> granted = immutableInput(grantedCapabilities, "grantedCapabilities");
         DeploymentLimits limits = deploymentLimits == null ? DeploymentLimits.NONE : deploymentLimits;
         validateRequested(profile, requested);
-        LOGGER.log(Level.FINE, "开始计算能力计划 profile={0} planRevision={1} requestedCount={2}",
-                new Object[]{profile.id(), planRevision, requested.size()});
+        LOGGER.log(Level.FINE,
+                "开始计算能力计划 profileRevision={0} planRevision={1} requestedCount={2}",
+                new Object[]{profile.revision(), planRevision, requested.size()});
 
         PlanningContext context = new PlanningContext(provider, profile, requested, granted, limits, planRevision);
         for (String capability : profile.requiredCapabilities()) {
@@ -94,17 +95,19 @@ public final class CapabilityPlanner {
         decisions.sort((left, right) -> left.capability().compareTo(right.capability()));
         for (CapabilityDecision decision : decisions) {
             LOGGER.log(Level.FINER,
-                    "能力决策 capability={0} availability={1} action={2} planRevision={3}",
-                    new Object[]{decision.capability(), decision.availability(),
-                            decision.action(), decision.planRevision()});
+                    "能力决策 availability={0} action={1} planRevision={2}",
+                    new Object[]{decision.availability(), decision.action(),
+                            decision.planRevision()});
         }
         CapabilityPlan plan = new CapabilityPlan(planRevision, decisions);
         if (plan.failed()) {
-            LOGGER.log(Level.WARNING, "能力计划包含必选能力失败 profile={0} planRevision={1}",
-                    new Object[]{profile.id(), planRevision});
+            LOGGER.log(Level.WARNING,
+                    "能力计划包含必选能力失败 profileRevision={0} planRevision={1}",
+                    new Object[]{profile.revision(), planRevision});
         } else {
-            LOGGER.log(Level.INFO, "能力计划已生成 profile={0} planRevision={1} decisions={2}",
-                    new Object[]{profile.id(), planRevision, decisions.size()});
+            LOGGER.log(Level.INFO,
+                    "能力计划已生成 profileRevision={0} planRevision={1} decisions={2}",
+                    new Object[]{profile.revision(), planRevision, decisions.size()});
         }
         return plan;
     }
@@ -137,7 +140,7 @@ public final class CapabilityPlanner {
         allowed.addAll(profile.optionalCapabilities());
         for (String capability : requested) {
             if (!allowed.contains(capability)) {
-                LOGGER.log(Level.WARNING, "会议请求了 Profile 未声明的能力 capability={0}", capability);
+                LOGGER.log(Level.WARNING, "会议请求了 Product Profile 未声明的能力");
                 throw new CapabilityPlanningException(
                         CapabilityPlanningException.ReasonCode.CAPABILITY_NOT_ALLOWED,
                         "requested capability is not allowed by profile: " + capability);
@@ -299,8 +302,8 @@ public final class CapabilityPlanner {
                 } else {
                     CapabilityDecision fallbackDecision = evaluate(fallback, true);
                     if (isUsable(fallbackDecision)) {
-                        LOGGER.log(Level.INFO, "能力使用降级实现 capability={0} fallback={1} reason={2}",
-                                new Object[]{capability, fallback, reason});
+                        LOGGER.log(Level.INFO,
+                                "能力计划使用已声明的降级实现 planRevision={0}", revision);
                         return new CapabilityDecision(
                                 capability,
                                 CapabilityDecision.Availability.DEGRADED,
