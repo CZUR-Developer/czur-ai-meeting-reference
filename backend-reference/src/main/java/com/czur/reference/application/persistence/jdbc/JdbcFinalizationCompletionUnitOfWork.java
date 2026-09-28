@@ -3,6 +3,7 @@ package com.czur.reference.application.persistence.jdbc;
 import com.czur.reference.application.finalization.FinalizationCheckpoint;
 import com.czur.reference.application.finalization.FinalizationCommitPlan;
 import com.czur.reference.application.finalization.FinalizationExecutionFact;
+import com.czur.reference.application.finalization.FinalizationTerminalOperationMarker;
 import com.czur.reference.application.finalization.FinalizationTerminalFailureIdentity;
 import com.czur.reference.application.manifest.FinalizationManifestFactory;
 import com.czur.reference.application.port.FinalUsageFact;
@@ -184,6 +185,12 @@ public final class JdbcFinalizationCompletionUnitOfWork
                     connection, fence.step(), operation.checkpoint())) {
                 return failAndRollback(connection, resolution,
                         ErrorCode.CHECKPOINT_CONFLICT, phase);
+            }
+            if (!terminalMarkerMatches(operation, fence.step())) {
+                // Completion 是最终本地写入边界，不能只依赖 Worker 自律。缺失、损坏
+                // 或属于另一请求的 marker 必须在首笔 metadata 写入前关闭式拒绝。
+                return failAndRollback(connection, resolution,
+                        ErrorCode.FACT_INCONSISTENT, phase);
             }
 
             phase = Phase.ENTITLEMENT_READ;
@@ -854,14 +861,50 @@ public final class JdbcFinalizationCompletionUnitOfWork
             Facts facts,
             WorkflowStep workflow,
             Optional<MeetingManifest> latest) throws SQLException {
-        return isInitialCompletionState(meeting, facts.input())
-                && latest.isEmpty()
-                && workflow.status() == WorkflowStep.Status.LEASED
-                && workflow.leaseVersion() == operation.lease().leaseVersion()
-                && (!operation.isFailure()
-                || workflow.attempt() == operation.leasedAttempt())
-                && JdbcWorkflowStepStore.activeLeaseMatches(
-                connection, operation.lease());
+        if (!isInitialCompletionState(meeting, facts.input())
+                || latest.isPresent()
+                || workflow.status() != WorkflowStep.Status.LEASED
+                || workflow.leaseVersion() < operation.lease().leaseVersion()
+                || !terminalMarkerMatches(operation, workflow)) {
+            return false;
+        }
+        if (workflow.leaseVersion() == operation.lease().leaseVersion()) {
+            // version 未旋转时还必须核对数据库私有 token，避免公开 Workflow 快照
+            // 无法区分的伪造旧请求被误判为“确定未提交”。
+            return JdbcWorkflowStepStore.activeLeaseMatches(
+                    connection, operation.lease());
+        }
+        // version 增大只允许来自续租或到期重领。marker 保留了旧请求的完整私有
+        // identity；当前行仍精确携带它且 attempt 未变化，才能跨 lease 证明未提交。
+        return true;
+    }
+
+    private static boolean terminalMarkerMatches(
+            Operation operation,
+            WorkflowStep workflow) {
+        try {
+            FinalizationTerminalOperationMarker marker =
+                    FinalizationTerminalOperationMarker.decode(
+                            workflow.errorCode(),
+                            workflow.errorSummary(),
+                            operation.checkpoint());
+            if (!marker.lease().equals(operation.lease())
+                    || !marker.terminalAt().equals(operation.terminalAt())
+                    || marker.leasedAttempt() != workflow.attempt()
+                    || !marker.readyArtifacts().equals(operation.readyArtifacts())) {
+                return false;
+            }
+            if (operation.isFailure()) {
+                return marker.kind()
+                        == FinalizationTerminalOperationMarker.Kind.FAILURE
+                        && marker.leasedAttempt() == operation.leasedAttempt()
+                        && marker.failure().equals(operation.failure());
+            }
+            return marker.kind() == FinalizationTerminalOperationMarker.Kind.SUCCESS
+                    && marker.failure() == null;
+        } catch (IllegalArgumentException invalidMarker) {
+            return false;
+        }
     }
 
     private static ErrorCode mapStoredFactFailure(

@@ -2,6 +2,7 @@ package com.czur.reference.application.persistence.jdbc;
 
 import com.czur.reference.application.finalization.DeterministicMockFinalizationPlanner;
 import com.czur.reference.application.finalization.FinalizationCheckpoint;
+import com.czur.reference.application.finalization.FinalizationTerminalOperationMarker;
 import com.czur.reference.application.port.FinalizationAdmissionUnitOfWork;
 import com.czur.reference.application.port.FinalizationCompletionUnitOfWork;
 import com.czur.reference.application.port.FinalizationCompletionUnitOfWork.CompletionRequest;
@@ -137,6 +138,7 @@ class JdbcFinalizationCompletionUnitOfWorkIntegrationTest {
                 prepared.checkpoint(),
                 prepared.descriptors(),
                 ACCEPTED_AT.plusSeconds(2));
+        persistTerminalMarker(request);
         var unitOfWork = new JdbcFinalizationCompletionUnitOfWork(dataSource);
 
         FinalizationCompletionUnitOfWork.Success first = success(
@@ -180,6 +182,7 @@ class JdbcFinalizationCompletionUnitOfWorkIntegrationTest {
                         "diag-completion", "model finalization failed"),
                 ACCEPTED_AT.plusSeconds(2),
                 prepared.claimed().step().attempt());
+        persistTerminalMarker(request);
         var unitOfWork = new JdbcFinalizationCompletionUnitOfWork(dataSource);
 
         FinalizationCompletionUnitOfWork.Success first = success(unitOfWork.fail(request));
@@ -208,6 +211,7 @@ class JdbcFinalizationCompletionUnitOfWorkIntegrationTest {
                 old.checkpoint(),
                 old.descriptors(),
                 ACCEPTED_AT.plusSeconds(2));
+        persistTerminalMarker(staleRequest);
         List<WorkflowStepStore.ClaimedStep> reclaimed =
                 new JdbcWorkflowStepStore(dataSource).claim(
                         new WorkflowStepStore.ClaimRequest(
@@ -239,13 +243,41 @@ class JdbcFinalizationCompletionUnitOfWorkIntegrationTest {
                 prepared.checkpoint(),
                 prepared.descriptors(),
                 ACCEPTED_AT.plusSeconds(2));
+        persistTerminalMarker(request);
         var unitOfWork = new JdbcFinalizationCompletionUnitOfWork(dataSource);
 
         assertEquals(FinalizationCompletionUnitOfWork.ErrorCode.COMPLETION_NOT_FOUND,
                 failure(unitOfWork.recoverCompletion(request)).code());
-        assertEquals(FinalizationCompletionUnitOfWork.ErrorCode.COMPLETION_NOT_FOUND,
+        assertEquals(FinalizationCompletionUnitOfWork.ErrorCode.FACT_INCONSISTENT,
                 failure(unitOfWork.recoverFailure(failureRequest(
-                        prepared, List.of(), "failure not committed"))).code());
+                        prepared, List.of(), "different terminal kind"))).code());
+
+        Prepared failurePrepared = prepare(
+                "recover-absent-failure", false, "worker-recover-failure");
+        FailureRequest failureRequest = failureRequest(
+                failurePrepared, List.of(), "failure not committed");
+        persistTerminalMarker(failureRequest);
+        assertEquals(FinalizationCompletionUnitOfWork.ErrorCode.COMPLETION_NOT_FOUND,
+                failure(unitOfWork.recoverFailure(failureRequest)).code());
+
+        JdbcWorkflowStepStore workflow = new JdbcWorkflowStepStore(dataSource);
+        List<WorkflowStepStore.ClaimedStep> reclaimed = workflow.claim(
+                new WorkflowStepStore.ClaimRequest(
+                Set.of(FinalizationCheckpoint.STEP_TYPE),
+                "worker-recover-next",
+                request.lease().expiresAt(),
+                Duration.ofSeconds(60),
+                10));
+        assertTrue(reclaimed.stream().anyMatch(value -> value.step().key().equals(
+                request.lease().key())));
+        assertTrue(reclaimed.stream().anyMatch(value -> value.step().key().equals(
+                failureRequest.lease().key())));
+        assertEquals(FinalizationCompletionUnitOfWork.ErrorCode.COMPLETION_NOT_FOUND,
+                failure(unitOfWork.recoverCompletion(request)).code(),
+                "canonical marker must preserve the old request across lease rotation");
+        assertEquals(FinalizationCompletionUnitOfWork.ErrorCode.COMPLETION_NOT_FOUND,
+                failure(unitOfWork.recoverFailure(failureRequest)).code(),
+                "failure marker must preserve the old request across lease rotation");
 
         WorkflowStepStore.LeaseToken real = prepared.claimed().lease();
         WorkflowStepStore.LeaseToken forged = new WorkflowStepStore.LeaseToken(
@@ -259,6 +291,38 @@ class JdbcFinalizationCompletionUnitOfWorkIntegrationTest {
     }
 
     @Test
+    void preCommitRecoveryRejectsCorruptMarkerAttemptAndPrivateTokenDrift()
+            throws Exception {
+        var unitOfWork = new JdbcFinalizationCompletionUnitOfWork(dataSource);
+
+        Prepared corrupt = prepare("marker-corrupt", true, "worker-marker-corrupt");
+        CompletionRequest corruptRequest = new CompletionRequest(
+                corrupt.claimed().lease(), corrupt.checkpoint(), corrupt.descriptors(),
+                ACCEPTED_AT.plusSeconds(2));
+        persistTerminalMarker(corruptRequest);
+        corruptWorkflowMarkerPayload(corrupt.meetingId());
+        assertEquals(FinalizationCompletionUnitOfWork.ErrorCode.FACT_INCONSISTENT,
+                failure(unitOfWork.recoverCompletion(corruptRequest)).code());
+
+        Prepared attempt = prepare("marker-attempt", false, "worker-marker-attempt");
+        FailureRequest attemptRequest = failureRequest(
+                attempt, List.of(), "attempt must stay frozen");
+        persistTerminalMarker(attemptRequest);
+        incrementWorkflowAttempt(attempt.meetingId());
+        assertEquals(FinalizationCompletionUnitOfWork.ErrorCode.FACT_INCONSISTENT,
+                failure(unitOfWork.recoverFailure(attemptRequest)).code());
+
+        Prepared token = prepare("marker-token", true, "worker-marker-token");
+        CompletionRequest tokenRequest = new CompletionRequest(
+                token.claimed().lease(), token.checkpoint(), token.descriptors(),
+                ACCEPTED_AT.plusSeconds(2));
+        persistTerminalMarker(tokenRequest);
+        driftWorkflowPrivateLeaseToken(token.meetingId());
+        assertEquals(FinalizationCompletionUnitOfWork.ErrorCode.FACT_INCONSISTENT,
+                failure(unitOfWork.recoverCompletion(tokenRequest)).code());
+    }
+
+    @Test
     void recoveryRejectsMetadataOnlyPartialTerminalState() throws Exception {
         Prepared prepared = prepare("metadata-only", true, "worker-metadata-only");
         for (ArtifactDescriptor descriptor : prepared.descriptors()) {
@@ -267,6 +331,7 @@ class JdbcFinalizationCompletionUnitOfWorkIntegrationTest {
         CompletionRequest request = new CompletionRequest(
                 prepared.claimed().lease(), prepared.checkpoint(),
                 prepared.descriptors(), ACCEPTED_AT.plusSeconds(2));
+        persistTerminalMarker(request);
 
         assertEquals(FinalizationCompletionUnitOfWork.ErrorCode.FACT_INCONSISTENT,
                 failure(new JdbcFinalizationCompletionUnitOfWork(dataSource)
@@ -283,6 +348,7 @@ class JdbcFinalizationCompletionUnitOfWorkIntegrationTest {
                 prepared.checkpoint(),
                 prepared.descriptors(),
                 ACCEPTED_AT.plusSeconds(2));
+        persistTerminalMarker(request);
 
         assertEquals(FinalizationCompletionUnitOfWork.ErrorCode.ARTIFACT_CONFLICT,
                 failure(new JdbcFinalizationCompletionUnitOfWork(dataSource)
@@ -299,6 +365,7 @@ class JdbcFinalizationCompletionUnitOfWorkIntegrationTest {
         persistReadyMetadata(prepared.descriptors().getFirst());
         FailureRequest request = failureRequest(
                 prepared, List.of(), "original workflow summary");
+        persistTerminalMarker(request);
 
         assertEquals(FinalizationCompletionUnitOfWork.ErrorCode.ARTIFACT_CONFLICT,
                 failure(new JdbcFinalizationCompletionUnitOfWork(dataSource)
@@ -315,6 +382,7 @@ class JdbcFinalizationCompletionUnitOfWorkIntegrationTest {
         Prepared prepared = prepare("failure-identity", false, "worker-identity");
         FailureRequest original = failureRequest(
                 prepared, List.of(), "original workflow summary");
+        persistTerminalMarker(original);
         var unitOfWork = new JdbcFinalizationCompletionUnitOfWork(dataSource);
         success(unitOfWork.fail(original));
 
@@ -337,6 +405,7 @@ class JdbcFinalizationCompletionUnitOfWorkIntegrationTest {
             CompletionRequest completion = new CompletionRequest(
                     successPrepared.claimed().lease(), successPrepared.checkpoint(),
                     successPrepared.descriptors(), ACCEPTED_AT.plusSeconds(2));
+            persistTerminalMarker(completion);
             var failingSuccess = failingAt(point);
 
             assertEquals(FinalizationCompletionUnitOfWork.ErrorCode.INTERNAL,
@@ -354,6 +423,7 @@ class JdbcFinalizationCompletionUnitOfWorkIntegrationTest {
                     failureSuffix, false, "worker-" + failureSuffix);
             FailureRequest terminalFailure = failureRequest(
                     failurePrepared, List.of(), "rollback failure summary");
+            persistTerminalMarker(terminalFailure);
             var failingFailure = failingAt(point);
 
             assertEquals(FinalizationCompletionUnitOfWork.ErrorCode.INTERNAL,
@@ -375,6 +445,7 @@ class JdbcFinalizationCompletionUnitOfWorkIntegrationTest {
         CompletionRequest committedRequest = new CompletionRequest(
                 committed.claimed().lease(), committed.checkpoint(),
                 committed.descriptors(), ACCEPTED_AT.plusSeconds(2));
+        persistTerminalMarker(committedRequest);
         CommitUnknownHarness committedHarness = commitUnknownOnce(
                 dataSource, CommitDisposition.COMMITTED);
         var committedUnit = new JdbcFinalizationCompletionUnitOfWork(
@@ -391,6 +462,7 @@ class JdbcFinalizationCompletionUnitOfWorkIntegrationTest {
         CompletionRequest absentRequest = new CompletionRequest(
                 absent.claimed().lease(), absent.checkpoint(),
                 absent.descriptors(), ACCEPTED_AT.plusSeconds(2));
+        persistTerminalMarker(absentRequest);
         CommitUnknownHarness absentHarness = commitUnknownOnce(
                 dataSource, CommitDisposition.ROLLED_BACK);
         var absentUnit = new JdbcFinalizationCompletionUnitOfWork(
@@ -411,6 +483,7 @@ class JdbcFinalizationCompletionUnitOfWorkIntegrationTest {
         CompletionRequest request = new CompletionRequest(
                 prepared.claimed().lease(), prepared.checkpoint(),
                 prepared.descriptors(), ACCEPTED_AT.plusSeconds(2));
+        persistTerminalMarker(request);
         success(new JdbcFinalizationCompletionUnitOfWork(dataSource).complete(request));
 
         CountDownLatch meetingRead = new CountDownLatch(1);
@@ -457,6 +530,7 @@ class JdbcFinalizationCompletionUnitOfWorkIntegrationTest {
         CompletionRequest sameRequest = new CompletionRequest(
                 same.claimed().lease(), same.checkpoint(), same.descriptors(),
                 ACCEPTED_AT.plusSeconds(2));
+        persistTerminalMarker(sameRequest);
         List<FinalizationCompletionUnitOfWork.Result> sameResults = concurrently(
                 () -> new JdbcFinalizationCompletionUnitOfWork(dataSource)
                         .complete(sameRequest),
@@ -473,6 +547,7 @@ class JdbcFinalizationCompletionUnitOfWorkIntegrationTest {
         CompletionRequest ready = new CompletionRequest(
                 opposed.claimed().lease(), opposed.checkpoint(), opposed.descriptors(),
                 ACCEPTED_AT.plusSeconds(2));
+        persistTerminalMarker(ready);
         FailureRequest failed = failureRequest(
                 opposed, List.of(), "concurrent failure summary");
         List<FinalizationCompletionUnitOfWork.Result> opposedResults = concurrently(
@@ -494,6 +569,7 @@ class JdbcFinalizationCompletionUnitOfWorkIntegrationTest {
         CompletionRequest request = new CompletionRequest(
                 prepared.claimed().lease(), prepared.checkpoint(),
                 prepared.descriptors(), ACCEPTED_AT.plusSeconds(2));
+        persistTerminalMarker(request);
 
         assertEquals(FinalizationCompletionUnitOfWork.SuccessCode.COMPLETED,
                 success(new JdbcFinalizationCompletionUnitOfWork(
@@ -509,6 +585,7 @@ class JdbcFinalizationCompletionUnitOfWorkIntegrationTest {
         CompletionRequest corruptRequest = new CompletionRequest(
                 corrupt.claimed().lease(), corrupt.checkpoint(), corrupt.descriptors(),
                 ACCEPTED_AT.plusSeconds(2));
+        persistTerminalMarker(corruptRequest);
         assertEquals(FinalizationCompletionUnitOfWork.ErrorCode.FACT_INCONSISTENT,
                 failure(new JdbcFinalizationCompletionUnitOfWork(dataSource)
                         .complete(corruptRequest)).code());
@@ -527,6 +604,7 @@ class JdbcFinalizationCompletionUnitOfWorkIntegrationTest {
         CompletionRequest manifestRequest = new CompletionRequest(
                 manifest.claimed().lease(), manifest.checkpoint(), manifest.descriptors(),
                 ACCEPTED_AT.plusSeconds(2));
+        persistTerminalMarker(manifestRequest);
         var unitOfWork = new JdbcFinalizationCompletionUnitOfWork(dataSource);
         success(unitOfWork.complete(manifestRequest));
         corruptManifestHash(manifest.meetingId());
@@ -538,6 +616,7 @@ class JdbcFinalizationCompletionUnitOfWorkIntegrationTest {
         CompletionRequest artifactRequest = new CompletionRequest(
                 artifact.claimed().lease(), artifact.checkpoint(), artifact.descriptors(),
                 ACCEPTED_AT.plusSeconds(2));
+        persistTerminalMarker(artifactRequest);
         success(unitOfWork.complete(artifactRequest));
         corruptArtifactSize(artifact.descriptors().getFirst()
                 .intent().spec().artifactId());
@@ -552,6 +631,7 @@ class JdbcFinalizationCompletionUnitOfWorkIntegrationTest {
         CompletionRequest readyRequest = new CompletionRequest(
                 ready.claimed().lease(), ready.checkpoint(), ready.descriptors(),
                 ACCEPTED_AT.plusSeconds(2));
+        persistTerminalMarker(readyRequest);
         var unitOfWork = new JdbcFinalizationCompletionUnitOfWork(dataSource);
         FinalizationCompletionUnitOfWork.Success readyResult = success(
                 unitOfWork.complete(readyRequest));
@@ -570,6 +650,7 @@ class JdbcFinalizationCompletionUnitOfWorkIntegrationTest {
         CompletionRequest warningRequest = new CompletionRequest(
                 warning.claimed().lease(), warning.checkpoint(), warning.descriptors(),
                 ACCEPTED_AT.plusSeconds(2));
+        persistTerminalMarker(warningRequest);
         FinalizationCompletionUnitOfWork.Success warningResult = success(
                 unitOfWork.complete(warningRequest));
         assertEquals(ManifestStatus.READY_WITH_WARNINGS,
@@ -606,6 +687,7 @@ class JdbcFinalizationCompletionUnitOfWorkIntegrationTest {
         Prepared terminal = prepare("failure-drift", false, "worker-failure-drift");
         FailureRequest originalFailure = failureRequest(
                 terminal, List.of(), "stable summary");
+        persistTerminalMarker(originalFailure);
         var unitOfWork = new JdbcFinalizationCompletionUnitOfWork(dataSource);
         success(unitOfWork.fail(originalFailure));
         List<FailureRequest> drifted = List.of(
@@ -642,6 +724,7 @@ class JdbcFinalizationCompletionUnitOfWorkIntegrationTest {
         Prepared prepared = prepare("log-secret-sentinel", false, "worker-log-secret");
         FailureRequest request = failureRequest(
                 prepared, List.of(), "workflow-summary-secret-sentinel");
+        persistTerminalMarker(request);
         Logger application = Logger.getLogger("com.czur.reference");
         CapturingHandler capture = new CapturingHandler();
         Level previousLevel = application.getLevel();
@@ -774,6 +857,51 @@ class JdbcFinalizationCompletionUnitOfWorkIntegrationTest {
              PreparedStatement statement = connection.prepareStatement("""
                      UPDATE workflow_step
                         SET content_digest='sha256:' || repeat('9', 64)
+                      WHERE meeting_id=?
+                     """)) {
+            statement.setString(1, meetingId);
+            assertEquals(1, statement.executeUpdate());
+        }
+    }
+
+    /**
+     * Corrupts only the durable terminal marker payload for a negative recovery test.
+     *
+     * <p>The helper intentionally exposes no arbitrary SQL fragment: every mutation in this
+     * fixture is fixed in source so a caller cannot accidentally turn a test utility into a
+     * dynamic SQL execution path.</p>
+     */
+    private void corruptWorkflowMarkerPayload(String meetingId) throws Exception {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement("""
+                     UPDATE workflow_step
+                        SET error_message=error_message || '='
+                      WHERE meeting_id=?
+                     """)) {
+            statement.setString(1, meetingId);
+            assertEquals(1, statement.executeUpdate());
+        }
+    }
+
+    /** Increments the leased attempt to prove a marker cannot be replayed for another attempt. */
+    private void incrementWorkflowAttempt(String meetingId) throws Exception {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement("""
+                     UPDATE workflow_step
+                        SET attempt_count=attempt_count + 1
+                      WHERE meeting_id=?
+                     """)) {
+            statement.setString(1, meetingId);
+            assertEquals(1, statement.executeUpdate());
+        }
+    }
+
+    /** Changes the database-private lease token while preserving its public lease coordinates. */
+    private void driftWorkflowPrivateLeaseToken(String meetingId) throws Exception {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement("""
+                     UPDATE workflow_step
+                        SET lease_token=lease_token || '-drift'
                       WHERE meeting_id=?
                      """)) {
             statement.setString(1, meetingId);
@@ -927,6 +1055,51 @@ class JdbcFinalizationCompletionUnitOfWorkIntegrationTest {
                             .persistReady(descriptor).status());
             connection.commit();
         }
+    }
+
+    /**
+     * 模拟 Worker 的硬性顺序：先以完整 lease CAS durable marker，再进入 Completion。
+     * 测试辅助方法本身也通过公共 Store 端口执行，避免测试绕过真实事务语义。
+     */
+    private void persistTerminalMarker(CompletionRequest request) {
+        JdbcWorkflowStepStore store = new JdbcWorkflowStepStore(dataSource);
+        var current = store.find(request.lease().key()).orElseThrow();
+        FinalizationTerminalOperationMarker marker =
+                FinalizationTerminalOperationMarker.forCompletion(
+                        request, current.attempt());
+        var result = store.persistLeaseMarker(
+                new WorkflowStepStore.PersistLeaseMarkerRequest(
+                        request.lease(),
+                        request.completedAt(),
+                        current.errorCode(),
+                        current.errorSummary(),
+                        marker.markerCode(),
+                        marker.encodedSummary()));
+        assertTrue(result.status()
+                        == WorkflowStepStore.PersistLeaseMarkerStatus.PERSISTED
+                        || result.status()
+                        == WorkflowStepStore.PersistLeaseMarkerStatus.REPLAYED,
+                () -> "completion marker was not persisted: " + result.status());
+    }
+
+    private void persistTerminalMarker(FailureRequest request) {
+        JdbcWorkflowStepStore store = new JdbcWorkflowStepStore(dataSource);
+        var current = store.find(request.lease().key()).orElseThrow();
+        FinalizationTerminalOperationMarker marker =
+                FinalizationTerminalOperationMarker.forFailure(request);
+        var result = store.persistLeaseMarker(
+                new WorkflowStepStore.PersistLeaseMarkerRequest(
+                        request.lease(),
+                        request.failedAt(),
+                        current.errorCode(),
+                        current.errorSummary(),
+                        marker.markerCode(),
+                        marker.encodedSummary()));
+        assertTrue(result.status()
+                        == WorkflowStepStore.PersistLeaseMarkerStatus.PERSISTED
+                        || result.status()
+                        == WorkflowStepStore.PersistLeaseMarkerStatus.REPLAYED,
+                () -> "failure marker was not persisted: " + result.status());
     }
 
     private void insertExternalMetadata(String meetingId) throws Exception {
