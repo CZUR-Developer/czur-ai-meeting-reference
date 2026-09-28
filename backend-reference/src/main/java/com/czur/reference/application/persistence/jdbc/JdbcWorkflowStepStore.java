@@ -330,6 +330,57 @@ public final class JdbcWorkflowStepStore implements WorkflowStepStore {
                 .map(stored -> stored.sameDefinition(candidate));
     }
 
+    /**
+     * 在调用方事务中锁定 Workflow 行并只核对当前 lease 栅栏，不改变任何事实。
+     *
+     * <p>最终收口工作单元必须先锁 Meeting，再调用本原语锁 Workflow，之后才能
+     * 持久化 Artifact metadata 或 Manifest。这样旧、过期或已经被重领的 lease
+     * 会在第一笔业务写入之前被拒绝；事务末尾仍需调用 {@link #complete(Connection,
+     * LeaseToken, Instant)} 或 {@link #fail(Connection, LeaseToken, Instant, Instant,
+     * String, String, int)} 执行同一栅栏的终态条件更新。</p>
+     */
+    static LeaseFenceResult lockActiveLease(
+            Connection connection,
+            LeaseToken lease,
+            Instant operationAt) throws SQLException {
+        requireTransactionalConnection(connection);
+        validateLease(lease);
+        requirePersistentTimestamp("operationAt", operationAt);
+        StoredStep current = queryStored(connection, lease.key(), true).orElse(null);
+        if (current == null) {
+            return new LeaseFenceResult(LeaseFenceStatus.NOT_FOUND, null);
+        }
+        if (current.step().status() == WorkflowStep.Status.COMPLETED) {
+            return new LeaseFenceResult(
+                    LeaseFenceStatus.ALREADY_COMPLETED, current.step());
+        }
+        if (current.step().status() == WorkflowStep.Status.DEAD) {
+            return new LeaseFenceResult(LeaseFenceStatus.ALREADY_DEAD, current.step());
+        }
+        if (!owns(current, lease)) {
+            return new LeaseFenceResult(LeaseFenceStatus.NOT_OWNER, current.step());
+        }
+        if (operationAt.isBefore(current.step().updatedAt())
+                || !operationAt.isBefore(current.step().leaseUntil())) {
+            return new LeaseFenceResult(LeaseFenceStatus.LEASE_EXPIRED, current.step());
+        }
+        return new LeaseFenceResult(LeaseFenceStatus.ACTIVE, current.step());
+    }
+
+    /**
+     * 在只读恢复事务中核对完整 lease identity，包括数据库私有 token。
+     * 本方法不加锁、不更新行，也不把 token 放入返回值或日志。
+     */
+    static boolean activeLeaseMatches(
+            Connection connection,
+            LeaseToken lease) throws SQLException {
+        requireTransactionalConnection(connection);
+        validateLease(lease);
+        return queryStored(connection, lease.key(), false)
+                .map(current -> owns(current, lease))
+                .orElse(false);
+    }
+
     /** 在调用方事务连接上领取；整个批次由调用方统一提交或回滚。 */
     static List<ClaimedStep> claim(
             Connection connection,
@@ -795,5 +846,26 @@ public final class JdbcWorkflowStepStore implements WorkflowStepStore {
             WorkflowStep step,
             String token,
             LeaseToken lease) {
+    }
+
+    /** 只供同包原子工作单元使用的 lease 锁读裁决。 */
+    enum LeaseFenceStatus {
+        ACTIVE,
+        NOT_FOUND,
+        NOT_OWNER,
+        LEASE_EXPIRED,
+        ALREADY_COMPLETED,
+        ALREADY_DEAD
+    }
+
+    /** 失败状态携带当前非敏感 Workflow 快照；NOT_FOUND 不携带虚构事实。 */
+    record LeaseFenceResult(LeaseFenceStatus status, WorkflowStep step) {
+        LeaseFenceResult {
+            Objects.requireNonNull(status, "status");
+            if ((status == LeaseFenceStatus.NOT_FOUND) != (step == null)) {
+                throw new IllegalArgumentException(
+                        "only NOT_FOUND lease fence may omit workflow step");
+            }
+        }
     }
 }

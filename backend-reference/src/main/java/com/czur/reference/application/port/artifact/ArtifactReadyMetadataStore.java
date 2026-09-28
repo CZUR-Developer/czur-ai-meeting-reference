@@ -3,6 +3,7 @@ package com.czur.reference.application.port.artifact;
 import com.czur.reference.application.port.artifact.ArtifactStore.ArtifactDescriptor;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -26,6 +27,15 @@ public interface ArtifactReadyMetadataStore {
      * @return 已保存 metadata；不存在时为空
      */
     Optional<ReadyMetadata> findByArtifactId(String artifactId);
+
+    /**
+     * 按 artifactId 字典序返回同一会议已经记录的全部 READY metadata。
+     *
+     * <p>Completion 使用该全集同时拒绝 checkpoint 外额外行、遗漏 descriptor
+     * 已经存在的半状态，以及不同请求遗留的身份漂移。实现不得只按调用方给出的
+     * artifactId 逐项读取后忽略同会议其它行。</p>
+     */
+    List<ReadyMetadata> findByMeetingId(String meetingId);
 
     /**
      * 持久化一份 READY descriptor，或按四个唯一身份轴返回稳定裁决。

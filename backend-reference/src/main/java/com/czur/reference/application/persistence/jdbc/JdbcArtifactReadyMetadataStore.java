@@ -53,6 +53,14 @@ final class JdbcArtifactReadyMetadataStore implements ArtifactReadyMetadataStore
               FROM artifact
              WHERE artifact_id = ?
             """;
+    private static final String FIND_BY_MEETING_ID_SQL = """
+            SELECT artifact_id, meeting_id, artifact_type, media_type, language,
+                   revision, intent_id, storage_binding, content_size, content_checksum,
+                   recorded_at
+              FROM artifact
+             WHERE meeting_id = ?
+             ORDER BY artifact_id
+            """;
     private static final String FIND_MATCHING_AXES_SQL = """
             SELECT artifact_id, meeting_id, artifact_type, media_type, language,
                    revision, intent_id, storage_binding, content_size, content_checksum,
@@ -108,6 +116,47 @@ final class JdbcArtifactReadyMetadataStore implements ArtifactReadyMetadataStore
             throw sqlFailure("FIND", failure);
         } catch (RuntimeException failure) {
             throw runtimeFailure("FIND");
+        }
+    }
+
+    @Override
+    public List<ArtifactReadyMetadataStore.ReadyMetadata> findByMeetingId(
+            String meetingId) {
+        requireText("meetingId", meetingId);
+        requireExplicitTransaction();
+        try {
+            pinSearchPath();
+            try (PreparedStatement statement = connection.prepareStatement(
+                    FIND_BY_MEETING_ID_SQL)) {
+                statement.setString(1, meetingId);
+                try (ResultSet rows = statement.executeQuery()) {
+                    List<ArtifactReadyMetadataStore.ReadyMetadata> result =
+                            new ArrayList<>();
+                    String previousArtifactId = null;
+                    while (rows.next()) {
+                        ArtifactReadyMetadataStore.ReadyMetadata metadata =
+                                readMetadata(rows);
+                        String artifactId = metadata.artifact().intent().spec().artifactId();
+                        if (!meetingId.equals(
+                                metadata.artifact().intent().spec().meetingId())
+                                || previousArtifactId != null
+                                && previousArtifactId.compareTo(artifactId) >= 0) {
+                            throw corruptData();
+                        }
+                        previousArtifactId = artifactId;
+                        result.add(metadata);
+                    }
+                    logResult("FIND_MEETING", result.isEmpty() ? "EMPTY" : "PRESENT");
+                    return List.copyOf(result);
+                }
+            }
+        } catch (StoredFactException failure) {
+            logFailure("FIND_MEETING", failure.kind(), "N/A");
+            throw failure;
+        } catch (SQLException failure) {
+            throw sqlFailure("FIND_MEETING", failure);
+        } catch (RuntimeException failure) {
+            throw runtimeFailure("FIND_MEETING");
         }
     }
 
