@@ -276,6 +276,71 @@ class InMemoryWorkflowStepStoreTest {
     }
 
     @Test
+    void terminalMarkerChangesOnlyErrorPairAndSurvivesLeaseReclaim() {
+        InMemoryWorkflowStepStore store = store();
+        WorkflowStep step = pending("summary", "terminal-marker", PAYLOAD, DIGEST, T0);
+        store.register(step);
+        WorkflowStepStore.ClaimedStep first = store.claim(
+                claim(Set.of("summary"), "owner-a", T0, 1)).getFirst();
+        WorkflowStep before = first.step();
+        WorkflowStepStore.PersistLeaseMarkerRequest request = markerRequest(
+                first.lease(), null, null, "TERMINAL_SUCCESS_V1", "marker-payload");
+
+        WorkflowStepStore.PersistLeaseMarkerResult persisted =
+                store.persistLeaseMarker(request);
+        assertEquals(WorkflowStepStore.PersistLeaseMarkerStatus.PERSISTED,
+                persisted.status());
+        WorkflowStep marked = persisted.step();
+        assertEquals("TERMINAL_SUCCESS_V1", marked.errorCode());
+        assertEquals("marker-payload", marked.errorSummary());
+        assertEquals(before.key(), marked.key());
+        assertEquals(before.checkpointType(), marked.checkpointType());
+        assertEquals(before.canonicalPayload(), marked.canonicalPayload());
+        assertEquals(before.contentDigest(), marked.contentDigest());
+        assertEquals(before.status(), marked.status());
+        assertEquals(before.attempt(), marked.attempt());
+        assertEquals(before.nextAttemptAt(), marked.nextAttemptAt());
+        assertEquals(before.leaseOwner(), marked.leaseOwner());
+        assertEquals(before.leaseUntil(), marked.leaseUntil());
+        assertEquals(before.leaseVersion(), marked.leaseVersion());
+        assertEquals(before.updatedAt(), marked.updatedAt(),
+                "marker must not rotate the claimedAt/updatedAt fence");
+
+        assertEquals(WorkflowStepStore.PersistLeaseMarkerStatus.REPLAYED,
+                store.persistLeaseMarker(request).status());
+        assertEquals(WorkflowStepStore.PersistLeaseMarkerStatus.REPLAYED,
+                store.recoverLeaseMarker(request).status());
+
+        WorkflowStepStore.PersistLeaseMarkerRequest conflicting = markerRequest(
+                first.lease(), null, null, "TERMINAL_FAILURE_V1", "other-payload");
+        assertEquals(WorkflowStepStore.PersistLeaseMarkerStatus.CONFLICT,
+                store.persistLeaseMarker(conflicting).status());
+        assertEquals(WorkflowStepStore.PersistLeaseMarkerStatus.CONFLICT,
+                store.recoverLeaseMarker(conflicting).status());
+
+        WorkflowStepStore.LeaseToken forged = new WorkflowStepStore.LeaseToken(
+                first.lease().key(), first.lease().owner(), "forged-token",
+                first.lease().expiresAt(), first.lease().claimedAt(),
+                first.lease().leaseVersion());
+        assertEquals(WorkflowStepStore.PersistLeaseMarkerStatus.NOT_OWNER,
+                store.persistLeaseMarker(markerRequest(
+                        forged, null, null,
+                        "TERMINAL_SUCCESS_V1", "marker-payload")).status());
+
+        WorkflowStepStore.ClaimedStep reclaimed = store.claim(
+                claim(Set.of("summary"), "owner-b", first.lease().expiresAt(), 1))
+                .getFirst();
+        assertEquals(first.step().attempt(), reclaimed.step().attempt());
+        assertEquals(first.lease().leaseVersion() + 1,
+                reclaimed.lease().leaseVersion());
+        assertEquals("TERMINAL_SUCCESS_V1", reclaimed.step().errorCode());
+        assertEquals("marker-payload", reclaimed.step().errorSummary());
+        assertEquals(WorkflowStepStore.PersistLeaseMarkerStatus.NOT_OWNER,
+                store.recoverLeaseMarker(request).status(),
+                "old lease recovery must not claim that the new lease owns the marker");
+    }
+
+    @Test
     void concurrentClaimHasExactlyOneWinner() throws Exception {
         InMemoryWorkflowStepStore store = store();
         store.register(pending("summary", "concurrent", PAYLOAD, DIGEST, T0));
@@ -392,5 +457,20 @@ class InMemoryWorkflowStepStoreTest {
             int limit) {
         return new WorkflowStepStore.ClaimRequest(
                 types, owner, now, Duration.ofSeconds(10), limit);
+    }
+
+    private static WorkflowStepStore.PersistLeaseMarkerRequest markerRequest(
+            WorkflowStepStore.LeaseToken lease,
+            String expectedCode,
+            String expectedSummary,
+            String markerCode,
+            String markerSummary) {
+        return new WorkflowStepStore.PersistLeaseMarkerRequest(
+                lease,
+                lease.claimedAt().plusSeconds(1),
+                expectedCode,
+                expectedSummary,
+                markerCode,
+                markerSummary);
     }
 }

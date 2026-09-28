@@ -5,6 +5,9 @@ import com.czur.reference.application.port.WorkflowStepStore;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
+import javax.sql.DataSource;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -21,6 +24,7 @@ import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -148,6 +152,104 @@ class JdbcWorkflowStepStoreIntegrationTest {
                     store.complete(ownerB, ownerB.claimedAt().plusSeconds(1)).status());
             assertEquals(WorkflowStepStore.CompleteStatus.ALREADY_COMPLETED,
                     store.complete(ownerA, ownerA.expiresAt().plusSeconds(2)).status());
+        } finally {
+            dropSchema(schema);
+        }
+    }
+
+    @Test
+    void terminalMarkerUsesPhysicalTwoColumnCasAndSurvivesReclaim() throws Exception {
+        String schema = createSchema();
+        try (JdbcDatabaseRuntime runtime = runtime(schema)) {
+            insertMeeting(runtime.dataSource(), "meeting-jdbc-workflow");
+            JdbcWorkflowStepStore store = runtime.workflowStepStore();
+            WorkflowStep step = pending("summary", "terminal-marker", T0);
+            store.register(step);
+            WorkflowStepStore.ClaimedStep first =
+                    store.claim(request("worker-a", T0, 1)).getFirst();
+            WorkflowPhysicalSnapshot before = readWorkflowPhysicalSnapshot(
+                    runtime.dataSource(), step.key());
+            WorkflowStepStore.PersistLeaseMarkerRequest marker = markerRequest(
+                    first.lease(), null, null,
+                    "TERMINAL_SUCCESS_V1", "canonical-marker-payload");
+
+            WorkflowStepStore.PersistLeaseMarkerResult persisted =
+                    store.persistLeaseMarker(marker);
+            assertEquals(WorkflowStepStore.PersistLeaseMarkerStatus.PERSISTED,
+                    persisted.status());
+            WorkflowPhysicalSnapshot after = readWorkflowPhysicalSnapshot(
+                    runtime.dataSource(), step.key());
+            assertEquals(before.nonMarkerColumns(), after.nonMarkerColumns(),
+                    "marker CAS must not change status, schedule, attempt or any lease fence");
+            assertEquals("TERMINAL_SUCCESS_V1", after.errorCode());
+            assertEquals("canonical-marker-payload", after.errorSummary());
+            assertEquals(first.step().updatedAt(), persisted.step().updatedAt());
+            assertEquals(first.step().attempt(), persisted.step().attempt());
+            assertEquals(first.step().leaseVersion(), persisted.step().leaseVersion());
+
+            assertEquals(WorkflowStepStore.PersistLeaseMarkerStatus.REPLAYED,
+                    store.persistLeaseMarker(marker).status());
+            assertEquals(WorkflowStepStore.PersistLeaseMarkerStatus.REPLAYED,
+                    store.recoverLeaseMarker(marker).status());
+            assertEquals(WorkflowStepStore.PersistLeaseMarkerStatus.CONFLICT,
+                    store.persistLeaseMarker(markerRequest(
+                            first.lease(), null, null,
+                            "TERMINAL_FAILURE_V1", "different-marker")).status());
+
+            WorkflowStepStore.LeaseToken forged = new WorkflowStepStore.LeaseToken(
+                    first.lease().key(), first.lease().owner(), "forged-token",
+                    first.lease().expiresAt(), first.lease().claimedAt(),
+                    first.lease().leaseVersion());
+            assertEquals(WorkflowStepStore.PersistLeaseMarkerStatus.NOT_OWNER,
+                    store.persistLeaseMarker(markerRequest(
+                            forged, null, null,
+                            "TERMINAL_SUCCESS_V1", "canonical-marker-payload")).status());
+
+            WorkflowStepStore.ClaimedStep reclaimed = store.claim(
+                    request("worker-b", first.lease().expiresAt(), 1)).getFirst();
+            assertEquals("TERMINAL_SUCCESS_V1", reclaimed.step().errorCode());
+            assertEquals("canonical-marker-payload", reclaimed.step().errorSummary());
+            assertEquals(first.lease().leaseVersion() + 1,
+                    reclaimed.lease().leaseVersion());
+            assertEquals(WorkflowStepStore.PersistLeaseMarkerStatus.NOT_OWNER,
+                    store.recoverLeaseMarker(marker).status());
+        } finally {
+            dropSchema(schema);
+        }
+    }
+
+    @Test
+    void commitAcknowledgementUnknownRecoversMarkerUsingFreshReadOnlyConnection()
+            throws Exception {
+        String schema = createSchema();
+        try (JdbcDatabaseRuntime runtime = runtime(schema)) {
+            insertMeeting(runtime.dataSource(), "meeting-jdbc-workflow");
+            JdbcWorkflowStepStore setup = runtime.workflowStepStore();
+            WorkflowStep step = pending("summary", "commit-unknown", T0);
+            setup.register(step);
+            WorkflowStepStore.ClaimedStep claimed =
+                    setup.claim(request("worker-a", T0, 1)).getFirst();
+            WorkflowStepStore.PersistLeaseMarkerRequest marker = markerRequest(
+                    claimed.lease(), null, null,
+                    "TERMINAL_SUCCESS_V1", "commit-unknown-marker");
+            AtomicInteger connections = new AtomicInteger();
+            AtomicInteger readOnlyConnections = new AtomicInteger();
+            AtomicInteger repeatableReadConnections = new AtomicInteger();
+            DataSource faulting = commitUnknownOnce(
+                    runtime.dataSource(), connections,
+                    readOnlyConnections, repeatableReadConnections);
+            JdbcWorkflowStepStore store = new JdbcWorkflowStepStore(faulting);
+
+            assertEquals(WorkflowStepStore.PersistLeaseMarkerStatus.OUTCOME_UNKNOWN,
+                    store.persistLeaseMarker(marker).status());
+            assertEquals(1, connections.get(),
+                    "unknown outcome must abandon the write connection");
+            assertEquals(WorkflowStepStore.PersistLeaseMarkerStatus.REPLAYED,
+                    store.recoverLeaseMarker(marker).status());
+            assertEquals(2, connections.get(),
+                    "recovery must acquire a fresh connection");
+            assertEquals(1, readOnlyConnections.get());
+            assertEquals(1, repeatableReadConnections.get());
         } finally {
             dropSchema(schema);
         }
@@ -428,6 +530,21 @@ class JdbcWorkflowStepStoreIntegrationTest {
                 Set.of("summary"), owner, now, Duration.ofSeconds(10), limit);
     }
 
+    private static WorkflowStepStore.PersistLeaseMarkerRequest markerRequest(
+            WorkflowStepStore.LeaseToken lease,
+            String expectedCode,
+            String expectedSummary,
+            String markerCode,
+            String markerSummary) {
+        return new WorkflowStepStore.PersistLeaseMarkerRequest(
+                lease,
+                lease.claimedAt().plusSeconds(1),
+                expectedCode,
+                expectedSummary,
+                markerCode,
+                markerSummary);
+    }
+
     private static JdbcDatabaseRuntime runtime(String schema) {
         return JdbcDatabaseRuntime.start(DatabaseRuntimeConfig.of(
                 scopedUrl(schema), required("REFERENCE_TEST_DATABASE_USER"),
@@ -436,7 +553,7 @@ class JdbcWorkflowStepStoreIntegrationTest {
     }
 
     private static String createSchema() throws Exception {
-        return createSchema(10);
+        return createSchema(11);
     }
 
     private static String createSchema(int migrationCount) throws Exception {
@@ -450,7 +567,8 @@ class JdbcWorkflowStepStoreIntegrationTest {
                 "V003__identity_entitlement.sql", "V004__meeting_event_envelope.sql",
                 "V005__meeting_finalization_fact.sql", "V006__meeting_read_model.sql",
                 "V007__meeting_manifest_revision.sql", "V008__durable_input_fact.sql",
-                "V009__final_usage_fact.sql", "V010__workflow_step_fencing.sql");
+                "V009__final_usage_fact.sql", "V010__workflow_step_fencing.sql",
+                "V011__finalization_execution_artifact_ready.sql");
         try {
             for (int i = 0; i < migrationCount; i++) {
                 try (Connection connection = DriverManager.getConnection(scopedUrl(schema),
@@ -511,6 +629,97 @@ class JdbcWorkflowStepStoreIntegrationTest {
                 return value;
             }
         }
+    }
+
+    private static WorkflowPhysicalSnapshot readWorkflowPhysicalSnapshot(
+            DataSource dataSource,
+            WorkflowStep.Key key) throws Exception {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement("""
+                     SELECT (to_jsonb(workflow_step)
+                              - 'error_code' - 'error_message')::text,
+                            error_code, error_message
+                       FROM workflow_step
+                      WHERE meeting_id = ? AND step_type = ? AND step_key = ?
+                     """)) {
+            statement.setString(1, key.meetingId());
+            statement.setString(2, key.stepType());
+            statement.setString(3, key.stepKey());
+            try (var rows = statement.executeQuery()) {
+                if (!rows.next()) {
+                    throw new IllegalStateException("workflow step fixture not found");
+                }
+                WorkflowPhysicalSnapshot value = new WorkflowPhysicalSnapshot(
+                        rows.getString(1), rows.getString(2), rows.getString(3));
+                if (rows.next()) {
+                    throw new IllegalStateException("workflow step fixture is not unique");
+                }
+                return value;
+            }
+        }
+    }
+
+    /**
+     * Returns a DataSource whose first connection commits successfully and then loses the
+     * acknowledgement. Later connections are normal but record the read-only recovery contract.
+     */
+    private static DataSource commitUnknownOnce(
+            DataSource delegate,
+            AtomicInteger connections,
+            AtomicInteger readOnlyConnections,
+            AtomicInteger repeatableReadConnections) {
+        return (DataSource) Proxy.newProxyInstance(
+                JdbcWorkflowStepStoreIntegrationTest.class.getClassLoader(),
+                new Class<?>[]{DataSource.class},
+                (proxy, method, arguments) -> {
+                    try {
+                        Object result = method.invoke(delegate, arguments);
+                        if (!method.getName().equals("getConnection")) {
+                            return result;
+                        }
+                        int index = connections.incrementAndGet();
+                        Connection connection = (Connection) result;
+                        return Proxy.newProxyInstance(
+                                JdbcWorkflowStepStoreIntegrationTest.class.getClassLoader(),
+                                new Class<?>[]{Connection.class},
+                                (connectionProxy, connectionMethod, connectionArguments) -> {
+                                    try {
+                                        if (connectionMethod.getName().equals("commit")
+                                                && index == 1) {
+                                            connection.commit();
+                                            throw new java.sql.SQLException(
+                                                    "injected acknowledgement loss", "08006");
+                                        }
+                                        if (connectionMethod.getName().equals("setReadOnly")
+                                                && Boolean.TRUE.equals(connectionArguments[0])) {
+                                            readOnlyConnections.incrementAndGet();
+                                        }
+                                        if (connectionMethod.getName().equals(
+                                                "setTransactionIsolation")
+                                                && ((Integer) connectionArguments[0])
+                                                == Connection.TRANSACTION_REPEATABLE_READ) {
+                                            repeatableReadConnections.incrementAndGet();
+                                        }
+                                        if (connectionMethod.getName().equals("abort")) {
+                                            connection.close();
+                                            return null;
+                                        }
+                                        return connectionMethod.invoke(
+                                                connection, connectionArguments);
+                                    } catch (InvocationTargetException failure) {
+                                        throw failure.getCause();
+                                    }
+                                });
+                    } catch (InvocationTargetException failure) {
+                        throw failure.getCause();
+                    }
+                });
+    }
+
+    private record WorkflowPhysicalSnapshot(
+            String nonMarkerColumns,
+            String errorCode,
+            String errorSummary) {
     }
 
     private static String readMigration(String filename) throws Exception {

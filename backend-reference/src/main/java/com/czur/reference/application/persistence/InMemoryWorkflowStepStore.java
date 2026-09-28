@@ -174,6 +174,88 @@ public final class InMemoryWorkflowStepStore implements WorkflowStepStore {
     }
 
     @Override
+    public PersistLeaseMarkerResult persistLeaseMarker(
+            PersistLeaseMarkerRequest request) {
+        Objects.requireNonNull(request, "request");
+        synchronized (mutex) {
+            Entry entry = entries.get(request.lease().key());
+            PersistLeaseMarkerStatus terminal = markerTerminal(entry);
+            if (terminal != null) {
+                return new PersistLeaseMarkerResult(
+                        terminal, entry == null ? null : entry.step);
+            }
+            if (!owns(entry, request.lease())) {
+                return new PersistLeaseMarkerResult(
+                        PersistLeaseMarkerStatus.NOT_OWNER, entry.step);
+            }
+            if (request.markedAt().isBefore(entry.step.updatedAt())
+                    || !request.markedAt().isBefore(entry.step.leaseUntil())) {
+                return new PersistLeaseMarkerResult(
+                        PersistLeaseMarkerStatus.LEASE_EXPIRED, entry.step);
+            }
+            if (markerEquals(
+                    entry.step, request.markerCode(), request.markerSummary())) {
+                return new PersistLeaseMarkerResult(
+                        PersistLeaseMarkerStatus.REPLAYED, entry.step);
+            }
+            if (!markerEquals(
+                    entry.step,
+                    request.expectedErrorCode(),
+                    request.expectedErrorSummary())) {
+                return new PersistLeaseMarkerResult(
+                        PersistLeaseMarkerStatus.CONFLICT, entry.step);
+            }
+            WorkflowStep marked = new WorkflowStep(
+                    entry.step.key(),
+                    entry.step.checkpointType(),
+                    entry.step.canonicalPayload(),
+                    entry.step.contentDigest(),
+                    entry.step.status(),
+                    entry.step.attempt(),
+                    entry.step.nextAttemptAt(),
+                    entry.step.leaseOwner(),
+                    entry.step.leaseUntil(),
+                    entry.step.leaseVersion(),
+                    request.markerCode(),
+                    request.markerSummary(),
+                    entry.step.updatedAt());
+            entry.step = marked;
+            LOGGER.log(Level.FINE,
+                    "内存工作流终态操作 marker 已持久化 status=PERSISTED");
+            return new PersistLeaseMarkerResult(
+                    PersistLeaseMarkerStatus.PERSISTED, marked);
+        }
+    }
+
+    @Override
+    public PersistLeaseMarkerResult recoverLeaseMarker(
+            PersistLeaseMarkerRequest request) {
+        Objects.requireNonNull(request, "request");
+        synchronized (mutex) {
+            Entry entry = entries.get(request.lease().key());
+            PersistLeaseMarkerStatus terminal = markerTerminal(entry);
+            if (terminal != null) {
+                return new PersistLeaseMarkerResult(
+                        terminal, entry == null ? null : entry.step);
+            }
+            if (!owns(entry, request.lease())) {
+                return new PersistLeaseMarkerResult(
+                        PersistLeaseMarkerStatus.NOT_OWNER, entry.step);
+            }
+            if (request.markedAt().isBefore(entry.step.updatedAt())
+                    || !request.markedAt().isBefore(entry.step.leaseUntil())) {
+                return new PersistLeaseMarkerResult(
+                        PersistLeaseMarkerStatus.LEASE_EXPIRED, entry.step);
+            }
+            PersistLeaseMarkerStatus status = markerEquals(
+                    entry.step, request.markerCode(), request.markerSummary())
+                    ? PersistLeaseMarkerStatus.REPLAYED
+                    : PersistLeaseMarkerStatus.CONFLICT;
+            return new PersistLeaseMarkerResult(status, entry.step);
+        }
+    }
+
+    @Override
     public CompleteResult complete(LeaseToken lease, Instant completedAt) {
         Objects.requireNonNull(lease, "lease");
         Objects.requireNonNull(completedAt, "completedAt");
@@ -301,6 +383,27 @@ public final class InMemoryWorkflowStepStore implements WorkflowStepStore {
         }
         if (entry.step.status() == WorkflowStep.Status.DEAD) return FailStatus.ALREADY_DEAD;
         return null;
+    }
+
+    private static PersistLeaseMarkerStatus markerTerminal(Entry entry) {
+        if (entry == null) {
+            return PersistLeaseMarkerStatus.NOT_FOUND;
+        }
+        if (entry.step.status() == WorkflowStep.Status.COMPLETED) {
+            return PersistLeaseMarkerStatus.ALREADY_COMPLETED;
+        }
+        if (entry.step.status() == WorkflowStep.Status.DEAD) {
+            return PersistLeaseMarkerStatus.ALREADY_DEAD;
+        }
+        return null;
+    }
+
+    private static boolean markerEquals(
+            WorkflowStep step,
+            String code,
+            String summary) {
+        return Objects.equals(step.errorCode(), code)
+                && Objects.equals(step.errorSummary(), summary);
     }
 
     private static void requireInitial(WorkflowStep candidate) {

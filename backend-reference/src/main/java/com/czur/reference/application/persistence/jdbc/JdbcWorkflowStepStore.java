@@ -83,6 +83,16 @@ public final class JdbcWorkflowStepStore implements WorkflowStepStore {
                AND lease_version = ? AND lease_until = ? AND updated_at = ?
                AND lease_until > ? AND ? > lease_until
             """;
+    private static final String PERSIST_LEASE_MARKER_SQL = """
+            UPDATE workflow_step
+               SET error_code = ?, error_message = ?
+             WHERE meeting_id = ? AND step_type = ? AND step_key = ?
+               AND status = 'LEASED' AND lease_owner = ? AND lease_token = ?
+               AND lease_version = ? AND lease_until = ? AND updated_at = ?
+               AND error_code IS NOT DISTINCT FROM CAST(? AS text)
+               AND error_message IS NOT DISTINCT FROM CAST(? AS text)
+               AND updated_at <= ? AND lease_until > ?
+            """;
     private static final String COMPLETE_SQL = """
             UPDATE workflow_step
                SET status = 'COMPLETED', next_attempt_at = NULL, lease_owner = NULL,
@@ -201,6 +211,100 @@ public final class JdbcWorkflowStepStore implements WorkflowStepStore {
             }
         } catch (SQLException failure) {
             throw sanitized("创建工作流步骤数据库连接失败");
+        }
+    }
+
+    @Override
+    public PersistLeaseMarkerResult persistLeaseMarker(
+            PersistLeaseMarkerRequest request) {
+        validateMarkerRequest(request);
+        Connection connection = null;
+        boolean previousAutoCommit = true;
+        boolean transactionStarted = false;
+        boolean commitStarted = false;
+        boolean commitCompleted = false;
+        try {
+            connection = dataSource.getConnection();
+            previousAutoCommit = connection.getAutoCommit();
+            connection.setAutoCommit(false);
+            transactionStarted = true;
+            PersistLeaseMarkerResult result = persistLeaseMarker(connection, request);
+            if (result.status() != PersistLeaseMarkerStatus.PERSISTED) {
+                // 没有写入时用 rollback 结束锁读事务；无需把只读事务的 commit
+                // acknowledgement 故障误报为 marker 写入结果未知。
+                connection.rollback();
+                transactionStarted = false;
+                return result;
+            }
+            commitStarted = true;
+            connection.commit();
+            commitCompleted = true;
+            LOGGER.log(Level.FINE, "JDBC 工作流终态操作 marker 已持久化");
+            return result;
+        } catch (SQLException | RuntimeException failure) {
+            if (commitStarted) {
+                LOGGER.log(Level.WARNING,
+                        "JDBC 工作流终态操作 marker 提交结果未知");
+                return new PersistLeaseMarkerResult(
+                        PersistLeaseMarkerStatus.OUTCOME_UNKNOWN, null);
+            }
+            if (transactionStarted) {
+                rollbackQuietly(connection);
+            }
+            LOGGER.log(Level.WARNING,
+                    "JDBC 工作流终态操作 marker 暂不可写");
+            return new PersistLeaseMarkerResult(
+                    PersistLeaseMarkerStatus.STORAGE_UNAVAILABLE, null);
+        } finally {
+            if (commitStarted && !commitCompleted) {
+                abortQuietly(connection);
+            } else {
+                restoreAutoCommitQuietly(connection, previousAutoCommit);
+            }
+            closeQuietly(connection);
+        }
+    }
+
+    @Override
+    public PersistLeaseMarkerResult recoverLeaseMarker(
+            PersistLeaseMarkerRequest request) {
+        validateMarkerRequest(request);
+        Connection connection = null;
+        boolean previousAutoCommit = true;
+        boolean previousReadOnly = false;
+        int previousIsolation = Connection.TRANSACTION_READ_COMMITTED;
+        boolean transactionStarted = false;
+        try {
+            connection = dataSource.getConnection();
+            previousAutoCommit = connection.getAutoCommit();
+            previousReadOnly = connection.isReadOnly();
+            previousIsolation = connection.getTransactionIsolation();
+            connection.setReadOnly(true);
+            connection.setAutoCommit(false);
+            connection.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+            transactionStarted = true;
+
+            StoredStep current = queryStored(
+                    connection, request.lease().key(), false).orElse(null);
+            PersistLeaseMarkerResult result = recoverLeaseMarker(current, request);
+            connection.rollback();
+            transactionStarted = false;
+            return result;
+        } catch (SQLException | RuntimeException failure) {
+            if (transactionStarted) {
+                rollbackQuietly(connection);
+            }
+            LOGGER.log(Level.WARNING,
+                    "JDBC 工作流终态操作 marker 只读恢复暂不可用");
+            return new PersistLeaseMarkerResult(
+                    PersistLeaseMarkerStatus.STORAGE_UNAVAILABLE, null);
+        } finally {
+            restoreReadOnlyQuietly(
+                    connection,
+                    previousAutoCommit,
+                    previousReadOnly,
+                    previousIsolation);
+            closeQuietly(connection);
         }
     }
 
@@ -493,6 +597,68 @@ public final class JdbcWorkflowStepStore implements WorkflowStepStore {
         return new RenewResult(RenewStatus.RENEWED, next, rotated);
     }
 
+    /**
+     * 在调用方事务内以完整 lease 栅栏 CAS marker；只修改错误字段。
+     *
+     * <p>特别不能更新 {@code updated_at}：该列同时是 claimedAt 栅栏，修改它会让
+     * 已经发给 Worker 的 LeaseToken 立即失效，也会破坏后续对旧终态请求的恢复。</p>
+     */
+    static PersistLeaseMarkerResult persistLeaseMarker(
+            Connection connection,
+            PersistLeaseMarkerRequest request) throws SQLException {
+        requireTransactionalConnection(connection);
+        validateMarkerRequest(request);
+        StoredStep current = queryStored(
+                connection, request.lease().key(), true).orElse(null);
+        if (current == null) {
+            return new PersistLeaseMarkerResult(
+                    PersistLeaseMarkerStatus.NOT_FOUND, null);
+        }
+        PersistLeaseMarkerStatus terminal = markerTerminal(current.step());
+        if (terminal != null) {
+            return new PersistLeaseMarkerResult(terminal, current.step());
+        }
+        if (!owns(current, request.lease())) {
+            return new PersistLeaseMarkerResult(
+                    PersistLeaseMarkerStatus.NOT_OWNER, current.step());
+        }
+        if (request.markedAt().isBefore(current.step().updatedAt())
+                || !request.markedAt().isBefore(current.step().leaseUntil())) {
+            return new PersistLeaseMarkerResult(
+                    PersistLeaseMarkerStatus.LEASE_EXPIRED, current.step());
+        }
+        if (markerEquals(current.step(), request.markerCode(), request.markerSummary())) {
+            return new PersistLeaseMarkerResult(
+                    PersistLeaseMarkerStatus.REPLAYED, current.step());
+        }
+        if (!markerEquals(
+                current.step(),
+                request.expectedErrorCode(),
+                request.expectedErrorSummary())) {
+            return new PersistLeaseMarkerResult(
+                    PersistLeaseMarkerStatus.CONFLICT, current.step());
+        }
+        try (PreparedStatement update = connection.prepareStatement(
+                PERSIST_LEASE_MARKER_SQL)) {
+            update.setString(1, request.markerCode());
+            update.setString(2, request.markerSummary());
+            bindKey(update, 3, request.lease().key());
+            update.setString(6, request.lease().owner());
+            update.setString(7, request.lease().token());
+            update.setLong(8, request.lease().leaseVersion());
+            update.setTimestamp(9, Timestamp.from(request.lease().expiresAt()));
+            update.setTimestamp(10, Timestamp.from(request.lease().claimedAt()));
+            update.setString(11, request.expectedErrorCode());
+            update.setString(12, request.expectedErrorSummary());
+            update.setTimestamp(13, Timestamp.from(request.markedAt()));
+            update.setTimestamp(14, Timestamp.from(request.markedAt()));
+            requireSingleFencedUpdate(update, "持久化终态操作 marker");
+        }
+        WorkflowStep marked = readCurrent(connection, request.lease().key()).step();
+        return new PersistLeaseMarkerResult(
+                PersistLeaseMarkerStatus.PERSISTED, marked);
+    }
+
     /** 在调用方事务连接上完成；终态不可逆。 */
     static CompleteResult complete(
             Connection connection,
@@ -679,6 +845,44 @@ public final class JdbcWorkflowStepStore implements WorkflowStepStore {
                 && lease.claimedAt().equals(step.updatedAt());
     }
 
+    private static PersistLeaseMarkerResult recoverLeaseMarker(
+            StoredStep current,
+            PersistLeaseMarkerRequest request) {
+        if (current == null) {
+            return new PersistLeaseMarkerResult(
+                    PersistLeaseMarkerStatus.NOT_FOUND, null);
+        }
+        PersistLeaseMarkerStatus terminal = markerTerminal(current.step());
+        if (terminal != null) {
+            return new PersistLeaseMarkerResult(terminal, current.step());
+        }
+        if (!owns(current, request.lease())) {
+            return new PersistLeaseMarkerResult(
+                    PersistLeaseMarkerStatus.NOT_OWNER, current.step());
+        }
+        PersistLeaseMarkerStatus status = markerEquals(
+                current.step(), request.markerCode(), request.markerSummary())
+                ? PersistLeaseMarkerStatus.REPLAYED
+                : PersistLeaseMarkerStatus.CONFLICT;
+        return new PersistLeaseMarkerResult(status, current.step());
+    }
+
+    private static PersistLeaseMarkerStatus markerTerminal(WorkflowStep step) {
+        return switch (step.status()) {
+            case COMPLETED -> PersistLeaseMarkerStatus.ALREADY_COMPLETED;
+            case DEAD -> PersistLeaseMarkerStatus.ALREADY_DEAD;
+            default -> null;
+        };
+    }
+
+    private static boolean markerEquals(
+            WorkflowStep step,
+            String code,
+            String summary) {
+        return Objects.equals(step.errorCode(), code)
+                && Objects.equals(step.errorSummary(), summary);
+    }
+
     private static RenewStatus renewTerminal(WorkflowStep step) {
         return switch (step.status()) {
             case COMPLETED -> RenewStatus.ALREADY_COMPLETED;
@@ -729,6 +933,12 @@ public final class JdbcWorkflowStepStore implements WorkflowStepStore {
         Objects.requireNonNull(lease, "lease");
         requirePersistentTimestamp("lease claimedAt", lease.claimedAt());
         requirePersistentTimestamp("lease expiresAt", lease.expiresAt());
+    }
+
+    private static void validateMarkerRequest(PersistLeaseMarkerRequest request) {
+        Objects.requireNonNull(request, "request");
+        validateLease(request.lease());
+        requirePersistentTimestamp("markedAt", request.markedAt());
     }
 
     private static void bindKey(
@@ -815,10 +1025,70 @@ public final class JdbcWorkflowStepStore implements WorkflowStepStore {
     }
 
     private static void rollbackQuietly(Connection connection) {
+        if (connection == null) {
+            return;
+        }
         try {
             connection.rollback();
         } catch (SQLException ignored) {
             LOGGER.log(Level.WARNING, "JDBC 工作流步骤事务回滚失败");
+        }
+    }
+
+    private static void abortQuietly(Connection connection) {
+        if (connection == null) {
+            return;
+        }
+        try {
+            connection.abort(Runnable::run);
+        } catch (SQLException | RuntimeException ignored) {
+            LOGGER.log(Level.WARNING,
+                    "JDBC 工作流终态操作 marker 未确认连接废弃失败");
+        }
+    }
+
+    private static void restoreAutoCommitQuietly(
+            Connection connection,
+            boolean autoCommit) {
+        if (connection == null) {
+            return;
+        }
+        try {
+            if (!connection.isClosed()) {
+                connection.setAutoCommit(autoCommit);
+            }
+        } catch (SQLException | RuntimeException ignored) {
+            LOGGER.log(Level.WARNING, "JDBC 工作流连接状态恢复失败");
+        }
+    }
+
+    private static void restoreReadOnlyQuietly(
+            Connection connection,
+            boolean autoCommit,
+            boolean readOnly,
+            int isolation) {
+        if (connection == null) {
+            return;
+        }
+        try {
+            if (!connection.isClosed()) {
+                connection.setAutoCommit(autoCommit);
+                connection.setTransactionIsolation(isolation);
+                connection.setReadOnly(readOnly);
+            }
+        } catch (SQLException | RuntimeException ignored) {
+            LOGGER.log(Level.WARNING, "JDBC 工作流只读连接状态恢复失败");
+        }
+    }
+
+    private static void closeQuietly(Connection connection) {
+        if (connection == null) {
+            return;
+        }
+        try {
+            connection.close();
+        } catch (SQLException | RuntimeException ignored) {
+            LOGGER.log(Level.WARNING, "JDBC 工作流连接关闭失败");
         }
     }
 

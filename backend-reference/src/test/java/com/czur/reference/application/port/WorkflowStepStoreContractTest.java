@@ -131,6 +131,83 @@ class WorkflowStepStoreContractTest {
                         WorkflowStepStore.RegisterStatus.APPLIED, null));
     }
 
+    @Test
+    void terminalMarkerRequestFreezesLeaseIntervalExpectedPairAndRedaction() {
+        WorkflowStep step = pending("summary", "marker", NOW);
+        WorkflowStepStore.LeaseToken lease = new WorkflowStepStore.LeaseToken(
+                step.key(), "marker-owner-sensitive", "marker-token-sensitive",
+                NOW.plusSeconds(10), NOW, 1);
+        WorkflowStepStore.PersistLeaseMarkerRequest request =
+                new WorkflowStepStore.PersistLeaseMarkerRequest(
+                        lease, NOW.plusSeconds(1),
+                        "expected-code-sensitive", "expected-summary-sensitive",
+                        "marker-code-sensitive", "marker-summary-sensitive");
+
+        String diagnostics = request.toString();
+        for (String secret : new String[]{
+                "marker-owner-sensitive", "marker-token-sensitive",
+                "expected-code-sensitive", "expected-summary-sensitive",
+                "marker-code-sensitive", "marker-summary-sensitive"}) {
+            assertFalse(diagnostics.contains(secret));
+        }
+        assertTrue(diagnostics.contains("redacted"));
+
+        assertThrows(IllegalArgumentException.class,
+                () -> new WorkflowStepStore.PersistLeaseMarkerRequest(
+                        lease, NOW.minusNanos(1), null, null, "CODE", "summary"));
+        assertThrows(IllegalArgumentException.class,
+                () -> new WorkflowStepStore.PersistLeaseMarkerRequest(
+                        lease, lease.expiresAt(), null, null, "CODE", "summary"));
+        assertThrows(IllegalArgumentException.class,
+                () -> new WorkflowStepStore.PersistLeaseMarkerRequest(
+                        lease, NOW.plusSeconds(1), "expected", null,
+                        "CODE", "summary"));
+        assertThrows(IllegalArgumentException.class,
+                () -> new WorkflowStepStore.PersistLeaseMarkerRequest(
+                        lease, NOW.plusSeconds(1), null, null, " ", "summary"));
+    }
+
+    @Test
+    void terminalMarkerResultsRejectContradictorySnapshots() {
+        WorkflowStep pending = pending("summary", "marker-result", NOW);
+        WorkflowStep leased = new WorkflowStep(
+                pending.key(), pending.checkpointType(), PAYLOAD, DIGEST,
+                WorkflowStep.Status.LEASED, 0, null,
+                "owner", NOW.plusSeconds(10), 1,
+                "MARKER", "payload", NOW);
+        WorkflowStep completed = new WorkflowStep(
+                pending.key(), pending.checkpointType(), PAYLOAD, DIGEST,
+                WorkflowStep.Status.COMPLETED, 0, null,
+                null, null, 1, null, null, NOW.plusSeconds(1));
+
+        new WorkflowStepStore.PersistLeaseMarkerResult(
+                WorkflowStepStore.PersistLeaseMarkerStatus.PERSISTED, leased);
+        new WorkflowStepStore.PersistLeaseMarkerResult(
+                WorkflowStepStore.PersistLeaseMarkerStatus.REPLAYED, leased);
+        new WorkflowStepStore.PersistLeaseMarkerResult(
+                WorkflowStepStore.PersistLeaseMarkerStatus.NOT_FOUND, null);
+        new WorkflowStepStore.PersistLeaseMarkerResult(
+                WorkflowStepStore.PersistLeaseMarkerStatus.STORAGE_UNAVAILABLE, null);
+        new WorkflowStepStore.PersistLeaseMarkerResult(
+                WorkflowStepStore.PersistLeaseMarkerStatus.OUTCOME_UNKNOWN, null);
+
+        assertThrows(IllegalArgumentException.class,
+                () -> new WorkflowStepStore.PersistLeaseMarkerResult(
+                        WorkflowStepStore.PersistLeaseMarkerStatus.PERSISTED, pending));
+        assertThrows(IllegalArgumentException.class,
+                () -> new WorkflowStepStore.PersistLeaseMarkerResult(
+                        WorkflowStepStore.PersistLeaseMarkerStatus.NOT_FOUND, leased));
+        assertThrows(IllegalArgumentException.class,
+                () -> new WorkflowStepStore.PersistLeaseMarkerResult(
+                        WorkflowStepStore.PersistLeaseMarkerStatus.CONFLICT, completed));
+        assertThrows(IllegalArgumentException.class,
+                () -> new WorkflowStepStore.PersistLeaseMarkerResult(
+                        WorkflowStepStore.PersistLeaseMarkerStatus.LEASE_EXPIRED, pending));
+        assertThrows(IllegalArgumentException.class,
+                () -> new WorkflowStepStore.PersistLeaseMarkerResult(
+                        WorkflowStepStore.PersistLeaseMarkerStatus.OUTCOME_UNKNOWN, leased));
+    }
+
     private static WorkflowStep pending(String type, String stepKey, Instant nextAttemptAt) {
         return WorkflowStep.pending(
                 new WorkflowStep.Key(MEETING, type, stepKey),

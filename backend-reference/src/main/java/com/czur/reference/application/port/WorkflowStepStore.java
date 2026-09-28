@@ -53,6 +53,29 @@ public interface WorkflowStepStore {
     RenewResult renew(LeaseToken lease, Instant renewedAt, Duration leaseDuration);
 
     /**
+     * 在当前 lease 下原子持久化终态操作 marker，但不改变任何调度或栅栏事实。
+     *
+     * <p>该操作只允许更新 {@link WorkflowStep#errorCode()} 与
+     * {@link WorkflowStep#errorSummary()}。状态必须继续为 LEASED，attempt、owner、
+     * token、leaseVersion、claimedAt/updatedAt 和 expiresAt 必须逐字保持不变。
+     * 这样 Worker 可以在调用跨资源 terminal 工作单元之前先冻结完整请求；进程崩溃
+     * 或结果未知后，新 owner 领取时仍能恢复旧请求身份。</p>
+     *
+     * <p>当前 marker 已与候选相同时返回 REPLAYED；否则只有当前错误字段与请求中的
+     * expected pair 相同才允许替换。不同值返回 CONFLICT，禁止静默覆盖一个可能已经
+     * 发出的终态请求。</p>
+     */
+    PersistLeaseMarkerResult persistLeaseMarker(PersistLeaseMarkerRequest request);
+
+    /**
+     * marker 写入确认未知后，用新的只读存储会话核对同一 full-fence 请求。
+     *
+     * <p>只有数据库中的完整 lease 栅栏和 marker 都与请求逐字相同才返回 REPLAYED。
+     * 本方法不写入、不续租，也不把“当前仍是原错误字段”猜测成 marker 已持久化。</p>
+     */
+    PersistLeaseMarkerResult recoverLeaseMarker(PersistLeaseMarkerRequest request);
+
+    /**
      * 完成步骤。只有当前完整 lease 栅栏匹配且 completedAt 严格早于 expiresAt 才能
      * 进入 COMPLETED。终态不可逆；完成后任意迟到 owner 固定收到 ALREADY_COMPLETED。
      */
@@ -190,6 +213,76 @@ public interface WorkflowStepStore {
         COMPLETED, NOT_FOUND, NOT_OWNER, LEASE_EXPIRED, ALREADY_COMPLETED, ALREADY_DEAD
     }
 
+    enum PersistLeaseMarkerStatus {
+        PERSISTED,
+        REPLAYED,
+        CONFLICT,
+        NOT_FOUND,
+        NOT_OWNER,
+        LEASE_EXPIRED,
+        ALREADY_COMPLETED,
+        ALREADY_DEAD,
+        STORAGE_UNAVAILABLE,
+        OUTCOME_UNKNOWN
+    }
+
+    record PersistLeaseMarkerRequest(
+            LeaseToken lease,
+            Instant markedAt,
+            String expectedErrorCode,
+            String expectedErrorSummary,
+            String markerCode,
+            String markerSummary) {
+        public PersistLeaseMarkerRequest {
+            Objects.requireNonNull(lease, "lease");
+            Objects.requireNonNull(markedAt, "markedAt");
+            requireOptionalPair(expectedErrorCode, expectedErrorSummary);
+            WorkflowStep.requireText("markerCode", markerCode);
+            WorkflowStep.requireText("markerSummary", markerSummary);
+            if (markedAt.isBefore(lease.claimedAt())
+                    || !markedAt.isBefore(lease.expiresAt())) {
+                throw new IllegalArgumentException(
+                        "markedAt must be inside the lease interval");
+            }
+        }
+
+        @Override
+        public String toString() {
+            return "WorkflowStepStore.PersistLeaseMarkerRequest[lease=redacted"
+                    + ", markedAt=" + markedAt
+                    + ", expectedMarkerPresent=" + (expectedErrorCode != null)
+                    + ", marker=redacted]";
+        }
+    }
+
+    record PersistLeaseMarkerResult(
+            PersistLeaseMarkerStatus status,
+            WorkflowStep step) {
+        public PersistLeaseMarkerResult {
+            Objects.requireNonNull(status, "status");
+            switch (status) {
+                case PERSISTED, REPLAYED ->
+                        requireStatus(step, WorkflowStep.Status.LEASED, status.name());
+                case NOT_FOUND -> requireAbsent(step, status.name());
+                case ALREADY_COMPLETED ->
+                        requireStatus(step, WorkflowStep.Status.COMPLETED, status.name());
+                case ALREADY_DEAD ->
+                        requireStatus(step, WorkflowStep.Status.DEAD, status.name());
+                case NOT_OWNER, CONFLICT -> requireNonTerminal(step, status.name());
+                case LEASE_EXPIRED ->
+                        requireStatus(step, WorkflowStep.Status.LEASED, status.name());
+                case STORAGE_UNAVAILABLE, OUTCOME_UNKNOWN ->
+                        requireAbsent(step, status.name());
+            }
+        }
+
+        @Override
+        public String toString() {
+            return "WorkflowStepStore.PersistLeaseMarkerResult[status=" + status
+                    + ", stepPresent=" + (step != null) + ']';
+        }
+    }
+
     record CompleteResult(CompleteStatus status, WorkflowStep step) {
         public CompleteResult {
             Objects.requireNonNull(status, "status");
@@ -243,6 +336,17 @@ public interface WorkflowStepStore {
         Objects.requireNonNull(duration, "leaseDuration");
         if (duration.isZero() || duration.isNegative()) {
             throw new IllegalArgumentException("leaseDuration must be positive");
+        }
+    }
+
+    private static void requireOptionalPair(String code, String summary) {
+        if ((code == null) != (summary == null)) {
+            throw new IllegalArgumentException(
+                    "expectedErrorCode and expectedErrorSummary must appear together");
+        }
+        if (code != null) {
+            WorkflowStep.requireText("expectedErrorCode", code);
+            WorkflowStep.requireText("expectedErrorSummary", summary);
         }
     }
 
