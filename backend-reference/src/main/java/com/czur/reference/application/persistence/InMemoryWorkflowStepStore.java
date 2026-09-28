@@ -139,6 +139,10 @@ public final class InMemoryWorkflowStepStore implements WorkflowStepStore {
         Objects.requireNonNull(lease, "lease");
         Objects.requireNonNull(renewedAt, "renewedAt");
         requirePositive(leaseDuration);
+        Instant nextExpiry = renewedAt.plus(leaseDuration);
+        if (!nextExpiry.isAfter(lease.expiresAt())) {
+            throw new IllegalArgumentException("renew must extend lease expiry");
+        }
         synchronized (mutex) {
             Entry entry = entries.get(lease.key());
             RenewStatus terminal = renewTerminal(entry);
@@ -151,10 +155,6 @@ public final class InMemoryWorkflowStepStore implements WorkflowStepStore {
             if (renewedAt.isBefore(entry.step.updatedAt())
                     || !renewedAt.isBefore(entry.step.leaseUntil())) {
                 return new RenewResult(RenewStatus.LEASE_EXPIRED, entry.step, null);
-            }
-            Instant nextExpiry = renewedAt.plus(leaseDuration);
-            if (!nextExpiry.isAfter(entry.step.leaseUntil())) {
-                throw new IllegalArgumentException("renew must extend lease expiry");
             }
             long version = Math.addExact(entry.step.leaseVersion(), 1L);
             String token = nextToken(entry.token);
@@ -218,6 +218,9 @@ public final class InMemoryWorkflowStepStore implements WorkflowStepStore {
         requireText("errorSummary", errorSummary);
         if (maxAttempts <= 0) {
             throw new IllegalArgumentException("maxAttempts must be positive");
+        }
+        if (nextAttemptAt.isBefore(failedAt)) {
+            throw new IllegalArgumentException("nextAttemptAt must not be before failedAt");
         }
         synchronized (mutex) {
             Entry entry = entries.get(lease.key());

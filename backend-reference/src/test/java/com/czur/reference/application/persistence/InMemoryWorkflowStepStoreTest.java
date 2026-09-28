@@ -133,6 +133,39 @@ class InMemoryWorkflowStepStoreTest {
     }
 
     @Test
+    void nonExtendingRenewIsRejectedBeforeActiveMissingOrTerminalStateLookup() {
+        InMemoryWorkflowStepStore store = store();
+        WorkflowStep step = pending("summary", "renew-parameter", PAYLOAD, DIGEST, T0);
+        store.register(step);
+        WorkflowStepStore.LeaseToken active = store.claim(
+                claim(Set.of("summary"), "owner", T0, 1)).getFirst().lease();
+        WorkflowStep activeBefore = store.find(step.key()).orElseThrow();
+
+        IllegalArgumentException activeFailure = assertThrows(
+                IllegalArgumentException.class,
+                () -> store.renew(
+                        active, T0.plusSeconds(5), Duration.ofSeconds(5)));
+        assertEquals("renew must extend lease expiry", activeFailure.getMessage());
+        assertEquals(activeBefore, store.find(step.key()).orElseThrow());
+
+        WorkflowStepStore.LeaseToken missing = new WorkflowStepStore.LeaseToken(
+                key("summary", "missing-renew-parameter"), "owner", "missing-token",
+                T0.plusSeconds(10), T0, 1);
+        assertThrows(IllegalArgumentException.class,
+                () -> store.renew(
+                        missing, T0.plusSeconds(5), Duration.ofSeconds(5)));
+        assertTrue(store.find(missing.key()).isEmpty());
+
+        assertEquals(WorkflowStepStore.CompleteStatus.COMPLETED,
+                store.complete(active, T0.plusSeconds(1)).status());
+        WorkflowStep completedBefore = store.find(step.key()).orElseThrow();
+        assertThrows(IllegalArgumentException.class,
+                () -> store.renew(
+                        active, T0.plusSeconds(5), Duration.ofSeconds(5)));
+        assertEquals(completedBefore, store.find(step.key()).orElseThrow());
+    }
+
+    @Test
     void failSchedulesRetryThenReachesDeadAndNeverClaimsAgain() {
         InMemoryWorkflowStepStore store = store();
         store.register(pending("summary", "retry", PAYLOAD, DIGEST, T0));
@@ -161,6 +194,34 @@ class InMemoryWorkflowStepStoreTest {
                         "AGAIN", "again", 2).status());
         assertTrue(store.claim(claim(Set.of("summary"), "other", T0.plusSeconds(40), 1))
                 .isEmpty());
+    }
+
+    @Test
+    void failRejectsRetryBeforeFailureBeforeStatusAdjudicationAndKeepsState() {
+        InMemoryWorkflowStepStore store = store();
+        WorkflowStep step = pending("summary", "retry-order", PAYLOAD, DIGEST, T0);
+        store.register(step);
+        WorkflowStepStore.LeaseToken lease = store.claim(
+                claim(Set.of("summary"), "worker", T0, 1)).getFirst().lease();
+        WorkflowStep before = store.find(step.key()).orElseThrow();
+
+        IllegalArgumentException leasedFailure = assertThrows(
+                IllegalArgumentException.class,
+                () -> store.fail(
+                        lease, T0.plusSeconds(2), T0.plusSeconds(1),
+                        "TEMPORARY", "retry in the past", 2));
+        assertEquals("nextAttemptAt must not be before failedAt",
+                leasedFailure.getMessage());
+        assertEquals(before, store.find(step.key()).orElseThrow());
+
+        WorkflowStepStore.LeaseToken missing = new WorkflowStepStore.LeaseToken(
+                key("summary", "missing-retry-order"), "worker", "missing-token",
+                T0.plusSeconds(10), T0, 1);
+        assertThrows(IllegalArgumentException.class,
+                () -> store.fail(
+                        missing, T0.plusSeconds(2), T0.plusSeconds(1),
+                        "TEMPORARY", "retry in the past", 2));
+        assertTrue(store.find(missing.key()).isEmpty());
     }
 
     @Test
@@ -204,7 +265,7 @@ class InMemoryWorkflowStepStoreTest {
         // 即使 key、owner、token、版本和过期时间都正确，claimedAt 仍是租约快照的一部分。
         // 不能接受调用方伪造的更早时间，也不能让操作时间回到真正领取之前。
         assertEquals(WorkflowStepStore.RenewStatus.NOT_OWNER,
-                store.renew(forged, T0.minusSeconds(1), Duration.ofSeconds(10)).status());
+                store.renew(forged, T0.minusSeconds(1), Duration.ofSeconds(12)).status());
         assertEquals(WorkflowStepStore.CompleteStatus.NOT_OWNER,
                 store.complete(forged, T0.minusSeconds(1)).status());
         assertEquals(WorkflowStepStore.FailStatus.NOT_OWNER,

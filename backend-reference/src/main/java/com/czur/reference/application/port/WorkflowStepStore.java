@@ -45,8 +45,10 @@ public interface WorkflowStepStore {
 
     /**
      * 续租当前未过期 lease。Key、owner、token、version、expiresAt 必须完整匹配，
-     * 且 renewedAt 严格早于旧 expiresAt。成功后 token 旋转、version 加一，旧句柄
-     * 立即失效。
+     * 且 renewedAt 严格早于旧 expiresAt。{@code renewedAt + leaseDuration} 必须严格
+     * 晚于传入 {@link LeaseToken#expiresAt()}；该调用参数规则必须在读取当前步骤状态前
+     * 关闭式校验，因此 active、missing 和 terminal Key 对同一非法请求都抛出
+     * {@link IllegalArgumentException}。成功后 token 旋转、version 加一，旧句柄立即失效。
      */
     RenewResult renew(LeaseToken lease, Instant renewedAt, Duration leaseDuration);
 
@@ -58,8 +60,10 @@ public interface WorkflowStepStore {
 
     /**
      * 报告失败。合法失败使 attempt 加一；达到 maxAttempts 时进入 DEAD，否则回到
-     * PENDING 并使用 nextAttemptAt。错误字段必须是调用方已脱敏的稳定码与摘要。
-     * 过期或被重领的旧 lease 不能覆盖当前 owner 或终态。
+     * PENDING 并使用 nextAttemptAt。{@code nextAttemptAt} 不得早于 {@code failedAt}；
+     * 该参数规则必须在读取当前状态或进行 NOT_FOUND/终态裁决前关闭式校验，避免同一
+     * 请求因 Store 实现或现有状态不同而得到不同结果。错误字段必须是调用方已脱敏的
+     * 稳定码与摘要。过期或被重领的旧 lease 不能覆盖当前 owner 或终态。
      */
     FailResult fail(
             LeaseToken lease,

@@ -17,7 +17,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 不依赖 PostgreSQL 的 JdbcDatabaseRuntime readiness 源码契约门。
  *
  * <p>真实 PostgreSQL catalog 的列类型、约束和 schema 反复启动由显式环境集成测试
- * 验证；这里冻结装配入口必须检查的 V001～V009 登记集合、V009 查询参数、只读
+ * 验证；这里冻结装配入口必须检查的 V001～V010 登记集合、V010 查询参数、只读
  * catalog 探针和脱敏日志边界，避免以后只更新迁移文件而漏掉运行时门禁。</p>
  */
 class JdbcDatabaseRuntimeReadinessContractTest {
@@ -27,23 +27,60 @@ class JdbcDatabaseRuntimeReadinessContractTest {
             "MIGRATION_QUERY\\s*=\\s*\\\"\\\"\\\"(.*?)\\\"\\\"\\\"", Pattern.DOTALL);
 
     @Test
-    void runtimeRequiresV009AndBindsItsMigrationQueryParameter() throws Exception {
+    void runtimeRequiresV010AndBindsItsMigrationQueryParameter() throws Exception {
         String source = readRuntimeSource();
         String required = match(REQUIRED_MIGRATIONS, source);
         String query = match(MIGRATION_QUERY, source);
 
-        assertEquals(9, occurrences(required, "V00"),
-                "runtime must freeze exactly V001 through V009 migrations");
+        assertEquals(10, occurrences(required, "V0"),
+                "runtime must freeze exactly V001 through V010 migrations");
         assertTrue(required.contains("V007__meeting_manifest_revision"));
         assertTrue(required.contains("V008__durable_input_fact"));
         assertTrue(required.contains("V009__final_usage_fact"));
-        assertEquals(11, occurrences(query, "?"),
-                "the two legacy aliases plus V001-V009 require eleven query slots");
+        assertTrue(required.contains("V010__workflow_step_fencing"));
+        assertEquals(12, occurrences(query, "?"),
+                "the two legacy aliases plus V001-V010 require twelve query slots");
         assertTrue(source.contains(
                 "migrations.setString(10, \"V008__durable_input_fact\")"));
         assertTrue(source.contains(
                 "migrations.setString(11, \"V009__final_usage_fact\")"));
+        assertTrue(source.contains(
+                "migrations.setString(12, \"V010__workflow_step_fencing\")"));
         assertTrue(source.contains("missing.removeAll(present)"));
+    }
+
+    @Test
+    void readinessUsesReadOnlyCatalogChecksForV010WorkflowStepContract() throws Exception {
+        String source = readRuntimeSource();
+        assertTrue(source.contains("hasExactWorkflowStepSchema(connection)"));
+        String helper = source.substring(source.indexOf("hasExactWorkflowStepSchema"));
+        for (String column : new String[]{"checkpoint_type", "canonical_payload",
+                "content_digest", "initial_available_at", "next_attempt_at",
+                "lease_token", "lease_version"}) {
+            assertTrue(source.contains("\"" + column + "\""), column);
+        }
+        for (String constraint : new String[]{"workflow_step_status_ck",
+                "workflow_step_definition_ck", "workflow_step_lease_token_ck",
+                "workflow_step_attempt_count_check", "workflow_step_facts_ck",
+                "workflow_step_key_uq", "workflow_step_meeting_id_fkey"}) {
+            assertTrue(helper.contains(constraint), constraint);
+        }
+        assertTrue(helper.contains("WORKFLOW_STEP_STATUS_CHECK"));
+        assertTrue(helper.contains("WORKFLOW_STEP_DEFINITION_CHECK"));
+        assertTrue(helper.contains("WORKFLOW_STEP_LEASE_TOKEN_CHECK"));
+        assertTrue(helper.contains("WORKFLOW_STEP_ATTEMPT_CHECK"));
+        assertTrue(helper.contains("WORKFLOW_STEP_FACTS_CHECK"));
+        assertTrue(helper.contains("stableKeyUnique"));
+        assertTrue(helper.contains("meetingForeignKey"));
+        assertTrue(helper.contains("hasExactWorkflowStepIdentity(connection, table)"));
+        assertTrue(helper.contains("a.attname = 'step_id'"));
+        assertTrue(helper.contains("\"bigint\".equals(rows.getString(\"data_type\"))"));
+        assertTrue(helper.contains("\"d\".equals(rows.getString(\"attidentity\"))"));
+        assertTrue(helper.contains("workflow_step_claim_v010_idx"));
+        assertTrue(helper.contains("只是性能索引"));
+        assertFalse(helper.contains("definition.contains("));
+        assertFalse(helper.contains("CREATE TABLE"));
+        assertFalse(helper.matches("(?is).*\\b(?:INSERT\\s+INTO|UPDATE\\s+\\w|DELETE\\s+FROM)\\b.*"));
     }
 
     @Test
@@ -101,8 +138,8 @@ class JdbcDatabaseRuntimeReadinessContractTest {
     @Test
     void startupDocumentationAndLogsStayOnStableRedactedClassification() throws Exception {
         String source = readRuntimeSource();
-        assertTrue(source.contains("{@code schema_migrations} 中的 V001～V009"));
-        assertFalse(source.contains("{@code schema_migrations} 中的 V001～V008"));
+        assertTrue(source.contains("{@code schema_migrations} 中的 V001～V010"));
+        assertFalse(source.contains("{@code schema_migrations} 中的 V001～V009"));
         assertTrue(source.contains("status={0}"));
         assertTrue(source.contains("exception={1}"));
         assertTrue(source.contains("LOGGER.log(Level.INFO, \"数据库运行时启动成功 pool={0}\", config)"));

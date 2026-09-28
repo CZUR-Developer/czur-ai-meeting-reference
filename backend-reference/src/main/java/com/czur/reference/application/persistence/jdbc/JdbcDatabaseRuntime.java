@@ -22,8 +22,9 @@ import java.util.logging.Logger;
  * PostgreSQL 数据库运行时边界。
  *
  * <p>启动时创建唯一的 HikariCP 连接池，执行只读 {@code SELECT 1} 探针并检查
- * {@code schema_migrations} 中的 V001～V009，再以只读 catalog 查询核对 V007
- * Manifest revision、V008 durable input fact 与 V009 final usage fact 表的精确物理契约。任一检查失败都会关闭已经创建的池并抛出
+ * {@code schema_migrations} 中的 V001～V010，再以只读 catalog 查询核对 V007
+ * Manifest revision、V008 durable input fact、V009 final usage fact 与 V010
+ * workflow step 表的精确物理契约。任一检查失败都会关闭已经创建的池并抛出
  * {@link DatabaseStartupException}；本类没有 InMemory fallback，也不会自动执行
  * 迁移或修补半成品表。成功启动后，所有 JDBC Repository、会议工作单元和提交后的
  * Outbox Worker 端口都共享同一个 {@link DataSource}。</p>
@@ -37,7 +38,7 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
     private static final String MIGRATION_QUERY = """
             SELECT version
               FROM schema_migrations
-             WHERE version IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              WHERE version IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """;
     private static final Set<String> REQUIRED_MIGRATIONS = Set.of(
             "V001__initial_schema",
@@ -48,7 +49,8 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
             "V006__meeting_read_model",
             "V007__meeting_manifest_revision",
             "V008__durable_input_fact",
-            "V009__final_usage_fact");
+            "V009__final_usage_fact",
+            "V010__workflow_step_fencing");
     private static final List<ColumnContract> MANIFEST_REVISION_COLUMNS = List.of(
             new ColumnContract("meeting_id", "text", true, null),
             new ColumnContract("manifest_revision", "integer", true, null),
@@ -112,11 +114,59 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
             "CHECK (length(btrim(source_input_binding)) > 0)";
     private static final String FINAL_USAGE_DIGEST_CHECK =
             "CHECK (length(btrim(source_input_digest)) > 0)";
+    private static final List<ColumnContract> WORKFLOW_STEP_COLUMNS = List.of(
+            new ColumnContract("meeting_id", "text", true, null),
+            new ColumnContract("step_type", "text", true, null),
+            new ColumnContract("step_key", "text", true, null),
+            new ColumnContract("checkpoint_type", "text", true, null),
+            new ColumnContract("canonical_payload", "text", true, null),
+            new ColumnContract("content_digest", "text", true, null),
+            new ColumnContract("initial_available_at", "timestamp with time zone", true, null),
+            new ColumnContract("status", "text", true, null),
+            new ColumnContract("attempt_count", "integer", true, "0"),
+            new ColumnContract("next_attempt_at", "timestamp with time zone", false, null),
+            new ColumnContract("lease_owner", "text", false, null),
+            new ColumnContract("lease_until", "timestamp with time zone", false, null),
+            new ColumnContract("lease_token", "text", false, null),
+            new ColumnContract("lease_version", "bigint", true, "0"),
+            new ColumnContract("error_code", "text", false, null),
+            new ColumnContract("error_message", "text", false, null),
+            new ColumnContract("updated_at", "timestamp with time zone", true, null));
+    private static final String WORKFLOW_STEP_STATUS_CHECK =
+            "CHECK (status = ANY (ARRAY['PENDING'::text, 'LEASED'::text, "
+                    + "'COMPLETED'::text, 'DEAD'::text]))";
+    private static final String WORKFLOW_STEP_DEFINITION_CHECK =
+            "CHECK (length(btrim(checkpoint_type)) > 0 "
+                    + "AND length(btrim(canonical_payload)) > 0 "
+                    + "AND length(btrim(content_digest)) > 0)";
+    private static final String WORKFLOW_STEP_LEASE_TOKEN_CHECK =
+            "CHECK (lease_token IS NULL OR length(btrim(lease_token)) > 0)";
+    private static final String WORKFLOW_STEP_ATTEMPT_CHECK =
+            "CHECK (attempt_count >= 0)";
+    private static final String WORKFLOW_STEP_FACTS_CHECK = """
+            CHECK (lease_version >= 0
+            AND (status = 'PENDING'::text AND next_attempt_at IS NOT NULL
+            AND lease_owner IS NULL AND lease_until IS NULL AND lease_token IS NULL
+            OR status = 'LEASED'::text AND next_attempt_at IS NULL
+            AND lease_owner IS NOT NULL AND length(btrim(lease_owner)) > 0
+            AND lease_until IS NOT NULL AND lease_token IS NOT NULL
+            AND lease_version > 0 AND lease_until > updated_at
+            OR status = 'COMPLETED'::text AND next_attempt_at IS NULL
+            AND lease_owner IS NULL AND lease_until IS NULL AND lease_token IS NULL
+            AND error_code IS NULL AND error_message IS NULL
+            OR status = 'DEAD'::text AND next_attempt_at IS NULL
+            AND lease_owner IS NULL AND lease_until IS NULL AND lease_token IS NULL
+            AND error_code IS NOT NULL AND error_message IS NOT NULL)
+            AND (error_code IS NULL AND error_message IS NULL
+            OR error_code IS NOT NULL AND error_message IS NOT NULL
+            AND length(btrim(error_code)) > 0 AND length(btrim(error_message)) > 0))
+            """;
 
     private final DatabaseRuntimeConfig config;
     private final HikariDataSource dataSource;
     private final JdbcMeetingUnitOfWork meetingUnitOfWork;
     private final JdbcOutboxStore outboxStore;
+    private final JdbcWorkflowStepStore workflowStepStore;
     private final AtomicBoolean closed = new AtomicBoolean(false);
 
     private JdbcDatabaseRuntime(DatabaseRuntimeConfig config, HikariDataSource dataSource) {
@@ -124,6 +174,7 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
         this.dataSource = dataSource;
         this.meetingUnitOfWork = new JdbcMeetingUnitOfWork(dataSource);
         this.outboxStore = new JdbcOutboxStore(dataSource);
+        this.workflowStepStore = new JdbcWorkflowStepStore(dataSource);
     }
 
     /**
@@ -213,6 +264,7 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
                 migrations.setString(9, "V002");
                 migrations.setString(10, "V008__durable_input_fact");
                 migrations.setString(11, "V009__final_usage_fact");
+                migrations.setString(12, "V010__workflow_step_fencing");
                 try (ResultSet rows = migrations.executeQuery()) {
                     while (rows.next()) {
                         String version = rows.getString(1);
@@ -249,6 +301,13 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
             if (!hasExactFinalUsageFactSchema(connection)) {
                 DatabaseReadiness invalid = DatabaseReadiness.schemaInvalid(
                         "final_usage_fact catalog contract mismatch");
+                LOGGER.log(Level.WARNING,
+                        "数据库 readiness 物理契约校验失败 status={0}", invalid.status());
+                return invalid;
+            }
+            if (!hasExactWorkflowStepSchema(connection)) {
+                DatabaseReadiness invalid = DatabaseReadiness.schemaInvalid(
+                        "workflow_step V010 catalog contract mismatch");
                 LOGGER.log(Level.WARNING,
                         "数据库 readiness 物理契约校验失败 status={0}", invalid.status());
                 return invalid;
@@ -299,6 +358,12 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
     public JdbcOutboxStore outboxStore() {
         ensureLive();
         return outboxStore;
+    }
+
+    /** 返回使用共享连接池的工作流步骤租约栅栏适配器。 */
+    public JdbcWorkflowStepStore workflowStepStore() {
+        ensureLive();
+        return workflowStepStore;
     }
 
     /** 工作单元的端口类型别名，避免调用方复制第二套事务装配。 */
@@ -643,6 +708,159 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
                 && containsExactCheck(
                         constraints, "final_usage_fact_source_input_digest_ck",
                         FINAL_USAGE_DIGEST_CHECK);
+    }
+
+    /**
+     * 只读核对 V010 workflow_step 的新增 checkpoint、租约列和关闭式 CHECK。
+     * 不读取业务行、不创建或修补表；同名半表、可空定义或缺少状态约束均不通过。
+     */
+    private static boolean hasExactWorkflowStepSchema(Connection connection)
+            throws SQLException {
+        Long table = relationOid(connection, "workflow_step");
+        Long meetingTable = relationOid(connection, "meeting");
+        if (table == null || meetingTable == null
+                || !isOrdinaryTable(connection, table)
+                || !isOrdinaryTable(connection, meetingTable)) {
+            return false;
+        }
+        if (!hasExactWorkflowStepIdentity(connection, table)) {
+            return false;
+        }
+        List<ColumnContract> actual = new ArrayList<>();
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT a.attname, format_type(a.atttypid, a.atttypmod) AS data_type,
+                       a.attnotnull, pg_get_expr(d.adbin, d.adrelid) AS default_expression
+                  FROM pg_attribute a
+                  LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+                 WHERE a.attrelid = ? AND a.attnum > 0 AND NOT a.attisdropped
+                   AND a.attname IN ('meeting_id','step_type','step_key','checkpoint_type',
+                       'canonical_payload','content_digest','initial_available_at','status','attempt_count',
+                       'next_attempt_at','lease_owner','lease_until','lease_token',
+                       'lease_version','error_code','error_message','updated_at')
+                 ORDER BY array_position(ARRAY['meeting_id','step_type','step_key',
+                       'checkpoint_type','canonical_payload','content_digest','initial_available_at','status',
+                       'attempt_count','next_attempt_at','lease_owner','lease_until',
+                       'lease_token','lease_version','error_code','error_message',
+                       'updated_at']::name[], a.attname)
+                """)) {
+            statement.setLong(1, table);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    actual.add(new ColumnContract(rows.getString("attname"),
+                            rows.getString("data_type"), rows.getBoolean("attnotnull"),
+                            rows.getString("default_expression")));
+                }
+            }
+        }
+        if (!actual.equals(WORKFLOW_STEP_COLUMNS)) return false;
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT conname, contype, convalidated,
+                       coalesce(array_to_string(conkey, ','), '') AS source_keys,
+                       confrelid::bigint AS referenced_relation,
+                       coalesce(array_to_string(confkey, ','), '') AS target_keys,
+                       confdeltype,
+                       pg_get_constraintdef(oid, TRUE) AS definition
+                  FROM pg_constraint WHERE conrelid = ?
+                """)) {
+            statement.setLong(1, table);
+            Set<String> checks = new HashSet<>();
+            boolean stableKeyUnique = false;
+            boolean meetingForeignKey = false;
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    String name = rows.getString("conname");
+                    String type = rows.getString("contype");
+                    boolean validated = rows.getBoolean("convalidated");
+                    String definition = normalizeDefinition(rows.getString("definition"));
+                    if ("c".equals(type) && validated) {
+                        if ("workflow_step_status_ck".equals(name)
+                                && definition.equals(normalizeDefinition(
+                                WORKFLOW_STEP_STATUS_CHECK))) {
+                            checks.add("status");
+                        }
+                        if ("workflow_step_definition_ck".equals(name)
+                                && definition.equals(normalizeDefinition(
+                                WORKFLOW_STEP_DEFINITION_CHECK))) {
+                            checks.add("definition");
+                        }
+                        if ("workflow_step_lease_token_ck".equals(name)
+                                && definition.equals(normalizeDefinition(
+                                WORKFLOW_STEP_LEASE_TOKEN_CHECK))) {
+                            checks.add("token");
+                        }
+                        if ("workflow_step_attempt_count_check".equals(name)
+                                && definition.equals(normalizeDefinition(
+                                WORKFLOW_STEP_ATTEMPT_CHECK))) {
+                            checks.add("attempt");
+                        }
+                        if ("workflow_step_facts_ck".equals(name)
+                                && definition.equals(normalizeDefinition(
+                                WORKFLOW_STEP_FACTS_CHECK))) {
+                            checks.add("facts");
+                        }
+                    }
+                    if ("workflow_step_key_uq".equals(name)
+                            && "u".equals(type)
+                            && validated
+                            && "2,3,4".equals(rows.getString("source_keys"))
+                            && definition.equals(
+                            "UNIQUE (meeting_id, step_type, step_key)")) {
+                        stableKeyUnique = true;
+                    }
+                    if ("workflow_step_meeting_id_fkey".equals(name)
+                            && "f".equals(type)
+                            && validated
+                            && "2".equals(rows.getString("source_keys"))
+                            && rows.getLong("referenced_relation") == meetingTable
+                            && "1".equals(rows.getString("target_keys"))
+                            && "a".equals(rows.getString("confdeltype"))
+                            && definition.equals(
+                            "FOREIGN KEY (meeting_id) REFERENCES meeting(meeting_id)")) {
+                        meetingForeignKey = true;
+                    }
+                }
+            }
+            return checks.size() == 5 && stableKeyUnique && meetingForeignKey;
+        }
+    }
+
+    /**
+     * 核对 Store 省略 {@code step_id} 写入时依赖的 V001 identity 生成能力。
+     *
+     * <p>{@code attidentity='d'} 是 PostgreSQL 对
+     * {@code GENERATED BY DEFAULT AS IDENTITY} 的物理标记。仅保留 bigint/NOT NULL
+     * 而执行过 {@code DROP IDENTITY} 的列无法完成 Store INSERT，必须判定 schema
+     * 不可用。surrogate 主键本身不参与 Store 的幂等、查找或 fencing；
+     * {@code workflow_step_claim_v010_idx} 也只是性能索引，二者不作为本 readiness
+     * 的正确性门禁。</p>
+     */
+    private static boolean hasExactWorkflowStepIdentity(
+            Connection connection,
+            long table) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT format_type(a.atttypid, a.atttypmod) AS data_type,
+                       a.attnotnull, a.attidentity, a.attgenerated,
+                       pg_get_expr(d.adbin, d.adrelid) AS default_expression
+                  FROM pg_attribute a
+                  LEFT JOIN pg_attrdef d
+                    ON d.adrelid = a.attrelid
+                   AND d.adnum = a.attnum
+                 WHERE a.attrelid = ?
+                   AND a.attname = 'step_id'
+                   AND a.attnum > 0
+                   AND NOT a.attisdropped
+                """)) {
+            statement.setLong(1, table);
+            try (ResultSet rows = statement.executeQuery()) {
+                return rows.next()
+                        && "bigint".equals(rows.getString("data_type"))
+                        && rows.getBoolean("attnotnull")
+                        && "d".equals(rows.getString("attidentity"))
+                        && "".equals(rows.getString("attgenerated"))
+                        && rows.getString("default_expression") == null
+                        && !rows.next();
+            }
+        }
     }
 
     /**
