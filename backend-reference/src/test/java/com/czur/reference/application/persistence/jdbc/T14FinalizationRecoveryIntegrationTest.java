@@ -1,14 +1,17 @@
 package com.czur.reference.application.persistence.jdbc;
 
 import com.czur.reference.application.artifact.filesystem.PersistentFileSystemMockArtifactStore;
-import com.czur.reference.application.finalization.DeterministicMockFinalizationPlanner.ArtifactWritePlan;
 import com.czur.reference.application.finalization.DeterministicMockFinalizationPlanner.Plan;
+import com.czur.reference.application.finalization.FinalizationCheckpoint;
+import com.czur.reference.application.finalization.FinalizationCheckpoint.ArtifactMaterial;
 import com.czur.reference.application.port.DurableInputFactStore;
 import com.czur.reference.application.port.FinalUsageFact;
 import com.czur.reference.application.port.WorkflowStep;
 import com.czur.reference.application.port.artifact.ArtifactStore.PrepareStatus;
 import com.czur.reference.application.port.artifact.ArtifactStore.StorageBinding;
 import com.czur.reference.application.port.artifact.ArtifactStore.StoreState;
+import com.czur.reference.protocol.json.FinalizationCheckpointJson;
+import com.czur.reference.protocol.json.FinalizationExecutionFactJson;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.junit.jupiter.api.io.TempDir;
@@ -48,8 +51,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *
  * <p>测试只接受脚本提供的隔离 PostgreSQL，在随机 schema 中应用 V001-V010。
  * 第一个真实子 JVM 在 Artifact 全部 READY 后直接 {@code halt(47)}，故意留下
- * LEASED workflow；第二个子 JVM 从 V008 重读输入并完成过期 lease 恢复；第三个
- * 子 JVM 以相同逻辑 identity、漂移的显式执行映射验证 Workflow/Artifact 冲突。
+ * LEASED workflow；第二个子 JVM 必须从数据库读取并 decode 已持久 Workflow
+ * checkpoint，只使用其中的 Artifact/用量/权益材料恢复，同时与 V008、V009 和测试
+ * 提供的冻结 execution fact 交叉核对；第三个子 JVM 以相同逻辑 identity、漂移的
+ * 显式执行映射验证 Workflow/Artifact 冲突。
  * 命令行只携带 action，数据库、文件根和旧 lease 均不出现在 argv 或输出中。</p>
  *
  * <p>此门禁不发布 Manifest、不写 V001 Artifact 元数据、不改变 Meeting、不会调用
@@ -117,6 +122,7 @@ class T14FinalizationRecoveryIntegrationTest {
             assertEquals(1, count(dataSource, "final_usage_fact"));
             assertEquals(plan.finalUsage(), readFinalUsage(dataSource));
             assertLeasedWorkflow(dataSource, plan);
+            assertStoredCheckpointDecodes(dataSource, plan);
             List<StorageBinding> bindings = assertArtifactsReady(artifactRoot, plan);
             assertEquals(2, bindings.stream().map(StorageBinding::value).distinct().count());
             assertObjectMultiplicity(artifactRoot, plan.artifacts().size());
@@ -126,7 +132,8 @@ class T14FinalizationRecoveryIntegrationTest {
                     schema, artifactRoot, controlFile, "recover");
             assertEquals(0, recovered.exitCode(), recovered.output());
             assertTrue(recovered.output().contains(
-                    "PROBE_RECOVERED usage=REPLAYED artifacts=REPLAYED"
+                    "PROBE_RECOVERED checkpoint=DECODED facts=VERIFIED"
+                            + " usage=REPLAYED artifacts=REPLAYED"
                             + " staleBefore=NOT_OWNER workflow=COMPLETED"
                             + " staleAfter=ALREADY_COMPLETED"), recovered.output());
             assertTrue(recovered.output().contains("PROBE_OK action=recover"),
@@ -270,12 +277,27 @@ class T14FinalizationRecoveryIntegrationTest {
         assertEquals(expected.contentDigest(), actual.contentDigest());
     }
 
+    private static void assertStoredCheckpointDecodes(DataSource dataSource, Plan plan) {
+        WorkflowStep stored = new JdbcWorkflowStepStore(dataSource)
+                .find(plan.workflowStep().key()).orElseThrow();
+        FinalizationCheckpoint decoded = FinalizationCheckpointJson.decode(
+                stored.canonicalPayload());
+        assertEquals(plan.checkpoint(), decoded);
+        assertEquals(stored.canonicalPayload(), FinalizationCheckpointJson.encode(decoded));
+        assertEquals(stored.contentDigest(), FinalizationCheckpointJson.sha256(decoded));
+        assertEquals(plan.finalUsage(), decoded.finalUsageFact());
+        assertEquals(plan.commitUsageRequest(), decoded.commitUsageRequest());
+        assertEquals(
+                plan.artifacts().stream().map(ArtifactMaterial::canonicalContent).toList(),
+                decoded.artifacts().stream().map(ArtifactMaterial::canonicalContent).toList());
+    }
+
     private static List<StorageBinding> assertArtifactsReady(Path root, Plan plan)
             throws Exception {
         PersistentFileSystemMockArtifactStore store =
                 new PersistentFileSystemMockArtifactStore(root, ARTIFACT_LIMIT);
         List<StorageBinding> bindings = new ArrayList<>();
-        for (ArtifactWritePlan artifact : plan.artifacts()) {
+        for (ArtifactMaterial artifact : plan.artifacts()) {
             var prepared = store.createWriteIntent(artifact.spec());
             assertEquals(PrepareStatus.REPLAYED, prepared.status());
             assertEquals(artifact.spec(), prepared.intent().spec());
@@ -437,6 +459,10 @@ class T14FinalizationRecoveryIntegrationTest {
                 "T14_FINALIZATION_RECOVERY_ARTIFACT_ROOT", artifactRoot.toString());
         environment.put(
                 "T14_FINALIZATION_RECOVERY_CONTROL_FILE", controlFile.toString());
+        environment.put(
+                "T14_FINALIZATION_RECOVERY_EXECUTION_FACT_JSON",
+                FinalizationExecutionFactJson.encode(
+                        T14FinalizationRecoveryProcessProbe.fixtureExecutionFact(false)));
         environment.put("REFERENCE_TEST_DATABASE_USER",
                 requiredEnvironment("REFERENCE_TEST_DATABASE_USER"));
         environment.put("REFERENCE_TEST_DATABASE_PASSWORD",
@@ -465,13 +491,20 @@ class T14FinalizationRecoveryIntegrationTest {
                 schema,
                 artifactRoot.toString(),
                 controlFile.toString(),
+                FinalizationExecutionFactJson.encode(
+                        T14FinalizationRecoveryProcessProbe.fixtureExecutionFact(false)),
                 T14FinalizationRecoveryProcessProbe.MEETING_ID,
                 T14FinalizationRecoveryProcessProbe.fixtureInput().inputBinding(),
                 T14FinalizationRecoveryProcessProbe.fixtureInput().contentDigest(),
                 plan.workflowStep().key().stepKey(),
                 plan.workflowStep().canonicalPayload(),
-                plan.workflowStep().contentDigest()));
-        for (ArtifactWritePlan artifact : plan.artifacts()) {
+                plan.workflowStep().contentDigest(),
+                plan.commitUsageRequest().deploymentScope(),
+                plan.commitUsageRequest().subjectScope(),
+                plan.commitUsageRequest().idempotencyKey(),
+                plan.commitUsageRequest().requestDigest(),
+                plan.commitUsageRequest().reservationId()));
+        for (ArtifactMaterial artifact : plan.artifacts()) {
             protectedValues.add(artifact.spec().artifactId());
             protectedValues.add(artifact.claim().checksum());
             protectedValues.add(artifact.canonicalContent());

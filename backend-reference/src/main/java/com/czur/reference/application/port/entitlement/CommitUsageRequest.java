@@ -27,4 +27,18 @@ public record CommitUsageRequest(
         }
         Objects.requireNonNull(actual, "actual");
     }
+
+    /**
+     * 只公开可诊断的版本与用量数值；所有 scope、operation key、digest 和
+     * Reservation identity 均不得进入日志或断言失败正文。
+     */
+    @Override
+    public String toString() {
+        return "CommitUsageRequest[deploymentScope=redacted, subjectScope=redacted"
+                + ", operationScope=redacted, idempotencyKey=redacted"
+                + ", requestDigestPresent=true, reservationId=redacted"
+                + ", expectedVersion=" + expectedVersion
+                + ", usageUnit=" + actual.unit()
+                + ", usageAmount=" + actual.amount() + ']';
+    }
 }

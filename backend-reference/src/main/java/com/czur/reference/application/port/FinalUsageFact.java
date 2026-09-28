@@ -2,6 +2,7 @@ package com.czur.reference.application.port;
 
 import com.czur.reference.application.port.entitlement.UsageActual;
 import com.czur.reference.application.port.entitlement.UsageUnit;
+import com.czur.reference.domain.meeting.MeetingIdPolicy;
 
 import java.time.Instant;
 import java.util.Objects;
@@ -74,6 +75,35 @@ public final class FinalUsageFact {
                 inputFact.inputBinding(),
                 inputFact.contentDigest(),
                 inputFact.acceptedAt());
+    }
+
+    /**
+     * 从 workflow checkpoint 已冻结的来源材料恢复最终用量事实。
+     *
+     * <p>该入口只供 durable checkpoint 恢复使用，不重新读取 V008、模型状态或
+     * 当前时钟。构造不变量与 {@link #fromInput(FinalizationInputFact)} 完全一致，
+     * 因而恢复结果可与 Admission 首次形成的 V009 值做逐字段等值比较。</p>
+     */
+    public static FinalUsageFact restore(
+            String meetingId,
+            UsageActual actual,
+            String sourceInputBinding,
+            String sourceInputDigest,
+            Instant sourceAcceptedAt) {
+        MeetingIdPolicy.requireValid(meetingId);
+        MeetingIdPolicy.utf8Length(sourceInputBinding);
+        MeetingIdPolicy.utf8Length(sourceInputDigest);
+        Objects.requireNonNull(sourceAcceptedAt, "sourceAcceptedAt");
+        if (sourceAcceptedAt.getNano() % 1_000 != 0) {
+            throw new IllegalArgumentException(
+                    "sourceAcceptedAt must use PostgreSQL microsecond precision");
+        }
+        return new FinalUsageFact(
+                meetingId,
+                actual,
+                sourceInputBinding,
+                sourceInputDigest,
+                sourceAcceptedAt);
     }
 
     public String meetingId() {

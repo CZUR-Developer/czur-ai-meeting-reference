@@ -7,6 +7,11 @@ import com.czur.reference.application.port.WorkflowStepStore;
 import com.czur.reference.application.port.artifact.ArtifactStore.CompleteStatus;
 import com.czur.reference.application.port.artifact.ArtifactStore.PrepareStatus;
 import com.czur.reference.application.port.artifact.ArtifactStore.StageStatus;
+import com.czur.reference.application.port.entitlement.MeetingGrant;
+import com.czur.reference.application.port.entitlement.UsageActual;
+import com.czur.reference.application.port.entitlement.UsageEstimate;
+import com.czur.reference.application.port.entitlement.UsageReservation;
+import com.czur.reference.application.port.entitlement.UsageUnit;
 import com.czur.reference.domain.capability.CapabilityDescriptor;
 import com.czur.reference.domain.capability.CapabilityPlan;
 import com.czur.reference.domain.capability.CapabilityPlanner;
@@ -15,7 +20,6 @@ import com.czur.reference.domain.capability.ProductProfile;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
@@ -28,10 +32,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** 确定性 Mock 收口值派生、显式能力映射和同 identity 漂移关闭门禁。 */
+/** 完整 checkpoint 派生、稳定逻辑 identity 与 Admission Reservation 门禁。 */
 class DeterministicMockFinalizationPlannerTest {
+    private static final String MEETING_ID = "meeting-finalization-recovery";
+    private static final String DEPLOYMENT_SCOPE = "deployment-finalization";
+    private static final String SUBJECT_SCOPE = "subject-finalization";
     private static final Instant ACCEPTED_AT =
             Instant.parse("2026-09-28T03:00:00.123456Z");
 
@@ -39,153 +45,171 @@ class DeterministicMockFinalizationPlannerTest {
     Path temporaryDirectory;
 
     @Test
-    void sameDurableInputProfileAndPlanDeriveByteIdenticalFacts() {
-        DeterministicMockFinalizationPlanner planner =
-                new DeterministicMockFinalizationPlanner();
-        ProductProfile profile = profile("mock-summary-v1");
-        CapabilityPlan capabilityPlan = capabilityPlan(profile);
+    void sameFrozenFactsDeriveByteIdenticalCompletePlan() {
+        FinalizationInputFact input = input("sha256:source-a");
+        FinalizationExecutionFact execution = execution(profile("mock-summary-v1"));
+        UsageReservation reservation = reservation("reservation-a");
 
-        var first = planner.derive(input("sha256:source-a"), profile, capabilityPlan);
-        var replay = planner.derive(input("sha256:source-a"), profile, capabilityPlan);
+        var first = derive(input, execution, reservation);
+        var replay = derive(input, execution, reservation);
 
         assertEquals(first, replay);
+        assertEquals(first.workflowStep().canonicalPayload(),
+                replay.workflowStep().canonicalPayload());
+        assertEquals(first.workflowStep().contentDigest(),
+                replay.workflowStep().contentDigest());
         assertEquals(2, first.artifacts().size());
         assertEquals(List.of("summary.structured", "transcript.final"),
                 first.artifacts().stream().map(value -> value.spec().artifactType()).toList());
-        assertEquals(2, first.artifacts().stream()
-                .map(value -> value.spec().artifactId()).distinct().count());
-        assertEquals(2, first.artifacts().stream()
-                .map(value -> value.claim().checksum()).distinct().count());
         assertEquals(ACCEPTED_AT, first.workflowStep().nextAttemptAt());
-        assertEquals(ACCEPTED_AT, first.workflowStep().updatedAt());
-        assertEquals(first.finalUsage().actual().amount(), input("sha256:source-a").audioDurationMs());
+        assertEquals(first.finalUsage(), first.checkpoint().finalUsageFact());
+        assertEquals(first.commitUsageRequest(),
+                first.checkpoint().commitPlan().commitUsageRequest());
+        assertEquals(1, first.commitUsageRequest().expectedVersion(),
+                "Admission 必须冻结 bind 后行锁下观察到的 version");
     }
 
     @Test
-    void fixedFixtureFreezesIdsContentChecksumsAndWorkflowDefinition() {
-        ProductProfile profile = profile("mock-summary-v1");
-        var plan = new DeterministicMockFinalizationPlanner().derive(
-                input("sha256:source-a"), profile, capabilityPlan(profile));
+    void inputExecutionAndReservationDriftKeepLogicalIdentityButConflict() throws Exception {
+        FinalizationInputFact input = input("sha256:source-a");
+        FinalizationExecutionFact originalExecution = execution(profile("mock-summary-v1"));
+        var original = derive(input, originalExecution, reservation("reservation-a"));
+        var inputDrift = derive(
+                input("sha256:source-b"), originalExecution, reservation("reservation-a"));
+        FinalizationInputFact acceptedAtDriftFact = new FinalizationInputFact(
+                MEETING_ID, "input-binding-v1", 17, 65_432,
+                "zh-CN", List.of("en-US"), ACCEPTED_AT.plusSeconds(1),
+                "sha256:source-a");
+        var acceptedAtDrift = derive(
+                acceptedAtDriftFact, originalExecution, reservation("reservation-a"));
+        var executionDrift = derive(
+                input, execution(profile("mock-summary-v2")), reservation("reservation-a"));
+        var reservationDrift = derive(
+                input, originalExecution, reservation("reservation-b"));
 
-        assertEquals(
-                "mock_finalize_v1_4bdd8a672b91b7f14c13e71b2c588513"
-                        + "b905e86d118f56ae6cd9172d4f90e2a1",
-                plan.workflowStep().key().stepKey());
-        assertEquals(
-                "sha256:c97ffbad2e31581a1133f12d4f5843319f1584185562c5dd127a327a92028c7b",
-                plan.workflowStep().contentDigest());
-        assertEquals(
-                "art_mock_v1_3671370abfa25048812da8c8a5fcf291"
-                        + "437fc6e8b668feafe50e8029067feb0a",
-                plan.artifacts().get(0).spec().artifactId());
-        assertEquals(
-                "sha256:452e31e706d8d7dc846d81bc0b70af53373bc63077b5376b32e388abae42c9f9",
-                plan.artifacts().get(0).claim().checksum());
-        assertEquals(
-                "art_mock_v1_580877f447eca8211daf35adb32e32b4"
-                        + "cf55cd4de56d8cda21932a4913cafa36",
-                plan.artifacts().get(1).spec().artifactId());
-        assertEquals(
-                "sha256:39b1a66552084283c777824bf5d66165462376127958f624f83421dfee5b0497",
-                plan.artifacts().get(1).claim().checksum());
-        assertEquals(
-                "{\"artifactType\":\"summary.structured\",\"mock\":true,"
-                        + "\"planRevision\":7,\"profileRevision\":3,"
-                        + "\"schemaVersion\":\"mock-finalization/v1\","
-                        + "\"sourceFingerprint\":\"4e63391a27cf566c1f4e4fce850c0993"
-                        + "79dc8bbebbd643018a1f98bce9cabb6f\","
-                        + "\"executionFingerprint\":\"bdefd3a06acb81a24de0c7666856fb05"
-                        + "32f7cb65cff8a3bb7bbe59e43bd19ac7\"}\n",
-                plan.artifacts().get(0).canonicalContent());
-        assertEquals(
-                "{\"artifactType\":\"transcript.final\",\"mock\":true,"
-                        + "\"planRevision\":7,\"profileRevision\":3,"
-                        + "\"schemaVersion\":\"mock-finalization/v1\","
-                        + "\"sourceFingerprint\":\"4e63391a27cf566c1f4e4fce850c0993"
-                        + "79dc8bbebbd643018a1f98bce9cabb6f\","
-                        + "\"executionFingerprint\":\"bdefd3a06acb81a24de0c7666856fb05"
-                        + "32f7cb65cff8a3bb7bbe59e43bd19ac7\"}\n",
-                plan.artifacts().get(1).canonicalContent());
-    }
-
-    @Test
-    void sourceOrExecutionDriftKeepsLogicalIdentityAndConflictsWithoutOverwrite()
-            throws Exception {
-        DeterministicMockFinalizationPlanner planner =
-                new DeterministicMockFinalizationPlanner();
-        ProductProfile originalProfile = profile("mock-summary-v1");
-        ProductProfile driftedProfile = profile("mock-summary-v2");
-        var original = planner.derive(
-                input("sha256:source-a"), originalProfile, capabilityPlan(originalProfile));
-        var sourceDrift = planner.derive(
-                input("sha256:source-b"), originalProfile, capabilityPlan(originalProfile));
-        var planDrift = planner.derive(
-                input("sha256:source-a"), driftedProfile, capabilityPlan(driftedProfile));
-
-        assertEquals(original.workflowStep().key(), sourceDrift.workflowStep().key());
-        assertEquals(original.workflowStep().key(), planDrift.workflowStep().key());
-        assertNotEquals(original.workflowStep().contentDigest(),
-                sourceDrift.workflowStep().contentDigest());
-        assertNotEquals(original.workflowStep().contentDigest(),
-                planDrift.workflowStep().contentDigest());
-        assertEquals(original.artifacts().stream().map(value -> value.spec().artifactId()).toList(),
-                sourceDrift.artifacts().stream().map(value -> value.spec().artifactId()).toList());
-        assertEquals(original.artifacts().stream().map(value -> value.spec().artifactId()).toList(),
-                planDrift.artifacts().stream().map(value -> value.spec().artifactId()).toList());
+        for (var drift : List.of(
+                inputDrift, acceptedAtDrift, executionDrift, reservationDrift)) {
+            assertEquals(original.workflowStep().key(), drift.workflowStep().key());
+            assertNotEquals(original.workflowStep().contentDigest(),
+                    drift.workflowStep().contentDigest());
+            assertEquals(
+                    original.artifacts().stream().map(value -> value.spec().artifactId()).toList(),
+                    drift.artifacts().stream().map(value -> value.spec().artifactId()).toList());
+            assertEquals(original.commitUsageRequest().idempotencyKey(),
+                    drift.commitUsageRequest().idempotencyKey());
+        }
+        assertNotEquals(original.commitUsageRequest().requestDigest(),
+                inputDrift.commitUsageRequest().requestDigest());
+        assertNotEquals(original.commitUsageRequest().requestDigest(),
+                acceptedAtDrift.commitUsageRequest().requestDigest());
+        assertEquals(original.commitUsageRequest().requestDigest(),
+                executionDrift.commitUsageRequest().requestDigest(),
+                "Profile/Plan 由 checkpoint 冲突，不进入 Entitlement request digest");
+        assertNotEquals(original.commitUsageRequest().requestDigest(),
+                reservationDrift.commitUsageRequest().requestDigest());
 
         InMemoryWorkflowStepStore workflow = new InMemoryWorkflowStepStore();
         assertEquals(WorkflowStepStore.RegisterStatus.APPLIED,
                 workflow.register(original.workflowStep()).status());
         assertEquals(WorkflowStepStore.RegisterStatus.CONFLICT,
-                workflow.register(sourceDrift.workflowStep()).status());
+                workflow.register(inputDrift.workflowStep()).status());
         assertEquals(WorkflowStepStore.RegisterStatus.CONFLICT,
-                workflow.register(planDrift.workflowStep()).status());
-        assertEquals(original.workflowStep(), workflow.find(original.workflowStep().key()).orElseThrow());
+                workflow.register(acceptedAtDrift.workflowStep()).status());
+        assertEquals(WorkflowStepStore.RegisterStatus.CONFLICT,
+                workflow.register(executionDrift.workflowStep()).status());
+        assertEquals(WorkflowStepStore.RegisterStatus.CONFLICT,
+                workflow.register(reservationDrift.workflowStep()).status());
 
         var artifactStore = new PersistentFileSystemMockArtifactStore(
                 temporaryDirectory.resolve("artifacts"), 1024 * 1024);
-        var originalArtifact = original.artifacts().getFirst();
-        var intent = artifactStore.createWriteIntent(originalArtifact.spec()).intent();
+        var winner = original.artifacts().getFirst();
+        var intent = artifactStore.createWriteIntent(winner.spec()).intent();
         assertEquals(StageStatus.APPLIED,
-                artifactStore.writeContent(intent, originalArtifact.openContent()).status());
+                artifactStore.writeContent(intent, winner.openContent()).status());
         assertEquals(CompleteStatus.APPLIED,
-                artifactStore.completeWrite(intent, originalArtifact.claim()).status());
+                artifactStore.completeWrite(intent, winner.claim()).status());
+        assertEquals(PrepareStatus.CONFLICT,
+                artifactStore.createWriteIntent(inputDrift.artifacts().getFirst().spec()).status());
         assertEquals(PrepareStatus.CONFLICT,
                 artifactStore.createWriteIntent(
-                        sourceDrift.artifacts().getFirst().spec()).status());
-        assertEquals(PrepareStatus.CONFLICT,
+                        executionDrift.artifacts().getFirst().spec()).status());
+        assertEquals(PrepareStatus.REPLAYED,
                 artifactStore.createWriteIntent(
-                        planDrift.artifacts().getFirst().spec()).status());
+                        reservationDrift.artifacts().getFirst().spec()).status(),
+                "Reservation seed 不改变 Artifact spec");
     }
 
     @Test
-    void executableDecisionsConsumeExplicitMappingsDeduplicateAndIgnoreDisabledArtifacts() {
-        ProductProfile profile = fallbackProfile();
-        Set<String> providerCapabilities = Set.of(TRANSCRIPT_FINAL, "summary.fallback");
-        CapabilityPlan capabilityPlan = new CapabilityPlanner().plan(
-                new CapabilityDescriptor("mock-fallback", providerCapabilities),
-                profile,
+    void reservationMustBeLockedReservedBoundToExactMeetingAndScopes() {
+        FinalizationInputFact input = input("sha256:source-a");
+        FinalizationExecutionFact execution = execution(profile("mock-summary-v1"));
+        UsageReservation bound = reservation("reservation-a");
+        UsageReservation unbound = initialReservation("reservation-unbound", MEETING_ID,
+                DEPLOYMENT_SCOPE, SUBJECT_SCOPE);
+        UsageReservation wrongMeeting = initialReservation(
+                        "reservation-wrong-meeting", "another-meeting",
+                        DEPLOYMENT_SCOPE, SUBJECT_SCOPE)
+                .bind("another-meeting", ACCEPTED_AT.minusSeconds(20), 0);
+        UsageReservation committed = bound.commit(
+                new UsageActual(UsageUnit.MEETING_DURATION_MS, 65_432),
+                ACCEPTED_AT.plusSeconds(1),
+                bound.version());
+        UsageReservation lockedVersionSeven = new UsageReservation(
+                bound.reservationId(), bound.deploymentScope(), bound.subjectScope(),
+                bound.grantId(), bound.expectedMeetingId(), bound.boundMeetingId(),
+                bound.boundAt(), bound.reservedUsage(), null, bound.createdAt(),
+                bound.expiresAt(), UsageReservation.State.RESERVED, 7,
+                null, null, null);
+
+        var versionSevenPlan = derive(input, execution, lockedVersionSeven);
+        assertEquals(7, versionSevenPlan.commitUsageRequest().expectedVersion());
+        assertEquals(derive(input, execution, bound).commitUsageRequest().idempotencyKey(),
+                versionSevenPlan.commitUsageRequest().idempotencyKey());
+        assertNotEquals(derive(input, execution, bound).commitUsageRequest().requestDigest(),
+                versionSevenPlan.commitUsageRequest().requestDigest());
+
+        assertThrows(IllegalArgumentException.class,
+                () -> derive(input, execution, unbound));
+        assertThrows(IllegalArgumentException.class,
+                () -> derive(input, execution, wrongMeeting));
+        assertThrows(IllegalArgumentException.class,
+                () -> derive(input, execution, committed));
+        assertThrows(IllegalArgumentException.class,
+                () -> new DeterministicMockFinalizationPlanner().derive(
+                        "wrong-deployment", SUBJECT_SCOPE,
+                        input, execution, bound));
+        assertThrows(IllegalArgumentException.class,
+                () -> new DeterministicMockFinalizationPlanner().derive(
+                        DEPLOYMENT_SCOPE, "wrong-subject",
+                        input, execution, bound));
+    }
+
+    @Test
+    void executableMappingsDeduplicateFallbackAndIgnoreDisabledArtifacts() {
+        ProductProfile fallback = fallbackProfile();
+        CapabilityPlan fallbackPlan = new CapabilityPlanner().plan(
+                new CapabilityDescriptor(
+                        "mock-fallback", Set.of(TRANSCRIPT_FINAL, "summary.fallback")),
+                fallback,
                 Set.of("summary.primary"),
                 Set.of(TRANSCRIPT_FINAL, "summary.primary", "summary.fallback"),
                 DeploymentLimits.NONE,
                 5L);
+        FinalizationExecutionFact execution = FinalizationExecutionFact.freeze(
+                MEETING_ID, ACCEPTED_AT.minusSeconds(60), null, fallback, fallbackPlan);
 
-        var plan = new DeterministicMockFinalizationPlanner().derive(
-                input("sha256:fallback"), profile, capabilityPlan);
+        var plan = derive(input("sha256:fallback"), execution, reservation("reservation-a"));
 
         assertEquals(List.of("summary.structured", "transcript.final"),
                 plan.artifacts().stream().map(value -> value.spec().artifactType()).toList());
-        assertEquals(2, plan.artifacts().size(),
-                "USE_FALLBACK and fallback ENABLE may name the same explicit artifact");
+        assertEquals(2, plan.artifacts().size());
 
         ProductProfile disabledProfile = new ProductProfile(
                 "disabled-artifact/mock-v1",
                 1,
                 Set.of(TRANSCRIPT_FINAL),
                 Set.of("export.optional"),
-                Map.of(),
-                Map.of(),
-                Map.of(),
+                Map.of(), Map.of(), Map.of(),
                 Map.of(
                         TRANSCRIPT_FINAL, List.of("mock-transcript-v1"),
                         "export.optional", List.of("mock-export-v1")),
@@ -199,19 +223,17 @@ class DeterministicMockFinalizationPlannerTest {
                 Set.of(TRANSCRIPT_FINAL, "export.optional"),
                 DeploymentLimits.NONE,
                 6L);
-        var enabledOnly = new DeterministicMockFinalizationPlanner().derive(
-                input("sha256:disabled"), disabledProfile, disabledPlan);
-
+        FinalizationExecutionFact disabledExecution = FinalizationExecutionFact.freeze(
+                MEETING_ID, ACCEPTED_AT.minusSeconds(60), null,
+                disabledProfile, disabledPlan);
+        var enabledOnly = derive(
+                input("sha256:disabled"), disabledExecution, reservation("reservation-a"));
         assertEquals(List.of("transcript.final"), enabledOnly.artifacts().stream()
                 .map(value -> value.spec().artifactType()).toList());
     }
 
     @Test
-    void failedIncompleteUnknownOrSubMicrosecondInputsFailClosed() {
-        ProductProfile profile = profile("mock-summary-v1");
-        CapabilityPlan enabled = capabilityPlan(profile);
-        DeterministicMockFinalizationPlanner planner =
-                new DeterministicMockFinalizationPlanner();
+    void unknownArtifactFailedPlanMismatchedMeetingAndSubMicrosecondInputFailClosed() {
         ProductProfile unknown = new ProductProfile(
                 "unknown-artifact-profile", 1,
                 Set.of(TRANSCRIPT_FINAL), Set.of(),
@@ -219,29 +241,70 @@ class DeterministicMockFinalizationPlannerTest {
                 Map.of(TRANSCRIPT_FINAL, List.of("mock-transcript")),
                 Map.of(TRANSCRIPT_FINAL, List.of("export.file")));
         CapabilityPlan unknownPlan = new CapabilityPlanner().plan(
-                new CapabilityDescriptor(Set.of(TRANSCRIPT_FINAL)), unknown,
-                Set.of(), Set.of(TRANSCRIPT_FINAL), DeploymentLimits.NONE);
+                new CapabilityDescriptor("unknown-mock", Set.of(TRANSCRIPT_FINAL)),
+                unknown,
+                Set.of(),
+                Set.of(TRANSCRIPT_FINAL),
+                DeploymentLimits.NONE,
+                8L);
+        FinalizationExecutionFact unknownExecution = FinalizationExecutionFact.freeze(
+                MEETING_ID, ACCEPTED_AT.minusSeconds(60), null, unknown, unknownPlan);
+        ProductProfile failedProfile = new ProductProfile(
+                "failed-plan-profile", 1,
+                Set.of(TRANSCRIPT_FINAL, SUMMARY_STRUCTURED), Set.of(),
+                Map.of(), Map.of(), Map.of(),
+                Map.of(
+                        TRANSCRIPT_FINAL, List.of("mock-transcript"),
+                        SUMMARY_STRUCTURED, List.of("mock-summary")),
+                Map.of(
+                        TRANSCRIPT_FINAL, List.of("transcript.final"),
+                        SUMMARY_STRUCTURED, List.of("summary.structured")));
+        CapabilityPlan failedPlan = new CapabilityPlanner().plan(
+                new CapabilityDescriptor("failed-mock", Set.of(TRANSCRIPT_FINAL)),
+                failedProfile,
+                Set.of(),
+                Set.of(TRANSCRIPT_FINAL, SUMMARY_STRUCTURED),
+                DeploymentLimits.NONE,
+                9L);
+        FinalizationExecutionFact failedExecution = FinalizationExecutionFact.freeze(
+                MEETING_ID, ACCEPTED_AT.minusSeconds(60), null,
+                failedProfile, failedPlan);
         FinalizationInputFact subMicrosecond = new FinalizationInputFact(
-                "meeting-finalization-recovery", "input-binding-v1", 17, 65_432,
+                MEETING_ID, "input-binding-v1", 17, 65_432,
                 "zh-CN", List.of("en-US"),
                 Instant.parse("2026-09-28T03:00:00.123456789Z"), "sha256:source-a");
+        FinalizationExecutionFact otherMeeting = FinalizationExecutionFact.freeze(
+                "another-meeting", ACCEPTED_AT.minusSeconds(60), null,
+                profile("mock-summary-v1"), capabilityPlan(profile("mock-summary-v1")));
 
         assertThrows(IllegalArgumentException.class,
-                () -> planner.derive(input("sha256:source-a"), unknown, unknownPlan));
+                () -> derive(input("sha256:source-a"), unknownExecution,
+                        reservation("reservation-a")));
         assertThrows(IllegalArgumentException.class,
-                () -> planner.derive(subMicrosecond, profile, enabled));
-
-        CapabilityPlan incomplete = new CapabilityPlan(
-                enabled.planRevision(), List.of(enabled.decisions().getFirst()));
+                () -> derive(input("sha256:source-a"), failedExecution,
+                        reservation("reservation-a")));
         assertThrows(IllegalArgumentException.class,
-                () -> planner.derive(input("sha256:source-a"), profile, incomplete));
-        assertFalse(planner.derive(input("sha256:source-a"), profile, enabled)
-                .toString().contains("meeting-finalization-recovery"));
+                () -> derive(subMicrosecond, execution(profile("mock-summary-v1")),
+                        reservation("reservation-a")));
+        assertThrows(IllegalArgumentException.class,
+                () -> derive(input("sha256:source-a"), otherMeeting,
+                        reservation("reservation-a")));
+        assertFalse(derive(
+                input("sha256:source-a"), execution(profile("mock-summary-v1")),
+                reservation("reservation-a")).toString().contains(MEETING_ID));
     }
 
-    private static FinalizationInputFact input(String digest) {
+    private static DeterministicMockFinalizationPlanner.Plan derive(
+            FinalizationInputFact input,
+            FinalizationExecutionFact execution,
+            UsageReservation reservation) {
+        return new DeterministicMockFinalizationPlanner().derive(
+                DEPLOYMENT_SCOPE, SUBJECT_SCOPE, input, execution, reservation);
+    }
+
+    static FinalizationInputFact input(String digest) {
         return new FinalizationInputFact(
-                "meeting-finalization-recovery",
+                MEETING_ID,
                 "input-binding-v1",
                 17,
                 65_432,
@@ -251,7 +314,16 @@ class DeterministicMockFinalizationPlannerTest {
                 digest);
     }
 
-    private static ProductProfile profile(String summaryWorkflow) {
+    static FinalizationExecutionFact execution(ProductProfile profile) {
+        return FinalizationExecutionFact.freeze(
+                MEETING_ID,
+                ACCEPTED_AT.minusSeconds(60),
+                "季度会议",
+                profile,
+                capabilityPlan(profile));
+    }
+
+    static ProductProfile profile(String summaryWorkflow) {
         return new ProductProfile(
                 "meeting-minutes/mock-v1",
                 3,
@@ -268,15 +340,48 @@ class DeterministicMockFinalizationPlannerTest {
                         SUMMARY_STRUCTURED, List.of("summary.structured")));
     }
 
-    private static CapabilityPlan capabilityPlan(ProductProfile profile) {
+    static CapabilityPlan capabilityPlan(ProductProfile profile) {
         return new CapabilityPlanner().plan(
-                new CapabilityDescriptor("deterministic-mock",
+                new CapabilityDescriptor(
+                        "deterministic-mock",
                         Set.of(TRANSCRIPT_FINAL, SUMMARY_STRUCTURED)),
                 profile,
                 Set.of(SUMMARY_STRUCTURED),
                 Set.of(TRANSCRIPT_FINAL, SUMMARY_STRUCTURED),
                 DeploymentLimits.NONE,
                 7L);
+    }
+
+    static UsageReservation reservation(String reservationId) {
+        return initialReservation(
+                        reservationId, MEETING_ID, DEPLOYMENT_SCOPE, SUBJECT_SCOPE)
+                .bind(MEETING_ID, ACCEPTED_AT.minusSeconds(20), 0);
+    }
+
+    private static UsageReservation initialReservation(
+            String reservationId,
+            String expectedMeetingId,
+            String deploymentScope,
+            String subjectScope) {
+        Instant createdAt = ACCEPTED_AT.minusSeconds(30);
+        MeetingGrant grant = new MeetingGrant(
+                "grant-finalization",
+                deploymentScope,
+                subjectScope,
+                "meeting-minutes/mock-v1",
+                3,
+                Set.of(TRANSCRIPT_FINAL, SUMMARY_STRUCTURED),
+                Set.of(TRANSCRIPT_FINAL, SUMMARY_STRUCTURED),
+                300_000,
+                createdAt.minusSeconds(1),
+                ACCEPTED_AT.plusSeconds(3600));
+        return UsageReservation.reserved(
+                reservationId,
+                grant,
+                expectedMeetingId,
+                new UsageEstimate(UsageUnit.MEETING_DURATION_MS, 120_000),
+                createdAt,
+                ACCEPTED_AT.plusSeconds(1800));
     }
 
     private static ProductProfile fallbackProfile() {

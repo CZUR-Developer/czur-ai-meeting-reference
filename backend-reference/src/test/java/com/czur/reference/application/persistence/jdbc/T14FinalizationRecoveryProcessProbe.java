@@ -2,14 +2,21 @@ package com.czur.reference.application.persistence.jdbc;
 
 import com.czur.reference.application.artifact.filesystem.PersistentFileSystemMockArtifactStore;
 import com.czur.reference.application.finalization.DeterministicMockFinalizationPlanner;
-import com.czur.reference.application.finalization.DeterministicMockFinalizationPlanner.ArtifactWritePlan;
 import com.czur.reference.application.finalization.DeterministicMockFinalizationPlanner.Plan;
+import com.czur.reference.application.finalization.FinalizationCheckpoint;
+import com.czur.reference.application.finalization.FinalizationCheckpoint.ArtifactMaterial;
+import com.czur.reference.application.finalization.FinalizationExecutionFact;
 import com.czur.reference.application.port.FinalUsageFact;
 import com.czur.reference.application.port.FinalUsageFactStore;
 import com.czur.reference.application.port.FinalizationInputFact;
+import com.czur.reference.application.port.WorkflowStep;
 import com.czur.reference.application.port.WorkflowStepStore;
 import com.czur.reference.application.port.WorkflowStepStore.ClaimRequest;
 import com.czur.reference.application.port.WorkflowStepStore.LeaseToken;
+import com.czur.reference.application.port.entitlement.MeetingGrant;
+import com.czur.reference.application.port.entitlement.UsageEstimate;
+import com.czur.reference.application.port.entitlement.UsageReservation;
+import com.czur.reference.application.port.entitlement.UsageUnit;
 import com.czur.reference.application.port.artifact.ArtifactStore.CompleteStatus;
 import com.czur.reference.application.port.artifact.ArtifactStore.PrepareStatus;
 import com.czur.reference.application.port.artifact.ArtifactStore.StageStatus;
@@ -19,6 +26,8 @@ import com.czur.reference.domain.capability.CapabilityPlan;
 import com.czur.reference.domain.capability.CapabilityPlanner;
 import com.czur.reference.domain.capability.DeploymentLimits;
 import com.czur.reference.domain.capability.ProductProfile;
+import com.czur.reference.protocol.json.FinalizationCheckpointJson;
+import com.czur.reference.protocol.json.FinalizationExecutionFactJson;
 import org.postgresql.ds.PGSimpleDataSource;
 
 import javax.sql.DataSource;
@@ -68,6 +77,8 @@ public final class T14FinalizationRecoveryProcessProbe {
     private static final String DATABASE_URL_ENV = "T14_FINALIZATION_RECOVERY_DATABASE_URL";
     private static final String ARTIFACT_ROOT_ENV = "T14_FINALIZATION_RECOVERY_ARTIFACT_ROOT";
     private static final String CONTROL_FILE_ENV = "T14_FINALIZATION_RECOVERY_CONTROL_FILE";
+    private static final String EXECUTION_FACT_ENV =
+            "T14_FINALIZATION_RECOVERY_EXECUTION_FACT_JSON";
     private static final long ARTIFACT_LIMIT = 1024 * 1024;
     private static final int CONTROL_MAGIC = 0x54313452; // T14R
     private static final int CONTROL_VERSION = 1;
@@ -105,7 +116,8 @@ public final class T14FinalizationRecoveryProcessProbe {
     private static void crashAfterReady() throws Exception {
         DataSource dataSource = dataSource();
         FinalizationInputFact input = readDurableInput(dataSource);
-        Plan plan = derive(input, false);
+        FinalizationExecutionFact executionFact = readFrozenExecutionFact();
+        Plan plan = derive(input, executionFact, lockedReservation());
         JdbcWorkflowStepStore workflow = new JdbcWorkflowStepStore(dataSource);
         require(workflow.register(plan.workflowStep()).status()
                 == WorkflowStepStore.RegisterStatus.APPLIED);
@@ -114,7 +126,7 @@ public final class T14FinalizationRecoveryProcessProbe {
                 == FinalUsageFactStore.PersistStatus.APPLIED);
 
         PersistentFileSystemMockArtifactStore artifacts = artifactStore();
-        for (ArtifactWritePlan artifact : plan.artifacts()) {
+        for (ArtifactMaterial artifact : plan.artifacts()) {
             var prepared = artifacts.createWriteIntent(artifact.spec());
             require(prepared.status() == PrepareStatus.APPLIED);
             require(artifacts.writeContent(prepared.intent(), artifact.openContent()).status()
@@ -133,17 +145,39 @@ public final class T14FinalizationRecoveryProcessProbe {
 
     private static void recover() throws Exception {
         DataSource dataSource = dataSource();
-        FinalizationInputFact reread = readDurableInput(dataSource);
-        Plan plan = derive(reread, false);
-        LeaseToken oldLease = readLeaseControl(controlFile(), plan);
         JdbcWorkflowStepStore workflow = new JdbcWorkflowStepStore(dataSource);
-        require(workflow.register(plan.workflowStep()).status()
-                == WorkflowStepStore.RegisterStatus.REPLAYED);
-        require(persistFinalUsage(dataSource, plan.finalUsage())
+        WorkflowStep stored = workflow.find(
+                FinalizationCheckpoint.workflowKey(MEETING_ID)).orElseThrow();
+        require(stored.status() == WorkflowStep.Status.LEASED);
+        FinalizationCheckpoint checkpoint = decodeStoredCheckpoint(stored);
+
+        // 第二 JVM 只读交叉核对各权威事实；不得用这些事实重新规划或读取
+        // 当前 Profile/Reservation version。后续副作用材料全部来自 checkpoint。
+        FinalizationInputFact durableInput = readDurableInput(dataSource);
+        FinalUsageFact durableUsage = readFinalUsage(dataSource);
+        FinalizationExecutionFact executionFact = readFrozenExecutionFact();
+        require(checkpoint.meetingId().equals(durableInput.meetingId()));
+        require(checkpoint.meetingId().equals(executionFact.meetingId()));
+        require(checkpoint.inputBinding().equals(durableInput.inputBinding()));
+        require(checkpoint.inputFactDigest().equals(
+                FinalizationCheckpoint.inputFactDigest(durableInput)));
+        require(checkpoint.executionFactDigest().equals(
+                FinalizationExecutionFactJson.sha256(executionFact)));
+        require(checkpoint.finalUsageFact().equals(durableUsage));
+        require(checkpoint.commitUsageRequest().actual().equals(durableUsage.actual()));
+        require(checkpoint.commitPlan().sourceInputBinding().equals(
+                durableUsage.sourceInputBinding()));
+        require(checkpoint.commitPlan().sourceInputDigest().equals(
+                durableUsage.sourceInputDigest()));
+        require(checkpoint.commitPlan().sourceAcceptedAt().equals(
+                durableUsage.sourceAcceptedAt()));
+
+        LeaseToken oldLease = readLeaseControl(controlFile(), stored.key());
+        require(persistFinalUsage(dataSource, checkpoint.finalUsageFact())
                 == FinalUsageFactStore.PersistStatus.REPLAYED);
 
         PersistentFileSystemMockArtifactStore artifacts = artifactStore();
-        for (ArtifactWritePlan artifact : plan.artifacts()) {
+        for (ArtifactMaterial artifact : checkpoint.artifacts()) {
             var prepared = artifacts.createWriteIntent(artifact.spec());
             require(prepared.status() == PrepareStatus.REPLAYED);
             require(artifacts.writeContent(prepared.intent(), artifact.openContent()).status()
@@ -155,7 +189,7 @@ public final class T14FinalizationRecoveryProcessProbe {
                 byte[] content = read.content().readAllBytes();
                 require(content.length == artifact.claim().size());
                 require(java.util.Arrays.equals(
-                        artifact.canonicalContent().getBytes(StandardCharsets.UTF_8),
+                        artifact.canonicalContentBytes(),
                         content));
             }
         }
@@ -169,26 +203,29 @@ public final class T14FinalizationRecoveryProcessProbe {
         require(workflow.complete(oldLease, reclaimedAt.plusSeconds(2)).status()
                 == WorkflowStepStore.CompleteStatus.ALREADY_COMPLETED);
         Files.delete(controlFile());
-        System.out.println("PROBE_RECOVERED usage=REPLAYED artifacts=REPLAYED"
+        System.out.println("PROBE_RECOVERED checkpoint=DECODED facts=VERIFIED"
+                + " usage=REPLAYED artifacts=REPLAYED"
                 + " staleBefore=NOT_OWNER workflow=COMPLETED staleAfter=ALREADY_COMPLETED");
     }
 
     private static void verifyDrift() throws Exception {
         DataSource dataSource = dataSource();
         FinalizationInputFact reread = readDurableInput(dataSource);
-        Plan original = derive(reread, false);
         Plan drifted = derive(reread, true);
-        require(original.workflowStep().key().equals(drifted.workflowStep().key()));
-        require(!original.workflowStep().contentDigest()
-                .equals(drifted.workflowStep().contentDigest()));
         JdbcWorkflowStepStore workflow = new JdbcWorkflowStepStore(dataSource);
+        WorkflowStep stored = workflow.find(
+                FinalizationCheckpoint.workflowKey(MEETING_ID)).orElseThrow();
+        FinalizationCheckpoint original = decodeStoredCheckpoint(stored);
+        require(stored.key().equals(drifted.workflowStep().key()));
+        require(!stored.contentDigest()
+                .equals(drifted.workflowStep().contentDigest()));
         require(workflow.register(drifted.workflowStep()).status()
                 == WorkflowStepStore.RegisterStatus.CONFLICT);
 
         PersistentFileSystemMockArtifactStore artifacts = artifactStore();
         for (int index = 0; index < original.artifacts().size(); index++) {
-            ArtifactWritePlan winner = original.artifacts().get(index);
-            ArtifactWritePlan conflict = drifted.artifacts().get(index);
+            ArtifactMaterial winner = original.artifacts().get(index);
+            ArtifactMaterial conflict = drifted.artifacts().get(index);
             require(winner.spec().artifactId().equals(conflict.spec().artifactId()));
             require(!winner.spec().expectedChecksum().equals(conflict.spec().expectedChecksum()));
             var result = artifacts.createWriteIntent(conflict.spec());
@@ -216,6 +253,22 @@ public final class T14FinalizationRecoveryProcessProbe {
     }
 
     static Plan derive(FinalizationInputFact input, boolean drifted) {
+        return derive(input, fixtureExecutionFact(drifted), lockedReservation());
+    }
+
+    private static Plan derive(
+            FinalizationInputFact input,
+            FinalizationExecutionFact executionFact,
+            UsageReservation reservation) {
+        return new DeterministicMockFinalizationPlanner().derive(
+                "t14-recovery-deployment",
+                "LEGACY_UNOWNED",
+                input,
+                executionFact,
+                reservation);
+    }
+
+    static FinalizationExecutionFact fixtureExecutionFact(boolean drifted) {
         ProductProfile profile = profile(drifted);
         CapabilityPlan capabilityPlan = new CapabilityPlanner().plan(
                 new CapabilityDescriptor(
@@ -226,8 +279,35 @@ public final class T14FinalizationRecoveryProcessProbe {
                 Set.of(TRANSCRIPT_FINAL, SUMMARY_STRUCTURED),
                 DeploymentLimits.NONE,
                 11L);
-        return new DeterministicMockFinalizationPlanner().derive(
-                input, profile, capabilityPlan);
+        return FinalizationExecutionFact.freeze(
+                MEETING_ID,
+                ACCEPTED_AT.minusSeconds(60),
+                null,
+                profile,
+                capabilityPlan);
+    }
+
+    private static UsageReservation lockedReservation() {
+        Instant createdAt = ACCEPTED_AT.minusSeconds(120);
+        MeetingGrant grant = new MeetingGrant(
+                "grant-t14-finalization",
+                "t14-recovery-deployment",
+                "LEGACY_UNOWNED",
+                "meeting-minutes/t14-mock-v1",
+                4,
+                Set.of(TRANSCRIPT_FINAL, SUMMARY_STRUCTURED),
+                Set.of(TRANSCRIPT_FINAL, SUMMARY_STRUCTURED),
+                300_000,
+                createdAt.minusSeconds(1),
+                ACCEPTED_AT.plusSeconds(3600));
+        return UsageReservation.reserved(
+                        "reservation-t14-finalization",
+                        grant,
+                        MEETING_ID,
+                        new UsageEstimate(UsageUnit.MEETING_DURATION_MS, 120_000),
+                        createdAt,
+                        ACCEPTED_AT.plusSeconds(1800))
+                .bind(MEETING_ID, createdAt.plusSeconds(1), 0);
     }
 
     private static ProductProfile profile(boolean drifted) {
@@ -291,6 +371,43 @@ public final class T14FinalizationRecoveryProcessProbe {
                 throw failure;
             }
         }
+    }
+
+    private static FinalUsageFact readFinalUsage(DataSource dataSource) throws Exception {
+        try (Connection connection = dataSource.getConnection()) {
+            connection.setAutoCommit(false);
+            try {
+                FinalUsageFact fact = JdbcFinalUsageFactStore.find(connection, MEETING_ID)
+                        .orElseThrow(() ->
+                                new IllegalStateException("final usage is unavailable"));
+                connection.rollback();
+                return fact;
+            } catch (Throwable failure) {
+                connection.rollback();
+                throw failure;
+            }
+        }
+    }
+
+    private static FinalizationExecutionFact readFrozenExecutionFact() {
+        return FinalizationExecutionFactJson.decode(requiredEnvironment(EXECUTION_FACT_ENV));
+    }
+
+    private static FinalizationCheckpoint decodeStoredCheckpoint(WorkflowStep stored) {
+        require(stored.key().equals(FinalizationCheckpoint.workflowKey(MEETING_ID)));
+        require(FinalizationCheckpoint.CHECKPOINT_TYPE.equals(stored.checkpointType()));
+        FinalizationCheckpoint checkpoint =
+                FinalizationCheckpointJson.decode(stored.canonicalPayload());
+        require(stored.canonicalPayload().equals(
+                FinalizationCheckpointJson.encode(checkpoint)));
+        require(stored.contentDigest().equals(
+                FinalizationCheckpointJson.sha256(checkpoint)));
+        WorkflowStep definition = FinalizationCheckpointJson.workflowStep(checkpoint);
+        require(definition.key().equals(stored.key()));
+        require(definition.checkpointType().equals(stored.checkpointType()));
+        require(definition.canonicalPayload().equals(stored.canonicalPayload()));
+        require(definition.contentDigest().equals(stored.contentDigest()));
+        return checkpoint;
     }
 
     private static void lockMeeting(Connection connection, String meetingId)
@@ -380,7 +497,9 @@ public final class T14FinalizationRecoveryProcessProbe {
         }
     }
 
-    private static LeaseToken readLeaseControl(Path path, Plan plan) throws Exception {
+    private static LeaseToken readLeaseControl(
+            Path path,
+            WorkflowStep.Key workflowKey) throws Exception {
         if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)
                 || Files.isSymbolicLink(path)
                 || Files.size(path) <= 0
@@ -404,7 +523,7 @@ public final class T14FinalizationRecoveryProcessProbe {
             Instant claimedAt = Instant.parse(readString(input));
             Instant expiresAt = Instant.parse(readString(input));
             LeaseToken lease = new LeaseToken(
-                    plan.workflowStep().key(),
+                    workflowKey,
                     owner,
                     token,
                     expiresAt,
