@@ -45,7 +45,44 @@ UTF-8 的原始 32 字节 SHA-256；数据库关闭式校验 12 个顶层字段�
 或业务 DML；最新版本由复合主键反向读取。V007 会精确核对已有同名表，只有“DDL 已
 提交但尚未登记版本”的完整结构可以安全重跑，半表、错列和同名弱约束都会失败。
 
-V003 和 V007 必须允许在“Schema 已提交但版本登记失败”后安全重跑。执行约束前会先
+`V008__durable_input_fact.sql` 新增每会议一个的 durable input 接管事实；
+`V009__final_usage_fact.sql` 固化由该输入事实得出的最终标准用量；
+`V010__workflow_step_fencing.sql` 将 V001 的工作流占位行收紧为可恢复 checkpoint、
+明确的下一次领取时间和完整租约 fencing 状态。这三个版本只冻结 JDBC 物理事实，
+不会启动 Worker、重新读取 Provider 状态或推断历史业务值。
+
+`V011__finalization_execution_artifact_ready.sql` 新增每会议一个的
+`finalization_execution_fact`：四列分别保存 `meeting_id`、codec canonical JSON、
+等价 JSONB 镜像与 canonical UTF-8 的原始 32 字节 SHA-256。数据库关闭式校验六个
+根字段、`finalization-execution-fact/v1`、会议身份、`startedAt` 微秒上限、可空
+标题、Profile/Plan 对象、JSON 镜像和摘要，不重复拆出 startedAt/Profile/Plan 列。
+
+V011 同时原位替换 V001 的 `artifact` 占位表，不另建同义表。新表的一行只表示产物
+已经 READY，保存 artifact/meeting/type/media/language/revision、唯一 intent、唯一
+storage binding、size/checksum 与 `recorded_at`；不保存 status、正文、checkpoint、
+Profile、租约、Manifest、URL、路径、凭据或开放式 metadata。迁移只接受“精确 V001
+artifact 且零行、execution 表不存在”的首次执行，或“两张 V011 表同时完整存在”的
+精确重跑。V001 artifact 有任意行、只存在一张 V011 表、半表、错列、弱约束、错误
+外键或 view 都会使整个 `BEGIN`/`COMMIT` 事务失败并保留原状，部署方不得先手工登记
+版本或删除旧行绕过门禁。
+
+V011 还关闭式锁定三类基础条件：`meeting.meeting_id` 必须仍是第 1 列的
+`TEXT NOT NULL` 非延迟主键；`meeting` 与两张 V011 表都必须是独立普通持久表，
+不接受 UNLOGGED/TEMP、partition leaf 或传统 `INHERITS` 父/子表；Artifact 文本值按
+Java 21 `String.isBlank()` 的完整空白码点集判定，不只是去除普通空格。迁移先把目标
+schema 固定在 `pg_temp` 之前，避免临时同名表遮蔽；再用 transaction advisory lock
+串行化同 schema 的 V011，并按 `meeting → finalization_execution_fact → artifact`
+固定锁序取得 catalog 保护。execution 的 `ACCESS SHARE` 不阻断业务写，artifact 的
+`ACCESS EXCLUSIVE` 保护 V001 检空与 `DROP TABLE`。因此精确重跑不会与正常的
+execution→artifact 写事务形成反向等待环；并发插入已提交的 V001 旧行会使迁移失败并
+保留原行，不会在检空与 `DROP TABLE` 之间丢失。
+
+这里的版本登记机制是仓库自带的 `deploy/migrate.sh` 与 `schema_migrations`，不是
+Flyway。脚本在 SQL 成功提交后登记完整文件基名；如果发生“DDL 已提交但版本登记
+失败”，应原样重跑脚本，让迁移自身的精确 catalog 门禁确认结构，不能只凭列名补
+登记。
+
+V003 和 V007～V011 必须允许在“Schema 已提交但版本登记失败”后安全重跑。执行约束前会先
 检查历史 Reservation 状态，发现未知状态时整事务失败；不要绕过该检查手工登记
 版本。没有 PostgreSQL 时可以先运行静态门禁：
 

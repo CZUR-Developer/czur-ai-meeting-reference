@@ -31,14 +31,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 显式 PostgreSQL 运行时门禁。
  *
  * <p>默认跳过，只有调用方显式提供测试数据库 URL、账号和密码时才启动真实
- * HikariCP。目标数据库必须预先执行并登记 V001～V010；常规业务用例不自动迁移、不清理
+ * HikariCP。目标数据库必须预先执行并登记 V001～V011；常规业务用例不自动迁移、不清理
  * 共享数据库，也不在运行失败时静默切换到内存实现。</p>
  */
 @EnabledIfEnvironmentVariable(named = "REFERENCE_TEST_DATABASE_URL", matches = ".+")
 class JdbcDatabaseRuntimeIntegrationTest {
     @Test
-    void refusesSchemaThatHasNotRegisteredV007ThroughV010() throws Exception {
-        String url = System.getenv("REFERENCE_TEST_DATABASE_URL");
+    void refusesSchemaThatHasNotRegisteredV007ThroughV011() throws Exception {
+        String url = requiredUrl();
         String user = System.getenv("REFERENCE_TEST_DATABASE_USER");
         String password = System.getenv("REFERENCE_TEST_DATABASE_PASSWORD");
         if (user == null || user.isBlank() || password == null || password.isBlank()) {
@@ -73,7 +73,8 @@ class JdbcDatabaseRuntimeIntegrationTest {
                             "V007__meeting_manifest_revision",
                             "V008__durable_input_fact",
                             "V009__final_usage_fact",
-                            "V010__workflow_step_fencing"),
+                            "V010__workflow_step_fencing",
+                            "V011__finalization_execution_artifact_ready"),
                     failure.readiness().missingMigrations());
         } finally {
             try (Connection admin = DriverManager.getConnection(url, user, password);
@@ -88,7 +89,7 @@ class JdbcDatabaseRuntimeIntegrationTest {
     void registeredV007WithoutPhysicalTableIsSchemaInvalid() throws Exception {
         String schema = createMigrationRegistryOnlySchema("runtime_v007_no_table_");
         try {
-            registerMigrations(schema, 10);
+            registerMigrations(schema, 11);
             assertSchemaInvalid(schema);
         } finally {
             dropSchema(schema);
@@ -103,7 +104,7 @@ class JdbcDatabaseRuntimeIntegrationTest {
                  Statement statement = connection.createStatement()) {
                 statement.execute("CREATE TABLE meeting_manifest_revision (meeting_id TEXT)");
             }
-            registerMigrations(schema, 10);
+            registerMigrations(schema, 11);
             assertSchemaInvalid(schema);
         } finally {
             dropSchema(schema);
@@ -112,7 +113,7 @@ class JdbcDatabaseRuntimeIntegrationTest {
 
     @Test
     void registeredV007WithSameNameWeakCheckIsSchemaInvalid() throws Exception {
-        String schema = createMigratedSchema("runtime_v007_weak_", 10);
+        String schema = createMigratedSchema("runtime_v007_weak_", 11);
         try {
             try (Connection connection = scopedConnection(schema);
                  Statement statement = connection.createStatement()) {
@@ -130,9 +131,9 @@ class JdbcDatabaseRuntimeIntegrationTest {
 
     @Test
     void registeredV009WithoutPhysicalTableIsSchemaInvalid() throws Exception {
-        String schema = createMigratedSchema("runtime_v009_no_table_", 9);
+        String schema = createMigratedSchema("runtime_v009_no_table_", 8);
         try {
-            registerMigrations(schema, 10);
+            registerMigrations(schema, 11);
             assertSchemaInvalid(schema);
         } finally {
             dropSchema(schema);
@@ -141,7 +142,7 @@ class JdbcDatabaseRuntimeIntegrationTest {
 
     @Test
     void registeredV009WithSameNameWeakCheckIsSchemaInvalid() throws Exception {
-        String schema = createMigratedSchema("runtime_v009_weak_", 10);
+        String schema = createMigratedSchema("runtime_v009_weak_", 11);
         try {
             try (Connection connection = scopedConnection(schema);
                  Statement statement = connection.createStatement()) {
@@ -150,6 +151,182 @@ class JdbcDatabaseRuntimeIntegrationTest {
                             DROP CONSTRAINT final_usage_fact_actual_amount_ck,
                             ADD CONSTRAINT final_usage_fact_actual_amount_ck CHECK (true)
                         """);
+            }
+            assertSchemaInvalid(schema);
+        } finally {
+            dropSchema(schema);
+        }
+    }
+
+    @Test
+    void exactV011PhysicalTablesWithoutRegistrationStayMigrationMissing() throws Exception {
+        String schema = createMigratedSchema("runtime_v011_unregistered_", 11);
+        try (Connection connection = scopedConnection(schema);
+             PreparedStatement statement = connection.prepareStatement(
+                     "DELETE FROM schema_migrations WHERE version = ?")) {
+            statement.setString(1, "V011__finalization_execution_artifact_ready");
+            assertEquals(1, statement.executeUpdate());
+        }
+        try {
+            DatabaseStartupException failure = assertThrows(
+                    DatabaseStartupException.class,
+                    () -> JdbcDatabaseRuntime.start(DatabaseRuntimeConfig.of(
+                            scopedUrl(schema), requiredUser(), requiredPassword(),
+                            Duration.ofSeconds(5), Duration.ofSeconds(3), 2, 1)));
+            assertEquals(DatabaseReadiness.Status.MIGRATION_MISSING,
+                    failure.readiness().status());
+            assertEquals(java.util.Set.of(
+                            "V011__finalization_execution_artifact_ready"),
+                    failure.readiness().missingMigrations());
+        } finally {
+            dropSchema(schema);
+        }
+    }
+
+    @Test
+    void registeredV011WithoutPhysicalTablesIsSchemaInvalid() throws Exception {
+        String schema = createMigratedSchema("runtime_v011_no_tables_", 10);
+        try {
+            registerMigrations(schema, 11);
+            assertSchemaInvalid(schema);
+        } finally {
+            dropSchema(schema);
+        }
+    }
+
+    @Test
+    void registeredV011MissingArtifactIsSchemaInvalid() throws Exception {
+        String schema = createMigratedSchema("runtime_v011_no_artifact_", 11);
+        try {
+            try (Connection connection = scopedConnection(schema);
+                 Statement statement = connection.createStatement()) {
+                statement.execute("DROP TABLE artifact");
+            }
+            assertSchemaInvalid(schema);
+        } finally {
+            dropSchema(schema);
+        }
+    }
+
+    @Test
+    void registeredV011WithWrongRecordedAtDefaultIsSchemaInvalid() throws Exception {
+        String schema = createMigratedSchema("runtime_v011_default_", 11);
+        try {
+            try (Connection connection = scopedConnection(schema);
+                 Statement statement = connection.createStatement()) {
+                statement.execute("ALTER TABLE artifact ALTER COLUMN recorded_at DROP DEFAULT");
+            }
+            assertSchemaInvalid(schema);
+        } finally {
+            dropSchema(schema);
+        }
+    }
+
+    @Test
+    void registeredV011WithNotValidCheckIsSchemaInvalid() throws Exception {
+        String schema = createMigratedSchema("runtime_v011_not_valid_", 11);
+        try {
+            try (Connection connection = scopedConnection(schema);
+                 Statement statement = connection.createStatement()) {
+                statement.execute("""
+                        ALTER TABLE artifact
+                            DROP CONSTRAINT artifact_language_ck,
+                            ADD CONSTRAINT artifact_language_ck CHECK (
+                                language IS NULL OR (
+                                    length(btrim(language)) > 0
+                                    AND octet_length(convert_to(language, 'UTF8')) <= 4096))
+                                NOT VALID
+                        """);
+            }
+            assertSchemaInvalid(schema);
+        } finally {
+            dropSchema(schema);
+        }
+    }
+
+    @Test
+    void registeredV011WithNullableUniqueMeetingIdentityIsSchemaInvalid() throws Exception {
+        String schema = createMigratedSchema("runtime_v011_parent_identity_", 11);
+        try {
+            try (Connection connection = scopedConnection(schema);
+                 Statement statement = connection.createStatement()) {
+                statement.execute("""
+                        ALTER TABLE meeting DROP CONSTRAINT meeting_pkey CASCADE;
+                        ALTER TABLE meeting ALTER COLUMN meeting_id DROP NOT NULL;
+                        ALTER TABLE meeting ADD CONSTRAINT meeting_id_uq UNIQUE (meeting_id);
+                        ALTER TABLE meeting_manifest_revision
+                            ADD CONSTRAINT meeting_manifest_revision_meeting_fk
+                            FOREIGN KEY (meeting_id) REFERENCES meeting(meeting_id)
+                            ON DELETE RESTRICT;
+                        ALTER TABLE durable_input_fact
+                            ADD CONSTRAINT durable_input_fact_meeting_fk
+                            FOREIGN KEY (meeting_id) REFERENCES meeting(meeting_id)
+                            ON DELETE RESTRICT;
+                        ALTER TABLE final_usage_fact
+                            ADD CONSTRAINT final_usage_fact_meeting_fk
+                            FOREIGN KEY (meeting_id) REFERENCES meeting(meeting_id)
+                            ON DELETE RESTRICT;
+                        ALTER TABLE workflow_step
+                            ADD CONSTRAINT workflow_step_meeting_id_fkey
+                            FOREIGN KEY (meeting_id) REFERENCES meeting(meeting_id);
+                        ALTER TABLE finalization_execution_fact
+                            ADD CONSTRAINT finalization_execution_fact_meeting_fk
+                            FOREIGN KEY (meeting_id) REFERENCES meeting(meeting_id)
+                            ON DELETE RESTRICT;
+                        ALTER TABLE artifact
+                            ADD CONSTRAINT artifact_meeting_fk
+                            FOREIGN KEY (meeting_id) REFERENCES meeting(meeting_id)
+                            ON DELETE RESTRICT
+                        """);
+            }
+            assertSchemaInvalid(schema);
+        } finally {
+            dropSchema(schema);
+        }
+    }
+
+    @Test
+    void registeredV011WithUnloggedArtifactIsSchemaInvalid() throws Exception {
+        String schema = createMigratedSchema("runtime_v011_unlogged_", 11);
+        try {
+            try (Connection connection = scopedConnection(schema);
+                 Statement statement = connection.createStatement()) {
+                statement.execute("ALTER TABLE artifact SET UNLOGGED");
+            }
+            assertSchemaInvalid(schema);
+        } finally {
+            dropSchema(schema);
+        }
+    }
+
+    @Test
+    void registeredV011WithArtifactPartitionLeafIsSchemaInvalid() throws Exception {
+        String schema = createMigratedSchema("runtime_v011_partition_", 11);
+        try {
+            try (Connection connection = scopedConnection(schema);
+                 Statement statement = connection.createStatement()) {
+                statement.execute("""
+                        CREATE TABLE artifact_partition_parent
+                            (LIKE artifact INCLUDING DEFAULTS)
+                            PARTITION BY HASH (artifact_id);
+                        ALTER TABLE artifact_partition_parent
+                            ATTACH PARTITION artifact
+                            FOR VALUES WITH (MODULUS 1, REMAINDER 0)
+                        """);
+            }
+            assertSchemaInvalid(schema);
+        } finally {
+            dropSchema(schema);
+        }
+    }
+
+    @Test
+    void registeredV011WithLegacyArtifactChildIsSchemaInvalid() throws Exception {
+        String schema = createMigratedSchema("runtime_v011_inheritance_", 11);
+        try {
+            try (Connection connection = scopedConnection(schema);
+                 Statement statement = connection.createStatement()) {
+                statement.execute("CREATE TABLE artifact_shadow () INHERITS (artifact)");
             }
             assertSchemaInvalid(schema);
         } finally {
@@ -167,7 +344,7 @@ class JdbcDatabaseRuntimeIntegrationTest {
         }
 
         DatabaseRuntimeConfig config = DatabaseRuntimeConfig.of(
-                System.getenv("REFERENCE_TEST_DATABASE_URL"),
+                requiredUrl(),
                 user,
                 password,
                 Duration.ofSeconds(5),
@@ -213,7 +390,7 @@ class JdbcDatabaseRuntimeIntegrationTest {
                     "显式 PostgreSQL 集成测试必须同时设置 REFERENCE_TEST_DATABASE_USER/PASSWORD");
         }
         JdbcDatabaseRuntime runtime = JdbcDatabaseRuntime.start(DatabaseRuntimeConfig.of(
-                System.getenv("REFERENCE_TEST_DATABASE_URL"), user, password,
+                requiredUrl(), user, password,
                 Duration.ofSeconds(5), Duration.ofSeconds(3), 4, 1));
         runtime.close();
         runtime.close();
@@ -261,7 +438,7 @@ class JdbcDatabaseRuntimeIntegrationTest {
     private static String createMigrationRegistryOnlySchema(String prefix) throws Exception {
         String schema = prefix + UUID.randomUUID().toString().replace("-", "");
         try (Connection admin = DriverManager.getConnection(
-                System.getenv("REFERENCE_TEST_DATABASE_URL"), requiredUser(), requiredPassword());
+                requiredUrl(), requiredUser(), requiredPassword());
              Statement statement = admin.createStatement()) {
             statement.execute("CREATE SCHEMA " + quoteIdentifier(schema));
             statement.execute("CREATE TABLE " + quoteIdentifier(schema)
@@ -278,7 +455,7 @@ class JdbcDatabaseRuntimeIntegrationTest {
     private static String createMigratedSchema(String prefix, int count) throws Exception {
         String schema = prefix + UUID.randomUUID().toString().replace("-", "");
         try (Connection admin = DriverManager.getConnection(
-                System.getenv("REFERENCE_TEST_DATABASE_URL"), requiredUser(), requiredPassword());
+                requiredUrl(), requiredUser(), requiredPassword());
              Statement statement = admin.createStatement()) {
             statement.execute("CREATE SCHEMA " + quoteIdentifier(schema));
         }
@@ -292,7 +469,8 @@ class JdbcDatabaseRuntimeIntegrationTest {
                 "V007__meeting_manifest_revision.sql",
                 "V008__durable_input_fact.sql",
                 "V009__final_usage_fact.sql",
-                "V010__workflow_step_fencing.sql");
+                "V010__workflow_step_fencing.sql",
+                "V011__finalization_execution_artifact_ready.sql");
         try {
             for (String migration : migrations.subList(0, count)) {
                 try (Connection connection = scopedConnection(schema);
@@ -319,7 +497,8 @@ class JdbcDatabaseRuntimeIntegrationTest {
                 "V007__meeting_manifest_revision",
                 "V008__durable_input_fact",
                 "V009__final_usage_fact",
-                "V010__workflow_step_fencing");
+                "V010__workflow_step_fencing",
+                "V011__finalization_execution_artifact_ready");
         try (Connection connection = scopedConnection(schema);
              PreparedStatement statement = connection.prepareStatement("""
                      INSERT INTO schema_migrations(version)
@@ -339,7 +518,7 @@ class JdbcDatabaseRuntimeIntegrationTest {
     }
 
     private static String scopedUrl(String schema) {
-        String url = System.getenv("REFERENCE_TEST_DATABASE_URL");
+        String url = requiredUrl();
         return url + (url.contains("?") ? "&" : "?") + "currentSchema=" + schema;
     }
 
@@ -358,7 +537,7 @@ class JdbcDatabaseRuntimeIntegrationTest {
 
     private static void dropSchema(String schema) throws Exception {
         try (Connection admin = DriverManager.getConnection(
-                System.getenv("REFERENCE_TEST_DATABASE_URL"), requiredUser(), requiredPassword());
+                requiredUrl(), requiredUser(), requiredPassword());
              Statement statement = admin.createStatement()) {
             statement.execute("DROP SCHEMA IF EXISTS "
                     + quoteIdentifier(schema) + " CASCADE");
@@ -371,6 +550,18 @@ class JdbcDatabaseRuntimeIntegrationTest {
             throw new IllegalStateException("REFERENCE_TEST_DATABASE_USER is required");
         }
         return user;
+    }
+
+    private static String requiredUrl() {
+        String url = System.getenv("REFERENCE_TEST_DATABASE_URL");
+        if (url == null || url.isBlank()) {
+            throw new IllegalStateException("REFERENCE_TEST_DATABASE_URL is required");
+        }
+        if (url.contains("127.0.0.1:55432") || url.contains("localhost:55432")) {
+            throw new IllegalStateException(
+                    "runtime tests refuse the shared 127.0.0.1:55432 PostgreSQL resource");
+        }
+        return url;
     }
 
     private static String requiredPassword() {
