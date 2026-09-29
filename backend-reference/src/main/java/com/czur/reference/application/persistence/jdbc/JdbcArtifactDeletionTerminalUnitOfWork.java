@@ -50,11 +50,13 @@ public final class JdbcArtifactDeletionTerminalUnitOfWork
         Objects.requireNonNull(request, "request");
         Connection connection = null;
         boolean commitStarted = false;
+        String phase = "OPEN_CONNECTION";
         try {
             connection = dataSource.getConnection();
             connection.setAutoCommit(false);
 
             // 锁序第一段：Meeting。锁住后再读取 Workflow，阻止删除受理或发布事务插队。
+            phase = "MEETING_LOCK";
             JdbcMeetingRepository.VersionedMeeting meeting =
                     JdbcMeetingRepository.findVersionedForUpdate(
                             connection, request.lease().key().meetingId()).orElse(null);
@@ -79,6 +81,7 @@ public final class JdbcArtifactDeletionTerminalUnitOfWork
             }
 
             // 锁序第二段：删除计划（其 item 在下一段按 ordinal 锁定）。
+            phase = "WORKFLOW_LOCK";
             MeetingDeletionPlan persisted = new JdbcArtifactDeletionPlanStore(connection)
                     .findForUpdate(request.lease().key().meetingId()).orElse(null);
             if (persisted == null) {
@@ -99,6 +102,7 @@ public final class JdbcArtifactDeletionTerminalUnitOfWork
             }
 
             // 锁序第三段：全部 item，再锁仍存在的 metadata 行。严格空计划自然通过。
+            phase = "ITEM_LOCK";
             if (!allItemsDeleted(connection, plan)) {
                 rollback(connection);
                 return failure(ErrorCode.ITEM_NOT_CONFIRMED);
@@ -109,6 +113,7 @@ public final class JdbcArtifactDeletionTerminalUnitOfWork
             }
 
             // 锁序第四段：Manifest。没有源 revision 时严格不制造 tombstone。
+            phase = "MANIFEST_LOCK";
             Optional<MeetingManifest> latest = new JdbcManifestFactStore(connection)
                     .findLatestForLockedMeeting(plan.meetingId());
             Integer deletedRevision = null;
@@ -133,6 +138,7 @@ public final class JdbcArtifactDeletionTerminalUnitOfWork
                 deletedRevision = deleted.manifestRevision();
             }
 
+            phase = "TERMINAL_WRITE";
             if (!JdbcMeetingRepository.markDeleted(
                     connection, meeting, request.completedAt())) {
                 rollback(connection);
@@ -162,6 +168,7 @@ public final class JdbcArtifactDeletionTerminalUnitOfWork
             LOGGER.log(Level.FINE, "删除终态事务已提交 result=COMPLETED");
             return new Success(SuccessCode.COMPLETED, deletedRevision);
         } catch (SQLException | RuntimeException failure) {
+            logStorageFailure(phase, failure);
             if (commitStarted) {
                 return failure(ErrorCode.OUTCOME_UNKNOWN);
             }
@@ -169,6 +176,21 @@ public final class JdbcArtifactDeletionTerminalUnitOfWork
             return failure(ErrorCode.STORAGE_FAILURE);
         } finally {
             close(connection);
+        }
+    }
+
+    /** 固定阶段、异常类型和 SQLState；禁止把 SQL、身份或驱动正文写入日志。 */
+    private static void logStorageFailure(String phase, Throwable failure) {
+        if (failure instanceof SQLException sql) {
+            LOGGER.log(Level.WARNING,
+                    "删除终态存储故障 phase={0} exceptionType={1} sqlState={2} vendorCode={3}",
+                    new Object[]{phase, sql.getClass().getSimpleName(),
+                            sql.getSQLState() == null ? "NONE" : sql.getSQLState(),
+                            sql.getErrorCode()});
+        } else {
+            LOGGER.log(Level.WARNING,
+                    "删除终态存储故障 phase={0} exceptionType={1}",
+                    new Object[]{phase, failure.getClass().getSimpleName()});
         }
     }
 
