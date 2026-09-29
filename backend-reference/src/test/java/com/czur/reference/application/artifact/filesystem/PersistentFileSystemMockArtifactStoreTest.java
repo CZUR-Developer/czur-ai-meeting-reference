@@ -4,6 +4,7 @@ import com.czur.reference.application.port.artifact.ArtifactStore;
 import com.czur.reference.application.port.artifact.ArtifactStore.CompleteStatus;
 import com.czur.reference.application.port.artifact.ArtifactStore.ContentClaim;
 import com.czur.reference.application.port.artifact.ArtifactStore.DeleteStatus;
+import com.czur.reference.application.port.artifact.ArtifactStore.InspectionResult;
 import com.czur.reference.application.port.artifact.ArtifactStore.PrepareResult;
 import com.czur.reference.application.port.artifact.ArtifactStore.PrepareStatus;
 import com.czur.reference.application.port.artifact.ArtifactStore.StageStatus;
@@ -31,6 +32,9 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -292,6 +296,246 @@ class PersistentFileSystemMockArtifactStoreTest {
         try (var files = Files.list(root.resolve("objects"))) {
             assertTrue(files.findAny().isEmpty());
         }
+    }
+
+    @Test
+    void inspectBySpecIsReadOnlyAndReportsDerivedBindingAcrossLifecycle() throws Exception {
+        Path root = temporaryDirectory.resolve("inspect-lifecycle");
+        PersistentFileSystemMockArtifactStore store = store(root);
+        WriteIntentSpec spec = spec("art_inspect", CONTENT);
+
+        InspectionResult missing = store.inspect(spec);
+        assertEquals(StoreState.NOT_FOUND, missing.state());
+        assertTrue(missing.optionalArtifact().isEmpty());
+        assertTrue(directoryIsEmpty(root.resolve("intents")));
+        assertTrue(directoryIsEmpty(root.resolve("tombstones")));
+
+        WriteIntent intent = store.createWriteIntent(spec).intent();
+        InspectionResult pending = store.inspect(spec);
+        assertEquals(StoreState.PENDING, pending.state());
+        assertEquals(intent.binding(), pending.binding());
+        assertTrue(pending.optionalArtifact().isEmpty());
+
+        store.writeContent(intent, new ByteArrayInputStream(CONTENT));
+        store.completeWrite(intent, claim(CONTENT));
+        InspectionResult ready = store.inspect(spec);
+        assertEquals(StoreState.READY, ready.state());
+        assertEquals(intent.binding(), ready.binding());
+        assertEquals(intent, ready.optionalArtifact().orElseThrow().intent());
+
+        Map<String, byte[]> before = treeSnapshot(root);
+        InspectionResult replay = store.inspect(spec);
+        assertEquals(StoreState.READY, replay.state());
+        assertTreeEquals(before, treeSnapshot(root));
+    }
+
+    @Test
+    void deleteBySpecTombstonesMissingArtifactAndBlocksEveryLateWriterPath()
+            throws Exception {
+        Path root = temporaryDirectory.resolve("delete-missing");
+        PersistentFileSystemMockArtifactStore store = store(root);
+        WriteIntentSpec spec = spec("art_missing_delete", CONTENT);
+
+        InspectionResult missing = store.inspect(spec);
+        WriteIntent staleIntent = new WriteIntent(
+                "fsmock_intent_v1_" + hash(missing.binding()), missing.binding(), spec);
+        assertEquals(DeleteStatus.DELETED, store.deleteBySpec(spec).status());
+        assertEquals(StoreState.DELETED, store.inspect(spec).state());
+        assertTrue(directoryIsEmpty(root.resolve("intents")));
+        assertEquals(1, regularFileCount(root.resolve("tombstones"), ".deleted"));
+
+        for (ThrowingOperation late : List.<ThrowingOperation>of(
+                () -> store.createWriteIntent(spec),
+                () -> store.writeContent(staleIntent, new ByteArrayInputStream(CONTENT)),
+                () -> store.completeWrite(staleIntent, claim(CONTENT)))) {
+            ArtifactStoreException deleted = assertThrows(
+                    ArtifactStoreException.class, late::run);
+            assertEquals(Code.DELETED, deleted.code());
+        }
+
+        PersistentFileSystemMockArtifactStore restarted = store(root);
+        assertEquals(DeleteStatus.ALREADY_DELETED,
+                restarted.deleteBySpec(spec).status());
+        assertEquals(StoreState.DELETED, restarted.inspect(spec).state());
+    }
+
+    @Test
+    void fullSpecConflictsFailBeforeMutatingWinnerOrTombstone() throws Exception {
+        Path root = temporaryDirectory.resolve("spec-conflict");
+        PersistentFileSystemMockArtifactStore store = store(root);
+        WriteIntentSpec winner = spec("art_spec_conflict", CONTENT);
+        store.createWriteIntent(winner);
+        WriteIntentSpec loser = new WriteIntentSpec(
+                winner.artifactId(), "other-meeting", winner.artifactType(),
+                winner.mediaType(), winner.language(), winner.revision(),
+                winner.expectedSize(), winner.expectedChecksum());
+
+        Map<String, byte[]> intentTree = treeSnapshot(root);
+        assertCode(Code.STORAGE_CONFLICT, () -> store.inspect(loser));
+        assertCode(Code.STORAGE_CONFLICT, () -> store.deleteBySpec(loser));
+        assertTreeEquals(intentTree, treeSnapshot(root));
+
+        assertEquals(DeleteStatus.DELETED, store.deleteBySpec(winner).status());
+        Map<String, byte[]> tombstoneTree = treeSnapshot(root);
+        assertCode(Code.STORAGE_CONFLICT, () -> store.inspect(loser));
+        assertCode(Code.STORAGE_CONFLICT, () -> store.deleteBySpec(loser));
+        assertCode(Code.STORAGE_CONFLICT, () -> store.createWriteIntent(loser));
+        assertTreeEquals(tombstoneTree, treeSnapshot(root));
+    }
+
+    @Test
+    void deleteBySpecRecoversPendingPartStagedAndObjectWithoutReady() throws Exception {
+        Path root = temporaryDirectory.resolve("pending-delete");
+        PersistentFileSystemMockArtifactStore store = store(root);
+
+        WriteIntentSpec partSpec = spec("art_pending_part", CONTENT);
+        WriteIntent partIntent = store.createWriteIntent(partSpec).intent();
+        Files.write(root.resolve("staging").resolve(hash(partIntent.binding()) + ".blob.part"),
+                Arrays.copyOf(CONTENT, 4));
+        assertEquals(StoreState.PENDING, store.inspect(partSpec).state());
+        assertEquals(DeleteStatus.DELETED, store.deleteBySpec(partSpec).status());
+
+        WriteIntentSpec stagedSpec = spec("art_pending_staged", CONTENT);
+        WriteIntent stagedIntent = store.createWriteIntent(stagedSpec).intent();
+        store.writeContent(stagedIntent, new ByteArrayInputStream(CONTENT));
+        assertEquals(StoreState.PENDING, store.inspect(stagedSpec).state());
+        assertEquals(DeleteStatus.DELETED, store.deleteBySpec(stagedSpec).status());
+
+        WriteIntentSpec objectSpec = spec("art_pending_object", CONTENT);
+        WriteIntent objectIntent = store.createWriteIntent(objectSpec).intent();
+        store.writeContent(objectIntent, new ByteArrayInputStream(CONTENT));
+        String objectHash = hash(objectIntent.binding());
+        Files.move(
+                root.resolve("staging").resolve(objectHash + ".blob"),
+                root.resolve("objects").resolve(objectHash + ".blob"));
+        assertEquals(StoreState.PENDING, store.inspect(objectSpec).state());
+        assertEquals(DeleteStatus.DELETED, store.deleteBySpec(objectSpec).status());
+
+        assertTrue(directoryIsEmpty(root.resolve("intents")));
+        assertTrue(directoryIsEmpty(root.resolve("staging")));
+        assertTrue(directoryIsEmpty(root.resolve("objects")));
+        assertEquals(3, regularFileCount(root.resolve("tombstones"), ".deleted"));
+    }
+
+    @Test
+    void commitUnknownAfterDeletingPublishIsRecoveredOnlyThroughInspection()
+            throws Exception {
+        Path root = temporaryDirectory.resolve("unknown-deleting");
+        WriteIntentSpec spec = spec("art_unknown_deleting", CONTENT);
+        AtomicBoolean failOnce = new AtomicBoolean(true);
+        PersistentFileSystemMockArtifactStore faulting =
+                new PersistentFileSystemMockArtifactStore(
+                        root, LIMIT, () -> "diagnostic-id", point -> {
+                            if (point == PersistentFileSystemMockArtifactStore
+                                    .TombstonePublishPoint.DELETING
+                                    && failOnce.getAndSet(false)) {
+                                throw new IOException("injected after deleting publish");
+                            }
+                        });
+
+        ArtifactStoreException unknown = assertThrows(
+                ArtifactStoreException.class, () -> faulting.deleteBySpec(spec));
+        assertEquals(Code.COMMIT_UNKNOWN, unknown.code());
+        Map<String, byte[]> beforeInspect = treeSnapshot(root);
+        assertEquals(StoreState.DELETING, faulting.inspect(spec).state());
+        assertTreeEquals(beforeInspect, treeSnapshot(root));
+
+        PersistentFileSystemMockArtifactStore recovered = store(root);
+        assertEquals(DeleteStatus.DELETED, recovered.deleteBySpec(spec).status());
+        assertEquals(StoreState.DELETED, recovered.inspect(spec).state());
+    }
+
+    @Test
+    void commitUnknownAfterDeletedPublishIsReadOnlyRecoverableAndReplaySafe()
+            throws Exception {
+        Path root = temporaryDirectory.resolve("unknown-deleted");
+        WriteIntentSpec spec = spec("art_unknown_deleted", CONTENT);
+        PersistentFileSystemMockArtifactStore initial = store(root);
+        complete(initial, spec);
+        AtomicBoolean failOnce = new AtomicBoolean(true);
+        PersistentFileSystemMockArtifactStore faulting =
+                new PersistentFileSystemMockArtifactStore(
+                        root, LIMIT, () -> "diagnostic-id", point -> {
+                            if (point == PersistentFileSystemMockArtifactStore
+                                    .TombstonePublishPoint.DELETED
+                                    && failOnce.getAndSet(false)) {
+                                throw new IOException("injected after deleted publish");
+                            }
+                        });
+
+        ArtifactStoreException unknown = assertThrows(
+                ArtifactStoreException.class, () -> faulting.deleteBySpec(spec));
+        assertEquals(Code.COMMIT_UNKNOWN, unknown.code());
+        Map<String, byte[]> beforeInspect = treeSnapshot(root);
+        assertEquals(StoreState.DELETED, faulting.inspect(spec).state());
+        assertTreeEquals(beforeInspect, treeSnapshot(root));
+        assertEquals(DeleteStatus.ALREADY_DELETED, faulting.deleteBySpec(spec).status());
+    }
+
+    @Test
+    void smallerDeploymentLimitStillInspectsAndDeletesHistoricalReadyObject()
+            throws Exception {
+        Path root = temporaryDirectory.resolve("historical-large");
+        byte[] large = new byte[4096];
+        Arrays.fill(large, (byte) 7);
+        WriteIntentSpec spec = spec("art_historical_large", large);
+        PersistentFileSystemMockArtifactStore original =
+                new PersistentFileSystemMockArtifactStore(root, large.length, () -> "original");
+        complete(original, spec, large);
+
+        PersistentFileSystemMockArtifactStore reduced =
+                new PersistentFileSystemMockArtifactStore(root, 32, () -> "reduced");
+        assertEquals(StoreState.READY, reduced.inspect(spec).state());
+        assertEquals(StoreState.READY,
+                reduced.stat(reduced.inspect(spec).binding()).state());
+        assertEquals(DeleteStatus.DELETED, reduced.deleteBySpec(spec).status());
+        assertEquals(StoreState.DELETED, reduced.inspect(spec).state());
+    }
+
+    @Test
+    void legacyBindingTombstoneRemainsReadableBySpecAndDeletedResidualCanBeCleaned()
+            throws Exception {
+        Path root = temporaryDirectory.resolve("legacy-and-residual");
+        PersistentFileSystemMockArtifactStore store = store(root);
+        WriteIntentSpec legacySpec = spec("art_legacy_tombstone", CONTENT);
+        WriteIntent legacy = complete(store, legacySpec);
+        assertEquals(DeleteStatus.DELETED, store.delete(legacy.binding()).status());
+        assertEquals(StoreState.DELETED, store.inspect(legacySpec).state());
+        assertEquals(DeleteStatus.ALREADY_DELETED, store.deleteBySpec(legacySpec).status());
+
+        WriteIntentSpec residualSpec = spec("art_deleted_residual", CONTENT);
+        WriteIntent residual = complete(store, residualSpec);
+        String residualHash = hash(residual.binding());
+        byte[] intentBytes = Files.readAllBytes(
+                root.resolve("intents").resolve(residualHash + ".intent"));
+        store.deleteBySpec(residualSpec);
+        Files.write(root.resolve("intents").resolve(residualHash + ".intent"), intentBytes);
+        assertCode(Code.STORAGE_CORRUPT, () -> store.inspect(residualSpec));
+        assertEquals(DeleteStatus.DELETED, store.deleteBySpec(residualSpec).status());
+        assertEquals(StoreState.DELETED, store.inspect(residualSpec).state());
+    }
+
+    @Test
+    void contradictoryReadyAndTombstoneStatesFailClosedWithoutMutation() throws Exception {
+        Path root = temporaryDirectory.resolve("contradictory-state");
+        PersistentFileSystemMockArtifactStore store = store(root);
+        WriteIntentSpec readySpec = spec("art_ready_contradiction", CONTENT);
+        WriteIntent ready = complete(store, readySpec);
+        Files.write(root.resolve("staging").resolve(hash(ready.binding()) + ".blob.part"),
+                new byte[]{1});
+        Map<String, byte[]> readyTree = treeSnapshot(root);
+        assertCode(Code.STORAGE_CORRUPT, () -> store.inspect(readySpec));
+        assertTreeEquals(readyTree, treeSnapshot(root));
+
+        WriteIntentSpec deletedSpec = spec("art_tombstone_contradiction", CONTENT);
+        store.deleteBySpec(deletedSpec);
+        String deletedHash = hash(store.inspect(deletedSpec).binding());
+        Path deleted = root.resolve("tombstones").resolve(deletedHash + ".deleted");
+        Files.copy(deleted, root.resolve("tombstones").resolve(deletedHash + ".deleting"));
+        Map<String, byte[]> tombstoneTree = treeSnapshot(root);
+        assertCode(Code.STORAGE_CORRUPT, () -> store.inspect(deletedSpec));
+        assertCode(Code.STORAGE_CORRUPT, () -> store.deleteBySpec(deletedSpec));
+        assertTreeEquals(tombstoneTree, treeSnapshot(root));
     }
 
     @Test
@@ -579,10 +823,55 @@ class PersistentFileSystemMockArtifactStoreTest {
     private static WriteIntent complete(
             PersistentFileSystemMockArtifactStore store,
             WriteIntentSpec spec) throws Exception {
+        return complete(store, spec, CONTENT);
+    }
+
+    private static WriteIntent complete(
+            PersistentFileSystemMockArtifactStore store,
+            WriteIntentSpec spec,
+            byte[] content) throws Exception {
         WriteIntent intent = store.createWriteIntent(spec).intent();
-        store.writeContent(intent, new ByteArrayInputStream(CONTENT));
-        store.completeWrite(intent, claim(CONTENT));
+        store.writeContent(intent, new ByteArrayInputStream(content));
+        store.completeWrite(intent, claim(content));
         return intent;
+    }
+
+    private static boolean directoryIsEmpty(Path directory) throws IOException {
+        try (var files = Files.list(directory)) {
+            return files.findAny().isEmpty();
+        }
+    }
+
+    private static long regularFileCount(Path directory, String suffix) throws IOException {
+        try (var files = Files.list(directory)) {
+            return files.filter(path -> path.getFileName().toString().endsWith(suffix)).count();
+        }
+    }
+
+    /** 快照排除诊断文本，只比较相对文件名和逐字节内容。 */
+    private static Map<String, byte[]> treeSnapshot(Path root) throws IOException {
+        Map<String, byte[]> snapshot = new TreeMap<>();
+        try (var paths = Files.walk(root)) {
+            for (Path path : paths.filter(Files::isRegularFile).toList()) {
+                snapshot.put(root.relativize(path).toString(), Files.readAllBytes(path));
+            }
+        }
+        return snapshot;
+    }
+
+    private static void assertTreeEquals(
+            Map<String, byte[]> expected,
+            Map<String, byte[]> actual) {
+        assertEquals(expected.keySet(), actual.keySet());
+        for (String path : expected.keySet()) {
+            assertArrayEquals(expected.get(path), actual.get(path), path);
+        }
+    }
+
+    private static void assertCode(Code expected, ThrowingOperation operation) {
+        ArtifactStoreException failure = assertThrows(
+                ArtifactStoreException.class, operation::run);
+        assertEquals(expected, failure.code());
     }
 
     private static WriteIntentSpec spec(String artifactId, byte[] content) {
@@ -645,5 +934,10 @@ class PersistentFileSystemMockArtifactStoreTest {
             position += count;
             return count;
         }
+    }
+
+    @FunctionalInterface
+    private interface ThrowingOperation {
+        void run() throws Exception;
     }
 }

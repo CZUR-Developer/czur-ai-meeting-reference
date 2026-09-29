@@ -66,6 +66,39 @@ class PersistentFileSystemMockArtifactStoreRestartTest {
     }
 
     @Test
+    void deletingPublishHaltIsInspectedRecoveredAndFencesStaleWriterAcrossJvms()
+            throws Exception {
+        Path root = temporaryDirectory.resolve("spec-delete-deleting-halt");
+
+        ProbeResult crash = runProbe(root, "crash-delete-deleting");
+        assertEquals(47, crash.exitCode(), crash.output());
+        assertSuccess(runProbe(root, "recover-deleting"));
+        assertSuccess(runProbe(root, "verify-stale-writer-fenced"));
+        assertSuccess(runProbe(root, "recover-deleted"));
+    }
+
+    @Test
+    void deletedPublishHaltIsReadOnlyRecoverableAndUniqueAcrossJvms()
+            throws Exception {
+        Path root = temporaryDirectory.resolve("spec-delete-deleted-halt");
+
+        assertSuccess(runProbe(root, "complete"));
+        ProbeResult crash = runProbe(root, "crash-delete-deleted");
+        assertEquals(47, crash.exitCode(), crash.output());
+        assertSuccess(runProbe(root, "recover-deleted"));
+        assertSuccess(runProbe(root, "verify-stale-writer-fenced"));
+
+        try (var files = Files.list(root.resolve("objects"))) {
+            assertTrue(files.findAny().isEmpty());
+        }
+        try (var files = Files.list(root.resolve("tombstones"))) {
+            List<Path> tombstones = files.toList();
+            assertEquals(1, tombstones.size());
+            assertTrue(tombstones.getFirst().getFileName().toString().endsWith(".deleted"));
+        }
+    }
+
+    @Test
     void twoRealJvmsUseFileLockAndHaveOneWinnerPerPublishPhase() throws Exception {
         Path root = temporaryDirectory.resolve("concurrent");
         Path barrier = temporaryDirectory.resolve("concurrent.start");

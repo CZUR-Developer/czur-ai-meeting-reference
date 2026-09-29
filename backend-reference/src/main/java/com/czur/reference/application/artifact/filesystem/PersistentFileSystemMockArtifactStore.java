@@ -7,6 +7,7 @@ import com.czur.reference.application.port.artifact.ArtifactStore.CompleteStatus
 import com.czur.reference.application.port.artifact.ArtifactStore.ContentClaim;
 import com.czur.reference.application.port.artifact.ArtifactStore.DeleteResult;
 import com.czur.reference.application.port.artifact.ArtifactStore.DeleteStatus;
+import com.czur.reference.application.port.artifact.ArtifactStore.InspectionResult;
 import com.czur.reference.application.port.artifact.ArtifactStore.PrepareResult;
 import com.czur.reference.application.port.artifact.ArtifactStore.PrepareStatus;
 import com.czur.reference.application.port.artifact.ArtifactStore.ReadHandle;
@@ -83,6 +84,7 @@ public final class PersistentFileSystemMockArtifactStore implements ArtifactStor
     private static final int KIND_STAGED = 2;
     private static final int KIND_READY = 3;
     private static final int KIND_TOMBSTONE = 4;
+    private static final int KIND_SPEC_TOMBSTONE = 5;
     private static final int MAX_METADATA_BYTES = 64 * 1024;
     private static final int MAX_FIELD_BYTES = 4096;
     private static final int BUFFER_BYTES = 16 * 1024;
@@ -107,6 +109,7 @@ public final class PersistentFileSystemMockArtifactStore implements ArtifactStor
     private final List<DirectoryIdentity> directoryIdentities;
     private final long maxArtifactBytes;
     private final Supplier<String> diagnosticIds;
+    private final TombstonePublishFaultInjector tombstonePublishFaultInjector;
 
     /**
      * 创建显式大小受限的持久 Mock。
@@ -117,19 +120,35 @@ public final class PersistentFileSystemMockArtifactStore implements ArtifactStor
      */
     public PersistentFileSystemMockArtifactStore(Path root, long maxArtifactBytes)
             throws ArtifactStoreException {
-        this(root, maxArtifactBytes, () -> UUID.randomUUID().toString());
+        this(root, maxArtifactBytes, () -> UUID.randomUUID().toString(),
+                TombstonePublishFaultInjector.NONE);
     }
 
     PersistentFileSystemMockArtifactStore(
             Path root,
             long maxArtifactBytes,
             Supplier<String> diagnosticIds) throws ArtifactStoreException {
+        this(root, maxArtifactBytes, diagnosticIds, TombstonePublishFaultInjector.NONE);
+    }
+
+    /**
+     * 仅供同包故障门在 tombstone 原子 rename 已完成、目录 fsync 尚未确认时注入失败。
+     * 生产构造器始终使用空注入器，不能从应用配置打开该能力。
+     */
+    PersistentFileSystemMockArtifactStore(
+            Path root,
+            long maxArtifactBytes,
+            Supplier<String> diagnosticIds,
+            TombstonePublishFaultInjector tombstonePublishFaultInjector)
+            throws ArtifactStoreException {
         Objects.requireNonNull(root, "root");
         if (maxArtifactBytes <= 0) {
             throw new IllegalArgumentException("maxArtifactBytes must be positive");
         }
         this.maxArtifactBytes = maxArtifactBytes;
         this.diagnosticIds = Objects.requireNonNull(diagnosticIds, "diagnosticIds");
+        this.tombstonePublishFaultInjector = Objects.requireNonNull(
+                tombstonePublishFaultInjector, "tombstonePublishFaultInjector");
         StoreLayout layout = initializeLayout(root.toAbsolutePath().normalize());
         this.root = layout.root();
         this.intentsDirectory = layout.intents();
@@ -147,7 +166,7 @@ public final class PersistentFileSystemMockArtifactStore implements ArtifactStor
         requireWithinLimit(spec);
         WriteIntent candidate = deriveIntent(spec);
         return withBindingLock(candidate.binding(), hash -> {
-            rejectDeleted(hash, candidate.binding());
+            rejectDeleted(hash, candidate);
             Path persistedPath = intentPath(hash);
             if (exists(persistedPath)) {
                 WriteIntent persisted = readIntent(persistedPath);
@@ -174,7 +193,7 @@ public final class PersistentFileSystemMockArtifactStore implements ArtifactStor
         validateCallerIntent(intent);
         requireWithinLimit(intent.spec());
         return withBindingLock(intent.binding(), hash -> {
-            rejectDeleted(hash, intent.binding());
+            rejectDeleted(hash, intent);
             requireExactPersistedIntent(hash, intent);
 
             if (exists(readyPath(hash))) {
@@ -223,7 +242,7 @@ public final class PersistentFileSystemMockArtifactStore implements ArtifactStor
         Objects.requireNonNull(claim, "claim");
         requireClaimMatchesSpec(intent.spec(), claim);
         return withBindingLock(intent.binding(), hash -> {
-            rejectDeleted(hash, intent.binding());
+            rejectDeleted(hash, intent);
             requireExactPersistedIntent(hash, intent);
 
             if (exists(readyPath(hash))) {
@@ -273,14 +292,28 @@ public final class PersistentFileSystemMockArtifactStore implements ArtifactStor
     @Override
     public StatResult stat(StorageBinding binding) throws ArtifactStoreException {
         Objects.requireNonNull(binding, "binding");
-        return withBindingLock(binding, hash -> statLocked(hash, binding));
+        return withBindingLock(binding, hash -> statLocked(hash, binding, null));
+    }
+
+    @Override
+    public InspectionResult inspect(WriteIntentSpec spec) throws ArtifactStoreException {
+        Objects.requireNonNull(spec, "spec");
+        WriteIntent candidate = deriveIntent(spec);
+        return withBindingLock(candidate.binding(), hash -> {
+            StatResult result = statLocked(hash, candidate.binding(), spec);
+            if (result.state() == StoreState.READY) {
+                return new InspectionResult(
+                        StoreState.READY, candidate.binding(), result.artifact());
+            }
+            return InspectionResult.withoutArtifact(result.state(), candidate.binding());
+        });
     }
 
     @Override
     public ReadHandle openRead(StorageBinding binding) throws ArtifactStoreException {
         Objects.requireNonNull(binding, "binding");
         return withBindingLock(binding, hash -> {
-            StatResult stat = statLocked(hash, binding);
+            StatResult stat = statLocked(hash, binding, null);
             if (stat.state() != StoreState.READY) {
                 Code code = switch (stat.state()) {
                     case NOT_FOUND -> Code.NOT_FOUND;
@@ -307,67 +340,61 @@ public final class PersistentFileSystemMockArtifactStore implements ArtifactStor
     @Override
     public DeleteResult delete(StorageBinding binding) throws ArtifactStoreException {
         Objects.requireNonNull(binding, "binding");
-        return withBindingLock(binding, hash -> {
-            Path deleting = deletingPath(hash);
-            Path deleted = deletedPath(hash);
-            boolean completedBefore = exists(deleted);
-            if (completedBefore) {
-                readTombstone(deleted, binding);
-                if (!hasResidualArtifactFiles(hash)) {
-                    logSuccess("delete", DeleteStatus.ALREADY_DELETED.name());
-                    return new DeleteResult(DeleteStatus.ALREADY_DELETED, binding);
-                }
-            }
+        return withBindingLock(binding,
+                hash -> deleteLocked(hash, binding, null, false));
+    }
 
-            if (exists(deleting)) {
-                readTombstone(deleting, binding);
-            } else if (!completedBefore) {
-                writeMetadataAtomically(
-                        deletingTemporaryPath(hash), deleting, encodeTombstone(binding));
-            }
-
-            deleteArtifactFiles(hash);
-            forceDirectory(intentsDirectory);
-            forceDirectory(stagingDirectory);
-            forceDirectory(objectsDirectory);
-
-            if (completedBefore) {
-                deleteRegularFileIfExists(deleting);
-            } else {
-                moveAtomically(deleting, deleted);
-            }
-            if (hasResidualArtifactFiles(hash)) {
-                throw failure(Code.COMMIT_UNKNOWN);
-            }
-            logSuccess("delete", DeleteStatus.DELETED.name());
-            return new DeleteResult(DeleteStatus.DELETED, binding);
+    @Override
+    public DeleteResult deleteBySpec(WriteIntentSpec spec) throws ArtifactStoreException {
+        Objects.requireNonNull(spec, "spec");
+        WriteIntent candidate = deriveIntent(spec);
+        return withBindingLock(candidate.binding(), hash -> {
+            validateDeleteBySpecPreconditions(hash, candidate);
+            return deleteLocked(hash, candidate.binding(), candidate, true);
         });
     }
 
-    private StatResult statLocked(String hash, StorageBinding binding)
+    private StatResult statLocked(
+            String hash,
+            StorageBinding binding,
+            WriteIntentSpec expectedSpec)
             throws ArtifactStoreException, IOException {
-        if (exists(deletingPath(hash))) {
-            readTombstone(deletingPath(hash), binding);
+        boolean deletingExists = exists(deletingPath(hash));
+        boolean deletedExists = exists(deletedPath(hash));
+        if (deletingExists && deletedExists) {
+            throw failure(Code.STORAGE_CORRUPT);
+        }
+        if (deletingExists) {
+            TombstoneMetadata tombstone = readTombstone(deletingPath(hash), binding);
+            validateTombstoneSpec(hash, tombstone, expectedSpec);
+            requireNoTombstoneTemporary(hash);
             return StatResult.withoutArtifact(StoreState.DELETING);
         }
-        if (exists(deletedPath(hash))) {
-            readTombstone(deletedPath(hash), binding);
-            if (hasResidualArtifactFiles(hash)) {
+        if (deletedExists) {
+            TombstoneMetadata tombstone = readTombstone(deletedPath(hash), binding);
+            validateTombstoneSpec(hash, tombstone, expectedSpec);
+            if (hasResidualArtifactFiles(hash) || exists(deletingTemporaryPath(hash))) {
                 throw failure(Code.STORAGE_CORRUPT);
             }
             return StatResult.withoutArtifact(StoreState.DELETED);
         }
         if (exists(readyPath(hash))) {
-            return new StatResult(StoreState.READY, readReadyAndVerify(hash, binding));
+            ArtifactDescriptor ready = readReadyAndVerify(hash, binding);
+            validateReadyStateConsistency(hash, ready);
+            requireExpectedSpec(ready.intent().spec(), expectedSpec);
+            return new StatResult(StoreState.READY, ready);
         }
         if (hasPendingArtifactFiles(hash)) {
-            validatePendingMetadata(hash, binding);
+            WriteIntent persisted = validatePendingMetadata(hash, binding);
+            if (persisted != null) {
+                requireExpectedSpec(persisted.spec(), expectedSpec);
+            }
             return StatResult.withoutArtifact(StoreState.PENDING);
         }
         return StatResult.withoutArtifact(StoreState.NOT_FOUND);
     }
 
-    private void validatePendingMetadata(String hash, StorageBinding binding)
+    private WriteIntent validatePendingMetadata(String hash, StorageBinding binding)
             throws ArtifactStoreException, IOException {
         WriteIntent persisted = null;
         if (exists(intentPath(hash))) {
@@ -404,6 +431,7 @@ public final class PersistentFileSystemMockArtifactStore implements ArtifactStor
         requireSafeKnownFileIfExists(intentTemporaryPath(hash));
         requireSafeKnownFileIfExists(verifiedTemporaryPath(hash));
         requireSafeKnownFileIfExists(readyTemporaryPath(hash));
+        return persisted;
     }
 
     private ArtifactDescriptor readReadyAndVerify(String hash, StorageBinding binding)
@@ -416,6 +444,28 @@ public final class PersistentFileSystemMockArtifactStore implements ArtifactStor
         }
         verifyContent(objectPath(hash), descriptor.content());
         return descriptor;
+    }
+
+    /** READY 是 intent、verified、object、ready 的单一一致快照，不能夹带半写文件。 */
+    private void validateReadyStateConsistency(
+            String hash,
+            ArtifactDescriptor descriptor) throws ArtifactStoreException, IOException {
+        for (Path impossible : new Path[]{
+                intentTemporaryPath(hash), partPath(hash), stagedPath(hash),
+                verifiedTemporaryPath(hash), readyTemporaryPath(hash)}) {
+            requireSafeKnownFileIfExists(impossible);
+            if (exists(impossible)) {
+                throw failure(Code.STORAGE_CORRUPT);
+            }
+        }
+        if (!exists(verifiedPath(hash))) {
+            throw failure(Code.STORAGE_CORRUPT);
+        }
+        StagedMetadata staged = readStaged(verifiedPath(hash));
+        if (!staged.intent().equals(descriptor.intent())
+                || !staged.content().equals(descriptor.content())) {
+            throw failure(Code.STORAGE_CORRUPT);
+        }
     }
 
     private ContentClaim writeAndMeasurePart(
@@ -493,7 +543,10 @@ public final class PersistentFileSystemMockArtifactStore implements ArtifactStor
                     continue;
                 }
                 size = Math.addExact(size, read);
-                if (size > maxArtifactBytes || size > expected.size()) {
+                // maxArtifactBytes 是新建/写入保护，不是历史数据可见性上限。部署缩小
+                // 配置后，READY 校验、inspect、读取和删除仍必须按持久 claim 工作，
+                // 否则旧大对象会既不可验证又不可删除。
+                if (size > expected.size()) {
                     throw failure(Code.STORAGE_CORRUPT);
                 }
                 digest.update(buffer, 0, read);
@@ -519,15 +572,148 @@ public final class PersistentFileSystemMockArtifactStore implements ArtifactStor
         }
     }
 
-    private void rejectDeleted(String hash, StorageBinding binding)
+    private void rejectDeleted(String hash, WriteIntent candidate)
             throws ArtifactStoreException, IOException {
-        if (exists(deletingPath(hash))) {
-            readTombstone(deletingPath(hash), binding);
+        boolean deletingExists = exists(deletingPath(hash));
+        boolean deletedExists = exists(deletedPath(hash));
+        if (deletingExists && deletedExists) {
+            throw failure(Code.STORAGE_CORRUPT);
+        }
+        Path tombstonePath = deletingExists
+                ? deletingPath(hash) : (deletedExists ? deletedPath(hash) : null);
+        if (tombstonePath != null) {
+            TombstoneMetadata tombstone = readTombstone(
+                    tombstonePath, candidate.binding());
+            validateTombstoneSpec(hash, tombstone, candidate.spec());
             throw failure(Code.DELETED);
         }
-        if (exists(deletedPath(hash))) {
-            readTombstone(deletedPath(hash), binding);
-            throw failure(Code.DELETED);
+    }
+
+    /**
+     * 在 deleteBySpec 产生任何写入前完成冲突与损坏检查，确保冲突时文件树逐字节不变。
+     */
+    private void validateDeleteBySpecPreconditions(String hash, WriteIntent candidate)
+            throws ArtifactStoreException, IOException {
+        boolean deletingExists = exists(deletingPath(hash));
+        boolean deletedExists = exists(deletedPath(hash));
+        if (deletingExists && deletedExists) {
+            throw failure(Code.STORAGE_CORRUPT);
+        }
+
+        Path tombstonePath = deletingExists
+                ? deletingPath(hash) : (deletedExists ? deletedPath(hash) : null);
+        if (tombstonePath != null) {
+            TombstoneMetadata tombstone = readTombstone(
+                    tombstonePath, candidate.binding());
+            validateTombstoneSpec(hash, tombstone, candidate.spec());
+            // DELETED 后的残留由本次重放清理；这里不能调用 statLocked，因为只读 stat
+            // 会把这种矛盾状态正确地报告为 STORAGE_CORRUPT。
+            return;
+        }
+
+        // 没有 tombstone 时复用只读检查，验证 READY 内容、PENDING metadata、symlink
+        // 与孤儿状态。该调用不会制造 intent 或 tombstone。
+        statLocked(hash, candidate.binding(), candidate.spec());
+    }
+
+    private DeleteResult deleteLocked(
+            String hash,
+            StorageBinding binding,
+            WriteIntent candidate,
+            boolean preserveFullSpec) throws ArtifactStoreException, IOException {
+        Path deleting = deletingPath(hash);
+        Path deleted = deletedPath(hash);
+        boolean deletingExists = exists(deleting);
+        boolean completedBefore = exists(deleted);
+        if (deletingExists && completedBefore) {
+            throw failure(Code.STORAGE_CORRUPT);
+        }
+
+        if (completedBefore) {
+            TombstoneMetadata tombstone = readTombstone(deleted, binding);
+            if (candidate != null) {
+                validateTombstoneSpec(hash, tombstone, candidate.spec());
+            }
+            deleteRegularFileIfExists(deletingTemporaryPath(hash));
+            if (!hasResidualArtifactFiles(hash)) {
+                logSuccess(preserveFullSpec ? "delete-by-spec" : "delete",
+                        DeleteStatus.ALREADY_DELETED.name());
+                return new DeleteResult(DeleteStatus.ALREADY_DELETED, binding);
+            }
+        }
+
+        if (deletingExists) {
+            TombstoneMetadata tombstone = readTombstone(deleting, binding);
+            if (candidate != null) {
+                validateTombstoneSpec(hash, tombstone, candidate.spec());
+            }
+            deleteRegularFileIfExists(deletingTemporaryPath(hash));
+        } else if (!completedBefore) {
+            byte[] encoded = preserveFullSpec
+                    ? encodeSpecTombstone(Objects.requireNonNull(candidate, "candidate"))
+                    : encodeTombstone(binding);
+            writeMetadataAtomically(
+                    deletingTemporaryPath(hash), deleting, encoded,
+                    TombstonePublishPoint.DELETING);
+        }
+
+        deleteArtifactFiles(hash);
+        forceDirectory(intentsDirectory);
+        forceDirectory(stagingDirectory);
+        forceDirectory(objectsDirectory);
+
+        if (completedBefore) {
+            deleteRegularFileIfExists(deleting);
+        } else {
+            moveAtomically(deleting, deleted, TombstonePublishPoint.DELETED);
+        }
+        if (hasResidualArtifactFiles(hash)) {
+            throw failure(Code.COMMIT_UNKNOWN);
+        }
+        logSuccess(preserveFullSpec ? "delete-by-spec" : "delete",
+                DeleteStatus.DELETED.name());
+        return new DeleteResult(DeleteStatus.DELETED, binding);
+    }
+
+    /**
+     * 校验候选 spec、正式 intent 与完整 tombstone 的不可变身份。
+     *
+     * <p>旧版 tombstone 只有 binding，无法反推出完整 spec，因此只做 binding 校验。
+     * 新版 tombstone 与正式 intent 任一不一致都返回 STORAGE_CONFLICT；这是合法赢家
+     * 冲突而不是磁盘损坏，且检查发生在任何清理之前。</p>
+     */
+    private void validateTombstoneSpec(
+            String hash,
+            TombstoneMetadata tombstone,
+            WriteIntentSpec expectedSpec) throws ArtifactStoreException, IOException {
+        WriteIntent tombstoneIntent = tombstone.intent();
+        if (tombstoneIntent != null) {
+            requireStoredIntentMatchesBinding(tombstoneIntent, tombstone.binding());
+            requireExpectedSpec(tombstoneIntent.spec(), expectedSpec);
+        }
+        if (exists(intentPath(hash))) {
+            WriteIntent persisted = readIntent(intentPath(hash));
+            requireStoredIntentMatchesBinding(persisted, tombstone.binding());
+            if (tombstoneIntent != null && !persisted.spec().equals(tombstoneIntent.spec())) {
+                throw failure(Code.STORAGE_CONFLICT);
+            }
+            requireExpectedSpec(persisted.spec(), expectedSpec);
+        }
+    }
+
+    private void requireExpectedSpec(
+            WriteIntentSpec actual,
+            WriteIntentSpec expected) throws ArtifactStoreException {
+        if (expected != null && !actual.equals(expected)) {
+            throw failure(Code.STORAGE_CONFLICT);
+        }
+    }
+
+    private void requireNoTombstoneTemporary(String hash) throws ArtifactStoreException {
+        Path temporary = deletingTemporaryPath(hash);
+        requireSafeKnownFileIfExists(temporary);
+        if (exists(temporary)) {
+            throw failure(Code.STORAGE_CORRUPT);
         }
     }
 
@@ -741,6 +927,15 @@ public final class PersistentFileSystemMockArtifactStore implements ArtifactStor
 
     private void writeMetadataAtomically(Path temporary, Path target, byte[] bytes)
             throws IOException, ArtifactStoreException {
+        writeMetadataAtomically(temporary, target, bytes, null);
+    }
+
+    private void writeMetadataAtomically(
+            Path temporary,
+            Path target,
+            byte[] bytes,
+            TombstonePublishPoint publishPoint)
+            throws IOException, ArtifactStoreException {
         if (bytes.length > MAX_METADATA_BYTES) {
             throw failure(Code.STORAGE_CORRUPT);
         }
@@ -760,10 +955,18 @@ public final class PersistentFileSystemMockArtifactStore implements ArtifactStor
             }
             channel.force(true);
         }
-        moveAtomically(temporary, target);
+        moveAtomically(temporary, target, publishPoint);
     }
 
     private void moveAtomically(Path source, Path target)
+            throws IOException, ArtifactStoreException {
+        moveAtomically(source, target, null);
+    }
+
+    private void moveAtomically(
+            Path source,
+            Path target,
+            TombstonePublishPoint publishPoint)
             throws IOException, ArtifactStoreException {
         requireRegularFile(source);
         if (exists(target)) {
@@ -775,6 +978,9 @@ public final class PersistentFileSystemMockArtifactStore implements ArtifactStor
             throw failure(Code.ATOMIC_PUBLISH_UNSUPPORTED, failure);
         }
         try {
+            if (publishPoint != null) {
+                tombstonePublishFaultInjector.afterAtomicPublish(publishPoint);
+            }
             forceDirectory(target.getParent());
         } catch (IOException failure) {
             throw failure(Code.COMMIT_UNKNOWN, failure);
@@ -807,6 +1013,10 @@ public final class PersistentFileSystemMockArtifactStore implements ArtifactStor
 
     private byte[] encodeTombstone(StorageBinding binding) throws ArtifactStoreException {
         return encode(KIND_TOMBSTONE, output -> writeString(output, binding.value()));
+    }
+
+    private byte[] encodeSpecTombstone(WriteIntent intent) throws ArtifactStoreException {
+        return encode(KIND_SPEC_TOMBSTONE, output -> writeIntent(output, intent));
     }
 
     private byte[] encode(int kind, MetadataWriter writer) throws ArtifactStoreException {
@@ -842,12 +1052,39 @@ public final class PersistentFileSystemMockArtifactStore implements ArtifactStor
                 input -> new ArtifactDescriptor(readIntentBody(input), readClaim(input)));
     }
 
-    private void readTombstone(Path path, StorageBinding expected)
+    private TombstoneMetadata readTombstone(Path path, StorageBinding expected)
             throws ArtifactStoreException, IOException {
-        StorageBinding decoded = decode(path, KIND_TOMBSTONE,
-                input -> new StorageBinding(readString(input)));
-        if (!decoded.equals(expected)) {
+        requireRegularFile(path);
+        long length = Files.size(path);
+        if (length <= 0 || length > MAX_METADATA_BYTES) {
             throw failure(Code.STORAGE_CORRUPT);
+        }
+        byte[] bytes = Files.readAllBytes(path);
+        try (DataInputStream input = new DataInputStream(new ByteArrayInputStream(bytes))) {
+            if (input.readInt() != METADATA_MAGIC || input.readInt() != METADATA_VERSION) {
+                throw failure(Code.STORAGE_CORRUPT);
+            }
+            int kind = input.readInt();
+            TombstoneMetadata decoded = switch (kind) {
+                case KIND_TOMBSTONE -> new TombstoneMetadata(
+                        new StorageBinding(readString(input)), null);
+                case KIND_SPEC_TOMBSTONE -> {
+                    WriteIntent intent = readIntentBody(input);
+                    yield new TombstoneMetadata(intent.binding(), intent);
+                }
+                default -> throw failure(Code.STORAGE_CORRUPT);
+            };
+            if (input.available() != 0 || !decoded.binding().equals(expected)) {
+                throw failure(Code.STORAGE_CORRUPT);
+            }
+            if (decoded.intent() != null) {
+                requireStoredIntentMatchesBinding(decoded.intent(), expected);
+            }
+            return decoded;
+        } catch (ArtifactStoreException failure) {
+            throw failure;
+        } catch (IOException | RuntimeException failure) {
+            throw failure(Code.STORAGE_CORRUPT, failure);
         }
     }
 
@@ -1148,6 +1385,33 @@ public final class PersistentFileSystemMockArtifactStore implements ArtifactStor
                 throw new IllegalArgumentException("staged metadata does not match intent");
             }
         }
+    }
+
+    private record TombstoneMetadata(StorageBinding binding, WriteIntent intent) {
+        private TombstoneMetadata {
+            Objects.requireNonNull(binding, "binding");
+            if (intent != null && !intent.binding().equals(binding)) {
+                throw new IllegalArgumentException(
+                        "tombstone intent must match tombstone binding");
+            }
+        }
+    }
+
+    /** tombstone 的两个持久线性化点，仅供同包故障测试精确注入。 */
+    enum TombstonePublishPoint {
+        DELETING,
+        DELETED
+    }
+
+    /**
+     * package-private 故障注入边界。回调发生在原子 rename 成功之后、目录 fsync 之前，
+     * 因此抛出 IOException 必须被映射为 COMMIT_UNKNOWN，调用方只能通过 inspect 恢复。
+     */
+    @FunctionalInterface
+    interface TombstonePublishFaultInjector {
+        TombstonePublishFaultInjector NONE = ignored -> { };
+
+        void afterAtomicPublish(TombstonePublishPoint point) throws IOException;
     }
 
     private record DirectoryIdentity(Path path, Object fileKey) {

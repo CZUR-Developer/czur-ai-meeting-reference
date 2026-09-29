@@ -53,6 +53,27 @@ public interface ArtifactStore {
     StatResult stat(StorageBinding binding) throws ArtifactStoreException;
 
     /**
+     * 按完整、冻结的写入定义查询 Store 状态，并由 Store 自己解析稳定 binding。
+     *
+     * <p>删除编排只能持有最终收口时冻结的 {@link WriteIntentSpec}，不能复制具体 Store
+     * 的 binding/hash 公式，也不能为了查询而创建写入意图。本方法因此必须是只读的：
+     * 实现不得创建 intent、tombstone、业务临时文件或其它 Artifact 事实。实现为并发
+     * 协调创建不含业务数据的内部锁文件，不改变本方法的业务只读语义。返回的 binding
+     * 必须由实现按同一套正式映射规则内部派生；如果已经存在的正式 intent 或完整 tombstone
+     * 与候选 spec 冲突，实现必须关闭式失败，不能把同 artifactId 的赢家误认成候选。</p>
+     *
+     * <p>默认实现让尚未升级的第三方 Store 保持源码兼容，但以
+     * {@link ArtifactStoreException.Code#OPERATION_UNSUPPORTED} 明确拒绝删除工作流，
+     * 不允许退化成 create-intent 或 binding 猜测。</p>
+     */
+    default InspectionResult inspect(WriteIntentSpec spec) throws ArtifactStoreException {
+        Objects.requireNonNull(spec, "spec");
+        throw new ArtifactStoreException(
+                ArtifactStoreException.Code.OPERATION_UNSUPPORTED,
+                "artifact-inspect-unsupported");
+    }
+
+    /**
      * 为 READY Artifact 打开一个从位置零开始的新读取流。
      * 返回句柄由调用方关闭；PENDING、DELETING、DELETED 和不存在均关闭式失败。
      */
@@ -63,6 +84,23 @@ public interface ArtifactStore {
      * 只有返回成功才证明本次调用观察到内容和暂存文件已经物理移除。
      */
     DeleteResult delete(StorageBinding binding) throws ArtifactStoreException;
+
+    /**
+     * 按完整、冻结的写入定义幂等删除 Artifact。
+     *
+     * <p>即使对象从未创建，实现也必须为该 spec 派生 binding，并在返回成功前持久保存
+     * 能阻止迟到 Writer 复活的 tombstone。实现不得通过调用
+     * {@link #createWriteIntent(WriteIntentSpec)} 制造待删除对象。</p>
+     *
+     * <p>默认实现只用于保持既有实现源码兼容，并关闭式返回不支持；调用方不能自动
+     * 回退到只按 binding 删除。</p>
+     */
+    default DeleteResult deleteBySpec(WriteIntentSpec spec) throws ArtifactStoreException {
+        Objects.requireNonNull(spec, "spec");
+        throw new ArtifactStoreException(
+                ArtifactStoreException.Code.OPERATION_UNSUPPORTED,
+                "artifact-delete-by-spec-unsupported");
+    }
 
     /** 同一逻辑 Artifact 版本的不可变写入定义。 */
     record WriteIntentSpec(
@@ -267,6 +305,50 @@ public interface ArtifactStore {
         public String toString() {
             return "StatResult[state=" + state
                     + ", artifactPresent=" + (artifact != null) + ']';
+        }
+    }
+
+    /**
+     * 按完整 spec 查询的只读结果。
+     *
+     * <p>所有状态都携带 Store 内部派生的不透明 binding。只有 READY 可以携带
+     * descriptor，且 descriptor 的 binding 必须与结果 binding 完全一致。诊断文本
+     * 只暴露状态和 descriptor 是否存在，不输出业务身份、binding 或内容声明。</p>
+     */
+    record InspectionResult(
+            StoreState state,
+            StorageBinding binding,
+            ArtifactDescriptor artifact) {
+        public InspectionResult {
+            Objects.requireNonNull(state, "state");
+            Objects.requireNonNull(binding, "binding");
+            if ((state == StoreState.READY) != (artifact != null)) {
+                throw new IllegalArgumentException(
+                        "only READY inspection may carry artifact descriptor");
+            }
+            if (artifact != null && !artifact.intent().binding().equals(binding)) {
+                throw new IllegalArgumentException(
+                        "inspection descriptor must match derived binding");
+            }
+        }
+
+        public static InspectionResult withoutArtifact(
+                StoreState state,
+                StorageBinding binding) {
+            if (state == StoreState.READY) {
+                throw new IllegalArgumentException("READY requires artifact descriptor");
+            }
+            return new InspectionResult(state, binding, null);
+        }
+
+        public Optional<ArtifactDescriptor> optionalArtifact() {
+            return Optional.ofNullable(artifact);
+        }
+
+        @Override
+        public String toString() {
+            return "InspectionResult[state=" + state
+                    + ", binding=redacted, artifactPresent=" + (artifact != null) + ']';
         }
     }
 

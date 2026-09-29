@@ -1,9 +1,14 @@
 package com.czur.reference.application.port.artifact;
 
 import com.czur.reference.application.port.artifact.ArtifactStore.ArtifactDescriptor;
+import com.czur.reference.application.port.artifact.ArtifactStore.CompleteResult;
 import com.czur.reference.application.port.artifact.ArtifactStore.ContentClaim;
+import com.czur.reference.application.port.artifact.ArtifactStore.DeleteResult;
+import com.czur.reference.application.port.artifact.ArtifactStore.InspectionResult;
 import com.czur.reference.application.port.artifact.ArtifactStore.PrepareResult;
 import com.czur.reference.application.port.artifact.ArtifactStore.PrepareStatus;
+import com.czur.reference.application.port.artifact.ArtifactStore.ReadHandle;
+import com.czur.reference.application.port.artifact.ArtifactStore.StageResult;
 import com.czur.reference.application.port.artifact.ArtifactStore.StatResult;
 import com.czur.reference.application.port.artifact.ArtifactStore.StorageBinding;
 import com.czur.reference.application.port.artifact.ArtifactStore.StoreState;
@@ -68,6 +73,47 @@ class ArtifactStoreContractTest {
     }
 
     @Test
+    void inspectionAlwaysCarriesDerivedBindingAndOnlyReadyCarriesMatchingDescriptor() {
+        ArtifactDescriptor descriptor = descriptor();
+
+        assertThrows(IllegalArgumentException.class,
+                () -> new InspectionResult(
+                        StoreState.PENDING, descriptor.intent().binding(), descriptor));
+        assertThrows(IllegalArgumentException.class,
+                () -> new InspectionResult(
+                        StoreState.READY, descriptor.intent().binding(), null));
+        assertThrows(IllegalArgumentException.class,
+                () -> new InspectionResult(
+                        StoreState.READY, new StorageBinding("other-binding"), descriptor));
+        assertThrows(IllegalArgumentException.class,
+                () -> InspectionResult.withoutArtifact(
+                        StoreState.READY, descriptor.intent().binding()));
+
+        InspectionResult ready = new InspectionResult(
+                StoreState.READY, descriptor.intent().binding(), descriptor);
+        assertEquals(descriptor.intent().binding(), ready.binding());
+        assertEquals(descriptor, ready.optionalArtifact().orElseThrow());
+        assertFalse(ready.toString().contains("binding-sensitive"));
+        assertFalse(ready.toString().contains(CHECKSUM));
+    }
+
+    @Test
+    void legacyImplementationsFailClosedForSpecInspectionAndDeletion() {
+        ArtifactStore legacy = new LegacyArtifactStore();
+        WriteIntentSpec spec = spec("art_legacy", "transcript.final", CHECKSUM);
+
+        ArtifactStoreException inspect = assertThrows(
+                ArtifactStoreException.class, () -> legacy.inspect(spec));
+        ArtifactStoreException delete = assertThrows(
+                ArtifactStoreException.class, () -> legacy.deleteBySpec(spec));
+
+        assertEquals(Code.OPERATION_UNSUPPORTED, inspect.code());
+        assertEquals(Code.OPERATION_UNSUPPORTED, delete.code());
+        assertFalse(inspect.retryable());
+        assertFalse(delete.retryable());
+    }
+
+    @Test
     void prepareConflictMayOnlyExposeRedactedWinnerDiagnostics() {
         PrepareResult result = new PrepareResult(PrepareStatus.CONFLICT, descriptor().intent());
         String diagnostic = result + " " + result.intent() + " " + result.intent().spec()
@@ -116,5 +162,38 @@ class ArtifactStoreContractTest {
                 new StorageBinding("binding-sensitive"),
                 spec("art_contract", "transcript.final", CHECKSUM));
         return new ArtifactDescriptor(intent, new ContentClaim(12, CHECKSUM));
+    }
+
+    /** 只实现 T14-10-02 之前的端口，用来证明新增方法保持源码兼容且不会静默降级。 */
+    private static final class LegacyArtifactStore implements ArtifactStore {
+        @Override
+        public PrepareResult createWriteIntent(WriteIntentSpec spec) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public StageResult writeContent(WriteIntent intent, java.io.InputStream content) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public CompleteResult completeWrite(WriteIntent intent, ContentClaim claim) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public StatResult stat(StorageBinding binding) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ReadHandle openRead(StorageBinding binding) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public DeleteResult delete(StorageBinding binding) {
+            throw new UnsupportedOperationException();
+        }
     }
 }

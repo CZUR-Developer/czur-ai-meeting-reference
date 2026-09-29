@@ -52,6 +52,7 @@ public final class ArtifactStoreException extends Exception {
         INVALID_INTENT(false),
         STORAGE_CONFLICT(false),
         STORAGE_CORRUPT(false),
+        OPERATION_UNSUPPORTED(false),
         ATOMIC_PUBLISH_UNSUPPORTED(false),
         UNSAFE_FILESYSTEM(false),
         STORAGE_UNAVAILABLE(true),

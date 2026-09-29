@@ -48,6 +48,15 @@ public final class PersistentFileSystemMockArtifactStoreProcessProbe {
             case "verify-pending" -> verifyPending(store, spec);
             case "delete" -> delete(store, spec);
             case "verify-deleted" -> verifyDeleted(store);
+            case "crash-delete-deleting" -> crashDeleteAt(
+                    root, spec,
+                    PersistentFileSystemMockArtifactStore.TombstonePublishPoint.DELETING);
+            case "recover-deleting" -> recoverDeleting(store, spec);
+            case "crash-delete-deleted" -> crashDeleteAt(
+                    root, spec,
+                    PersistentFileSystemMockArtifactStore.TombstonePublishPoint.DELETED);
+            case "recover-deleted" -> recoverDeleted(store, spec);
+            case "verify-stale-writer-fenced" -> verifyStaleWriterFenced(store, spec);
             case "concurrent-complete" -> {
                 if (arguments.length != 3) {
                     throw new IllegalArgumentException("concurrent action requires barrier");
@@ -139,6 +148,61 @@ public final class PersistentFileSystemMockArtifactStoreProcessProbe {
         }
     }
 
+    /** 在 tombstone rename 成功后真实 halt，确保下一 JVM 不依赖进程内对象恢复。 */
+    private static void crashDeleteAt(
+            Path root,
+            WriteIntentSpec spec,
+            PersistentFileSystemMockArtifactStore.TombstonePublishPoint haltPoint)
+            throws Exception {
+        PersistentFileSystemMockArtifactStore faulting =
+                new PersistentFileSystemMockArtifactStore(
+                        root, LIMIT, () -> "process-probe", point -> {
+                            if (point == haltPoint) {
+                                Runtime.getRuntime().halt(47);
+                            }
+                        });
+        faulting.deleteBySpec(spec);
+        throw new AssertionError("delete did not halt at " + haltPoint);
+    }
+
+    private static void recoverDeleting(
+            PersistentFileSystemMockArtifactStore store,
+            WriteIntentSpec spec) throws Exception {
+        require(store.inspect(spec).state() == StoreState.DELETING);
+        require(store.deleteBySpec(spec).status() == DeleteStatus.DELETED);
+        require(store.inspect(spec).state() == StoreState.DELETED);
+    }
+
+    private static void recoverDeleted(
+            PersistentFileSystemMockArtifactStore store,
+            WriteIntentSpec spec) throws Exception {
+        require(store.inspect(spec).state() == StoreState.DELETED);
+        require(store.deleteBySpec(spec).status() == DeleteStatus.ALREADY_DELETED);
+    }
+
+    /**
+     * 用删除前可合法获得的旧 intent 重放三条写路径，证明新进程也不能越过 tombstone。
+     */
+    private static void verifyStaleWriterFenced(
+            PersistentFileSystemMockArtifactStore store,
+            WriteIntentSpec spec) throws Exception {
+        WriteIntent stale = new WriteIntent(
+                "fsmock_intent_v1_" + bindingHash(), derivedBinding(), spec);
+        expectDeleted(() -> store.createWriteIntent(spec));
+        expectDeleted(() -> store.writeContent(stale, new ByteArrayInputStream(CONTENT)));
+        expectDeleted(() -> store.completeWrite(stale, claim()));
+        require(store.inspect(spec).state() == StoreState.DELETED);
+    }
+
+    private static void expectDeleted(CheckedOperation operation) throws Exception {
+        try {
+            operation.run();
+            throw new AssertionError("late writer was not fenced");
+        } catch (ArtifactStoreException expected) {
+            require(expected.code() == Code.DELETED);
+        }
+    }
+
     private static void concurrentComplete(
             PersistentFileSystemMockArtifactStore store,
             WriteIntentSpec spec,
@@ -180,6 +244,10 @@ public final class PersistentFileSystemMockArtifactStoreProcessProbe {
         return new StorageBinding("fsmock_v1_" + HexFormat.of().formatHex(digest.digest()));
     }
 
+    private static String bindingHash() {
+        return derivedBinding().value().substring("fsmock_v1_".length());
+    }
+
     private static String checksum(byte[] content) {
         return "sha256:" + HexFormat.of().formatHex(digest().digest(content));
     }
@@ -196,6 +264,11 @@ public final class PersistentFileSystemMockArtifactStoreProcessProbe {
         if (!condition) {
             throw new AssertionError("probe assertion failed");
         }
+    }
+
+    @FunctionalInterface
+    private interface CheckedOperation {
+        void run() throws Exception;
     }
 
     /** 第一段写入后直接终止子 JVM，模拟没有 finally/close 的真实进程崩溃。 */
