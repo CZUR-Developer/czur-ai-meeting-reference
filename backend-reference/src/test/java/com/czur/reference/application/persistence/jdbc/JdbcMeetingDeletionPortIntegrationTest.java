@@ -3,6 +3,21 @@ package com.czur.reference.application.persistence.jdbc;
 import com.czur.reference.application.command.MeetingCommandContext;
 import com.czur.reference.application.command.MeetingCommandEventFactory;
 import com.czur.reference.application.command.MeetingPermissions;
+import com.czur.reference.application.finalization.FinalizationCheckpoint;
+import com.czur.reference.application.finalization.FinalizationCommitPlan;
+import com.czur.reference.application.finalization.FinalizationOperationIdentity;
+import com.czur.reference.application.finalization.MockFinalizationArtifactContent;
+import com.czur.reference.application.port.FinalizationInputFact;
+import com.czur.reference.application.port.WorkflowStep;
+import com.czur.reference.application.port.WorkflowStepStore;
+import com.czur.reference.application.port.artifact.ArtifactReadyMetadataStore;
+import com.czur.reference.application.port.artifact.ArtifactStore;
+import com.czur.reference.application.port.artifact.ArtifactStore.ArtifactDescriptor;
+import com.czur.reference.application.port.artifact.ArtifactStore.ContentClaim;
+import com.czur.reference.application.port.artifact.ArtifactStore.StorageBinding;
+import com.czur.reference.application.port.artifact.ArtifactStore.WriteIntent;
+import com.czur.reference.application.port.artifact.ArtifactStore.WriteIntentSpec;
+import com.czur.reference.application.port.entitlement.UsageActual;
 import com.czur.reference.application.manifest.ManifestDeletionRevisionFactory;
 import com.czur.reference.application.manifest.ManifestResultAccessPolicy;
 import com.czur.reference.application.port.DeleteRequest;
@@ -28,6 +43,7 @@ import com.czur.reference.application.port.identity.Subject;
 import com.czur.reference.application.port.identity.VerifiedIdentity;
 import com.czur.reference.domain.meeting.MeetingAggregate;
 import com.czur.reference.domain.meeting.MeetingState;
+import com.czur.reference.protocol.json.FinalizationCheckpointJson;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -156,6 +172,198 @@ class JdbcMeetingDeletionPortIntegrationTest {
                 port.delete(request("meeting-legacy", "legacy-key", "legacy-digest")));
         assertInstanceOf(DeleteResult.NotFound.class,
                 port.delete(request("meeting-missing", "missing-key", "missing-digest")));
+    }
+
+    /** T14-10-05：严格早期取消只注册零目标计划和删除 Workflow。 */
+    @Test
+    void admissionUnitFreezesStrictEarlyEmptyPlanAndWorkflowAtomically() throws Exception {
+        for (String migration : List.of(
+                "V008__durable_input_fact.sql",
+                "V009__final_usage_fact.sql",
+                "V010__workflow_step_fencing.sql",
+                "V011__finalization_execution_artifact_ready.sql",
+                "V012__artifact_deletion_plan.sql")) {
+            applyMigration(migration);
+        }
+        String meetingId = "meeting-admission-early";
+        createOwned("admission-early", MeetingState.CANCELLED, DEPLOYMENT, SUBJECT);
+        // 早期取消没有最终收口；测试夹具的通用状态映射默认使用 FAILED，
+        // 这里显式恢复冻结契约要求的 NOT_STARTED/无 Manifest 组合。
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "UPDATE meeting SET manifest_state='NOT_STARTED' WHERE meeting_id=?")) {
+            statement.setString(1, meetingId);
+            assertEquals(1, statement.executeUpdate());
+        }
+
+        DeleteResult.Accepted result = assertInstanceOf(
+                DeleteResult.Accepted.class,
+                new JdbcMeetingDeletionPort(
+                        dataSource, Clock.fixed(DELETE_AT, ZoneOffset.UTC), true)
+                        .delete(request(meetingId, "admission-early-key", "admission-early-digest")));
+        assertEquals(MeetingState.DELETION_PENDING, result.meeting().state());
+        assertEquals(1, deletionEventCount(meetingId));
+        try (Connection connection = transaction();
+             PreparedStatement plan = connection.prepareStatement(
+                     "SELECT target_count, status FROM meeting_deletion_plan WHERE meeting_id=?");
+             PreparedStatement workflow = connection.prepareStatement(
+                     "SELECT status, step_type FROM workflow_step WHERE meeting_id=?")) {
+            plan.setString(1, meetingId);
+            try (var rows = plan.executeQuery()) {
+                assertTrue(rows.next());
+                assertEquals(0, rows.getInt("target_count"));
+                assertEquals("PENDING", rows.getString("status"));
+            }
+            workflow.setString(1, meetingId);
+            try (var rows = workflow.executeQuery()) {
+                assertTrue(rows.next());
+                assertEquals("PENDING", rows.getString("status"));
+                assertEquals("artifact-deletion", rows.getString("step_type"));
+            }
+            assertFalse(workflow.getMoreResults());
+            connection.rollback();
+        }
+    }
+
+    /** READY 会议必须按完整 finalization checkpoint 冻结全部删除目标。 */
+    @Test
+    void admissionUnitFreezesReadyCheckpointTargetsAndAllLocalFactsAtomically()
+            throws Exception {
+        for (String migration : List.of(
+                "V008__durable_input_fact.sql",
+                "V009__final_usage_fact.sql",
+                "V010__workflow_step_fencing.sql",
+                "V011__finalization_execution_artifact_ready.sql",
+                "V012__artifact_deletion_plan.sql")) {
+            applyMigration(migration);
+        }
+        String meetingId = "mtg_admission_ready";
+        String suffix = "admission-ready";
+        createOwnedWithMeetingId(meetingId, suffix, MeetingState.READY, DEPLOYMENT, SUBJECT);
+        FinalizationInputFact input = new FinalizationInputFact(
+                meetingId, "input-binding-ready", 7, 300_000,
+                "zh-CN", List.of("en-US"), CREATED_AT.plusSeconds(2),
+                "input-content-digest-ready");
+        String inputDigest = FinalizationCheckpoint.inputFactDigest(input);
+        String executionDigest = "sha256:" + "cd".repeat(32);
+        byte[] content = new MockFinalizationArtifactContent(
+                "transcript.final", executionDigest.substring(7), "zh-CN", 1,
+                inputDigest.substring(7)).canonicalBytes();
+        String checksum = "sha256:" + java.util.HexFormat.of().formatHex(
+                java.security.MessageDigest.getInstance("SHA-256").digest(content));
+        String artifactId = FinalizationCheckpoint.artifactId(
+                meetingId, "transcript.final", 1);
+        WriteIntentSpec spec = new WriteIntentSpec(
+                artifactId, meetingId, "transcript.final",
+                MockFinalizationArtifactContent.MEDIA_TYPE, "zh-CN", 1,
+                content.length, checksum);
+        FinalizationCheckpoint.ArtifactMaterial material =
+                new FinalizationCheckpoint.ArtifactMaterial(
+                        spec, content, new ContentClaim(content.length, checksum));
+        FinalizationOperationIdentity identity = FinalizationOperationIdentity.commit(
+                DEPLOYMENT, SUBJECT, meetingId, "reservation-admission-ready", 1,
+                new UsageActual(UsageUnit.MEETING_DURATION_MS, 300_000),
+                input.inputBinding(), input.contentDigest(), input.acceptedAt());
+        FinalizationCommitPlan commitPlan = FinalizationCommitPlan.restore(
+                meetingId, DEPLOYMENT, SUBJECT, identity.operationScope(),
+                identity.idempotencyKey(), identity.requestDigest(),
+                "reservation-admission-ready", 1, UsageUnit.MEETING_DURATION_MS,
+                300_000, input.inputBinding(), input.contentDigest(), input.acceptedAt());
+        FinalizationCheckpoint checkpoint = new FinalizationCheckpoint(
+                meetingId, input.inputBinding(), inputDigest, executionDigest,
+                List.of(material), commitPlan);
+        WorkflowStep finalizationWorkflow = FinalizationCheckpointJson.workflowStep(checkpoint);
+
+        try (Connection connection = transaction()) {
+            assertEquals(com.czur.reference.application.port.DurableInputFactStore.PersistStatus.APPLIED,
+                    JdbcDurableInputFactStore.persist(connection, input).status());
+            assertEquals(com.czur.reference.application.port.FinalUsageFactStore.PersistStatus.APPLIED,
+                    JdbcFinalUsageFactStore.persist(connection, checkpoint.finalUsageFact()).status());
+            assertEquals(WorkflowStepStore.RegisterStatus.APPLIED,
+                    JdbcWorkflowStepStore.register(connection, finalizationWorkflow).status());
+            try (PreparedStatement update = connection.prepareStatement(
+                    "UPDATE workflow_step SET status='COMPLETED', next_attempt_at=NULL "
+                            + "WHERE meeting_id=? AND step_type=? AND step_key=?")) {
+                update.setString(1, meetingId);
+                update.setString(2, finalizationWorkflow.key().stepType());
+                update.setString(3, finalizationWorkflow.key().stepKey());
+                assertEquals(1, update.executeUpdate());
+            }
+            ArtifactDescriptor descriptor = new ArtifactDescriptor(
+                    new WriteIntent("intent-admission-ready", new StorageBinding(
+                            "binding-admission-ready"), spec),
+                    new ContentClaim(content.length, checksum));
+            assertEquals(ArtifactReadyMetadataStore.PersistStatus.APPLIED,
+                    new JdbcArtifactReadyMetadataStore(connection)
+                            .persistReady(descriptor).status());
+            connection.commit();
+        }
+        appendManifest(readyManifest(meetingId, checkpoint),
+                new ManifestFactStore.ExpectedPreviousRevision.None());
+
+        DeleteResult.Accepted result = assertInstanceOf(
+                DeleteResult.Accepted.class,
+                new JdbcMeetingDeletionPort(
+                        dataSource, Clock.fixed(DELETE_AT, ZoneOffset.UTC), true)
+                        .delete(request(meetingId, "admission-ready-key", "admission-ready-digest")));
+        assertEquals(MeetingState.DELETION_PENDING, result.meeting().state());
+        assertEquals(2, manifestRevisionCount(meetingId));
+        assertEquals(1, deletionEventCount(meetingId));
+        try (Connection connection = transaction();
+             PreparedStatement plan = connection.prepareStatement(
+                     "SELECT target_count FROM meeting_deletion_plan WHERE meeting_id=?");
+             PreparedStatement items = connection.prepareStatement(
+                     "SELECT count(*) FROM artifact_deletion_item WHERE meeting_id=?");
+             PreparedStatement workflow = connection.prepareStatement(
+                     "SELECT status FROM workflow_step WHERE meeting_id=? AND step_type='artifact-deletion'")) {
+            plan.setString(1, meetingId);
+            try (var rows = plan.executeQuery()) {
+                assertTrue(rows.next());
+                assertEquals(1, rows.getInt(1));
+            }
+            items.setString(1, meetingId);
+            try (var rows = items.executeQuery()) {
+                assertTrue(rows.next());
+                assertEquals(1, rows.getInt(1));
+            }
+            workflow.setString(1, meetingId);
+            try (var rows = workflow.executeQuery()) {
+                assertTrue(rows.next());
+                assertEquals("PENDING", rows.getString(1));
+            }
+            connection.rollback();
+        }
+    }
+
+    @Test
+    void admissionUnitFreezesReadyWithWarningsCheckpointTargets() throws Exception {
+        applyDeletionAdmissionMigrations();
+        AdmissionFixture fixture = prepareAdmissionFixture(
+                "mtg_admission_warn", "admission-warn",
+                MeetingState.READY_WITH_WARNINGS, ManifestStatus.READY_WITH_WARNINGS,
+                WorkflowStep.Status.COMPLETED, true);
+        DeleteResult.Accepted result = assertInstanceOf(DeleteResult.Accepted.class,
+                new JdbcMeetingDeletionPort(dataSource, Clock.fixed(DELETE_AT, ZoneOffset.UTC), true)
+                        .delete(request(fixture.meetingId(), "admission-warn-key", "admission-warn-digest")));
+        assertEquals(MeetingState.DELETION_PENDING, result.meeting().state());
+        assertEquals(1, deletionPlanTargetCount(fixture.meetingId()));
+        assertEquals(1, deletionItemCount(fixture.meetingId()));
+    }
+
+    @Test
+    void admissionUnitFreezesFailedCheckpointIncludingMissingReadyArtifact() throws Exception {
+        applyDeletionAdmissionMigrations();
+        AdmissionFixture fixture = prepareAdmissionFixture(
+                "mtg_admission_failed", "admission-failed",
+                MeetingState.FAILED, ManifestStatus.FAILED,
+                WorkflowStep.Status.DEAD, false);
+        DeleteResult.Accepted result = assertInstanceOf(DeleteResult.Accepted.class,
+                new JdbcMeetingDeletionPort(dataSource, Clock.fixed(DELETE_AT, ZoneOffset.UTC), true)
+                        .delete(request(fixture.meetingId(), "admission-failed-key", "admission-failed-digest")));
+        assertEquals(MeetingState.DELETION_PENDING, result.meeting().state());
+        assertEquals(1, deletionPlanTargetCount(fixture.meetingId()),
+                "未 READY 的 checkpoint 目标也必须进入删除计划");
+        assertEquals(1, deletionItemCount(fixture.meetingId()));
     }
 
     @Test
@@ -1102,6 +1310,164 @@ class JdbcMeetingDeletionPortIntegrationTest {
                         "summary",
                         "ai_meeting.summary_skipped",
                         null)));
+    }
+
+    private static MeetingManifest readyManifest(
+            String meetingId, FinalizationCheckpoint checkpoint) {
+        FinalizationCheckpoint.ArtifactMaterial material = checkpoint.artifacts().getFirst();
+        WriteIntentSpec spec = material.spec();
+        Instant endedAt = CREATED_AT.plusSeconds(300);
+        return new MeetingManifest(
+                "0.1", meetingId, 1,
+                new MeetingManifest.Profile("profile-owned", 7),
+                "Deletion transaction test", ManifestStatus.READY,
+                CREATED_AT, endedAt, 300_000,
+                new MeetingManifest.Languages("zh-CN", List.of("en-US")),
+                List.of(new MeetingManifest.ArtifactRef(
+                        spec.artifactId(), spec.artifactType(), spec.mediaType(),
+                        spec.language(), spec.revision(), spec.expectedSize(),
+                        spec.expectedChecksum(), MeetingManifest.ArtifactStatus.READY,
+                        endedAt, null, null)),
+                List.of());
+    }
+
+    private void applyDeletionAdmissionMigrations() throws Exception {
+        for (String migration : List.of(
+                "V008__durable_input_fact.sql",
+                "V009__final_usage_fact.sql",
+                "V010__workflow_step_fencing.sql",
+                "V011__finalization_execution_artifact_ready.sql",
+                "V012__artifact_deletion_plan.sql")) {
+            applyMigration(migration);
+        }
+    }
+
+    private AdmissionFixture prepareAdmissionFixture(
+            String meetingId,
+            String suffix,
+            MeetingState meetingState,
+            ManifestStatus manifestStatus,
+            WorkflowStep.Status workflowStatus,
+            boolean persistMetadata) throws Exception {
+        createOwnedWithMeetingId(meetingId, suffix, meetingState, DEPLOYMENT, SUBJECT);
+        FinalizationInputFact input = new FinalizationInputFact(
+                meetingId, "input-binding-" + suffix, 7, 300_000,
+                "zh-CN", List.of("en-US"), CREATED_AT.plusSeconds(2),
+                "input-content-digest-" + suffix);
+        String inputDigest = FinalizationCheckpoint.inputFactDigest(input);
+        String executionDigest = "sha256:" + "cd".repeat(32);
+        byte[] content = new MockFinalizationArtifactContent(
+                "transcript.final", executionDigest.substring(7), "zh-CN", 1,
+                inputDigest.substring(7)).canonicalBytes();
+        String checksum = "sha256:" + java.util.HexFormat.of().formatHex(
+                java.security.MessageDigest.getInstance("SHA-256").digest(content));
+        WriteIntentSpec spec = new WriteIntentSpec(
+                FinalizationCheckpoint.artifactId(meetingId, "transcript.final", 1),
+                meetingId, "transcript.final", MockFinalizationArtifactContent.MEDIA_TYPE,
+                "zh-CN", 1, content.length, checksum);
+        FinalizationCheckpoint checkpoint = new FinalizationCheckpoint(
+                meetingId, input.inputBinding(), inputDigest, executionDigest,
+                List.of(new FinalizationCheckpoint.ArtifactMaterial(
+                        spec, content, new ContentClaim(content.length, checksum))),
+                FinalizationCommitPlan.restore(
+                        meetingId, DEPLOYMENT, SUBJECT,
+                        FinalizationOperationIdentity.OPERATION_SCOPE,
+                        FinalizationOperationIdentity.commit(
+                                DEPLOYMENT, SUBJECT, meetingId,
+                                "reservation-" + suffix, 1,
+                                new UsageActual(UsageUnit.MEETING_DURATION_MS, 300_000),
+                                input.inputBinding(), input.contentDigest(), input.acceptedAt())
+                                .idempotencyKey(),
+                        FinalizationOperationIdentity.commit(
+                                DEPLOYMENT, SUBJECT, meetingId,
+                                "reservation-" + suffix, 1,
+                                new UsageActual(UsageUnit.MEETING_DURATION_MS, 300_000),
+                                input.inputBinding(), input.contentDigest(), input.acceptedAt())
+                                .requestDigest(),
+                        "reservation-" + suffix, 1, UsageUnit.MEETING_DURATION_MS,
+                        300_000, input.inputBinding(), input.contentDigest(), input.acceptedAt()));
+        WorkflowStep workflow = FinalizationCheckpointJson.workflowStep(checkpoint);
+        try (Connection connection = transaction()) {
+            assertEquals(com.czur.reference.application.port.DurableInputFactStore.PersistStatus.APPLIED,
+                    JdbcDurableInputFactStore.persist(connection, input).status());
+            assertEquals(com.czur.reference.application.port.FinalUsageFactStore.PersistStatus.APPLIED,
+                    JdbcFinalUsageFactStore.persist(connection, checkpoint.finalUsageFact()).status());
+            assertEquals(WorkflowStepStore.RegisterStatus.APPLIED,
+                    JdbcWorkflowStepStore.register(connection, workflow).status());
+            String state = workflowStatus == WorkflowStep.Status.DEAD ? "DEAD" : "COMPLETED";
+            try (PreparedStatement update = connection.prepareStatement(
+                    "UPDATE workflow_step SET status=?, next_attempt_at=NULL, "
+                            + "error_code=?, error_message=? WHERE meeting_id=?")) {
+                update.setString(1, state);
+                update.setString(2, workflowStatus == WorkflowStep.Status.DEAD ? "MODEL_FAILURE" : null);
+                update.setString(3, workflowStatus == WorkflowStep.Status.DEAD ? "stable failure" : null);
+                update.setString(4, meetingId);
+                assertEquals(1, update.executeUpdate());
+            }
+            if (persistMetadata) {
+                ArtifactDescriptor descriptor = new ArtifactDescriptor(
+                        new WriteIntent("intent-" + suffix,
+                                new StorageBinding("binding-" + suffix), spec),
+                        new ContentClaim(content.length, checksum));
+                assertEquals(ArtifactReadyMetadataStore.PersistStatus.APPLIED,
+                        new JdbcArtifactReadyMetadataStore(connection).persistReady(descriptor).status());
+            }
+            connection.commit();
+        }
+        appendManifest(admissionManifest(meetingId, checkpoint, manifestStatus),
+                new ManifestFactStore.ExpectedPreviousRevision.None());
+        return new AdmissionFixture(meetingId, checkpoint);
+    }
+
+    private static MeetingManifest admissionManifest(
+            String meetingId, FinalizationCheckpoint checkpoint, ManifestStatus status) {
+        var material = checkpoint.artifacts().getFirst();
+        var spec = material.spec();
+        Instant endedAt = CREATED_AT.plusSeconds(300);
+        MeetingManifest.ArtifactStatus artifactStatus = status == ManifestStatus.FAILED
+                ? MeetingManifest.ArtifactStatus.FAILED
+                : MeetingManifest.ArtifactStatus.READY;
+        MeetingManifest.ArtifactFailure failure = artifactStatus == MeetingManifest.ArtifactStatus.FAILED
+                ? new MeetingManifest.ArtifactFailure("MODEL", "MODEL_FAILURE", false, "diagnostic") : null;
+        return new MeetingManifest("0.1", meetingId, 1,
+                new MeetingManifest.Profile("profile-owned", 7), "Deletion transaction test",
+                status, CREATED_AT, endedAt, 300_000,
+                new MeetingManifest.Languages("zh-CN", List.of("en-US")),
+                List.of(new MeetingManifest.ArtifactRef(
+                        spec.artifactId(), spec.artifactType(), spec.mediaType(), spec.language(),
+                        spec.revision(), spec.expectedSize(), spec.expectedChecksum(), artifactStatus,
+                        endedAt, null, failure)), List.of());
+    }
+
+    private int deletionPlanTargetCount(String meetingId) throws SQLException {
+        try (Connection connection = transaction();
+             PreparedStatement statement = connection.prepareStatement(
+                     "SELECT target_count FROM meeting_deletion_plan WHERE meeting_id=?")) {
+            statement.setString(1, meetingId);
+            try (var rows = statement.executeQuery()) {
+                assertTrue(rows.next());
+                int count = rows.getInt(1);
+                connection.rollback();
+                return count;
+            }
+        }
+    }
+
+    private int deletionItemCount(String meetingId) throws SQLException {
+        try (Connection connection = transaction();
+             PreparedStatement statement = connection.prepareStatement(
+                     "SELECT count(*) FROM artifact_deletion_item WHERE meeting_id=?")) {
+            statement.setString(1, meetingId);
+            try (var rows = statement.executeQuery()) {
+                assertTrue(rows.next());
+                int count = rows.getInt(1);
+                connection.rollback();
+                return count;
+            }
+        }
+    }
+
+    private record AdmissionFixture(String meetingId, FinalizationCheckpoint checkpoint) {
     }
 
     private void appendManifest(

@@ -1,19 +1,31 @@
 package com.czur.reference.application.persistence.jdbc;
 
 import com.czur.reference.application.command.MeetingCommandEventFactory;
+import com.czur.reference.application.deletion.ArtifactDeletionAdmissionPolicy;
+import com.czur.reference.application.deletion.ArtifactDeletionPlan;
+import com.czur.reference.application.deletion.ArtifactDeletionTarget;
 import com.czur.reference.application.manifest.ManifestDeletionRevisionFactory;
 import com.czur.reference.application.port.DeleteRequest;
 import com.czur.reference.application.port.DeleteResult;
 import com.czur.reference.application.port.IdempotencyScopeCodec;
+import com.czur.reference.application.port.ArtifactDeletionPlanStore;
 import com.czur.reference.application.port.ManifestFactStore;
 import com.czur.reference.application.port.ManifestStatus;
 import com.czur.reference.application.port.MeetingDeletionPort;
 import com.czur.reference.application.port.MeetingManifest;
 import com.czur.reference.application.port.MeetingStatus;
 import com.czur.reference.application.port.OutboxStore;
+import com.czur.reference.application.port.WorkflowStep;
+import com.czur.reference.application.port.WorkflowStepStore;
+import com.czur.reference.application.port.artifact.ArtifactReadyMetadataStore;
+import com.czur.reference.application.port.artifact.ArtifactStore.WriteIntentSpec;
+import com.czur.reference.application.finalization.FinalizationCheckpoint;
+import com.czur.reference.application.finalization.FinalizationCheckpoint.ArtifactMaterial;
 import com.czur.reference.domain.meeting.MeetingAggregate;
 import com.czur.reference.domain.meeting.MeetingEvent;
 import com.czur.reference.domain.meeting.MeetingState;
+import com.czur.reference.protocol.json.ArtifactDeletionPlanJson;
+import com.czur.reference.protocol.json.FinalizationCheckpointJson;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
@@ -22,6 +34,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.EnumSet;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.logging.Level;
@@ -64,10 +77,447 @@ public final class JdbcMeetingDeletionPort implements MeetingDeletionPort {
 
     private final DataSource dataSource;
     private final Clock clock;
+    private final boolean admissionWorkflowEnabled;
 
     public JdbcMeetingDeletionPort(DataSource dataSource, Clock clock) {
+        this(dataSource, clock, false);
+    }
+
+    /**
+     * T14-10-05 的删除受理事务：在旧删除受理事实之外冻结完整删除集合并注册
+     * 删除 Workflow。所有 JDBC 原语都绑定本连接；提交结果未知时只返回可重试的
+     * OUTCOME_UNKNOWN，不能继续使用可能已经提交的连接或补写第二笔事实。
+     */
+    private DeleteResult deleteWithFrozenPlan(DeleteRequest request) {
+        Connection connection = null;
+        boolean transactionStarted = false;
+        boolean commitStarted = false;
+        boolean commitCompleted = false;
+        boolean previousAutoCommit = true;
+        TransactionResolution resolution = new TransactionResolution();
+        Phase phase = Phase.OPEN_CONNECTION;
+        try {
+            connection = dataSource.getConnection();
+            previousAutoCommit = connection.getAutoCommit();
+            connection.setAutoCommit(false);
+            transactionStarted = true;
+
+            phase = Phase.MEETING_LOCK_AND_ACCESS_CHECK;
+            JdbcMeetingRepository.DeletionLockResult lock =
+                    JdbcMeetingRepository.lockForDeletion(
+                            connection, request.meetingId(), request.context());
+            if (lock instanceof JdbcMeetingRepository.DeletionNotFound) {
+                return rollbackResult(connection, resolution,
+                        new DeleteResult.NotFound(), phase);
+            }
+            if (lock instanceof JdbcMeetingRepository.DeletionAccessDenied) {
+                return rollbackResult(connection, resolution,
+                        new DeleteResult.AccessDenied(), phase);
+            }
+            if (lock instanceof JdbcMeetingRepository.DeletionSnapshotInconsistent) {
+                return rollbackResult(connection, resolution,
+                        conflict(DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT), phase);
+            }
+            JdbcMeetingRepository.DeletionMeeting current =
+                    ((JdbcMeetingRepository.DeletionFound) lock).meeting();
+            String scope = IdempotencyScopeCodec.meetingDelete(
+                    request.context().deploymentScope(),
+                    request.context().identity().subject().subjectScope());
+
+            phase = Phase.IDEMPOTENCY_READ;
+            Optional<JdbcIdempotencyStore.DeletionRawRecord> previous =
+                    JdbcIdempotencyStore.findDeletion(
+                            connection, scope, request.idempotencyKey());
+            Optional<MeetingManifest> latest =
+                    new JdbcManifestFactStore(connection)
+                            .findLatestForLockedMeeting(request.meetingId());
+            if (previous.isPresent()) {
+                if (!sameDigest(previous.orElseThrow().requestDigest(),
+                        request.canonicalRequestDigest())) {
+                    return rollbackResult(connection, resolution,
+                            conflict(DeleteResult.ConflictReason.REQUEST_DIGEST_MISMATCH), phase);
+                }
+                DeleteResult replay = classifyExisting(
+                        previous.get(), request, current, latest);
+                if (replay instanceof DeleteResult.Replayed
+                        && !frozenDeletionFactsPresent(connection, request.meetingId())) {
+                    replay = conflict(DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT);
+                }
+                return rollbackResult(connection, resolution, replay, phase);
+            }
+
+            phase = Phase.STATE_CHECK;
+            if (!FIRST_ACCEPTED_STATES.contains(current.snapshot().state())) {
+                return rollbackResult(connection, resolution,
+                        conflict(DeleteResult.ConflictReason.INVALID_MEETING_STATE), phase);
+            }
+            if (!FIRST_ACCEPTED_MANIFEST_STATES.contains(current.manifestState())) {
+                return rollbackResult(connection, resolution,
+                        conflict(DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT), phase);
+            }
+
+            phase = Phase.WORKFLOW_READ;
+            Optional<WorkflowStep> sourceWorkflow = JdbcWorkflowStepStore.find(
+                    connection, FinalizationCheckpoint.workflowKey(request.meetingId()));
+            Optional<com.czur.reference.application.port.FinalizationInputFact> inputFact =
+                    JdbcDurableInputFactStore.find(connection, request.meetingId());
+            Optional<com.czur.reference.application.port.FinalUsageFact> usageFact =
+                    JdbcFinalUsageFactStore.find(connection, request.meetingId());
+            List<ArtifactReadyMetadataStore.ReadyMetadata> metadata =
+                    new JdbcArtifactReadyMetadataStore(connection)
+                            .findByMeetingId(request.meetingId());
+            FinalizationCheckpoint checkpoint = null;
+            ArtifactDeletionAdmissionPolicy.MetadataCheck metadataCheck = null;
+            if (sourceWorkflow.isPresent()) {
+                WorkflowStep source = sourceWorkflow.orElseThrow();
+                try {
+                    checkpoint = decodeFinalizationCheckpoint(source, request.meetingId());
+                    metadataCheck = compareMetadata(checkpoint, metadata);
+                } catch (RuntimeException malformed) {
+                    return rollbackResult(connection, resolution,
+                            conflict(DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT), phase);
+                }
+            }
+            ArtifactDeletionAdmissionPolicy.Facts facts = new ArtifactDeletionAdmissionPolicy.Facts(
+                    current.snapshot().state(),
+                    current.manifestState(),
+                    latest.isPresent(),
+                    sourceWorkflow.isPresent(),
+                    sourceWorkflow.map(WorkflowStep::status).orElse(null),
+                    current.finalization().isAccepted(),
+                    inputFact.isPresent(),
+                    usageFact.isPresent(),
+                    checkpoint == null ? 0 : checkpoint.artifacts().size(),
+                    metadata.size(),
+                    metadataCheck != null && metadataCheck.exact(),
+                    metadataCheck != null && metadataCheck.subset());
+            ArtifactDeletionAdmissionPolicy.Result admission =
+                    ArtifactDeletionAdmissionPolicy.evaluate(facts);
+            if (admission instanceof ArtifactDeletionAdmissionPolicy.Rejected rejected) {
+                return rollbackResult(connection, resolution,
+                        conflict(mapRejection(rejected.reason())), phase);
+            }
+            if (checkpoint != null && latest.isPresent()
+                    && !manifestAlignedWithCheckpoint(
+                    latest.orElseThrow(), checkpoint, metadata,
+                    ((ArtifactDeletionAdmissionPolicy.Accepted) admission).kind())) {
+                return rollbackResult(connection, resolution,
+                        conflict(DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT), phase);
+            }
+
+            phase = Phase.CLOCK_READ;
+            Instant acceptedAt = Objects.requireNonNull(clock.instant(), "clock.instant")
+                    .truncatedTo(ChronoUnit.MICROS);
+            if (acceptedAt.isBefore(current.snapshot().updatedAt())) {
+                return rollbackResult(connection, resolution,
+                        conflict(DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT), phase);
+            }
+            MeetingAggregate aggregate = MeetingAggregate.fromSnapshot(current.snapshot());
+            if (aggregate.apply(MeetingEvent.DELETE_REQUESTED, acceptedAt)
+                    != MeetingState.DELETION_PENDING) {
+                return rollbackResult(connection, resolution,
+                        conflict(DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT), phase);
+            }
+            MeetingAggregate.MeetingSnapshot advanced = aggregate.snapshot();
+            MeetingStatus accepted = current.pendingStatus(aggregate);
+
+            phase = Phase.IDEMPOTENCY_RESERVE;
+            JdbcIdempotencyStore.DeletionReservation reservation =
+                    JdbcIdempotencyStore.reserveDeletion(
+                            connection, scope, request.idempotencyKey(),
+                            request.canonicalRequestDigest(), accepted, acceptedAt);
+            if (!reservation.acquired()) {
+                return rollbackResult(connection, resolution,
+                        classifyExisting(reservation.record(), request, current, latest), phase);
+            }
+            MeetingStatus persistedAccepted;
+            try {
+                persistedAccepted = decodeDeletion(reservation.record());
+            } catch (RuntimeException malformed) {
+                return rollbackResult(connection, resolution,
+                        conflict(DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT), phase);
+            }
+            if (!sameDigest(reservation.record().requestDigest(),
+                    request.canonicalRequestDigest()) || !accepted.equals(persistedAccepted)) {
+                return rollbackResult(connection, resolution,
+                        conflict(DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT), phase);
+            }
+
+            ArtifactDeletionAdmissionPolicy.Accepted acceptedDecision =
+                    (ArtifactDeletionAdmissionPolicy.Accepted) admission;
+            ArtifactDeletionPlan plan = buildDeletionPlan(
+                    request.meetingId(), acceptedAt, latest, sourceWorkflow, checkpoint,
+                    acceptedDecision.kind());
+
+            if (latest.isPresent()) {
+                MeetingManifest source = latest.orElseThrow();
+                if (!isConsistentDeletionSource(current, source)) {
+                    return rollbackResult(connection, resolution,
+                            conflict(DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT), phase);
+                }
+                phase = Phase.MANIFEST_APPEND;
+                MeetingManifest deletion = ManifestDeletionRevisionFactory.deletionPendingAfter(source);
+                ManifestFactStore.AppendResult appended = new JdbcManifestFactStore(connection).append(
+                        new ManifestFactStore.AppendRequest(
+                                deletion,
+                                new ManifestFactStore.ExpectedPreviousRevision.Present(
+                                        source.manifestRevision())));
+                if (appended.status() != ManifestFactStore.AppendStatus.APPENDED) {
+                    return rollbackResult(connection, resolution,
+                            conflict(DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT), phase);
+                }
+            }
+
+            phase = Phase.PLAN_REGISTER;
+            ArtifactDeletionPlanStore.PersistResult persistedPlan =
+                    new JdbcArtifactDeletionPlanStore(connection).register(plan);
+            if (persistedPlan.status() == ArtifactDeletionPlanStore.PersistStatus.CONFLICT
+                    || !persistedPlan.plan().plan().equals(plan)) {
+                return rollbackResult(connection, resolution,
+                        conflict(DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT), phase);
+            }
+            phase = Phase.WORKFLOW_REGISTER;
+            WorkflowStep deletionWorkflow = ArtifactDeletionPlanJson.workflowStep(plan);
+            WorkflowStepStore.RegisterResult workflowResult =
+                    JdbcWorkflowStepStore.register(connection, deletionWorkflow);
+            if (workflowResult.status() == WorkflowStepStore.RegisterStatus.CONFLICT
+                    || !workflowResult.step().key().equals(deletionWorkflow.key())
+                    || !workflowResult.step().checkpointType().equals(deletionWorkflow.checkpointType())
+                    || !workflowResult.step().contentDigest().equals(deletionWorkflow.contentDigest())) {
+                return rollbackResult(connection, resolution,
+                        conflict(DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT), phase);
+            }
+
+            phase = Phase.MEETING_UPDATE;
+            if (!JdbcMeetingRepository.markDeletionPending(
+                    connection, current, advanced, accepted)) {
+                return rollbackResult(connection, resolution,
+                        conflict(DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT), phase);
+            }
+            phase = Phase.OUTBOX_APPEND;
+            OutboxStore.AppendResult append = JdbcOutboxStore.append(connection,
+                    MeetingCommandEventFactory.meetingDeletionRequested(
+                            current.snapshot().deploymentScope(), accepted));
+            if (append.status() != OutboxStore.AppendStatus.APPENDED) {
+                return rollbackResult(connection, resolution,
+                        conflict(DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT), phase);
+            }
+            phase = Phase.COMMIT;
+            commitStarted = true;
+            connection.commit();
+            commitCompleted = true;
+            LOGGER.log(Level.FINE, "删除受理冻结计划事务已提交 result=ACCEPTED");
+            return new DeleteResult.Accepted(accepted);
+        } catch (JdbcArtifactDeletionPlanStore.StoreException failure) {
+            if (commitStarted) {
+                return loggedUnavailable(DeleteResult.UnavailableReason.OUTCOME_UNKNOWN,
+                        Phase.COMMIT, null);
+            }
+            DeleteResult result = switch (failure.code()) {
+                case CORRUPT_DATA -> conflict(DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT);
+                case LOCK_CONFLICT -> unavailable(
+                        DeleteResult.UnavailableReason.TRANSIENT_STORAGE_FAILURE);
+                case STORAGE_UNAVAILABLE, TRANSACTION_REQUIRED -> unavailable(
+                        DeleteResult.UnavailableReason.STORAGE_FAILURE);
+            };
+            return transactionStarted
+                    ? rollbackResult(connection, resolution, result, phase) : result;
+        } catch (JdbcManifestFactStore.StoredFactException failure) {
+            if (commitStarted) {
+                return loggedUnavailable(DeleteResult.UnavailableReason.OUTCOME_UNKNOWN,
+                        Phase.COMMIT, null);
+            }
+            DeleteResult result = failure.kind() == JdbcManifestFactStore.FailureKind.CORRUPT_DATA
+                    ? conflict(DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT)
+                    : unavailable(DeleteResult.UnavailableReason.STORAGE_FAILURE);
+            return transactionStarted
+                    ? rollbackResult(connection, resolution, result, phase) : result;
+        } catch (SQLException failure) {
+            if (commitStarted) {
+                return loggedUnavailable(DeleteResult.UnavailableReason.OUTCOME_UNKNOWN,
+                        Phase.COMMIT, safeSqlState(failure.getSQLState()));
+            }
+            DeleteResult result = switch (JdbcReadLookupSupport.classify(failure)) {
+                case INCONSISTENT -> conflict(DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT);
+                case RETRYABLE_UNAVAILABLE -> unavailable(
+                        DeleteResult.UnavailableReason.TRANSIENT_STORAGE_FAILURE);
+                case NON_RETRYABLE_UNAVAILABLE -> unavailable(
+                        DeleteResult.UnavailableReason.STORAGE_FAILURE);
+            };
+            return transactionStarted
+                    ? rollbackResult(connection, resolution, result, phase) : result;
+        } catch (RuntimeException failure) {
+            if (commitStarted) {
+                return loggedUnavailable(DeleteResult.UnavailableReason.OUTCOME_UNKNOWN,
+                        Phase.COMMIT, null);
+            }
+            DeleteResult result = loggedUnavailable(
+                    DeleteResult.UnavailableReason.STORAGE_FAILURE, phase, null);
+            return transactionStarted
+                    ? rollbackResult(connection, resolution, result, phase) : result;
+        } finally {
+            if (commitCompleted || resolution.rollbackConfirmed()) {
+                restoreAutoCommitQuietly(connection, previousAutoCommit);
+            } else {
+                abortQuietly(connection);
+            }
+            closeQuietly(connection);
+        }
+    }
+
+    private static DeleteResult.ConflictReason mapRejection(
+            ArtifactDeletionAdmissionPolicy.Rejection reason) {
+        return reason == ArtifactDeletionAdmissionPolicy.Rejection.INVALID_MEETING_STATE
+                ? DeleteResult.ConflictReason.INVALID_MEETING_STATE
+                : DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT;
+    }
+
+    private static FinalizationCheckpoint decodeFinalizationCheckpoint(
+            WorkflowStep step, String meetingId) {
+        if (!FinalizationCheckpoint.STEP_TYPE.equals(step.key().stepType())
+                || !FinalizationCheckpoint.CHECKPOINT_TYPE.equals(step.checkpointType())
+                || !FinalizationCheckpoint.workflowKey(meetingId).equals(step.key())) {
+            throw new IllegalArgumentException("workflow definition is inconsistent");
+        }
+        FinalizationCheckpoint checkpoint =
+                FinalizationCheckpointJson.decode(step.canonicalPayload());
+        if (!checkpoint.meetingId().equals(meetingId)
+                || !FinalizationCheckpointJson.sha256(checkpoint).equals(step.contentDigest())
+                || !FinalizationCheckpointJson.workflowStep(checkpoint).canonicalPayload()
+                        .equals(step.canonicalPayload())) {
+            throw new IllegalArgumentException("workflow checkpoint is inconsistent");
+        }
+        return checkpoint;
+    }
+
+    private static ArtifactDeletionPlan buildDeletionPlan(
+            String meetingId,
+            Instant acceptedAt,
+            Optional<MeetingManifest> latest,
+            Optional<WorkflowStep> sourceWorkflow,
+            FinalizationCheckpoint checkpoint,
+            ArtifactDeletionAdmissionPolicy.Kind kind) {
+        if (kind == ArtifactDeletionAdmissionPolicy.Kind.EARLY_EMPTY) {
+            return new ArtifactDeletionPlan(meetingId, acceptedAt, null, null, List.of());
+        }
+        if (checkpoint == null || sourceWorkflow.isEmpty() || latest.isEmpty()) {
+            throw new IllegalArgumentException("complete deletion source is missing");
+        }
+        List<ArtifactDeletionTarget> targets = checkpoint.artifacts().stream()
+                .map(ArtifactMaterial::spec)
+                .map(ArtifactDeletionTarget::fromSpec)
+                .toList();
+        return new ArtifactDeletionPlan(
+                meetingId,
+                acceptedAt,
+                latest.orElseThrow().manifestRevision(),
+                ArtifactDeletionPlan.SourceFinalizationWorkflow.fromStep(
+                        sourceWorkflow.orElseThrow()),
+                targets);
+    }
+
+    private static ArtifactDeletionAdmissionPolicy.MetadataCheck compareMetadata(
+            FinalizationCheckpoint checkpoint,
+            List<ArtifactReadyMetadataStore.ReadyMetadata> metadata) {
+        java.util.Map<String, WriteIntentSpec> expected = new java.util.HashMap<>();
+        for (ArtifactMaterial material : checkpoint.artifacts()) {
+            expected.put(material.spec().artifactId(), material.spec());
+        }
+        boolean subset = true;
+        for (ArtifactReadyMetadataStore.ReadyMetadata value : metadata) {
+            WriteIntentSpec actual = value.artifact().intent().spec();
+            if (!checkpoint.meetingId().equals(actual.meetingId())
+                    || !actual.equals(expected.get(actual.artifactId()))) {
+                subset = false;
+                break;
+            }
+        }
+        boolean exact = subset && metadata.size() == expected.size();
+        return new ArtifactDeletionAdmissionPolicy.MetadataCheck(exact, subset);
+    }
+
+    /** 重放前重新证明计划和删除 Workflow 仍成对存在且 Definition 未漂移。 */
+    private static boolean frozenDeletionFactsPresent(
+            Connection connection, String meetingId) throws SQLException {
+        Optional<com.czur.reference.application.deletion.MeetingDeletionPlan> persisted =
+                new JdbcArtifactDeletionPlanStore(connection).find(meetingId);
+        if (persisted.isEmpty()) {
+            return false;
+        }
+        ArtifactDeletionPlan plan = persisted.orElseThrow().plan();
+        Optional<WorkflowStep> workflow = JdbcWorkflowStepStore.find(
+                connection, plan.workflowKey());
+        if (workflow.isEmpty()) {
+            return false;
+        }
+        WorkflowStep expected = ArtifactDeletionPlanJson.workflowStep(plan);
+        WorkflowStep actual = workflow.orElseThrow();
+        return expected.key().equals(actual.key())
+                && expected.checkpointType().equals(actual.checkpointType())
+                && expected.canonicalPayload().equals(actual.canonicalPayload())
+                && expected.contentDigest().equals(actual.contentDigest());
+    }
+
+    /**
+     * 交叉核对 Manifest 的 Artifact 引用，防止只凭 READY metadata 数量掩盖正文漂移。
+     * READY/WARN 必须逐项 READY 且覆盖 checkpoint；FAILED 允许缺失项以 FAILED 引用保留，
+     * 但每个引用仍必须来自同一份 checkpoint，READY 引用必须有完全相同 metadata。
+     */
+    private static boolean manifestAlignedWithCheckpoint(
+            MeetingManifest manifest,
+            FinalizationCheckpoint checkpoint,
+            List<ArtifactReadyMetadataStore.ReadyMetadata> metadata,
+            ArtifactDeletionAdmissionPolicy.Kind kind) {
+        java.util.Map<String, WriteIntentSpec> expected = new java.util.HashMap<>();
+        for (ArtifactMaterial material : checkpoint.artifacts()) {
+            expected.put(material.spec().artifactId(), material.spec());
+        }
+        java.util.Map<String, WriteIntentSpec> ready = new java.util.HashMap<>();
+        for (ArtifactReadyMetadataStore.ReadyMetadata value : metadata) {
+            ready.put(value.artifact().intent().spec().artifactId(),
+                    value.artifact().intent().spec());
+        }
+        if (manifest.artifacts().size() != expected.size()) {
+            return false;
+        }
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        for (MeetingManifest.ArtifactRef ref : manifest.artifacts()) {
+            WriteIntentSpec spec = expected.get(ref.artifactId());
+            if (spec == null || !seen.add(ref.artifactId())
+                    || !spec.artifactType().equals(ref.type())
+                    || !spec.mediaType().equals(ref.mediaType())
+                    || !Objects.equals(spec.language(), ref.language())
+                    || spec.revision() != ref.revision()
+                    || spec.expectedSize() != ref.size()
+                    || !spec.expectedChecksum().equalsIgnoreCase(ref.checksum())) {
+                return false;
+            }
+            if (ref.status() == MeetingManifest.ArtifactStatus.READY
+                    && !spec.equals(ready.get(ref.artifactId()))) {
+                return false;
+            }
+            if (kind != ArtifactDeletionAdmissionPolicy.Kind.FINAL_FAILED
+                    && ref.status() != MeetingManifest.ArtifactStatus.READY) {
+                return false;
+            }
+            if (kind == ArtifactDeletionAdmissionPolicy.Kind.FINAL_FAILED
+                    && ref.status() != MeetingManifest.ArtifactStatus.READY
+                    && ref.status() != MeetingManifest.ArtifactStatus.FAILED) {
+                return false;
+            }
+        }
+        return seen.size() == expected.size();
+    }
+
+    /**
+     * 创建带 T14-10-05 计划冻结的删除端口。旧构造器保留 V001～V007 参考行为，
+     * 新装配必须显式启用该模式并在同一连接上提供 V012 事实表。
+     */
+    public JdbcMeetingDeletionPort(
+            DataSource dataSource, Clock clock, boolean admissionWorkflowEnabled) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
         this.clock = Objects.requireNonNull(clock, "clock");
+        this.admissionWorkflowEnabled = admissionWorkflowEnabled;
     }
 
     /**
@@ -81,6 +531,9 @@ public final class JdbcMeetingDeletionPort implements MeetingDeletionPort {
     @Override
     public DeleteResult delete(DeleteRequest request) {
         Objects.requireNonNull(request, "request");
+        if (admissionWorkflowEnabled) {
+            return deleteWithFrozenPlan(request);
+        }
         Connection connection = null;
         boolean transactionStarted = false;
         boolean commitStarted = false;
@@ -596,6 +1049,9 @@ public final class JdbcMeetingDeletionPort implements MeetingDeletionPort {
         MANIFEST_APPEND,
         MEETING_UPDATE,
         OUTBOX_APPEND,
+        WORKFLOW_READ,
+        PLAN_REGISTER,
+        WORKFLOW_REGISTER,
         COMMIT
     }
 }
