@@ -103,6 +103,23 @@ public final class JdbcArtifactDeletionPlanStore implements ArtifactDeletionPlan
         }
     }
 
+    /** 在终态事务中锁定计划行；调用方必须已经锁定 Meeting 与 Workflow。 */
+    Optional<MeetingDeletionPlan> findForUpdate(String meetingId) {
+        requireMeetingId(meetingId);
+        requireExplicitTransaction();
+        try {
+            pinSearchPath();
+            return select(meetingId, false, true);
+        } catch (StoredFactException failure) {
+            logFailure("FIND_FOR_UPDATE", failure.code(), "N/A");
+            throw failure;
+        } catch (SQLException failure) {
+            throw sqlFailure("FIND_FOR_UPDATE", failure);
+        } catch (RuntimeException failure) {
+            throw runtimeFailure("FIND_FOR_UPDATE");
+        }
+    }
+
     @Override
     public PersistResult register(ArtifactDeletionPlan candidate) {
         Objects.requireNonNull(candidate, "candidate");
@@ -164,9 +181,32 @@ public final class JdbcArtifactDeletionPlanStore implements ArtifactDeletionPlan
         }
     }
 
+    /** 将已锁定且所有 item 已 DELETED 的计划置为 COMPLETED。 */
+    static boolean complete(Connection connection, String meetingId, Instant completedAt)
+            throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(meetingId, "meetingId");
+        requirePersistentInstant(completedAt);
+        try (PreparedStatement statement = connection.prepareStatement("""
+                UPDATE meeting_deletion_plan
+                   SET status = 'COMPLETED', completed_at = ?
+                 WHERE meeting_id = ? AND status = 'PENDING' AND completed_at IS NULL
+                """)) {
+            statement.setTimestamp(1, Timestamp.from(completedAt));
+            statement.setString(2, meetingId);
+            return statement.executeUpdate() == 1;
+        }
+    }
+
     private Optional<MeetingDeletionPlan> select(String meetingId, boolean nowait)
             throws SQLException {
-        String sql = nowait ? FIND_PLAN_FOR_UPDATE_NOWAIT_SQL : FIND_PLAN_SQL;
+        return select(meetingId, nowait, false);
+    }
+
+    private Optional<MeetingDeletionPlan> select(
+            String meetingId, boolean nowait, boolean forUpdate) throws SQLException {
+        String sql = nowait ? FIND_PLAN_FOR_UPDATE_NOWAIT_SQL
+                : (forUpdate ? FIND_PLAN_SQL + " FOR UPDATE" : FIND_PLAN_SQL);
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, meetingId);
             try (ResultSet rows = statement.executeQuery()) {

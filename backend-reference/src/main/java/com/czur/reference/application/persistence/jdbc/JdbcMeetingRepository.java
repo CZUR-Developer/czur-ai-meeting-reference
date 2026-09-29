@@ -767,6 +767,64 @@ public final class JdbcMeetingRepository implements MeetingRepository {
     }
 
     /**
+     * 在已锁定 Meeting 行上提交删除终态；{@code deleted_at} 与 {@code updated_at}
+     * 使用同一个调用方时间，满足 V012 等价约束。调用方必须先完成全部 item、
+     * Manifest 和计划校验，方法本身不访问其它表也不提交事务。
+     */
+    static boolean markDeleted(
+            Connection connection,
+            VersionedMeeting before,
+            Instant deletedAt) throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(before, "before");
+        Objects.requireNonNull(deletedAt, "deletedAt");
+        if (deletedAt.getNano() % 1_000 != 0
+                || before.snapshot().state() != MeetingState.DELETION_PENDING) {
+            throw new IllegalArgumentException("meeting is not deletion pending");
+        }
+        if (deletedAt.isBefore(before.snapshot().updatedAt())) {
+            throw new IllegalArgumentException("deletedAt cannot move backwards");
+        }
+        MeetingAggregate.MeetingSnapshot snapshot = before.snapshot();
+        try (PreparedStatement statement = connection.prepareStatement("""
+                UPDATE meeting
+                   SET state = 'DELETED', manifest_state = 'DELETED',
+                       updated_at = ?, deleted_at = ?,
+                       aggregate_version = aggregate_version + 1
+                 WHERE meeting_id = ?
+                   AND deployment_scope = ? AND client_session_id = ?
+                   AND subject_scope = ? AND grant_id IS NOT DISTINCT FROM ?
+                   AND grant_expires_at IS NOT DISTINCT FROM ?
+                   AND usage_reservation_id IS NOT DISTINCT FROM ?
+                   AND profile_id = ? AND profile_revision = ? AND created_at = ?
+                   AND state = 'DELETION_PENDING'
+                   AND manifest_state = 'DELETION_PENDING'
+                   AND updated_at = ? AND aggregate_version = ?
+                   AND deleted_at IS NULL
+                """)) {
+            statement.setTimestamp(1, Timestamp.from(deletedAt));
+            statement.setTimestamp(2, Timestamp.from(deletedAt));
+            statement.setString(3, snapshot.meetingId());
+            statement.setString(4, snapshot.deploymentScope());
+            statement.setString(5, snapshot.clientSessionId());
+            statement.setString(6, snapshot.subjectScope());
+            statement.setString(7, snapshot.grantId());
+            if (snapshot.grantExpiresAt() == null) {
+                statement.setNull(8, java.sql.Types.TIMESTAMP_WITH_TIMEZONE);
+            } else {
+                statement.setTimestamp(8, Timestamp.from(snapshot.grantExpiresAt()));
+            }
+            statement.setString(9, snapshot.usageReservationId());
+            statement.setString(10, snapshot.profileId());
+            statement.setInt(11, snapshot.profileRevision());
+            statement.setTimestamp(12, Timestamp.from(snapshot.createdAt()));
+            statement.setTimestamp(13, Timestamp.from(snapshot.updatedAt()));
+            statement.setLong(14, before.aggregateVersion());
+            return statement.executeUpdate() == 1;
+        }
+    }
+
+    /**
      * 在准备 SQL 之前重新证明删除转换，避免包内调用方绕过领域状态机后直接
      * 覆盖数据库。验证失败抛出固定参数错误，且不会创建 PreparedStatement。
      */

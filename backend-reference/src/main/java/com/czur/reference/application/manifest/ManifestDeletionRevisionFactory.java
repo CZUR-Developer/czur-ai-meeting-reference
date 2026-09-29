@@ -54,4 +54,35 @@ public final class ManifestDeletionRevisionFactory {
                 latest.artifacts(),
                 latest.warnings());
     }
+
+    /**
+     * 从删除待处理 revision 构造唯一的 DELETED tombstone revision。
+     *
+     * <p>Manifest 正文仍保留原始完整字段；状态和 revision 是唯一变化。调用方
+     * 必须在同一 Meeting 锁事务中追加该值，并将已存在的 DELETED revision 作为
+     * 幂等重放处理，不能再次生成新版本。</p>
+     */
+    public static MeetingManifest deletedAfter(MeetingManifest latest) {
+        Objects.requireNonNull(latest, "latest");
+        if (latest.status() != ManifestStatus.DELETION_PENDING) {
+            throw new IllegalArgumentException(
+                    "deleted revision requires a deletion-pending source manifest");
+        }
+        if (latest.manifestRevision() == Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("manifest revision cannot be incremented");
+        }
+        return new MeetingManifest(
+                latest.specVersion(),
+                latest.meetingId(),
+                latest.manifestRevision() + 1,
+                latest.profile(),
+                latest.title(),
+                ManifestStatus.DELETED,
+                latest.startedAt(),
+                latest.endedAt(),
+                latest.durationMs(),
+                latest.languages(),
+                latest.artifacts(),
+                latest.warnings());
+    }
 }

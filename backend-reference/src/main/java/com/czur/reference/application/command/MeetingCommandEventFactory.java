@@ -25,6 +25,7 @@ public final class MeetingCommandEventFactory {
     private static final String MEETING_CREATED = "MeetingCreated";
     private static final String MEETING_STOP_REQUESTED = "MeetingStopRequested";
     private static final String MEETING_DELETION_REQUESTED = "MeetingDeletionRequested";
+    private static final String MEETING_DELETED = "MeetingDeleted";
 
     private MeetingCommandEventFactory() {
     }
@@ -76,6 +77,52 @@ public final class MeetingCommandEventFactory {
                 payload,
                 meeting.updatedAt(),
                 meeting.updatedAt());
+    }
+
+    /**
+     * 为删除终态构造稳定的唯一生命周期事件。事件正文只携带公开终态和时间，
+     * 不携带产物、Manifest 正文、lease 或存储绑定；同一会议重放始终命中同一
+     * eventId。
+     */
+    public static OutboxStore.OutboxEvent meetingDeleted(
+            String deploymentScope,
+            MeetingStatus meeting) {
+        requireText("deploymentScope", deploymentScope);
+        Objects.requireNonNull(meeting, "meeting");
+        if (meeting.state() != MeetingState.DELETED
+                || meeting.manifestState() != ManifestStatus.DELETED) {
+            throw new IllegalArgumentException(
+                    "deleted event requires matching DELETED states");
+        }
+        String eventId = "meeting-" + digest(MEETING_DELETED, meeting.meetingId());
+        String payload = "{\"meetingId\":" + quote(meeting.meetingId())
+                + ",\"deploymentScope\":" + quote(deploymentScope)
+                + ",\"state\":\"DELETED\",\"updatedAt\":"
+                + quote(meeting.updatedAt().toString()) + "}";
+        return OutboxStore.OutboxEvent.pending(
+                eventId,
+                "Meeting",
+                meeting.meetingId(),
+                MEETING_DELETED,
+                payload,
+                meeting.updatedAt(),
+                meeting.updatedAt());
+    }
+
+    /** 终态 JDBC 工作单元使用的轻量构造入口，避免凭空重建 receipt。 */
+    public static OutboxStore.OutboxEvent meetingDeleted(
+            String deploymentScope, String meetingId, Instant deletedAt) {
+        requireText("deploymentScope", deploymentScope);
+        requireText("meetingId", meetingId);
+        Objects.requireNonNull(deletedAt, "deletedAt");
+        String eventId = "meeting-" + digest(MEETING_DELETED, meetingId);
+        String payload = "{\"meetingId\":" + quote(meetingId)
+                + ",\"deploymentScope\":" + quote(deploymentScope)
+                + ",\"state\":\"DELETED\",\"updatedAt\":"
+                + quote(deletedAt.toString()) + "}";
+        return OutboxStore.OutboxEvent.pending(
+                eventId, "Meeting", meetingId, MEETING_DELETED, payload,
+                deletedAt, deletedAt);
     }
 
     private static OutboxStore.OutboxEvent commandEvent(
