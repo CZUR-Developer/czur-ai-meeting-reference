@@ -31,13 +31,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 显式 PostgreSQL 运行时门禁。
  *
  * <p>默认跳过，只有调用方显式提供测试数据库 URL、账号和密码时才启动真实
- * HikariCP。目标数据库必须预先执行并登记 V001～V011；常规业务用例不自动迁移、不清理
+ * HikariCP。目标数据库必须预先执行并登记 V001～V012；常规业务用例不自动迁移、不清理
  * 共享数据库，也不在运行失败时静默切换到内存实现。</p>
  */
 @EnabledIfEnvironmentVariable(named = "REFERENCE_TEST_DATABASE_URL", matches = ".+")
 class JdbcDatabaseRuntimeIntegrationTest {
     @Test
-    void refusesSchemaThatHasNotRegisteredV007ThroughV011() throws Exception {
+    void refusesSchemaThatHasNotRegisteredV007ThroughV012() throws Exception {
         String url = requiredUrl();
         String user = System.getenv("REFERENCE_TEST_DATABASE_USER");
         String password = System.getenv("REFERENCE_TEST_DATABASE_PASSWORD");
@@ -74,7 +74,8 @@ class JdbcDatabaseRuntimeIntegrationTest {
                             "V008__durable_input_fact",
                             "V009__final_usage_fact",
                             "V010__workflow_step_fencing",
-                            "V011__finalization_execution_artifact_ready"),
+                            "V011__finalization_execution_artifact_ready",
+                            "V012__artifact_deletion_plan"),
                     failure.readiness().missingMigrations());
         } finally {
             try (Connection admin = DriverManager.getConnection(url, user, password);
@@ -89,7 +90,7 @@ class JdbcDatabaseRuntimeIntegrationTest {
     void registeredV007WithoutPhysicalTableIsSchemaInvalid() throws Exception {
         String schema = createMigrationRegistryOnlySchema("runtime_v007_no_table_");
         try {
-            registerMigrations(schema, 11);
+            registerMigrations(schema, 12);
             assertSchemaInvalid(schema);
         } finally {
             dropSchema(schema);
@@ -104,7 +105,7 @@ class JdbcDatabaseRuntimeIntegrationTest {
                  Statement statement = connection.createStatement()) {
                 statement.execute("CREATE TABLE meeting_manifest_revision (meeting_id TEXT)");
             }
-            registerMigrations(schema, 11);
+            registerMigrations(schema, 12);
             assertSchemaInvalid(schema);
         } finally {
             dropSchema(schema);
@@ -113,7 +114,7 @@ class JdbcDatabaseRuntimeIntegrationTest {
 
     @Test
     void registeredV007WithSameNameWeakCheckIsSchemaInvalid() throws Exception {
-        String schema = createMigratedSchema("runtime_v007_weak_", 11);
+        String schema = createMigratedSchema("runtime_v007_weak_", 12);
         try {
             try (Connection connection = scopedConnection(schema);
                  Statement statement = connection.createStatement()) {
@@ -133,7 +134,7 @@ class JdbcDatabaseRuntimeIntegrationTest {
     void registeredV009WithoutPhysicalTableIsSchemaInvalid() throws Exception {
         String schema = createMigratedSchema("runtime_v009_no_table_", 8);
         try {
-            registerMigrations(schema, 11);
+            registerMigrations(schema, 12);
             assertSchemaInvalid(schema);
         } finally {
             dropSchema(schema);
@@ -142,7 +143,7 @@ class JdbcDatabaseRuntimeIntegrationTest {
 
     @Test
     void registeredV009WithSameNameWeakCheckIsSchemaInvalid() throws Exception {
-        String schema = createMigratedSchema("runtime_v009_weak_", 11);
+        String schema = createMigratedSchema("runtime_v009_weak_", 12);
         try {
             try (Connection connection = scopedConnection(schema);
                  Statement statement = connection.createStatement()) {
@@ -160,7 +161,7 @@ class JdbcDatabaseRuntimeIntegrationTest {
 
     @Test
     void exactV011PhysicalTablesWithoutRegistrationStayMigrationMissing() throws Exception {
-        String schema = createMigratedSchema("runtime_v011_unregistered_", 11);
+        String schema = createMigratedSchema("runtime_v011_unregistered_", 12);
         try (Connection connection = scopedConnection(schema);
              PreparedStatement statement = connection.prepareStatement(
                      "DELETE FROM schema_migrations WHERE version = ?")) {
@@ -187,7 +188,7 @@ class JdbcDatabaseRuntimeIntegrationTest {
     void registeredV011WithoutPhysicalTablesIsSchemaInvalid() throws Exception {
         String schema = createMigratedSchema("runtime_v011_no_tables_", 10);
         try {
-            registerMigrations(schema, 11);
+            registerMigrations(schema, 12);
             assertSchemaInvalid(schema);
         } finally {
             dropSchema(schema);
@@ -196,7 +197,7 @@ class JdbcDatabaseRuntimeIntegrationTest {
 
     @Test
     void registeredV011MissingArtifactIsSchemaInvalid() throws Exception {
-        String schema = createMigratedSchema("runtime_v011_no_artifact_", 11);
+        String schema = createMigratedSchema("runtime_v011_no_artifact_", 12);
         try {
             try (Connection connection = scopedConnection(schema);
                  Statement statement = connection.createStatement()) {
@@ -210,7 +211,7 @@ class JdbcDatabaseRuntimeIntegrationTest {
 
     @Test
     void registeredV011WithWrongRecordedAtDefaultIsSchemaInvalid() throws Exception {
-        String schema = createMigratedSchema("runtime_v011_default_", 11);
+        String schema = createMigratedSchema("runtime_v011_default_", 12);
         try {
             try (Connection connection = scopedConnection(schema);
                  Statement statement = connection.createStatement()) {
@@ -224,7 +225,7 @@ class JdbcDatabaseRuntimeIntegrationTest {
 
     @Test
     void registeredV011WithNotValidCheckIsSchemaInvalid() throws Exception {
-        String schema = createMigratedSchema("runtime_v011_not_valid_", 11);
+        String schema = createMigratedSchema("runtime_v011_not_valid_", 12);
         try {
             try (Connection connection = scopedConnection(schema);
                  Statement statement = connection.createStatement()) {
@@ -246,7 +247,7 @@ class JdbcDatabaseRuntimeIntegrationTest {
 
     @Test
     void registeredV011WithNullableUniqueMeetingIdentityIsSchemaInvalid() throws Exception {
-        String schema = createMigratedSchema("runtime_v011_parent_identity_", 11);
+        String schema = createMigratedSchema("runtime_v011_parent_identity_", 12);
         try {
             try (Connection connection = scopedConnection(schema);
                  Statement statement = connection.createStatement()) {
@@ -287,7 +288,7 @@ class JdbcDatabaseRuntimeIntegrationTest {
 
     @Test
     void registeredV011WithUnloggedArtifactIsSchemaInvalid() throws Exception {
-        String schema = createMigratedSchema("runtime_v011_unlogged_", 11);
+        String schema = createMigratedSchema("runtime_v011_unlogged_", 12);
         try {
             try (Connection connection = scopedConnection(schema);
                  Statement statement = connection.createStatement()) {
@@ -301,7 +302,7 @@ class JdbcDatabaseRuntimeIntegrationTest {
 
     @Test
     void registeredV011WithArtifactPartitionLeafIsSchemaInvalid() throws Exception {
-        String schema = createMigratedSchema("runtime_v011_partition_", 11);
+        String schema = createMigratedSchema("runtime_v011_partition_", 12);
         try {
             try (Connection connection = scopedConnection(schema);
                  Statement statement = connection.createStatement()) {
@@ -322,7 +323,7 @@ class JdbcDatabaseRuntimeIntegrationTest {
 
     @Test
     void registeredV011WithLegacyArtifactChildIsSchemaInvalid() throws Exception {
-        String schema = createMigratedSchema("runtime_v011_inheritance_", 11);
+        String schema = createMigratedSchema("runtime_v011_inheritance_", 12);
         try {
             try (Connection connection = scopedConnection(schema);
                  Statement statement = connection.createStatement()) {
@@ -470,7 +471,8 @@ class JdbcDatabaseRuntimeIntegrationTest {
                 "V008__durable_input_fact.sql",
                 "V009__final_usage_fact.sql",
                 "V010__workflow_step_fencing.sql",
-                "V011__finalization_execution_artifact_ready.sql");
+                "V011__finalization_execution_artifact_ready.sql",
+                "V012__artifact_deletion_plan.sql");
         try {
             for (String migration : migrations.subList(0, count)) {
                 try (Connection connection = scopedConnection(schema);
@@ -498,7 +500,8 @@ class JdbcDatabaseRuntimeIntegrationTest {
                 "V008__durable_input_fact",
                 "V009__final_usage_fact",
                 "V010__workflow_step_fencing",
-                "V011__finalization_execution_artifact_ready");
+                "V011__finalization_execution_artifact_ready",
+                "V012__artifact_deletion_plan");
         try (Connection connection = scopedConnection(schema);
              PreparedStatement statement = connection.prepareStatement("""
                      INSERT INTO schema_migrations(version)

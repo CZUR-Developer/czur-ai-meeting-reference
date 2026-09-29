@@ -497,7 +497,11 @@ class JdbcWorkflowStepStoreIntegrationTest {
                     ALTER COLUMN step_id DROP IDENTITY
                 """);
         for (String drift : drifts) {
-            String schema = createSchema();
+            // 这是 V010 专项迁移反例：先停在 V011，否则 V012 的删除
+            // 计划外键会阻止故意破坏 workflow stable key。破坏完成后只登记
+            // V012，使 Runtime 在迁移集合完整的前提下先精确拒绝 V010 漂移；
+            // 不创建或修补 V012 对象。
+            String schema = createSchema(11);
             try {
                 try (Connection connection = DriverManager.getConnection(
                         scopedUrl(schema), required("REFERENCE_TEST_DATABASE_USER"),
@@ -508,6 +512,7 @@ class JdbcWorkflowStepStoreIntegrationTest {
                             () -> statement.execute(
                                     readMigration("V010__workflow_step_fencing.sql")));
                 }
+                registerMigrationVersion(schema, "V012__artifact_deletion_plan");
                 DatabaseStartupException failure = assertThrows(
                         DatabaseStartupException.class,
                         () -> runtime(schema));
@@ -516,6 +521,17 @@ class JdbcWorkflowStepStoreIntegrationTest {
             } finally {
                 dropSchema(schema);
             }
+        }
+    }
+
+    private static void registerMigrationVersion(String schema, String version) throws Exception {
+        try (Connection connection = DriverManager.getConnection(
+                scopedUrl(schema), required("REFERENCE_TEST_DATABASE_USER"),
+                required("REFERENCE_TEST_DATABASE_PASSWORD"));
+             PreparedStatement statement = connection.prepareStatement(
+                     "INSERT INTO schema_migrations(version) VALUES (?)")) {
+            statement.setString(1, version);
+            statement.executeUpdate();
         }
     }
 
@@ -553,7 +569,7 @@ class JdbcWorkflowStepStoreIntegrationTest {
     }
 
     private static String createSchema() throws Exception {
-        return createSchema(11);
+        return createSchema(12);
     }
 
     private static String createSchema(int migrationCount) throws Exception {
@@ -568,7 +584,8 @@ class JdbcWorkflowStepStoreIntegrationTest {
                 "V005__meeting_finalization_fact.sql", "V006__meeting_read_model.sql",
                 "V007__meeting_manifest_revision.sql", "V008__durable_input_fact.sql",
                 "V009__final_usage_fact.sql", "V010__workflow_step_fencing.sql",
-                "V011__finalization_execution_artifact_ready.sql");
+                "V011__finalization_execution_artifact_ready.sql",
+                "V012__artifact_deletion_plan.sql");
         try {
             for (int i = 0; i < migrationCount; i++) {
                 try (Connection connection = DriverManager.getConnection(scopedUrl(schema),

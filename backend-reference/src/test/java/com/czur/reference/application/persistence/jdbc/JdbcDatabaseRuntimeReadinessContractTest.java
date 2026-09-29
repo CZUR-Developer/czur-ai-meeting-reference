@@ -17,7 +17,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 不依赖 PostgreSQL 的 JdbcDatabaseRuntime readiness 源码契约门。
  *
  * <p>真实 PostgreSQL catalog 的列类型、约束和 schema 反复启动由显式环境集成测试
- * 验证；这里冻结装配入口必须检查的 V001～V011 登记集合、V011 查询参数、只读
+ * 验证；这里冻结装配入口必须检查的 V001～V012 登记集合、V012 查询参数、只读
  * catalog 探针和脱敏日志边界，避免以后只更新迁移文件而漏掉运行时门禁。</p>
  */
 class JdbcDatabaseRuntimeReadinessContractTest {
@@ -27,20 +27,21 @@ class JdbcDatabaseRuntimeReadinessContractTest {
             "MIGRATION_QUERY\\s*=\\s*\\\"\\\"\\\"(.*?)\\\"\\\"\\\"", Pattern.DOTALL);
 
     @Test
-    void runtimeRequiresV011AndBindsItsMigrationQueryParameter() throws Exception {
+    void runtimeRequiresV012AndBindsItsMigrationQueryParameter() throws Exception {
         String source = readRuntimeSource();
         String required = match(REQUIRED_MIGRATIONS, source);
         String query = match(MIGRATION_QUERY, source);
 
-        assertEquals(11, occurrences(required, "V0"),
-                "runtime must freeze exactly V001 through V011 migrations");
+        assertEquals(12, occurrences(required, "V0"),
+                "runtime must freeze exactly V001 through V012 migrations");
         assertTrue(required.contains("V007__meeting_manifest_revision"));
         assertTrue(required.contains("V008__durable_input_fact"));
         assertTrue(required.contains("V009__final_usage_fact"));
         assertTrue(required.contains("V010__workflow_step_fencing"));
         assertTrue(required.contains("V011__finalization_execution_artifact_ready"));
-        assertEquals(13, occurrences(query, "?"),
-                "the two legacy aliases plus V001-V011 require thirteen query slots");
+        assertTrue(required.contains("V012__artifact_deletion_plan"));
+        assertEquals(14, occurrences(query, "?"),
+                "the two legacy aliases plus V001-V012 require fourteen query slots");
         assertTrue(source.contains(
                 "migrations.setString(10, \"V008__durable_input_fact\")"));
         assertTrue(source.contains(
@@ -49,6 +50,8 @@ class JdbcDatabaseRuntimeReadinessContractTest {
                 "migrations.setString(12, \"V010__workflow_step_fencing\")"));
         assertTrue(source.contains(
                 "migrations.setString(13, \"V011__finalization_execution_artifact_ready\")"));
+        assertTrue(source.contains(
+                "migrations.setString(14, \"V012__artifact_deletion_plan\")"));
         assertTrue(source.contains("missing.removeAll(present)"));
     }
 
@@ -176,6 +179,63 @@ class JdbcDatabaseRuntimeReadinessContractTest {
     }
 
     @Test
+    void readinessUsesExactReadOnlyCatalogChecksForV012DeletionContract() throws Exception {
+        String source = readRuntimeSource();
+        assertTrue(source.contains("hasExactMeetingDeletionSchema(connection)"));
+        String helper = source.substring(source.indexOf(
+                "private static boolean hasExactMeetingDeletionSchema"),
+                source.indexOf("/** 读取指定当前-schema 表的完整约束 catalog"));
+
+        for (String relation : new String[]{
+                "meeting_deletion_plan", "artifact_deletion_item"}) {
+            assertTrue(helper.contains("\"" + relation + "\""), relation);
+        }
+        for (String column : new String[]{
+                "deleted_at", "accepted_at", "source_manifest_revision",
+                "source_workflow_step_type", "source_workflow_step_key",
+                "source_workflow_checkpoint_type", "source_workflow_content_digest",
+                "target_count", "canonical_json", "deletion_plan_json", "content_sha256",
+                "completed_at", "ordinal", "artifact_id", "artifact_type",
+                "revision", "storage_binding"}) {
+            assertTrue(source.contains("\"" + column + "\""), column);
+        }
+        for (String constraint : new String[]{
+                "meeting_deleted_at_equivalence_ck",
+                "meeting_deletion_plan_pkey", "meeting_deletion_plan_meeting_fk",
+                "meeting_deletion_plan_manifest_fk", "meeting_deletion_plan_workflow_fk",
+                "meeting_deletion_plan_source_ck", "meeting_deletion_plan_target_count_ck",
+                "meeting_deletion_plan_document_ck", "meeting_deletion_plan_hash_ck",
+                "meeting_deletion_plan_status_ck",
+                "artifact_deletion_item_pkey", "artifact_deletion_item_plan_fk",
+                "artifact_deletion_item_artifact_id_uq",
+                "artifact_deletion_item_revision_uq",
+                "artifact_deletion_item_ordinal_ck", "artifact_deletion_item_text_ck",
+                "artifact_deletion_item_revision_ck", "artifact_deletion_item_status_ck"}) {
+            assertTrue(helper.contains(constraint) || source.contains(constraint), constraint);
+        }
+        for (String catalogField : new String[]{
+                "a.attnum", "a.attidentity", "a.attgenerated", "convalidated",
+                "condeferrable", "condeferred", "confdeltype", "confupdtype",
+                "confmatchtype", "conindid", "i.indkey", "i.indnkeyatts", "i.indnatts",
+                "i.indisunique", "i.indisprimary", "i.indisvalid", "i.indisready",
+                "i.indislive", "i.indexprs IS NULL", "i.indpred IS NULL",
+                "pg_my_temp_schema()"}) {
+            assertTrue(helper.contains(catalogField), catalogField);
+        }
+        assertTrue(helper.contains("isStandalonePermanentTable(connection, planTable)"));
+        assertTrue(helper.contains("isStandalonePermanentTable(connection, itemTable)"));
+        assertTrue(helper.contains("planConstraints.size() == 9"));
+        assertTrue(helper.contains("itemConstraints.size() == 8"));
+        assertTrue(helper.contains("planIndexes.size() == 1"));
+        assertTrue(helper.contains("itemIndexes.size() == 3"));
+        assertFalse(helper.contains("CREATE TABLE"));
+        assertFalse(helper.matches(
+                "(?is).*\\b(?:INSERT\\s+INTO|UPDATE\\s+\\w|DELETE\\s+FROM)\\b.*"));
+        assertFalse(helper.matches(
+                "(?is).*FROM\\s+(?:meeting_deletion_plan|artifact_deletion_item)\\b.*"));
+    }
+
+    @Test
     void readinessFreezesMeetingParentAndStandaloneDurableRelations() throws Exception {
         String source = readRuntimeSource();
         assertTrue(source.contains("hasExactMeetingIdentitySchema(connection)"));
@@ -203,8 +263,8 @@ class JdbcDatabaseRuntimeReadinessContractTest {
     @Test
     void startupDocumentationAndLogsStayOnStableRedactedClassification() throws Exception {
         String source = readRuntimeSource();
-        assertTrue(source.contains("{@code schema_migrations} 中的 V001～V011"));
-        assertFalse(source.contains("{@code schema_migrations} 中的 V001～V010"));
+        assertTrue(source.contains("{@code schema_migrations} 中的 V001～V012"));
+        assertFalse(source.contains("{@code schema_migrations} 中的 V001～V011"));
         assertTrue(source.contains("status={0}"));
         assertTrue(source.contains("exception={1}"));
         assertTrue(source.contains("LOGGER.log(Level.INFO, \"数据库运行时启动成功 pool={0}\", config)"));

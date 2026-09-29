@@ -22,7 +22,7 @@ import java.util.logging.Logger;
  * PostgreSQL 数据库运行时边界。
  *
  * <p>启动时创建唯一的 HikariCP 连接池，执行只读 {@code SELECT 1} 探针并检查
- * {@code schema_migrations} 中的 V001～V011，再以只读 catalog 查询核对 V007
+ * {@code schema_migrations} 中的 V001～V012，再以只读 catalog 查询核对 V007
  * Manifest revision、V008 durable input fact、V009 final usage fact 与 V010
  * workflow step，以及 V011 execution fact/READY artifact 表的精确物理契约。
  * 任一检查失败都会关闭已经创建的池并抛出
@@ -39,7 +39,7 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
     private static final String MIGRATION_QUERY = """
             SELECT version
               FROM schema_migrations
-              WHERE version IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              WHERE version IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """;
     private static final Set<String> REQUIRED_MIGRATIONS = Set.of(
             "V001__initial_schema",
@@ -52,7 +52,8 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
             "V008__durable_input_fact",
             "V009__final_usage_fact",
             "V010__workflow_step_fencing",
-            "V011__finalization_execution_artifact_ready");
+            "V011__finalization_execution_artifact_ready",
+            "V012__artifact_deletion_plan");
     private static final List<ColumnContract> MANIFEST_REVISION_COLUMNS = List.of(
             new ColumnContract("meeting_id", "text", true, null),
             new ColumnContract("manifest_revision", "integer", true, null),
@@ -234,6 +235,68 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
             "CHECK (content_size >= 0)";
     private static final String READY_ARTIFACT_CHECKSUM_CHECK =
             "CHECK (content_checksum ~ '^sha256:[0-9a-f]{64}$'::text)";
+    private static final List<DeletionColumnContract> MEETING_DELETION_COLUMNS = List.of(
+            new DeletionColumnContract(
+                    12, "deleted_at", "timestamp with time zone", false, null, "", ""));
+    private static final List<DeletionColumnContract> DELETION_PLAN_COLUMNS = List.of(
+            DeletionColumnContract.plain(1, "meeting_id", "text", true),
+            DeletionColumnContract.plain(
+                    2, "accepted_at", "timestamp with time zone", true),
+            DeletionColumnContract.plain(3, "source_manifest_revision", "integer", false),
+            DeletionColumnContract.plain(4, "source_workflow_step_type", "text", false),
+            DeletionColumnContract.plain(5, "source_workflow_step_key", "text", false),
+            DeletionColumnContract.plain(
+                    6, "source_workflow_checkpoint_type", "text", false),
+            DeletionColumnContract.plain(
+                    7, "source_workflow_content_digest", "text", false),
+            DeletionColumnContract.plain(8, "target_count", "integer", true),
+            DeletionColumnContract.plain(9, "canonical_json", "text", true),
+            DeletionColumnContract.plain(10, "deletion_plan_json", "jsonb", true),
+            DeletionColumnContract.plain(11, "content_sha256", "bytea", true),
+            DeletionColumnContract.plain(12, "status", "text", true),
+            DeletionColumnContract.plain(
+                    13, "completed_at", "timestamp with time zone", false));
+    private static final List<DeletionColumnContract> DELETION_ITEM_COLUMNS = List.of(
+            DeletionColumnContract.plain(1, "meeting_id", "text", true),
+            DeletionColumnContract.plain(2, "ordinal", "integer", true),
+            DeletionColumnContract.plain(3, "artifact_id", "text", true),
+            DeletionColumnContract.plain(4, "artifact_type", "text", true),
+            DeletionColumnContract.plain(5, "revision", "integer", true),
+            DeletionColumnContract.plain(6, "status", "text", true),
+            DeletionColumnContract.plain(7, "storage_binding", "text", false),
+            DeletionColumnContract.plain(
+                    8, "deleted_at", "timestamp with time zone", false));
+    private static final String MEETING_DELETED_AT_EQUIVALENCE_CHECK = """
+            CHECK (state = 'DELETED'::text AND manifest_state = 'DELETED'::text
+            AND deleted_at IS NOT NULL AND deleted_at = updated_at
+            OR state <> 'DELETED'::text AND manifest_state <> 'DELETED'::text
+            AND deleted_at IS NULL)
+            """;
+    /*
+     * PostgreSQL 16 将 CHECK 的完整 pretty-printed 定义归一化空白后的
+     * 固定指纹。它们与 V012 迁移内的自检值相同；仅用于紧凑比较 catalog
+     * 定义，不是业务内容摘要。
+     */
+    private static final Set<CheckDigestContract> DELETION_PLAN_CHECKS = Set.of(
+            new CheckDigestContract(
+                    "meeting_deletion_plan_source_ck", "6b3c20a2b1311e2009acf90f22737deb"),
+            new CheckDigestContract(
+                    "meeting_deletion_plan_target_count_ck", "c08d5a142a0b209dd518fc50d8185381"),
+            new CheckDigestContract(
+                    "meeting_deletion_plan_document_ck", "9d75a55627b56e65ff261d32cae80aed"),
+            new CheckDigestContract(
+                    "meeting_deletion_plan_hash_ck", "172f5c48d743ed8f69ba9a1b745880ac"),
+            new CheckDigestContract(
+                    "meeting_deletion_plan_status_ck", "300963b81dfa6fd06962b20e291ae6de"));
+    private static final Set<CheckDigestContract> DELETION_ITEM_CHECKS = Set.of(
+            new CheckDigestContract(
+                    "artifact_deletion_item_ordinal_ck", "fd48ea1158f7b79807eeeb70d8ddf6d3"),
+            new CheckDigestContract(
+                    "artifact_deletion_item_text_ck", "f42bc9d422de735b25eaa80b0979e198"),
+            new CheckDigestContract(
+                    "artifact_deletion_item_revision_ck", "c89fd39547f9f210c335be16751472e2"),
+            new CheckDigestContract(
+                    "artifact_deletion_item_status_ck", "7d644b2bea16a06d068d8216483deca6"));
 
     private final DatabaseRuntimeConfig config;
     private final HikariDataSource dataSource;
@@ -339,6 +402,7 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
                 migrations.setString(11, "V009__final_usage_fact");
                 migrations.setString(12, "V010__workflow_step_fencing");
                 migrations.setString(13, "V011__finalization_execution_artifact_ready");
+                migrations.setString(14, "V012__artifact_deletion_plan");
                 try (ResultSet rows = migrations.executeQuery()) {
                     while (rows.next()) {
                         String version = rows.getString(1);
@@ -403,6 +467,13 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
             if (!hasExactReadyArtifactSchema(connection)) {
                 DatabaseReadiness invalid = DatabaseReadiness.schemaInvalid(
                         "artifact READY V011 catalog contract mismatch");
+                LOGGER.log(Level.WARNING,
+                        "数据库 readiness 物理契约校验失败 status={0}", invalid.status());
+                return invalid;
+            }
+            if (!hasExactMeetingDeletionSchema(connection)) {
+                DatabaseReadiness invalid = DatabaseReadiness.schemaInvalid(
+                        "meeting deletion V012 catalog contract mismatch");
                 LOGGER.log(Level.WARNING,
                         "数据库 readiness 物理契约校验失败 status={0}", invalid.status());
                 return invalid;
@@ -1108,6 +1179,411 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
                         READY_ARTIFACT_CHECKSUM_CHECK);
     }
 
+    /**
+     * 只读核对 V012 Meeting 删除等价关系、冻结计划和逐项审计表。
+     *
+     * <p>本探针只读取 PostgreSQL catalog，不读取删除计划 JSON、Artifact
+     * binding 或任何业务行。它同时锁定列顺序/类型/空值/default/
+     * identity/generated，全部 PK/UQ/CHECK/FK 定义，以及由这些约束
+     * 拥有的精确索引集合。任何半表、弱 CHECK、NOT VALID、NO ACTION/
+     * CASCADE、额外索引、临时同名表或非持久/分区/继承表都关闭式失败。</p>
+     */
+    private static boolean hasExactMeetingDeletionSchema(Connection connection)
+            throws SQLException {
+        if (hasTemporaryRelationShadow(
+                connection,
+                "meeting",
+                "meeting_manifest_revision",
+                "workflow_step",
+                "meeting_deletion_plan",
+                "artifact_deletion_item")) {
+            return false;
+        }
+
+        Long meetingTable = relationOid(connection, "meeting");
+        Long manifestTable = relationOid(connection, "meeting_manifest_revision");
+        Long workflowTable = relationOid(connection, "workflow_step");
+        Long planTable = relationOid(connection, "meeting_deletion_plan");
+        Long itemTable = relationOid(connection, "artifact_deletion_item");
+        if (meetingTable == null || manifestTable == null || workflowTable == null
+                || planTable == null || itemTable == null
+                || !isStandalonePermanentTable(connection, meetingTable)
+                || !isStandalonePermanentTable(connection, planTable)
+                || !isStandalonePermanentTable(connection, itemTable)) {
+            return false;
+        }
+
+        if (!MEETING_DELETION_COLUMNS.equals(readDeletionColumns(
+                connection, meetingTable, "deleted_at"))
+                || !DELETION_PLAN_COLUMNS.equals(readDeletionColumns(
+                connection, planTable, null))
+                || !DELETION_ITEM_COLUMNS.equals(readDeletionColumns(
+                connection, itemTable, null))
+                || !hasExactMeetingDeletionEquivalence(connection, meetingTable)) {
+            return false;
+        }
+
+        List<DeletionIndexContract> planIndexes = readDeletionIndexes(connection, planTable);
+        List<DeletionIndexContract> itemIndexes = readDeletionIndexes(connection, itemTable);
+        if (!hasExactDeletionIndexes(planIndexes, itemIndexes)) {
+            return false;
+        }
+
+        List<DeletionConstraintContract> planConstraints =
+                readDeletionConstraints(connection, planTable);
+        List<DeletionConstraintContract> itemConstraints =
+                readDeletionConstraints(connection, itemTable);
+        return planConstraints.size() == 9
+                && itemConstraints.size() == 8
+                && hasExactKeyConstraint(
+                        planConstraints,
+                        "meeting_deletion_plan_pkey", "p", "1",
+                        "PRIMARY KEY (meeting_id)", indexOid(planIndexes,
+                                "meeting_deletion_plan_pkey"))
+                && hasExactForeignKey(
+                        planConstraints,
+                        "meeting_deletion_plan_meeting_fk", "1",
+                        meetingTable, "1",
+                        "FOREIGN KEY (meeting_id) REFERENCES meeting(meeting_id) "
+                                + "ON DELETE RESTRICT")
+                && hasExactForeignKey(
+                        planConstraints,
+                        "meeting_deletion_plan_manifest_fk", "1,3",
+                        manifestTable, "1,2",
+                        "FOREIGN KEY (meeting_id, source_manifest_revision) REFERENCES "
+                                + "meeting_manifest_revision(meeting_id, manifest_revision) "
+                                + "ON DELETE RESTRICT")
+                && hasExactForeignKey(
+                        planConstraints,
+                        "meeting_deletion_plan_workflow_fk", "1,4,5",
+                        workflowTable, "2,3,4",
+                        "FOREIGN KEY (meeting_id, source_workflow_step_type, "
+                                + "source_workflow_step_key) REFERENCES workflow_step(meeting_id, "
+                                + "step_type, step_key) ON DELETE RESTRICT")
+                && hasExactChecks(planConstraints, DELETION_PLAN_CHECKS)
+                && hasExactKeyConstraint(
+                        itemConstraints,
+                        "artifact_deletion_item_pkey", "p", "1,2",
+                        "PRIMARY KEY (meeting_id, ordinal)", indexOid(itemIndexes,
+                                "artifact_deletion_item_pkey"))
+                && hasExactKeyConstraint(
+                        itemConstraints,
+                        "artifact_deletion_item_artifact_id_uq", "u", "3",
+                        "UNIQUE (artifact_id)", indexOid(itemIndexes,
+                                "artifact_deletion_item_artifact_id_uq"))
+                && hasExactKeyConstraint(
+                        itemConstraints,
+                        "artifact_deletion_item_revision_uq", "u", "1,4,5",
+                        "UNIQUE (meeting_id, artifact_type, revision)", indexOid(itemIndexes,
+                                "artifact_deletion_item_revision_uq"))
+                && hasExactForeignKey(
+                        itemConstraints,
+                        "artifact_deletion_item_plan_fk", "1",
+                        planTable, "1",
+                        "FOREIGN KEY (meeting_id) REFERENCES "
+                                + "meeting_deletion_plan(meeting_id) ON DELETE RESTRICT")
+                && hasExactChecks(itemConstraints, DELETION_ITEM_CHECKS);
+    }
+
+    /** 读取列的物理序号和所有可影响写入语义的属性。 */
+    private static List<DeletionColumnContract> readDeletionColumns(
+            Connection connection,
+            long table,
+            String onlyColumn) throws SQLException {
+        List<DeletionColumnContract> columns = new ArrayList<>();
+        String sql = """
+                SELECT a.attnum, a.attname,
+                       format_type(a.atttypid, a.atttypmod) AS data_type,
+                       a.attnotnull,
+                       pg_get_expr(d.adbin, d.adrelid) AS default_expression,
+                       a.attidentity, a.attgenerated
+                  FROM pg_attribute a
+                  LEFT JOIN pg_attrdef d
+                    ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+                 WHERE a.attrelid = ?
+                   AND a.attnum > 0
+                   AND NOT a.attisdropped
+                   AND (? IS NULL OR a.attname = ?)
+                 ORDER BY a.attnum
+                """;
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setLong(1, table);
+            statement.setString(2, onlyColumn);
+            statement.setString(3, onlyColumn);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    columns.add(new DeletionColumnContract(
+                            rows.getInt("attnum"),
+                            rows.getString("attname"),
+                            rows.getString("data_type"),
+                            rows.getBoolean("attnotnull"),
+                            rows.getString("default_expression"),
+                            rows.getString("attidentity"),
+                            rows.getString("attgenerated")));
+                }
+            }
+        }
+        return columns;
+    }
+
+    /** Meeting 上只核对 V012 具名等价 CHECK，不限制其它既有业务约束。 */
+    private static boolean hasExactMeetingDeletionEquivalence(
+            Connection connection,
+            long meetingTable) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT contype, convalidated, condeferrable, condeferred,
+                       pg_get_constraintdef(oid, TRUE) AS definition
+                  FROM pg_constraint
+                 WHERE conrelid = ?
+                   AND conname = 'meeting_deleted_at_equivalence_ck'
+                """)) {
+            statement.setLong(1, meetingTable);
+            try (ResultSet rows = statement.executeQuery()) {
+                return rows.next()
+                        && "c".equals(rows.getString("contype"))
+                        && rows.getBoolean("convalidated")
+                        && !rows.getBoolean("condeferrable")
+                        && !rows.getBoolean("condeferred")
+                        && normalizeDefinition(MEETING_DELETED_AT_EQUIVALENCE_CHECK)
+                        .equals(normalizeDefinition(rows.getString("definition")))
+                        && !rows.next();
+            }
+        }
+    }
+
+    /** 读取 V012 表的全部约束；CHECK 指纹是完整定义的归一化 MD5。 */
+    private static List<DeletionConstraintContract> readDeletionConstraints(
+            Connection connection,
+            long table) throws SQLException {
+        List<DeletionConstraintContract> constraints = new ArrayList<>();
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT conname, contype, convalidated, condeferrable, condeferred,
+                       coalesce(array_to_string(conkey, ','), '') AS source_keys,
+                       confrelid::bigint AS referenced_relation,
+                       coalesce(array_to_string(confkey, ','), '') AS target_keys,
+                       confdeltype, confupdtype, confmatchtype, conindid::bigint AS index_relation,
+                       pg_get_constraintdef(oid, TRUE) AS definition,
+                       md5(regexp_replace(pg_get_constraintdef(oid, TRUE),
+                           '[[:space:]]+', ' ', 'g')) AS definition_digest
+                  FROM pg_constraint
+                 WHERE conrelid = ?
+                 ORDER BY conname
+                """)) {
+            statement.setLong(1, table);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    constraints.add(new DeletionConstraintContract(
+                            rows.getString("conname"),
+                            rows.getString("contype"),
+                            rows.getBoolean("convalidated"),
+                            rows.getBoolean("condeferrable"),
+                            rows.getBoolean("condeferred"),
+                            rows.getString("source_keys"),
+                            rows.getLong("referenced_relation"),
+                            rows.getString("target_keys"),
+                            rows.getString("confdeltype"),
+                            rows.getString("confupdtype"),
+                            rows.getString("confmatchtype"),
+                            rows.getLong("index_relation"),
+                            normalizeDefinition(rows.getString("definition")),
+                            rows.getString("definition_digest")));
+                }
+            }
+        }
+        return constraints;
+    }
+
+    /**
+     * 索引门禁不仅数数量：它还锁定表归属、名称、indkey、键列数、
+     * btree、unique/primary 以及 valid/ready/live，并拒绝 include、表达式和部分索引。
+     */
+    private static List<DeletionIndexContract> readDeletionIndexes(
+            Connection connection,
+            long table) throws SQLException {
+        List<DeletionIndexContract> indexes = new ArrayList<>();
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT i.indexrelid::bigint AS index_oid,
+                       index_class.relname AS index_name,
+                       table_class.relnamespace = index_class.relnamespace AS same_namespace,
+                       index_class.relkind, index_class.relpersistence,
+                       access_method.amname,
+                       coalesce(array_to_string(i.indkey, ','), '') AS source_keys,
+                       i.indnkeyatts, i.indnatts,
+                       i.indisunique, i.indisprimary, i.indisexclusion,
+                       i.indimmediate, i.indisvalid, i.indisready, i.indislive,
+                       i.indnullsnotdistinct,
+                       i.indexprs IS NULL AS no_expressions,
+                       i.indpred IS NULL AS no_predicate
+                  FROM pg_index i
+                  JOIN pg_class index_class ON index_class.oid = i.indexrelid
+                  JOIN pg_class table_class ON table_class.oid = i.indrelid
+                  JOIN pg_am access_method ON access_method.oid = index_class.relam
+                 WHERE i.indrelid = ?
+                 ORDER BY index_class.relname
+                """)) {
+            statement.setLong(1, table);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    indexes.add(new DeletionIndexContract(
+                            rows.getLong("index_oid"),
+                            rows.getString("index_name"),
+                            rows.getBoolean("same_namespace"),
+                            rows.getString("relkind"),
+                            rows.getString("relpersistence"),
+                            rows.getString("amname"),
+                            rows.getString("source_keys"),
+                            rows.getInt("indnkeyatts"),
+                            rows.getInt("indnatts"),
+                            rows.getBoolean("indisunique"),
+                            rows.getBoolean("indisprimary"),
+                            rows.getBoolean("indisexclusion"),
+                            rows.getBoolean("indimmediate"),
+                            rows.getBoolean("indisvalid"),
+                            rows.getBoolean("indisready"),
+                            rows.getBoolean("indislive"),
+                            rows.getBoolean("indnullsnotdistinct"),
+                            rows.getBoolean("no_expressions"),
+                            rows.getBoolean("no_predicate")));
+                }
+            }
+        }
+        return indexes;
+    }
+
+    private static boolean hasExactDeletionIndexes(
+            List<DeletionIndexContract> planIndexes,
+            List<DeletionIndexContract> itemIndexes) {
+        return planIndexes.size() == 1
+                && hasExactDeletionIndex(
+                        planIndexes, "meeting_deletion_plan_pkey", "1", 1, true, true)
+                && itemIndexes.size() == 3
+                && hasExactDeletionIndex(
+                        itemIndexes, "artifact_deletion_item_pkey", "1,2", 2, true, true)
+                && hasExactDeletionIndex(
+                        itemIndexes,
+                        "artifact_deletion_item_artifact_id_uq", "3", 1, true, false)
+                && hasExactDeletionIndex(
+                        itemIndexes,
+                        "artifact_deletion_item_revision_uq", "1,4,5", 3, true, false);
+    }
+
+    private static boolean hasExactDeletionIndex(
+            List<DeletionIndexContract> indexes,
+            String name,
+            String keys,
+            int keyCount,
+            boolean unique,
+            boolean primary) {
+        return indexes.stream().filter(index -> index.name().equals(name)).count() == 1
+                && indexes.stream().anyMatch(index -> index.name().equals(name)
+                && index.sameNamespace()
+                && "i".equals(index.relationKind())
+                && "p".equals(index.persistence())
+                && "btree".equals(index.accessMethod())
+                && keys.equals(index.sourceKeys())
+                && index.keyAttributes() == keyCount
+                && index.totalAttributes() == keyCount
+                && index.unique() == unique
+                && index.primary() == primary
+                && !index.exclusion()
+                && index.immediate()
+                && index.valid()
+                && index.ready()
+                && index.live()
+                && !index.nullsNotDistinct()
+                && index.noExpressions()
+                && index.noPredicate());
+    }
+
+    private static long indexOid(List<DeletionIndexContract> indexes, String name) {
+        return indexes.stream()
+                .filter(index -> index.name().equals(name))
+                .mapToLong(DeletionIndexContract::oid)
+                .findFirst()
+                .orElse(0L);
+    }
+
+    private static boolean hasExactKeyConstraint(
+            List<DeletionConstraintContract> constraints,
+            String name,
+            String type,
+            String keys,
+            String definition,
+            long indexOid) {
+        String normalized = normalizeDefinition(definition);
+        return indexOid != 0L
+                && constraints.stream().filter(value -> value.name().equals(name)).count() == 1
+                && constraints.stream().anyMatch(value -> value.name().equals(name)
+                && type.equals(value.type())
+                && value.validated()
+                && !value.deferrable()
+                && !value.deferred()
+                && keys.equals(value.sourceKeys())
+                && value.indexRelation() == indexOid
+                && normalized.equals(value.definition()));
+    }
+
+    private static boolean hasExactForeignKey(
+            List<DeletionConstraintContract> constraints,
+            String name,
+            String sourceKeys,
+            long referencedRelation,
+            String targetKeys,
+            String definition) {
+        String normalized = normalizeDefinition(definition);
+        return constraints.stream().filter(value -> value.name().equals(name)).count() == 1
+                && constraints.stream().anyMatch(value -> value.name().equals(name)
+                && "f".equals(value.type())
+                && value.validated()
+                && !value.deferrable()
+                && !value.deferred()
+                && sourceKeys.equals(value.sourceKeys())
+                && value.referencedRelation() == referencedRelation
+                && targetKeys.equals(value.targetKeys())
+                && "r".equals(value.deleteAction())
+                && "a".equals(value.updateAction())
+                && "s".equals(value.matchType())
+                && normalized.equals(value.definition()));
+    }
+
+    private static boolean hasExactChecks(
+            List<DeletionConstraintContract> constraints,
+            Set<CheckDigestContract> expected) {
+        return expected.stream().allMatch(check ->
+                constraints.stream().filter(value -> value.name().equals(check.name())).count() == 1
+                        && constraints.stream().anyMatch(value ->
+                        value.name().equals(check.name())
+                                && "c".equals(value.type())
+                                && value.validated()
+                                && !value.deferrable()
+                                && !value.deferred()
+                                && check.definitionDigest().equals(value.definitionDigest())));
+    }
+
+    /** 拒绝当前 readiness 会话中可以抢先 search_path 的同名 TEMP 关系。 */
+    private static boolean hasTemporaryRelationShadow(
+            Connection connection,
+            String... relationNames) throws SQLException {
+        String placeholders = String.join(", ", java.util.Collections.nCopies(
+                relationNames.length, "?"));
+        String sql = """
+                SELECT EXISTS (
+                    SELECT 1
+                      FROM pg_class c
+                     WHERE pg_my_temp_schema() <> 0
+                       AND c.relnamespace = pg_my_temp_schema()
+                       AND c.relname IN (%s))
+                """.formatted(placeholders);
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            for (int index = 0; index < relationNames.length; index++) {
+                statement.setString(index + 1, relationNames[index]);
+            }
+            try (ResultSet rows = statement.executeQuery()) {
+                return rows.next() && rows.getBoolean(1);
+            }
+        }
+    }
+
     /** 读取指定当前-schema 表的完整约束 catalog；调用方必须再锁定约束总数。 */
     private static List<ConstraintContract> readConstraints(
             Connection connection,
@@ -1269,6 +1745,71 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
     private static String hasNonBlankSql(String column) {
         return "length(translate(" + column + ", " + JAVA_21_BLANK_SQL
                 + ", ''::text)) > 0";
+    }
+
+    /** V012 列指纹；物理序号用于拒绝无害外观下的顺序漂移。 */
+    private record DeletionColumnContract(
+            int position,
+            String name,
+            String dataType,
+            boolean notNull,
+            String defaultExpression,
+            String identity,
+            String generated) {
+
+        private static DeletionColumnContract plain(
+                int position,
+                String name,
+                String dataType,
+                boolean notNull) {
+            return new DeletionColumnContract(
+                    position, name, dataType, notNull, null, "", "");
+        }
+    }
+
+    /** V012 约束 catalog 指纹；定义与指纹均不包含业务行数据。 */
+    private record DeletionConstraintContract(
+            String name,
+            String type,
+            boolean validated,
+            boolean deferrable,
+            boolean deferred,
+            String sourceKeys,
+            long referencedRelation,
+            String targetKeys,
+            String deleteAction,
+            String updateAction,
+            String matchType,
+            long indexRelation,
+            String definition,
+            String definitionDigest) {
+    }
+
+    /** V012 索引 catalog 指纹；约束的 conindid 必须指向这些精确 OID。 */
+    private record DeletionIndexContract(
+            long oid,
+            String name,
+            boolean sameNamespace,
+            String relationKind,
+            String persistence,
+            String accessMethod,
+            String sourceKeys,
+            int keyAttributes,
+            int totalAttributes,
+            boolean unique,
+            boolean primary,
+            boolean exclusion,
+            boolean immediate,
+            boolean valid,
+            boolean ready,
+            boolean live,
+            boolean nullsNotDistinct,
+            boolean noExpressions,
+            boolean noPredicate) {
+    }
+
+    /** PostgreSQL 16 完整 CHECK 定义的固定 catalog 指纹。 */
+    private record CheckDigestContract(String name, String definitionDigest) {
     }
 
     private record ColumnContract(
