@@ -77,12 +77,32 @@ schema 固定在 `pg_temp` 之前，避免临时同名表遮蔽；再用 transac
 execution→artifact 写事务形成反向等待环；并发插入已提交的 V001 旧行会使迁移失败并
 保留原行，不会在检空与 `DROP TABLE` 之间丢失。
 
+`V012__artifact_deletion_plan.sql` 新增每会议一个的 `meeting_deletion_plan` 和按
+`(meeting_id, ordinal)` 固定顺序的 `artifact_deletion_item`。计划保存删除受理时间、
+可空的来源 Manifest revision、可空的最终收口 Workflow 身份、目标数量、删除计划
+codec 的 canonical JSON、等价 JSONB 镜像、原始 32 字节 SHA-256 以及
+`PENDING/COMPLETED` 终态时间。计划 JSON 关闭六个根字段并核对会议、时间、来源、
+目标数量、镜像和摘要；item 固定 artifact/type/revision，只有 `DELETED` 可以且必须
+携带 Store 返回的不透明 binding 和删除时间。item 故意不外键引用 READY `artifact`
+表，使元数据删除与审计确认可以在同一后续事务中完成。
+
+V012 同时增加 `meeting_deleted_at_equivalence_ck`：Meeting 只有在生命周期和 Manifest
+都为 `DELETED` 时才能保存非空 `deleted_at`，且该时间必须等于同次终态写入的
+`updated_at`；其它生命周期必须保持 Manifest 非 `DELETED` 且 `deleted_at` 为空。
+首次迁移若发现任一 `DELETION_PENDING`、`DELETED` 或非空 `deleted_at` 旧事实会整
+事务失败，因为数据库无法证明对应删除计划。迁移只接受“三个对象全部不存在”的首次
+执行和“三个对象全部精确存在”的原样重跑；半表、半约束、弱 CHECK、错误 FK、额外
+索引、TEMP 遮蔽、UNLOGGED/分区/继承表均关闭式拒绝。迁移使用 schema 级 advisory
+lock，并按 Meeting → 来源 Workflow → 来源 Manifest → 删除计划 → item 的顺序加锁。
+参考运行时在后续切片通过 readiness 启用 V012，本版本迁移提交本身仍保持 V011 runtime
+门槛，确保每个小提交可以独立编译和回退。
+
 这里的版本登记机制是仓库自带的 `deploy/migrate.sh` 与 `schema_migrations`，不是
 Flyway。脚本在 SQL 成功提交后登记完整文件基名；如果发生“DDL 已提交但版本登记
 失败”，应原样重跑脚本，让迁移自身的精确 catalog 门禁确认结构，不能只凭列名补
 登记。
 
-V003 和 V007～V011 必须允许在“Schema 已提交但版本登记失败”后安全重跑。执行约束前会先
+V003 和 V007～V012 必须允许在“Schema 已提交但版本登记失败”后安全重跑。执行约束前会先
 检查历史 Reservation 状态，发现未知状态时整事务失败；不要绕过该检查手工登记
 版本。没有 PostgreSQL 时可以先运行静态门禁：
 
