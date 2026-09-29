@@ -229,10 +229,10 @@ unset T14_WORKER_CROSS_JVM_DATABASE_URL
 unset T14_WORKER_CROSS_JVM_ARTIFACT_ROOT
 unset T14_WORKER_CROSS_JVM_CONTROL_FILE
 
-log INFO "启动 P2-T14-09-10 五窗口真实双 JVM 门禁（连接信息已隐藏）"
+log INFO "启动 P2-T14-09-10 五窗口及删除事务真实双 JVM 门禁（连接信息已隐藏）"
 mvn -B --no-transfer-progress \
   -f "${REPO_ROOT}/backend-reference/pom.xml" \
-  -Dtest=MockFinalizationWorkerCrossJvmIntegrationTest test
+  -Dtest=MockFinalizationWorkerCrossJvmIntegrationTest,JdbcArtifactDeletionWorkerCrossJvmIntegrationTest test
 
 trap - EXIT
 cleanup
@@ -259,4 +259,4 @@ for (( attempt=1; attempt<=30; attempt++ )); do
 done
 (( port_released == 1 )) || fail "本次随机 loopback 端口清理后仍可连接"
 
-log INFO "P2-T14-09-10 PostgreSQL 16 双 JVM Worker 恢复门禁通过，容器、卷和端口已精确清理"
+log INFO "P2-T14-09-10 PostgreSQL 16 双 JVM Worker 与删除事务恢复门禁通过，容器、卷和端口已精确清理"
