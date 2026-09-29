@@ -21,11 +21,13 @@ import com.czur.reference.application.port.artifact.ArtifactReadyMetadataStore;
 import com.czur.reference.application.port.artifact.ArtifactStore.WriteIntentSpec;
 import com.czur.reference.application.finalization.FinalizationCheckpoint;
 import com.czur.reference.application.finalization.FinalizationCheckpoint.ArtifactMaterial;
+import com.czur.reference.application.finalization.FinalizationExecutionFact;
 import com.czur.reference.domain.meeting.MeetingAggregate;
 import com.czur.reference.domain.meeting.MeetingEvent;
 import com.czur.reference.domain.meeting.MeetingState;
 import com.czur.reference.protocol.json.ArtifactDeletionPlanJson;
 import com.czur.reference.protocol.json.FinalizationCheckpointJson;
+import com.czur.reference.protocol.json.FinalizationExecutionFactJson;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
@@ -128,15 +130,14 @@ public final class JdbcMeetingDeletionPort implements MeetingDeletionPort {
             Optional<JdbcIdempotencyStore.DeletionRawRecord> previous =
                     JdbcIdempotencyStore.findDeletion(
                             connection, scope, request.idempotencyKey());
-            Optional<MeetingManifest> latest =
-                    new JdbcManifestFactStore(connection)
-                            .findLatestForLockedMeeting(request.meetingId());
             if (previous.isPresent()) {
                 if (!sameDigest(previous.orElseThrow().requestDigest(),
                         request.canonicalRequestDigest())) {
                     return rollbackResult(connection, resolution,
                             conflict(DeleteResult.ConflictReason.REQUEST_DIGEST_MISMATCH), phase);
                 }
+                Optional<MeetingManifest> latest = new JdbcManifestFactStore(connection)
+                        .findLatestForLockedMeeting(request.meetingId());
                 DeleteResult replay = classifyExisting(
                         previous.get(), request, current, latest);
                 if (replay instanceof DeleteResult.Replayed
@@ -163,6 +164,8 @@ public final class JdbcMeetingDeletionPort implements MeetingDeletionPort {
                     JdbcDurableInputFactStore.find(connection, request.meetingId());
             Optional<com.czur.reference.application.port.FinalUsageFact> usageFact =
                     JdbcFinalUsageFactStore.find(connection, request.meetingId());
+            Optional<FinalizationExecutionFact> executionFact =
+                    new JdbcFinalizationExecutionFactStore(connection).find(request.meetingId());
             List<ArtifactReadyMetadataStore.ReadyMetadata> metadata =
                     new JdbcArtifactReadyMetadataStore(connection)
                             .findByMeetingId(request.meetingId());
@@ -177,6 +180,16 @@ public final class JdbcMeetingDeletionPort implements MeetingDeletionPort {
                     return rollbackResult(connection, resolution,
                             conflict(DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT), phase);
                 }
+            }
+            Optional<MeetingManifest> latest = new JdbcManifestFactStore(connection)
+                    .findLatestForLockedMeeting(request.meetingId());
+            if (checkpoint != null && (inputFact.isEmpty() || usageFact.isEmpty()
+                    || executionFact.isEmpty()
+                    || !factsAlignedWithCheckpoint(current, checkpoint,
+                    inputFact.orElseThrow(), usageFact.orElseThrow(),
+                    executionFact.orElseThrow()))) {
+                return rollbackResult(connection, resolution,
+                        conflict(DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT), phase);
             }
             ArtifactDeletionAdmissionPolicy.Facts facts = new ArtifactDeletionAdmissionPolicy.Facts(
                     current.snapshot().state(),
@@ -332,6 +345,17 @@ public final class JdbcMeetingDeletionPort implements MeetingDeletionPort {
                     : unavailable(DeleteResult.UnavailableReason.STORAGE_FAILURE);
             return transactionStarted
                     ? rollbackResult(connection, resolution, result, phase) : result;
+        } catch (JdbcFinalizationExecutionFactStore.StoredFactException failure) {
+            if (commitStarted) {
+                return loggedUnavailable(DeleteResult.UnavailableReason.OUTCOME_UNKNOWN,
+                        Phase.COMMIT, null);
+            }
+            DeleteResult result = failure.kind()
+                    == JdbcFinalizationExecutionFactStore.FailureKind.CORRUPT_DATA
+                    ? conflict(DeleteResult.ConflictReason.SNAPSHOT_INCONSISTENT)
+                    : unavailable(DeleteResult.UnavailableReason.STORAGE_FAILURE);
+            return transactionStarted
+                    ? rollbackResult(connection, resolution, result, phase) : result;
         } catch (SQLException failure) {
             if (commitStarted) {
                 return loggedUnavailable(DeleteResult.UnavailableReason.OUTCOME_UNKNOWN,
@@ -414,6 +438,37 @@ public final class JdbcMeetingDeletionPort implements MeetingDeletionPort {
                 ArtifactDeletionPlan.SourceFinalizationWorkflow.fromStep(
                         sourceWorkflow.orElseThrow()),
                 targets);
+    }
+
+    private static boolean factsAlignedWithCheckpoint(
+            JdbcMeetingRepository.DeletionMeeting current,
+            FinalizationCheckpoint checkpoint,
+            com.czur.reference.application.port.FinalizationInputFact input,
+            com.czur.reference.application.port.FinalUsageFact usage,
+            FinalizationExecutionFact execution) {
+        try {
+            return checkpoint.meetingId().equals(current.snapshot().meetingId())
+                    && checkpoint.meetingId().equals(input.meetingId())
+                    && checkpoint.meetingId().equals(usage.meetingId())
+                    && checkpoint.meetingId().equals(execution.meetingId())
+                    && checkpoint.inputBinding().equals(input.inputBinding())
+                    && checkpoint.inputFactDigest().equals(
+                    FinalizationCheckpoint.inputFactDigest(input))
+                    && checkpoint.executionFactDigest().equals(
+                    FinalizationExecutionFactJson.sha256(execution))
+                    && checkpoint.finalUsageFact().equals(usage)
+                    && current.snapshot().profileId().equals(execution.productProfile().id())
+                    && current.snapshot().profileRevision()
+                    == execution.productProfile().revision()
+                    && current.snapshot().deploymentScope().equals(
+                    checkpoint.commitPlan().deploymentScope())
+                    && current.snapshot().subjectScope().equals(
+                    checkpoint.commitPlan().subjectScope())
+                    && Objects.equals(current.snapshot().usageReservationId(),
+                    checkpoint.commitPlan().reservationId());
+        } catch (RuntimeException malformed) {
+            return false;
+        }
     }
 
     private static ArtifactDeletionAdmissionPolicy.MetadataCheck compareMetadata(

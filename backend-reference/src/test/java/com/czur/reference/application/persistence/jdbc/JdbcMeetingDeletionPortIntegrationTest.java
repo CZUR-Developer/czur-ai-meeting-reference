@@ -6,6 +6,7 @@ import com.czur.reference.application.command.MeetingPermissions;
 import com.czur.reference.application.finalization.FinalizationCheckpoint;
 import com.czur.reference.application.finalization.FinalizationCommitPlan;
 import com.czur.reference.application.finalization.FinalizationOperationIdentity;
+import com.czur.reference.application.finalization.FinalizationExecutionFact;
 import com.czur.reference.application.finalization.MockFinalizationArtifactContent;
 import com.czur.reference.application.port.FinalizationInputFact;
 import com.czur.reference.application.port.WorkflowStep;
@@ -44,6 +45,10 @@ import com.czur.reference.application.port.identity.VerifiedIdentity;
 import com.czur.reference.domain.meeting.MeetingAggregate;
 import com.czur.reference.domain.meeting.MeetingState;
 import com.czur.reference.protocol.json.FinalizationCheckpointJson;
+import com.czur.reference.protocol.json.FinalizationExecutionFactJson;
+import com.czur.reference.domain.capability.CapabilityDecision;
+import com.czur.reference.domain.capability.CapabilityPlan;
+import com.czur.reference.domain.capability.ProductProfile;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -71,6 +76,7 @@ import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
@@ -245,7 +251,8 @@ class JdbcMeetingDeletionPortIntegrationTest {
                 "zh-CN", List.of("en-US"), CREATED_AT.plusSeconds(2),
                 "input-content-digest-ready");
         String inputDigest = FinalizationCheckpoint.inputFactDigest(input);
-        String executionDigest = "sha256:" + "cd".repeat(32);
+        FinalizationExecutionFact execution = executionFact(meetingId, suffix);
+        String executionDigest = FinalizationExecutionFactJson.sha256(execution);
         byte[] content = new MockFinalizationArtifactContent(
                 "transcript.final", executionDigest.substring(7), "zh-CN", 1,
                 inputDigest.substring(7)).canonicalBytes();
@@ -277,6 +284,8 @@ class JdbcMeetingDeletionPortIntegrationTest {
         try (Connection connection = transaction()) {
             assertEquals(com.czur.reference.application.port.DurableInputFactStore.PersistStatus.APPLIED,
                     JdbcDurableInputFactStore.persist(connection, input).status());
+            assertEquals(com.czur.reference.application.port.FinalizationExecutionFactStore.PersistStatus.APPLIED,
+                    new JdbcFinalizationExecutionFactStore(connection).persist(execution).status());
             assertEquals(com.czur.reference.application.port.FinalUsageFactStore.PersistStatus.APPLIED,
                     JdbcFinalUsageFactStore.persist(connection, checkpoint.finalUsageFact()).status());
             assertEquals(WorkflowStepStore.RegisterStatus.APPLIED,
@@ -1355,7 +1364,8 @@ class JdbcMeetingDeletionPortIntegrationTest {
                 "zh-CN", List.of("en-US"), CREATED_AT.plusSeconds(2),
                 "input-content-digest-" + suffix);
         String inputDigest = FinalizationCheckpoint.inputFactDigest(input);
-        String executionDigest = "sha256:" + "cd".repeat(32);
+        FinalizationExecutionFact execution = executionFact(meetingId, suffix);
+        String executionDigest = FinalizationExecutionFactJson.sha256(execution);
         byte[] content = new MockFinalizationArtifactContent(
                 "transcript.final", executionDigest.substring(7), "zh-CN", 1,
                 inputDigest.substring(7)).canonicalBytes();
@@ -1390,6 +1400,8 @@ class JdbcMeetingDeletionPortIntegrationTest {
         try (Connection connection = transaction()) {
             assertEquals(com.czur.reference.application.port.DurableInputFactStore.PersistStatus.APPLIED,
                     JdbcDurableInputFactStore.persist(connection, input).status());
+            assertEquals(com.czur.reference.application.port.FinalizationExecutionFactStore.PersistStatus.APPLIED,
+                    new JdbcFinalizationExecutionFactStore(connection).persist(execution).status());
             assertEquals(com.czur.reference.application.port.FinalUsageFactStore.PersistStatus.APPLIED,
                     JdbcFinalUsageFactStore.persist(connection, checkpoint.finalUsageFact()).status());
             assertEquals(WorkflowStepStore.RegisterStatus.APPLIED,
@@ -1437,6 +1449,19 @@ class JdbcMeetingDeletionPortIntegrationTest {
                         spec.artifactId(), spec.artifactType(), spec.mediaType(), spec.language(),
                         spec.revision(), spec.expectedSize(), spec.expectedChecksum(), artifactStatus,
                         endedAt, null, failure)), List.of());
+    }
+
+    private static FinalizationExecutionFact executionFact(String meetingId, String suffix) {
+        ProductProfile profile = new ProductProfile(
+                "profile-owned", 7, Set.of("asr"), Set.of(), Map.of(), Map.of(), Map.of(),
+                Map.of("asr", List.of("caption")),
+                Map.of("asr", List.of("transcript.final")));
+        CapabilityPlan plan = new CapabilityPlan(1, List.of(new CapabilityDecision(
+                "asr", CapabilityDecision.Availability.AVAILABLE, true,
+                CapabilityDecision.Action.ENABLE, null, List.of("caption"),
+                List.of("transcript.final"), null, 1)));
+        return FinalizationExecutionFact.freeze(
+                meetingId, CREATED_AT, "execution-" + suffix, profile, plan);
     }
 
     private int deletionPlanTargetCount(String meetingId) throws SQLException {
