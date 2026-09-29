@@ -136,3 +136,40 @@ docker rm -f -- <日志中的精确-container-name>
 docker volume rm -- <日志中的精确-volume-name>
 rm -rf -- <日志中的精确-state-directory>
 ```
+
+## P2-T14-09-10 Mock 最终收口双 JVM 恢复门
+
+`test-t14-worker-cross-jvm.sh` 使用本次专属的 `postgres:16` Debian 容器、
+named volume 和随机 IPv4 loopback 端口，在五个独立随机 schema 中验证真实进程
+退出与恢复：第一个 Artifact READY、权益提交成功、成功 marker 已持久化、
+Completion 已提交和失败 marker 已持久化。JVM-A 在对应线性化点调用
+`Runtime.halt(47)`；JVM-B 重新构造正式 JDBC/文件 Store、权益 Provider、
+Completion 和 Worker，并从同一 PostgreSQL 与文件根自主恢复；JVM-C 再证明终态
+运行 idle，数据库和文件哈希不变。
+
+```bash
+tools/test-t14-worker-cross-jvm.sh
+```
+
+门禁同时要求 takeover 活跃期的旧 lease 对 renew、complete、fail、marker persist
+和 marker recover 全部返回 `NOT_OWNER`，并核对 receipt、V008、V009、execution
+fact、Workflow、Manifest、Artifact、usage operation、Reservation 和文件内容唯一。
+checkpoint、业务正文和恢复决定不会通过进程环境传入，子进程输出还会执行完整泄露
+检查。
+
+脚本不会访问保留端口 `55432`，不会枚举或清理已有数据库资源，也不使用 Compose、
+`prune`、通配符或模糊删除。容器和数据卷均带本次 run-id 归属标签；正常退出、失败及
+`INT`、`TERM`、`HUP` 都只按精确名称和标签清理本次资源。`SIGKILL` 后必须先读取脚本
+启动日志中的精确名称，并逐一核对以下标签；标签缺失或不一致时禁止删除：
+
+```bash
+docker container inspect --format '{{index .Config.Labels "com.czur.ai-meeting.t14-worker-cross-jvm.run-id"}}' <日志中的精确-container-name>
+docker volume inspect --format '{{index .Labels "com.czur.ai-meeting.t14-worker-cross-jvm.run-id"}}' <日志中的精确-volume-name>
+```
+
+确认归属后，才可精确执行：
+
+```bash
+docker rm -f -- <日志中的精确-container-name>
+docker volume rm -- <日志中的精确-volume-name>
+```
