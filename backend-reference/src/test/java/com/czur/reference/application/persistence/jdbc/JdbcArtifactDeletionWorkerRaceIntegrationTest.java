@@ -11,6 +11,7 @@ import com.czur.reference.application.port.WorkflowStepStore;
 import com.czur.reference.application.port.artifact.ArtifactReadyMetadataStore;
 import com.czur.reference.application.port.artifact.ArtifactStore;
 import com.czur.reference.application.port.artifact.ArtifactStore.WriteIntentSpec;
+import com.czur.reference.application.port.artifact.ArtifactStoreException;
 import com.czur.reference.protocol.json.ArtifactDeletionPlanJson;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -34,6 +35,10 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Proxy;
+import javax.sql.DataSource;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -70,6 +75,7 @@ class JdbcArtifactDeletionWorkerRaceIntegrationTest {
     private PersistentFileSystemMockArtifactStore artifactStore;
     private ArtifactDeletionPlan plan;
     private WorkflowStepStore.LeaseToken lease;
+    private ArtifactStore.WriteIntent initialWriteIntent;
 
     @BeforeEach
     void setUp() throws Exception {
@@ -178,12 +184,71 @@ class JdbcArtifactDeletionWorkerRaceIntegrationTest {
         assertEquals(1, regularFileCount(root.resolve("tombstones"), ".deleted"));
     }
 
+    @Test
+    void itemDatabaseCommitUnknownIsReplayedByAReclaimedLeaseAndLateWritersAreRejected()
+            throws Exception {
+        ArtifactDeletionItemUnitOfWork.DeleteRequest request = request(lease);
+        ArtifactDeletionItemUnitOfWork.Result unknown =
+                new JdbcArtifactDeletionItemUnitOfWork(
+                        commitUnknownDataSource(), artifactStore).delete(request);
+        assertEquals(ArtifactDeletionItemUnitOfWork.ErrorCode.OUTCOME_UNKNOWN,
+                ((ArtifactDeletionItemUnitOfWork.Failure) unknown).code());
+
+        WorkflowStepStore.LeaseToken reclaimed = reclaimLease();
+        ArtifactDeletionItemUnitOfWork.Result replay =
+                new JdbcArtifactDeletionItemUnitOfWork(dataSource, artifactStore).delete(
+                        request(reclaimed));
+        assertEquals(ArtifactDeletionItemUnitOfWork.SuccessCode.REPLAYED,
+                ((ArtifactDeletionItemUnitOfWork.Success) replay).code());
+        assertLateWritersRejected(plan.targets().getFirst().spec(), artifactStore);
+    }
+
+    @Test
+    void deletingTombstoneCommitUnknownIsRecoveredByItemUnitOfWork() throws Exception {
+        AtomicBoolean failOnce = new AtomicBoolean(true);
+        PersistentFileSystemMockArtifactStore faulting = faultingStore(
+                point -> "DELETING".equals(point.toString())
+                        && failOnce.getAndSet(false));
+        ArtifactDeletionItemUnitOfWork.Result failed =
+                new JdbcArtifactDeletionItemUnitOfWork(dataSource, faulting).delete(request(lease));
+        assertEquals(ArtifactDeletionItemUnitOfWork.ErrorCode.STORE_FAILURE,
+                ((ArtifactDeletionItemUnitOfWork.Failure) failed).code());
+
+        WorkflowStepStore.LeaseToken reclaimed = reclaimLease();
+        ArtifactDeletionItemUnitOfWork.Result recovered =
+                new JdbcArtifactDeletionItemUnitOfWork(dataSource, artifactStore).delete(
+                        request(reclaimed));
+        assertEquals(ArtifactDeletionItemUnitOfWork.SuccessCode.DELETED,
+                ((ArtifactDeletionItemUnitOfWork.Success) recovered).code());
+        assertLateWritersRejected(plan.targets().getFirst().spec(), artifactStore);
+    }
+
+    @Test
+    void deletedTombstoneCommitUnknownIsRecoveredAndReplayIsStable() throws Exception {
+        AtomicBoolean failOnce = new AtomicBoolean(true);
+        PersistentFileSystemMockArtifactStore faulting = faultingStore(
+                point -> "DELETED".equals(point.toString()) && failOnce.getAndSet(false));
+        ArtifactDeletionItemUnitOfWork.Result failed =
+                new JdbcArtifactDeletionItemUnitOfWork(dataSource, faulting).delete(request(lease));
+        assertEquals(ArtifactDeletionItemUnitOfWork.ErrorCode.STORE_FAILURE,
+                ((ArtifactDeletionItemUnitOfWork.Failure) failed).code());
+        WorkflowStepStore.LeaseToken reclaimed = reclaimLease();
+        ArtifactDeletionItemUnitOfWork.Result recovered =
+                new JdbcArtifactDeletionItemUnitOfWork(dataSource, artifactStore).delete(request(reclaimed));
+        assertEquals(ArtifactDeletionItemUnitOfWork.SuccessCode.DELETED,
+                ((ArtifactDeletionItemUnitOfWork.Success) recovered).code());
+        assertEquals(ArtifactStore.StoreState.DELETED,
+                artifactStore.inspect(plan.targets().getFirst().spec()).state());
+        assertLateWritersRejected(plan.targets().getFirst().spec(), artifactStore);
+    }
+
     private ArtifactDeletionPlan preparePlanAndWorkflow() throws Exception {
         String artifactId = "artifact-race-" + meeting;
         WriteIntentSpec spec = new WriteIntentSpec(
                 artifactId, meeting, "transcript.final", "application/octet-stream",
                 "zh-CN", 1, CONTENT.length, checksum(CONTENT));
         ArtifactStore.WriteIntent intent = artifactStore.createWriteIntent(spec).intent();
+        initialWriteIntent = intent;
         ArtifactStore.StageResult staged = artifactStore.writeContent(
                 intent, new ByteArrayInputStream(CONTENT));
         ArtifactStore.ArtifactDescriptor descriptor = artifactStore.completeWrite(
@@ -206,6 +271,88 @@ class JdbcArtifactDeletionWorkerRaceIntegrationTest {
                 Set.of(ArtifactDeletionPlan.STEP_TYPE), "race-worker", CLAIMED_AT,
                 Duration.ofMinutes(5), 1)).getFirst().lease();
         return result;
+    }
+
+    private ArtifactDeletionItemUnitOfWork.DeleteRequest request(
+            WorkflowStepStore.LeaseToken itemLease) {
+        return new ArtifactDeletionItemUnitOfWork.DeleteRequest(
+                itemLease, 0, plan.targets().getFirst().spec(),
+                itemLease.claimedAt().plusSeconds(1));
+    }
+
+    private WorkflowStepStore.LeaseToken reclaimLease() {
+        return new JdbcWorkflowStepStore(dataSource).claim(new WorkflowStepStore.ClaimRequest(
+                Set.of(ArtifactDeletionPlan.STEP_TYPE), "race-worker-reclaim",
+                CLAIMED_AT.plus(Duration.ofMinutes(6)), Duration.ofMinutes(5), 1)).getFirst().lease();
+    }
+
+    private DataSource commitUnknownDataSource() {
+        return (DataSource) Proxy.newProxyInstance(
+                DataSource.class.getClassLoader(), new Class<?>[]{DataSource.class},
+                (source, method, args) -> {
+                    Object value = method.invoke(dataSource, args);
+                    if (!"getConnection".equals(method.getName())) return value;
+                    Connection connection = (Connection) value;
+                    return Proxy.newProxyInstance(
+                            Connection.class.getClassLoader(), new Class<?>[]{Connection.class},
+                            new java.lang.reflect.InvocationHandler() {
+                                private boolean thrown;
+
+                                @Override
+                                public Object invoke(Object proxy, java.lang.reflect.Method call,
+                                        Object[] callArgs) throws Throwable {
+                                    if ("commit".equals(call.getName()) && !thrown) {
+                                        thrown = true;
+                                        call.invoke(connection, callArgs);
+                                        throw new java.sql.SQLException("commit acknowledgement lost");
+                                    }
+                                    return call.invoke(connection, callArgs);
+                                }
+                            });
+                });
+    }
+
+    private PersistentFileSystemMockArtifactStore faultingStore(
+            java.util.function.Predicate<Object> shouldFail) throws Exception {
+        Class<?> injectorType = Class.forName(
+                "com.czur.reference.application.artifact.filesystem.PersistentFileSystemMockArtifactStore$TombstonePublishFaultInjector");
+        Object injector = Proxy.newProxyInstance(
+                injectorType.getClassLoader(), new Class<?>[]{injectorType},
+                (proxy, method, args) -> {
+                    if (args != null && args.length == 1 && shouldFail.test(args[0])) {
+                        throw new java.io.IOException("injected tombstone acknowledgement loss");
+                    }
+                    return null;
+                });
+        Constructor<PersistentFileSystemMockArtifactStore> constructor =
+                PersistentFileSystemMockArtifactStore.class.getDeclaredConstructor(
+                        Path.class, long.class, java.util.function.Supplier.class, injectorType);
+        constructor.setAccessible(true);
+        return constructor.newInstance(root, 4096,
+                (java.util.function.Supplier<String>) () -> "race-diagnostic", injector);
+    }
+
+    private void assertLateWritersRejected(
+            WriteIntentSpec spec, PersistentFileSystemMockArtifactStore store) throws Exception {
+        ArtifactStoreException create = org.junit.jupiter.api.Assertions.assertThrows(
+                ArtifactStoreException.class, () -> store.createWriteIntent(spec));
+        assertEquals(ArtifactStoreException.Code.DELETED, create.code());
+        ArtifactStoreException write = org.junit.jupiter.api.Assertions.assertThrows(
+                ArtifactStoreException.class,
+                () -> store.writeContent(initialWriteIntent,
+                        new ByteArrayInputStream(CONTENT)));
+        assertEquals(ArtifactStoreException.Code.DELETED, write.code());
+        ArtifactStoreException complete = org.junit.jupiter.api.Assertions.assertThrows(
+                ArtifactStoreException.class,
+                () -> store.completeWrite(initialWriteIntent, new ArtifactStore.ContentClaim(
+                        CONTENT.length, checksum(CONTENT))));
+        assertEquals(ArtifactStoreException.Code.DELETED, complete.code());
+    }
+
+    private static String sha256(String value) throws Exception {
+        return java.util.HexFormat.of().formatHex(
+                java.security.MessageDigest.getInstance("SHA-256")
+                        .digest(value.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
     }
 
     private void insertMeeting() throws Exception {
