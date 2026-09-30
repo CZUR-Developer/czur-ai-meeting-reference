@@ -9,6 +9,7 @@ import com.czur.reference.application.port.entitlement.ExpiredReservationStore;
 import com.czur.reference.application.port.entitlement.MeetingGrant;
 import com.czur.reference.application.port.entitlement.UsageEstimate;
 import com.czur.reference.application.port.entitlement.UsageOperationResult;
+import com.czur.reference.application.port.entitlement.UsageOperationScopes;
 import com.czur.reference.application.port.entitlement.UsageReservation;
 import com.czur.reference.application.port.entitlement.UsageUnit;
 import org.junit.jupiter.api.Test;
@@ -54,6 +55,8 @@ class T14TotalGateIntegrationTest {
     private static final String STATE_ENV = "T14_TOTAL_STATE_FILE";
     private static final String OUTBOX_EVENT_ID = "t14-total-outbox-event";
     private static final String OUTBOX_EVENT_TYPE = "T14TotalEvent";
+    private static final String UNKNOWN_OUTBOX_EVENT_ID = "t14-total-unregistered-event";
+    private static final String UNKNOWN_OUTBOX_EVENT_TYPE = "T14TotalUnregisteredEvent";
     private static final String RESERVATION_ID = "reservation-t14-total-cleanup";
     private static final String DEPLOYMENT_SCOPE = "t14-total-deployment";
     private static final String SUBJECT_SCOPE = "t14-total-subject";
@@ -95,6 +98,9 @@ class T14TotalGateIntegrationTest {
             assertEquals(OutboxStore.EventStatus.PENDING,
                     new JdbcOutboxStore(runtime.dataSource())
                             .find(OUTBOX_EVENT_ID).orElseThrow().status());
+            assertEquals(OutboxStore.EventStatus.PENDING,
+                    new JdbcOutboxStore(runtime.dataSource())
+                            .find(UNKNOWN_OUTBOX_EVENT_ID).orElseThrow().status());
             writeState(state, Map.of(
                     "phase", "PREPARED",
                     "pidA", Long.toString(ProcessHandle.current().pid()),
@@ -128,10 +134,19 @@ class T14TotalGateIntegrationTest {
             assertAllFactTablesExist(dataSource);
             runOutboxDispatcher(dataSource);
             runExpiredReservationCleanup(dataSource);
+            JdbcOutboxStore outbox = new JdbcOutboxStore(dataSource);
             assertEquals(OutboxStore.EventStatus.PUBLISHED,
-                    new JdbcOutboxStore(dataSource).find(OUTBOX_EVENT_ID).orElseThrow().status());
+                    outbox.find(OUTBOX_EVENT_ID).orElseThrow().status());
+            OutboxStore.OutboxEvent unknown = outbox.find(UNKNOWN_OUTBOX_EVENT_ID).orElseThrow();
+            assertEquals(OutboxStore.EventStatus.PENDING, unknown.status());
+            assertEquals(0, unknown.attemptCount());
+            assertEquals(null, unknown.leaseOwner());
+            assertEquals(null, unknown.leaseUntil());
+            assertEquals(null, unknown.publishedAt());
+            assertEquals(null, unknown.lastError());
             assertEquals(UsageReservation.State.CANCELLED,
                     findReservation(dataSource).orElseThrow().state());
+            assertCleanupOperationFacts(dataSource);
             writeState(stateFile(), Map.of(
                     "phase", "VERIFIED",
                     "pidA", expected.get("pidA"),
@@ -146,16 +161,21 @@ class T14TotalGateIntegrationTest {
     }
 
     private static void seedOutboxEvent(DataSource dataSource) {
-        OutboxStore.OutboxEvent event = OutboxStore.OutboxEvent.pending(
-                OUTBOX_EVENT_ID,
-                "T14Total",
-                "aggregate-t14-total",
-                OUTBOX_EVENT_TYPE,
-                "{\"fixture\":\"t14-total\"}",
-                FIXTURE_NOW.minusSeconds(1),
-                FIXTURE_NOW.minusSeconds(1));
-        OutboxStore.AppendResult result = new JdbcOutboxStore(dataSource).append(event);
-        assertEquals(OutboxStore.AppendStatus.APPENDED, result.status());
+        JdbcOutboxStore outbox = new JdbcOutboxStore(dataSource);
+        for (String[] fixture : List.of(
+                new String[]{OUTBOX_EVENT_ID, OUTBOX_EVENT_TYPE},
+                new String[]{UNKNOWN_OUTBOX_EVENT_ID, UNKNOWN_OUTBOX_EVENT_TYPE})) {
+            OutboxStore.OutboxEvent event = OutboxStore.OutboxEvent.pending(
+                    fixture[0],
+                    "T14Total",
+                    "aggregate-t14-total",
+                    fixture[1],
+                    "{\"fixture\":\"t14-total\"}",
+                    FIXTURE_NOW.minusSeconds(1),
+                    FIXTURE_NOW.minusSeconds(1));
+            OutboxStore.AppendResult result = outbox.append(event);
+            assertEquals(OutboxStore.AppendStatus.APPENDED, result.status());
+        }
     }
 
     private static void seedExpiredReservation(DataSource dataSource) throws Exception {
@@ -260,6 +280,54 @@ class T14TotalGateIntegrationTest {
             return JdbcUsageReservationStore.findReservation(
                     connection, DEPLOYMENT_SCOPE, SUBJECT_SCOPE, RESERVATION_ID);
         }
+    }
+
+    private static void assertCleanupOperationFacts(DataSource dataSource) throws Exception {
+        List<OperationFact> facts = new ArrayList<>();
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(
+                             "SELECT operation_scope, idempotency_key, request_digest, "
+                             + "reservation_id, result_body::text "
+                             + "FROM usage_operation "
+                             + "WHERE deployment_scope = ? AND subject_scope = ? "
+                             + "AND reservation_id = ? ORDER BY operation_scope, idempotency_key")) {
+            statement.setString(1, DEPLOYMENT_SCOPE);
+            statement.setString(2, SUBJECT_SCOPE);
+            statement.setString(3, RESERVATION_ID);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    facts.add(new OperationFact(
+                            rows.getString("operation_scope"),
+                            rows.getString("idempotency_key"),
+                            rows.getString("request_digest"),
+                            rows.getString("reservation_id"),
+                            rows.getString("result_body")));
+                }
+            }
+        }
+        assertEquals(2, facts.size(), "reservation must have exactly reserve and cancel facts");
+        assertEquals(Set.of(UsageOperationScopes.RESERVE, UsageOperationScopes.CANCEL),
+                facts.stream().map(OperationFact::operationScope).collect(java.util.stream.Collectors.toSet()));
+        assertEquals(facts.size(), facts.stream().map(OperationFact::idempotencyKey).distinct().count());
+        assertEquals(facts.size(), facts.stream().map(OperationFact::requestDigest).distinct().count());
+        assertTrue(facts.stream().allMatch(fact -> RESERVATION_ID.equals(fact.reservationId())));
+
+        List<OperationFact> cleanup = facts.stream()
+                .filter(fact -> UsageOperationScopes.CANCEL.equals(fact.operationScope()))
+                .toList();
+        assertEquals(1, cleanup.size(), "cleanup must have one cancel operation");
+        assertEquals("t14-total-cleanup:" + RESERVATION_ID, cleanup.get(0).idempotencyKey());
+        assertTrue(!cleanup.get(0).idempotencyKey().isBlank());
+        assertTrue(!cleanup.get(0).requestDigest().isBlank());
+        assertTrue(!cleanup.get(0).resultBody().isBlank());
+    }
+
+    private record OperationFact(
+            String operationScope,
+            String idempotencyKey,
+            String requestDigest,
+            String reservationId,
+            String resultBody) {
     }
 
     private static void assertDifferentJvm(String pidA, String startA) {
