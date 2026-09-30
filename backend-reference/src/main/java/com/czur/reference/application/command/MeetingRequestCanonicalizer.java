@@ -36,6 +36,9 @@ public final class MeetingRequestCanonicalizer {
     /** 首版停止意图编码版本。改变字段或编码方式时必须递增。 */
     public static final int STOP_SCHEMA_VERSION = 1;
 
+    /** 完整 Create 请求快照的独立编码版本；不改变旧 CreateIntent 摘要。 */
+    public static final int CREATE_SNAPSHOT_SCHEMA_VERSION = 1;
+
     private static final String DOMAIN = "czur.ai-meeting.request";
     private static final String CREATE_OPERATION = "meeting.create";
     private static final String STOP_OPERATION = "meeting.stop";
@@ -68,6 +71,55 @@ public final class MeetingRequestCanonicalizer {
 
             writeText(output, intent.estimatedUsage().unit().name());
             output.writeLong(intent.estimatedUsage().amount());
+        }));
+    }
+
+    /**
+     * 计算完整 Create 请求快照的业务摘要。
+     *
+     * <p>该 overload 只冻结新快照的编码契约，暂不接入现有创建服务。幂等键仍然
+     * 不进入业务摘要，避免同一业务意图因为客户端重试更换 Header 而被判定为不同
+     * 请求；它只用于幂等记录的定位。与旧 {@link CreateMeetingIntent} 使用独立
+     * schemaVersion，后续接入持久化时不得把两种摘要混用。</p>
+     */
+    public static String digest(CreateMeetingRequestSnapshot request) {
+        Objects.requireNonNull(request, "request");
+        return sha256(encode(output -> {
+            writeText(output, DOMAIN);
+            writeText(output, CREATE_OPERATION);
+            output.writeInt(CREATE_SNAPSHOT_SCHEMA_VERSION);
+            writeText(output, request.clientSessionId());
+            writeText(output, request.profile().id());
+            output.writeInt(request.profile().revision());
+            writeText(output, request.client().appId());
+            writeText(output, request.client().appVersion());
+            writeText(output, request.client().contractVersion());
+            writeText(output, request.client().deviceId());
+            output.writeBoolean(request.title() != null);
+            if (request.title() != null) {
+                writeText(output, request.title());
+            }
+            writeText(output, request.timezone());
+            writeText(output, request.languages().source());
+            List<String> targets = new ArrayList<>(request.languages().targets());
+            targets.sort(MeetingRequestCanonicalizer::compareUtf8);
+            output.writeInt(targets.size());
+            for (String target : targets) {
+                writeText(output, target);
+            }
+            // 使用稳定枚举名称而不是 ordinal，避免未来扩展枚举或重排常量破坏摘要。
+            writeText(output, request.audioProfile().encoding().name());
+            output.writeInt(request.audioProfile().sampleRateHz());
+            output.writeInt(request.audioProfile().channelCount());
+            output.writeInt(request.audioProfile().frameDurationMs());
+            List<String> capabilities = new ArrayList<>(request.requestedCapabilities());
+            capabilities.sort(MeetingRequestCanonicalizer::compareUtf8);
+            output.writeInt(capabilities.size());
+            for (String capability : capabilities) {
+                writeText(output, capability);
+            }
+            output.writeBoolean(request.artifactPolicy().retainAudio());
+            output.writeBoolean(request.artifactPolicy().presentationCapture());
         }));
     }
 
