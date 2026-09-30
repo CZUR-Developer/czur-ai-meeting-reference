@@ -30,9 +30,9 @@ import java.util.regex.Pattern;
  *
  * <p>本参考切片明确不在 adapter 中解析或验证 Bearer，不实现权限、计费、权益
  * 预占、能力规划、Manifest、事件、Artifact 或 Worker。GET/DELETE 要求调用方
- * 提供已经验证的 {@link MeetingCommandContext}。create/stop 在本 slice 中明确
- * 关闭，返回 501 且不调用任何旧的未认证命令服务；正式部署必须另行装配完成
- * 身份、权限、权益和完整 OpenAPI response 的 command adapter。</p>
+ * 提供已经验证的 {@link MeetingCommandContext}。create 仍关闭并返回 501；stop
+ * 只有在注入认证 application service 后才开放，否则同样返回 501。两者都不会
+ * 回退到任何旧的未认证命令服务。</p>
  *
  * <p>日志只记录固定 operation 名和状态码，不记录原始 path、meetingId、Token、
  * request body、receipt 或异常消息。未知路径和当前未实现的后续 OpenAPI 路由
@@ -268,8 +268,8 @@ public final class MeetingHttpAdapter {
      * <p>实现可以读取请求头中的幂等键和服务端时间，但必须生成规范摘要；adapter
      * 不把原始 JSON、Bearer 或供应商字段复制进领域端口。delete 使用 adapter
      * 已检查过的认证 context 生成 {@link DeleteRequest}，不得从客户端 body 覆盖
-     * 其部署或主体。create/stop 解码接口故意未暴露，避免误接入不完整的旧命令。
-     * </p>
+     * 其部署或主体。create 解码接口故意未暴露，避免误接入不完整的旧命令；Stop
+     * 解码只在完整 application service 装配时使用。</p>
      */
     public interface RequestDecoder {
         /** 依据已验证 context 解码删除输入，不得接受客户端覆盖的归属字段。 */
