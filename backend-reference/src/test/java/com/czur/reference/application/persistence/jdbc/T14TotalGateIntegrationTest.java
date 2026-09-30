@@ -1,10 +1,22 @@
 package com.czur.reference.application.persistence.jdbc;
 
+import com.czur.reference.application.entitlement.ExpiredReservationCleanupWorker;
+import com.czur.reference.application.outbox.OutboxDispatcher;
+import com.czur.reference.application.port.OutboxStore;
+import com.czur.reference.application.port.entitlement.AuthorizedProfileSnapshot;
+import com.czur.reference.application.port.entitlement.EntitlementIdGenerator;
+import com.czur.reference.application.port.entitlement.ExpiredReservationStore;
+import com.czur.reference.application.port.entitlement.MeetingGrant;
+import com.czur.reference.application.port.entitlement.UsageEstimate;
+import com.czur.reference.application.port.entitlement.UsageOperationResult;
+import com.czur.reference.application.port.entitlement.UsageReservation;
+import com.czur.reference.application.port.entitlement.UsageUnit;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
 import javax.sql.DataSource;
 import java.io.IOException;
+import java.lang.management.ManagementFactory;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
@@ -17,11 +29,13 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -29,14 +43,22 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * P2-T14-11 first gate: a fresh deploy migration chain survives one real PostgreSQL
- * stop/start in two independent Maven/JVM phases.  Business workers are deliberately
- * outside this slice; later slices consume the same lifecycle harness.
+ * P2-T14-11 total gate: a fresh deploy migration chain survives one real PostgreSQL
+ * stop/start in two independent Maven/JVM phases.  The first JVM leaves a pending
+ * Outbox event and an expired unbound Reservation in PostgreSQL; the second JVM runs
+ * the production Dispatcher and cleanup Worker against those durable facts.
  */
 @EnabledIfEnvironmentVariable(named = "REFERENCE_TEST_DATABASE_URL", matches = ".+")
 @EnabledIfEnvironmentVariable(named = "T14_TOTAL_STATE_FILE", matches = ".+")
 class T14TotalGateIntegrationTest {
     private static final String STATE_ENV = "T14_TOTAL_STATE_FILE";
+    private static final String OUTBOX_EVENT_ID = "t14-total-outbox-event";
+    private static final String OUTBOX_EVENT_TYPE = "T14TotalEvent";
+    private static final String RESERVATION_ID = "reservation-t14-total-cleanup";
+    private static final String DEPLOYMENT_SCOPE = "t14-total-deployment";
+    private static final String SUBJECT_SCOPE = "t14-total-subject";
+    private static final String EXPECTED_MEETING_ID = "meeting-t14-total-cleanup";
+    private static final Instant FIXTURE_NOW = Instant.parse("2026-09-30T04:00:00Z");
     private static final Set<String> MIGRATIONS = Set.of(
             "V001__initial_schema", "V002__outbox_lease_fencing",
             "V003__identity_entitlement", "V004__meeting_event_envelope",
@@ -46,7 +68,8 @@ class T14TotalGateIntegrationTest {
             "V011__finalization_execution_artifact_ready",
             "V012__artifact_deletion_plan");
     private static final Set<String> STATE_KEYS = Set.of(
-            "phase", "postmasterStart", "migrationCount");
+            "phase", "pidA", "startA", "pidB", "startB", "postmasterStart",
+            "migrationCount", "outboxEventId", "reservationId");
     private static final Set<PosixFilePermission> PRIVATE_PERMISSIONS =
             PosixFilePermissions.fromString("rw-------");
     private static final Set<String> EMPTY_FACT_TABLES = Set.of(
@@ -67,10 +90,21 @@ class T14TotalGateIntegrationTest {
             assertEquals(MIGRATIONS, migrationVersions(runtime.dataSource()));
             assertAllFactTablesExist(runtime.dataSource());
             assertEmptyBusinessFacts(runtime.dataSource());
+            seedOutboxEvent(runtime.dataSource());
+            seedExpiredReservation(runtime.dataSource());
+            assertEquals(OutboxStore.EventStatus.PENDING,
+                    new JdbcOutboxStore(runtime.dataSource())
+                            .find(OUTBOX_EVENT_ID).orElseThrow().status());
             writeState(state, Map.of(
                     "phase", "PREPARED",
+                    "pidA", Long.toString(ProcessHandle.current().pid()),
+                    "startA", Long.toString(ManagementFactory.getRuntimeMXBean().getStartTime()),
+                    "pidB", "UNSET",
+                    "startB", "UNSET",
                     "postmasterStart", postmasterStart(runtime.dataSource()).toString(),
-                    "migrationCount", Integer.toString(MIGRATIONS.size())));
+                    "migrationCount", Integer.toString(MIGRATIONS.size()),
+                    "outboxEventId", OUTBOX_EVENT_ID,
+                    "reservationId", RESERVATION_ID));
         }
     }
 
@@ -79,6 +113,9 @@ class T14TotalGateIntegrationTest {
         rejectReservedEndpoint();
         Map<String, String> expected = readState(stateFile());
         assertEquals("PREPARED", expected.get("phase"));
+        assertEquals(OUTBOX_EVENT_ID, expected.get("outboxEventId"));
+        assertEquals(RESERVATION_ID, expected.get("reservationId"));
+        assertDifferentJvm(expected.get("pidA"), expected.get("startA"));
         try (JdbcDatabaseRuntime runtime = startRuntime()) {
             assertTrue(runtime.checkReadiness().ready(),
                     "V001-V012 readiness must survive PostgreSQL restart");
@@ -89,12 +126,148 @@ class T14TotalGateIntegrationTest {
             assertEquals(MIGRATIONS, migrationVersions(dataSource));
             assertEquals(Integer.toString(MIGRATIONS.size()), expected.get("migrationCount"));
             assertAllFactTablesExist(dataSource);
-            assertEmptyBusinessFacts(dataSource);
+            runOutboxDispatcher(dataSource);
+            runExpiredReservationCleanup(dataSource);
+            assertEquals(OutboxStore.EventStatus.PUBLISHED,
+                    new JdbcOutboxStore(dataSource).find(OUTBOX_EVENT_ID).orElseThrow().status());
+            assertEquals(UsageReservation.State.CANCELLED,
+                    findReservation(dataSource).orElseThrow().state());
             writeState(stateFile(), Map.of(
                     "phase", "VERIFIED",
+                    "pidA", expected.get("pidA"),
+                    "startA", expected.get("startA"),
+                    "pidB", Long.toString(ProcessHandle.current().pid()),
+                    "startB", Long.toString(ManagementFactory.getRuntimeMXBean().getStartTime()),
                     "postmasterStart", after.toString(),
-                    "migrationCount", Integer.toString(MIGRATIONS.size())));
+                    "migrationCount", Integer.toString(MIGRATIONS.size()),
+                    "outboxEventId", OUTBOX_EVENT_ID,
+                    "reservationId", RESERVATION_ID));
         }
+    }
+
+    private static void seedOutboxEvent(DataSource dataSource) {
+        OutboxStore.OutboxEvent event = OutboxStore.OutboxEvent.pending(
+                OUTBOX_EVENT_ID,
+                "T14Total",
+                "aggregate-t14-total",
+                OUTBOX_EVENT_TYPE,
+                "{\"fixture\":\"t14-total\"}",
+                FIXTURE_NOW.minusSeconds(1),
+                FIXTURE_NOW.minusSeconds(1));
+        OutboxStore.AppendResult result = new JdbcOutboxStore(dataSource).append(event);
+        assertEquals(OutboxStore.AppendStatus.APPENDED, result.status());
+    }
+
+    private static void seedExpiredReservation(DataSource dataSource) throws Exception {
+        MeetingGrant grant = new MeetingGrant(
+                "grant-t14-total",
+                DEPLOYMENT_SCOPE,
+                SUBJECT_SCOPE,
+                "t14-profile",
+                1,
+                Set.of("transcript.final"),
+                Set.of("transcript.final"),
+                3_600_000,
+                FIXTURE_NOW.minusSeconds(120),
+                FIXTURE_NOW.plusSeconds(3_600));
+        UsageReservation reservation = UsageReservation.reserved(
+                RESERVATION_ID,
+                grant,
+                EXPECTED_MEETING_ID,
+                new UsageEstimate(UsageUnit.MEETING_DURATION_MS, 60_000),
+                FIXTURE_NOW.minusSeconds(60),
+                FIXTURE_NOW.minusSeconds(10));
+        UsageOperationResult reserve = UsageOperationResult.reserve(
+                DEPLOYMENT_SCOPE,
+                SUBJECT_SCOPE,
+                "reserve-key-t14-total",
+                "reserve-digest-t14-total",
+                grant.expiresAt(),
+                AuthorizedProfileSnapshot.from(grant),
+                reservation);
+        try (Connection connection = dataSource.getConnection()) {
+            connection.setAutoCommit(false);
+            JdbcUsageReservationStore.insertReservation(connection, reservation);
+            if (!JdbcUsageReservationStore.insertOperation(connection, reserve, FIXTURE_NOW)) {
+                throw new IllegalStateException("T14 total reserve fixture already exists");
+            }
+            connection.commit();
+        }
+    }
+
+    private static void runOutboxDispatcher(DataSource dataSource) {
+        OutboxDispatcher dispatcher = new OutboxDispatcher(
+                new JdbcOutboxStore(dataSource),
+                List.of(new OutboxDispatcher.HandlerRegistration(
+                        OUTBOX_EVENT_TYPE, (event, context) -> {
+                            assertEquals(OUTBOX_EVENT_ID, event.eventId());
+                            assertEquals(OUTBOX_EVENT_TYPE, event.eventType());
+                        })),
+                new OutboxDispatcher.Config(
+                        "t14-total-dispatcher",
+                        java.time.Clock.fixed(FIXTURE_NOW, ZoneOffset.UTC),
+                        Duration.ofMinutes(1),
+                        Duration.ZERO,
+                        10,
+                        3));
+        OutboxDispatcher.RunResult result = dispatcher.runOnce();
+        assertEquals(1, result.claimedCount());
+        assertEquals(1, result.items().size());
+        assertEquals(OutboxDispatcher.ItemStatus.PUBLISHED, result.items().get(0).status());
+    }
+
+    private static void runExpiredReservationCleanup(DataSource dataSource) {
+        ExpiredReservationStore store = new JdbcExpiredReservationStore(
+                dataSource,
+                new EntitlementIdGenerator() {
+                    @Override
+                    public String newGrantId() {
+                        return "unused-t14-total-grant";
+                    }
+
+                    @Override
+                    public String newReservationId() {
+                        return "unused-t14-total-reservation";
+                    }
+
+                    @Override
+                    public String newLeaseToken() {
+                        return "t14-total-lease-token";
+                    }
+                });
+        ExpiredReservationCleanupWorker worker = new ExpiredReservationCleanupWorker(
+                store,
+                T14WorkerCrossJvmTestSupport.entitlementProvider(
+                        dataSource, java.time.Clock.fixed(FIXTURE_NOW, ZoneOffset.UTC)),
+                new ExpiredReservationCleanupWorker.Config(
+                        DEPLOYMENT_SCOPE,
+                        "t14-total-cleaner",
+                        java.time.Clock.fixed(FIXTURE_NOW, ZoneOffset.UTC),
+                        Duration.ofMinutes(1),
+                        10,
+                        "t14-total-cleanup:",
+                        "EXPIRED_UNBOUND"));
+        ExpiredReservationCleanupWorker.RunResult result = worker.runOnce();
+        assertEquals(1, result.claimedCount());
+        assertEquals(1, result.items().size());
+        assertEquals(ExpiredReservationCleanupWorker.ItemStatus.CANCELLED,
+                result.items().get(0).status());
+    }
+
+    private static Optional<UsageReservation> findReservation(DataSource dataSource)
+            throws Exception {
+        try (Connection connection = dataSource.getConnection()) {
+            return JdbcUsageReservationStore.findReservation(
+                    connection, DEPLOYMENT_SCOPE, SUBJECT_SCOPE, RESERVATION_ID);
+        }
+    }
+
+    private static void assertDifferentJvm(String pidA, String startA) {
+        long currentPid = ProcessHandle.current().pid();
+        long currentStart = ManagementFactory.getRuntimeMXBean().getStartTime();
+        assertFalse(Long.toString(currentPid).equals(pidA)
+                        && Long.toString(currentStart).equals(startA),
+                "worker phase must run in a different JVM");
     }
 
     private static JdbcDatabaseRuntime startRuntime() {
@@ -189,8 +362,14 @@ class T14TotalGateIntegrationTest {
             Files.createFile(path, PosixFilePermissions.asFileAttribute(PRIVATE_PERMISSIONS));
         }
         String content = "phase=" + fixedValue(values.get("phase")) + '\n'
+                + "pidA=" + fixedValue(values.get("pidA")) + '\n'
+                + "startA=" + fixedValue(values.get("startA")) + '\n'
+                + "pidB=" + fixedValue(values.get("pidB")) + '\n'
+                + "startB=" + fixedValue(values.get("startB")) + '\n'
                 + "postmasterStart=" + fixedValue(values.get("postmasterStart")) + '\n'
-                + "migrationCount=" + fixedValue(values.get("migrationCount")) + '\n';
+                + "migrationCount=" + fixedValue(values.get("migrationCount")) + '\n'
+                + "outboxEventId=" + fixedValue(values.get("outboxEventId")) + '\n'
+                + "reservationId=" + fixedValue(values.get("reservationId")) + '\n';
         Files.writeString(path, content, StandardCharsets.UTF_8,
                 StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING);
         try {

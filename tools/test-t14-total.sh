@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# P2-T14-11 first slice: fresh V001..V012 deploy chain and one real PostgreSQL
-# stop/start.  This script owns only the resources named by this run-id.
+# P2-T14-11 second slice: fresh V001..V012 deploy chain, one real PostgreSQL
+# stop/start, and production Outbox/expired-Reservation workers across two JVMs.
+# This script owns only the resources named by this run-id.
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
@@ -241,7 +242,7 @@ fi
 [[ ! -e "${STATE_DIR_FOR_CHECK}" ]] || fail "状态目录清理后仍存在"
 for (( attempt=1; attempt<=30; attempt++ )); do
   if ! { exec 3<>"/dev/tcp/127.0.0.1/${HOST_PORT}"; } 2>/dev/null; then
-    log INFO "T14-11 fresh-chain/restart 首片通过，随机端口已释放"
+    log INFO "T14-11 fresh-chain/restart/worker 第二片通过，随机端口已释放"
     exit 0
   fi
   exec 3>&-; exec 3<&-
