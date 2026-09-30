@@ -1,6 +1,7 @@
 package com.czur.reference.application.persistence.jdbc;
 
 import com.czur.reference.application.port.MeetingUnitOfWork;
+import com.czur.reference.application.port.CreateMeetingFactStore;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 
@@ -12,6 +13,7 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -22,7 +24,7 @@ import java.util.logging.Logger;
  * PostgreSQL 数据库运行时边界。
  *
  * <p>启动时创建唯一的 HikariCP 连接池，执行只读 {@code SELECT 1} 探针并检查
- * {@code schema_migrations} 中的 V001～V012，再以只读 catalog 查询核对 V007
+ * {@code schema_migrations} 中的 V001～V013，再以只读 catalog 查询核对 V007
  * Manifest revision、V008 durable input fact、V009 final usage fact 与 V010
  * workflow step，以及 V011 execution fact/READY artifact 表的精确物理契约。
  * 任一检查失败都会关闭已经创建的池并抛出
@@ -39,7 +41,7 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
     private static final String MIGRATION_QUERY = """
             SELECT version
               FROM schema_migrations
-              WHERE version IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              WHERE version IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """;
     private static final Set<String> REQUIRED_MIGRATIONS = Set.of(
             "V001__initial_schema",
@@ -53,7 +55,62 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
             "V009__final_usage_fact",
             "V010__workflow_step_fencing",
             "V011__finalization_execution_artifact_ready",
-            "V012__artifact_deletion_plan");
+            "V012__artifact_deletion_plan",
+            "V013__meeting_create_fact");
+    private static final List<ColumnContract> CREATE_FACT_COLUMNS = List.of(
+            new ColumnContract("scope", "text", true, null),
+            new ColumnContract("idempotency_key", "text", true, null),
+            new ColumnContract("request_schema_version", "integer", true, null),
+            new ColumnContract("request_digest", "text", true, null),
+            new ColumnContract("request_json", "text", true, null),
+            new ColumnContract("response_schema_version", "integer", true, null),
+            new ColumnContract("response_status", "integer", true, null),
+            new ColumnContract("response_type", "text", true, null),
+            new ColumnContract("response_json", "text", true, null),
+            new ColumnContract("response_sha256", "bytea", true, null),
+            new ColumnContract("meeting_id", "text", false, null),
+            new ColumnContract("created_at", "timestamp with time zone", true, null));
+    private static final List<String> CREATE_FACT_KEY_CHECK = List.of(
+            "length(btrim(scope)) > 0",
+            "length(btrim(idempotency_key)) > 0");
+    private static final List<String> CREATE_FACT_REQUEST_CHECK = List.of(
+            "request_schema_version = 1",
+            "request_digest ~ '^[0-9a-f]{64}$'",
+            "jsonb_typeof(request_json::jsonb) = 'object'");
+    private static final List<String> CREATE_FACT_RESPONSE_CHECK = List.of(
+            "response_schema_version = 1",
+            "jsonb_typeof(response_json::jsonb) = 'object'",
+            "octet_length(response_sha256) = 32",
+            "response_sha256 = sha256(convert_to(response_json, 'UTF8'))");
+    private static final List<String> CREATE_FACT_OUTCOME_CHECK = List.of(
+            "response_type = 'SUCCESS'",
+            "response_status = 201",
+            "meeting_id IS NOT NULL",
+            "(response_json::jsonb ->> 'meetingId') = meeting_id",
+            "(response_json::jsonb ->> 'state') = 'CREATED'",
+            "response_type = 'FAILURE'",
+            "response_status >= 400 AND response_status <= 599",
+            "meeting_id IS NULL");
+    /* PostgreSQL 16 pg_get_constraintdef(oid, TRUE) normalized definitions. */
+    private static final String CREATE_FACT_KEY_CHECK_DEFINITION =
+            "CHECK ((length(btrim(scope)) > 0 AND length(btrim(idempotency_key)) > 0) IS TRUE)";
+    private static final String CREATE_FACT_REQUEST_CHECK_DEFINITION =
+            "CHECK ((request_schema_version = 1 AND request_digest ~ "
+                    + "'^[0-9a-f]{64}$'::text AND "
+                    + "jsonb_typeof(request_json::jsonb) = 'object'::text) IS TRUE)";
+    private static final String CREATE_FACT_RESPONSE_CHECK_DEFINITION =
+            "CHECK ((response_schema_version = 1 AND "
+                    + "jsonb_typeof(response_json::jsonb) = 'object'::text AND "
+                    + "octet_length(response_sha256) = 32 AND "
+                    + "response_sha256 = sha256(convert_to(response_json, 'UTF8'::name))) IS TRUE)";
+    private static final String CREATE_FACT_OUTCOME_CHECK_DEFINITION =
+            "CHECK ((response_type = 'SUCCESS'::text AND response_status = 201 "
+                    + "AND meeting_id IS NOT NULL AND "
+                    + "(response_json::jsonb ->> 'meetingId'::text) = meeting_id "
+                    + "AND (response_json::jsonb ->> 'state'::text) = 'CREATED'::text "
+                    + "OR response_type = 'FAILURE'::text "
+                    + "AND response_status >= 400 AND response_status <= 599 "
+                    + "AND meeting_id IS NULL) IS TRUE)";
     private static final List<ColumnContract> MANIFEST_REVISION_COLUMNS = List.of(
             new ColumnContract("meeting_id", "text", true, null),
             new ColumnContract("manifest_revision", "integer", true, null),
@@ -403,6 +460,7 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
                 migrations.setString(12, "V010__workflow_step_fencing");
                 migrations.setString(13, "V011__finalization_execution_artifact_ready");
                 migrations.setString(14, "V012__artifact_deletion_plan");
+                migrations.setString(15, "V013__meeting_create_fact");
                 try (ResultSet rows = migrations.executeQuery()) {
                     while (rows.next()) {
                         String version = rows.getString(1);
@@ -478,6 +536,13 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
                         "数据库 readiness 物理契约校验失败 status={0}", invalid.status());
                 return invalid;
             }
+            if (!hasExactCreateMeetingFactSchema(connection)) {
+                DatabaseReadiness invalid = DatabaseReadiness.schemaInvalid(
+                        "meeting_create_fact V013 catalog contract mismatch");
+                LOGGER.log(Level.WARNING,
+                        "数据库 readiness 物理契约校验失败 status={0}", invalid.status());
+                return invalid;
+            }
             LOGGER.log(Level.FINE, "数据库 readiness 检查通过");
             return DatabaseReadiness.success();
         } catch (SQLException failure) {
@@ -530,6 +595,17 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
     public JdbcWorkflowStepStore workflowStepStore() {
         ensureLive();
         return workflowStepStore;
+    }
+
+    /**
+     * 为调用方已经取得的显式事务连接创建 V013 事实原语。
+     *
+     * <p>该方法只装配 connection-scoped store，不从池中获取连接；调用方仍负责
+     * {@code setAutoCommit(false)}、提交/回滚和关闭连接。</p>
+     */
+    public CreateMeetingFactStore createMeetingFactStore(Connection connection) {
+        ensureLive();
+        return new JdbcCreateMeetingFactStore(connection);
     }
 
     /** 工作单元的端口类型别名，避免调用方复制第二套事务装配。 */
@@ -1180,6 +1256,180 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
     }
 
     /**
+     * 只读核对 V013 完整 Create 事实表的十二列、主键、唯一会议约束、外键和四个
+     * 关闭式 CHECK。探针不读取业务行、不自动创建或修补表，并拒绝临时、分区、
+     * UNLOGGED、继承或增加了额外约束的同名对象。
+     */
+    private static boolean hasExactCreateMeetingFactSchema(Connection connection)
+            throws SQLException {
+        if (hasTemporaryRelationShadow(connection, "meeting_create_fact")) {
+            return false;
+        }
+        Long factTable = relationOid(connection, "meeting_create_fact");
+        Long meetingTable = relationOid(connection, "meeting");
+        if (factTable == null || meetingTable == null
+                || !isStandalonePermanentTable(connection, factTable)
+                || !isStandalonePermanentTable(connection, meetingTable)) {
+            return false;
+        }
+        List<ColumnContract> columns = new ArrayList<>();
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT a.attname, format_type(a.atttypid, a.atttypmod) AS data_type,
+                       a.attnotnull, pg_get_expr(d.adbin, d.adrelid) AS default_expression
+                  FROM pg_attribute a
+                  LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+                 WHERE a.attrelid = ? AND a.attnum > 0 AND NOT a.attisdropped
+                 ORDER BY a.attnum
+                """)) {
+            statement.setLong(1, factTable);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    columns.add(new ColumnContract(
+                            rows.getString("attname"), rows.getString("data_type"),
+                            rows.getBoolean("attnotnull"),
+                            rows.getString("default_expression")));
+                }
+            }
+        }
+        if (!CREATE_FACT_COLUMNS.equals(columns)) {
+            return false;
+        }
+        if (!hasExactCreateMeetingFactColumnAttributes(connection, factTable)) {
+            return false;
+        }
+
+        List<ConstraintContract> constraints = readConstraints(connection, factTable);
+        if (constraints.size() != 7
+                || !constraints.contains(ConstraintContract.primaryKey(
+                        "meeting_create_fact_pkey", "1,2"))
+                || !constraints.contains(ConstraintContract.uniqueKey(
+                        "meeting_create_fact_meeting_id_uq", "11",
+                        "UNIQUE (meeting_id)"))
+                || !constraints.contains(ConstraintContract.foreignKey(
+                        "meeting_create_fact_meeting_fk", "11", meetingTable, "1"))) {
+            return false;
+        }
+        if (!hasExactCreateMeetingFactKeyConstraints(connection, factTable, meetingTable)) {
+            return false;
+        }
+        if (!hasExactCreateMeetingFactIndexes(connection, factTable)) {
+            return false;
+        }
+        return containsStrictCreateFactCheck(
+                        constraints, "meeting_create_fact_key_ck", CREATE_FACT_KEY_CHECK,
+                        CREATE_FACT_KEY_CHECK_DEFINITION)
+                && containsStrictCreateFactCheck(
+                        constraints, "meeting_create_fact_request_ck", CREATE_FACT_REQUEST_CHECK,
+                        CREATE_FACT_REQUEST_CHECK_DEFINITION)
+                && containsStrictCreateFactCheck(
+                        constraints, "meeting_create_fact_response_ck", CREATE_FACT_RESPONSE_CHECK,
+                        CREATE_FACT_RESPONSE_CHECK_DEFINITION)
+                && containsStrictCreateFactCheck(
+                        constraints, "meeting_create_fact_outcome_ck", CREATE_FACT_OUTCOME_CHECK,
+                        CREATE_FACT_OUTCOME_CHECK_DEFINITION);
+    }
+
+    /** V013 PK/UQ/FK 的完整 catalog 语义，防止可延迟或改写更新动作的约束冒充。 */
+    private static boolean hasExactCreateMeetingFactKeyConstraints(
+            Connection connection, long factTable, long meetingTable) throws SQLException {
+        List<CreateFactKeyConstraint> keys = new ArrayList<>();
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT conname, contype, convalidated, condeferrable, condeferred,
+                       coalesce(array_to_string(conkey, ','), '') AS source_keys,
+                       confrelid::bigint AS referenced_relation,
+                       coalesce(array_to_string(confkey, ','), '') AS target_keys,
+                       confdeltype, confupdtype, confmatchtype,
+                       pg_get_constraintdef(oid, TRUE) AS definition
+                  FROM pg_constraint
+                 WHERE conrelid = ? AND contype IN ('p', 'u', 'f')
+                 ORDER BY conname
+                """)) {
+            statement.setLong(1, factTable);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    keys.add(new CreateFactKeyConstraint(
+                            rows.getString("conname"), rows.getString("contype"),
+                            rows.getBoolean("convalidated"), rows.getBoolean("condeferrable"),
+                            rows.getBoolean("condeferred"), rows.getString("source_keys"),
+                            rows.getLong("referenced_relation"), rows.getString("target_keys"),
+                            rows.getString("confdeltype"), rows.getString("confupdtype"),
+                            rows.getString("confmatchtype"),
+                            normalizeDefinition(rows.getString("definition"))));
+                }
+            }
+        }
+        if (keys.size() != 3) {
+            return false;
+        }
+        return keys.stream().allMatch(key -> key.validated()
+                && !key.deferrable() && !key.deferred())
+                && keys.stream().anyMatch(key -> key.name().equals("meeting_create_fact_pkey")
+                && key.type().equals("p") && key.sourceKeys().equals("1,2")
+                && key.definition().equals("PRIMARY KEY (scope, idempotency_key)"))
+                && keys.stream().anyMatch(key -> key.name().equals("meeting_create_fact_meeting_id_uq")
+                && key.type().equals("u") && key.sourceKeys().equals("11")
+                && key.definition().equals("UNIQUE (meeting_id)"))
+                && keys.stream().anyMatch(key -> key.name().equals("meeting_create_fact_meeting_fk")
+                && key.type().equals("f") && key.sourceKeys().equals("11")
+                && key.referencedRelation() == meetingTable && key.targetKeys().equals("1")
+                && key.deleteAction().equals("r") && key.updateAction().equals("a")
+                && key.matchType().equals("s")
+                && key.definition().equals("FOREIGN KEY (meeting_id) "
+                + "REFERENCES meeting(meeting_id) ON DELETE RESTRICT"));
+    }
+
+    /**
+     * V013 的十二列必须保持普通列形态：不得暗中加入 identity 或 generated
+     * 属性。CREATE_FACT_COLUMNS 已锁定名称、类型、NULL/default，这个 catalog
+     * 探针补上 migration 中 attidentity/attgenerated 的等价门禁。
+     */
+    private static boolean hasExactCreateMeetingFactColumnAttributes(
+            Connection connection, long factTable) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT count(*) AS column_count,
+                       count(*) FILTER (WHERE a.attidentity <> ''
+                           OR a.attgenerated <> '') AS non_plain_count
+                  FROM pg_attribute a
+                 WHERE a.attrelid = ? AND a.attnum > 0 AND NOT a.attisdropped
+                """)) {
+            statement.setLong(1, factTable);
+            try (ResultSet rows = statement.executeQuery()) {
+                return rows.next()
+                        && rows.getLong("column_count") == CREATE_FACT_COLUMNS.size()
+                        && rows.getLong("non_plain_count") == 0
+                        && !rows.next();
+            }
+        }
+    }
+
+    /**
+     * V013 只允许主键和 meeting_id 唯一约束各自拥有一个有效的普通索引。
+     * 表达式/部分索引、未完成构建的索引或额外索引都会改变迁移 catalog 契约，
+     * 因此与 V013 migration 的 pg_index 门禁保持相同的关闭式判断。
+     */
+    private static boolean hasExactCreateMeetingFactIndexes(
+            Connection connection, long factTable) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT count(*) AS index_count,
+                       count(*) FILTER (WHERE NOT indisvalid OR NOT indisready
+                           OR NOT indislive OR indexprs IS NOT NULL
+                           OR indpred IS NOT NULL) AS invalid_count
+                  FROM pg_index
+                 WHERE indrelid = ?
+                """)) {
+            statement.setLong(1, factTable);
+            try (ResultSet rows = statement.executeQuery()) {
+                if (!rows.next()) {
+                    return false;
+                }
+                return rows.getLong("index_count") == 2
+                        && rows.getLong("invalid_count") == 0
+                        && !rows.next();
+            }
+        }
+    }
+
+    /**
      * 只读核对 V012 Meeting 删除等价关系、冻结计划和逐项审计表。
      *
      * <p>本探针只读取 PostgreSQL catalog，不读取删除计划 JSON、Artifact
@@ -1674,6 +1924,13 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
                 && constraint.definition().equals(normalized));
     }
 
+    /** pg_get_constraintdef may add implicit text/name casts; they do not alter the predicate. */
+    private static String normalizeCreateFactCheckFragment(String value) {
+        return normalizeDefinition(value)
+                .replace("::text", "")
+                .replace("::name", "");
+    }
+
     private static boolean containsCheckFragment(
             List<ConstraintContract> constraints,
             String name,
@@ -1684,6 +1941,49 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
                         && constraint.type().equals("c")
                         && constraint.validated()
                         && constraint.definition().contains(normalizedFragment));
+    }
+
+    /**
+     * V013 CHECK 必须是已校验、不可延迟的完整谓词形状，而不是只含若干字段
+     * 名称的弱化表达式。key/request/response 约束不得出现 OR；outcome 必须
+     * 恰好有成功/失败两个分支之间的一个 OR，并拒绝明显的 OR true/OR 1=1
+     * 恒真注入。迁移自身仍以关键片段作兼容性门禁，这里是运行时的更严格关闭式
+     * 补充；未知 PostgreSQL pretty-print 细节不会被当作业务输入接受。
+     */
+    private static boolean containsStrictCreateFactCheck(
+            List<ConstraintContract> constraints,
+            String name,
+            List<String> fragments,
+            String expectedDefinition) {
+        int expectedOrCount = "meeting_create_fact_outcome_ck".equals(name) ? 1 : 0;
+        return constraints.stream().filter(value -> value.name().equals(name)).count() == 1
+                && constraints.stream().anyMatch(value -> {
+                    String definition = normalizeCreateFactCheckFragment(value.definition());
+                    return value.name().equals(name)
+                            && "c".equals(value.type())
+                            && value.validated()
+                            && value.definition().equals(normalizeDefinition(expectedDefinition))
+                            && fragments.stream().allMatch(fragment ->
+                            definition.indexOf(normalizeCreateFactCheckFragment(fragment)) >= 0)
+                            && countToken(definition.toUpperCase(Locale.ROOT), " OR ")
+                            == expectedOrCount
+                            && !containsObviousCheckTautology(definition);
+                });
+    }
+
+    private static boolean containsObviousCheckTautology(String definition) {
+        String lower = definition.toLowerCase(Locale.ROOT);
+        return lower.matches(".*\\bor\\s*\\(?\\s*true\\s*\\)?.*")
+                || lower.matches(".*\\bor\\s*\\(?\\s*1\\s*=\\s*1\\s*\\)?.*");
+    }
+
+    private static int countToken(String value, String token) {
+        int count = 0;
+        for (int offset = 0; (offset = value.indexOf(token, offset)) >= 0;
+             offset += token.length()) {
+            count++;
+        }
+        return count;
     }
 
     /** 返回当前 schema 中的精确关系 OID；不沿 search_path 接受其它 schema。 */
@@ -1812,6 +2112,22 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
     private record CheckDigestContract(String name, String definitionDigest) {
     }
 
+    /** V013 键约束完整 PostgreSQL catalog 指纹。 */
+    private record CreateFactKeyConstraint(
+            String name,
+            String type,
+            boolean validated,
+            boolean deferrable,
+            boolean deferred,
+            String sourceKeys,
+            long referencedRelation,
+            String targetKeys,
+            String deleteAction,
+            String updateAction,
+            String matchType,
+            String definition) {
+    }
+
     private record ColumnContract(
             String name,
             String dataType,
@@ -1841,6 +2157,8 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
                 case "final_usage_fact_pkey" -> "PRIMARY KEY (meeting_id)";
                 case "finalization_execution_fact_pkey" -> "PRIMARY KEY (meeting_id)";
                 case "artifact_pkey" -> "PRIMARY KEY (artifact_id)";
+                case "meeting_create_fact_pkey" ->
+                        "PRIMARY KEY (scope, idempotency_key)";
                 default -> throw new IllegalArgumentException("unknown primary key contract");
             };
             return new ConstraintContract(
@@ -1867,6 +2185,8 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
                 case "finalization_execution_fact_meeting_fk" ->
                         "FOREIGN KEY (meeting_id) REFERENCES meeting(meeting_id) ON DELETE RESTRICT";
                 case "artifact_meeting_fk" ->
+                        "FOREIGN KEY (meeting_id) REFERENCES meeting(meeting_id) ON DELETE RESTRICT";
+                case "meeting_create_fact_meeting_fk" ->
                         "FOREIGN KEY (meeting_id) REFERENCES meeting(meeting_id) ON DELETE RESTRICT";
                 default -> throw new IllegalArgumentException("unknown foreign key contract");
             };

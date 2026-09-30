@@ -17,7 +17,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 不依赖 PostgreSQL 的 JdbcDatabaseRuntime readiness 源码契约门。
  *
  * <p>真实 PostgreSQL catalog 的列类型、约束和 schema 反复启动由显式环境集成测试
- * 验证；这里冻结装配入口必须检查的 V001～V012 登记集合、V012 查询参数、只读
+ * 验证；这里冻结装配入口必须检查的 V001～V013 登记集合、V013 查询参数、只读
  * catalog 探针和脱敏日志边界，避免以后只更新迁移文件而漏掉运行时门禁。</p>
  */
 class JdbcDatabaseRuntimeReadinessContractTest {
@@ -27,21 +27,22 @@ class JdbcDatabaseRuntimeReadinessContractTest {
             "MIGRATION_QUERY\\s*=\\s*\\\"\\\"\\\"(.*?)\\\"\\\"\\\"", Pattern.DOTALL);
 
     @Test
-    void runtimeRequiresV012AndBindsItsMigrationQueryParameter() throws Exception {
+    void runtimeRequiresV013AndBindsItsMigrationQueryParameter() throws Exception {
         String source = readRuntimeSource();
         String required = match(REQUIRED_MIGRATIONS, source);
         String query = match(MIGRATION_QUERY, source);
 
-        assertEquals(12, occurrences(required, "V0"),
-                "runtime must freeze exactly V001 through V012 migrations");
+        assertEquals(13, occurrences(required, "V0"),
+                "runtime must freeze exactly V001 through V013 migrations");
         assertTrue(required.contains("V007__meeting_manifest_revision"));
         assertTrue(required.contains("V008__durable_input_fact"));
         assertTrue(required.contains("V009__final_usage_fact"));
         assertTrue(required.contains("V010__workflow_step_fencing"));
         assertTrue(required.contains("V011__finalization_execution_artifact_ready"));
         assertTrue(required.contains("V012__artifact_deletion_plan"));
-        assertEquals(14, occurrences(query, "?"),
-                "the two legacy aliases plus V001-V012 require fourteen query slots");
+        assertTrue(required.contains("V013__meeting_create_fact"));
+        assertEquals(15, occurrences(query, "?"),
+                "the two legacy aliases plus V001-V013 require fifteen query slots");
         assertTrue(source.contains(
                 "migrations.setString(10, \"V008__durable_input_fact\")"));
         assertTrue(source.contains(
@@ -52,6 +53,8 @@ class JdbcDatabaseRuntimeReadinessContractTest {
                 "migrations.setString(13, \"V011__finalization_execution_artifact_ready\")"));
         assertTrue(source.contains(
                 "migrations.setString(14, \"V012__artifact_deletion_plan\")"));
+        assertTrue(source.contains(
+                "migrations.setString(15, \"V013__meeting_create_fact\")"));
         assertTrue(source.contains("missing.removeAll(present)"));
     }
 
@@ -179,6 +182,82 @@ class JdbcDatabaseRuntimeReadinessContractTest {
     }
 
     @Test
+    void readinessFreezesV013IndexCountAndRejectsExpressionOrPartialIndexes() throws Exception {
+        String source = readRuntimeSource();
+        int start = source.indexOf("hasExactCreateMeetingFactSchema");
+        int end = source.indexOf("/**\n     * 只读核对 V012", start);
+        assertTrue(start >= 0 && end > start, "V013 readiness helper is missing");
+        String helper = source.substring(start, end);
+        assertTrue(helper.contains("hasExactCreateMeetingFactIndexes(connection, factTable)"));
+        assertTrue(helper.contains("FROM pg_index"));
+        assertTrue(helper.contains("count(*) AS index_count"));
+        assertTrue(helper.contains("count(*) FILTER"));
+        assertTrue(helper.contains("NOT indisvalid"));
+        assertTrue(helper.contains("NOT indisready"));
+        assertTrue(helper.contains("NOT indislive"));
+        assertTrue(helper.contains("indexprs IS NOT NULL"));
+        assertTrue(helper.contains("indpred IS NOT NULL"));
+        assertTrue(helper.contains("index_count") && helper.contains("== 2"));
+        assertTrue(helper.contains("invalid_count") && helper.contains("== 0"));
+        assertFalse(helper.contains("CREATE TABLE"));
+        assertFalse(helper.matches(
+                "(?is).*\\b(?:INSERT\\s+INTO|UPDATE\\s+\\w|DELETE\\s+FROM)\\b.*"));
+    }
+
+    @Test
+    void readinessFreezesV013ColumnAttributesAndCheckOperatorShape() throws Exception {
+        String source = readRuntimeSource();
+        int start = source.indexOf("hasExactCreateMeetingFactSchema");
+        int end = source.indexOf("/**\n     * 只读核对 V012", start);
+        assertTrue(start >= 0 && end > start, "V013 readiness helper is missing");
+        String helper = source.substring(start, end);
+        assertTrue(helper.contains("hasExactCreateMeetingFactColumnAttributes(connection, factTable)"));
+        assertTrue(helper.contains("a.attidentity"));
+        assertTrue(helper.contains("a.attgenerated"));
+        assertTrue(helper.contains("non_plain_count"));
+        assertTrue(helper.contains("containsStrictCreateFactCheck"));
+        assertTrue(source.contains("countToken"));
+        assertTrue(source.contains("expectedOrCount"));
+        assertTrue(source.contains("containsObviousCheckTautology"));
+        assertTrue(source.contains("OR true"));
+        assertTrue(source.contains("OR 1=1") || source.contains("1\\s*=\\s*1"));
+        assertTrue(helper.contains("meeting_create_fact_outcome_ck"));
+        assertFalse(helper.contains("containsCheckFragments"));
+    }
+
+    @Test
+    void readinessUsesExactV013KeyCatalogAndFullPostgresCheckDefinitions() throws Exception {
+        String source = readRuntimeSource();
+        assertTrue(source.contains("hasExactCreateMeetingFactKeyConstraints(connection, factTable, meetingTable)"));
+        int start = source.indexOf("private static boolean hasExactCreateMeetingFactKeyConstraints");
+        int end = source.indexOf("private static boolean hasExactCreateMeetingFactColumnAttributes", start);
+        if (end < 0) {
+            end = source.indexOf("private static boolean hasExactCreateMeetingFactIndexes", start);
+        }
+        assertTrue(start >= 0 && end > start, "V013 key catalog gate is missing");
+        String helper = source.substring(start, end);
+        for (String field : new String[]{"convalidated", "condeferrable", "condeferred",
+                "conkey", "confkey", "confdeltype", "confupdtype", "confmatchtype",
+                "pg_get_constraintdef(oid, TRUE)"}) {
+            assertTrue(helper.contains(field), field);
+        }
+        assertTrue(helper.contains("keys.size() != 3"));
+        assertTrue(helper.contains("!key.deferrable() && !key.deferred()"));
+        assertTrue(helper.contains("key.deleteAction().equals(\"r\")"));
+        assertTrue(helper.contains("key.updateAction().equals(\"a\")"));
+        assertTrue(helper.contains("key.matchType().equals(\"s\")"));
+        assertTrue(helper.contains("key.definition().equals("));
+
+        for (String check : new String[]{"CREATE_FACT_KEY_CHECK_DEFINITION",
+                "CREATE_FACT_REQUEST_CHECK_DEFINITION",
+                "CREATE_FACT_RESPONSE_CHECK_DEFINITION",
+                "CREATE_FACT_OUTCOME_CHECK_DEFINITION"}) {
+            assertTrue(source.contains(check), check);
+        }
+        assertTrue(source.contains("value.definition().equals(normalizeDefinition(expectedDefinition))"));
+    }
+
+    @Test
     void readinessUsesExactReadOnlyCatalogChecksForV012DeletionContract() throws Exception {
         String source = readRuntimeSource();
         assertTrue(source.contains("hasExactMeetingDeletionSchema(connection)"));
@@ -263,7 +342,7 @@ class JdbcDatabaseRuntimeReadinessContractTest {
     @Test
     void startupDocumentationAndLogsStayOnStableRedactedClassification() throws Exception {
         String source = readRuntimeSource();
-        assertTrue(source.contains("{@code schema_migrations} 中的 V001～V012"));
+        assertTrue(source.contains("{@code schema_migrations} 中的 V001～V013"));
         assertFalse(source.contains("{@code schema_migrations} 中的 V001～V011"));
         assertTrue(source.contains("status={0}"));
         assertTrue(source.contains("exception={1}"));
