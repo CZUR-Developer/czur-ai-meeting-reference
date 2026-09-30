@@ -3,7 +3,8 @@ set -Eeuo pipefail
 
 # P2-T14-11 third slice: fresh V001..V012 deploy chain, one real PostgreSQL
 # stop/start, production Outbox/expired-Reservation workers, and active-lease
-# reclaim with stale-owner fencing across two JVMs.
+# reclaim with stale-owner fencing across two JVMs, including formal finalization
+# and ArtifactDeletionWorker workflow recovery.
 # This script owns only the resources named by this run-id.
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -201,7 +202,7 @@ export REFERENCE_TEST_DATABASE_URL="${JDBC_URL}"
 export REFERENCE_TEST_DATABASE_USER="${DB_USER}"
 export REFERENCE_TEST_DATABASE_PASSWORD="${DB_PASSWORD}"
 export T14_TOTAL_STATE_FILE="${STATE_FILE}"
-log INFO "阶段 A：独立 Maven/JVM fresh-chain readiness"
+log INFO "阶段 A：独立 Maven/JVM fresh-chain readiness（含最终收口与删除 lease）"
 mvn -B --no-transfer-progress -f "${REPO_ROOT}/backend-reference/pom.xml" \
   '-Dtest=T14TotalGateIntegrationTest#prepareBeforeRestart' test
 [[ -f "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || fail "阶段 A 未生成状态文件"
@@ -225,7 +226,7 @@ AFTER_START="$(postmaster_start)"
 [[ "${AFTER_START}" > "${BEFORE_START}" ]] || fail "postmaster start time 未变晚"
 
 export REFERENCE_TEST_DATABASE_URL="${JDBC_URL}"
-log INFO "阶段 B：独立 Maven/JVM restart verification"
+log INFO "阶段 B：独立 Maven/JVM restart verification（含最终收口与 ArtifactDeletionWorker）"
 mvn -B --no-transfer-progress -f "${REPO_ROOT}/backend-reference/pom.xml" \
   '-Dtest=T14TotalGateIntegrationTest#verifyAfterRestart' test
 grep -qx 'phase=VERIFIED' "${STATE_FILE}" || fail "阶段 B 状态不正确"
@@ -243,7 +244,7 @@ fi
 [[ ! -e "${STATE_DIR_FOR_CHECK}" ]] || fail "状态目录清理后仍存在"
 for (( attempt=1; attempt<=30; attempt++ )); do
   if ! { exec 3<>"/dev/tcp/127.0.0.1/${HOST_PORT}"; } 2>/dev/null; then
-    log INFO "T14-11 fresh-chain/restart/worker/reclaim 第三片通过，随机端口已释放"
+    log INFO "T14-11 fresh-chain/restart/worker/reclaim/finalization/deletion 第三片通过，随机端口已释放"
     exit 0
   fi
   exec 3>&-; exec 3<&-

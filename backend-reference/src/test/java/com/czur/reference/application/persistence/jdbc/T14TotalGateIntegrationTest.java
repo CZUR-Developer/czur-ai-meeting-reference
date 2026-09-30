@@ -1,13 +1,21 @@
 package com.czur.reference.application.persistence.jdbc;
 
 import com.czur.reference.application.artifact.filesystem.PersistentFileSystemMockArtifactStore;
+import com.czur.reference.application.deletion.ArtifactDeletionPlan;
+import com.czur.reference.application.deletion.ArtifactDeletionTarget;
+import com.czur.reference.application.deletion.ArtifactDeletionWorker;
 import com.czur.reference.application.finalization.FinalizationCheckpoint;
 import com.czur.reference.application.finalization.MockFinalizationWorker;
 import com.czur.reference.application.entitlement.ExpiredReservationCleanupWorker;
 import com.czur.reference.application.outbox.OutboxDispatcher;
 import com.czur.reference.application.port.OutboxStore;
+import com.czur.reference.application.port.ArtifactDeletionPlanStore;
+import com.czur.reference.application.deletion.MeetingDeletionPlan;
 import com.czur.reference.application.port.WorkflowStep;
 import com.czur.reference.application.port.WorkflowStepStore;
+import com.czur.reference.application.port.artifact.ArtifactReadyMetadataStore;
+import com.czur.reference.application.port.artifact.ArtifactStore;
+import com.czur.reference.application.port.artifact.ArtifactStore.WriteIntentSpec;
 import com.czur.reference.application.port.entitlement.AuthorizedProfileSnapshot;
 import com.czur.reference.application.port.entitlement.EntitlementIdGenerator;
 import com.czur.reference.application.port.entitlement.ExpiredReservationStore;
@@ -17,10 +25,12 @@ import com.czur.reference.application.port.entitlement.UsageOperationResult;
 import com.czur.reference.application.port.entitlement.UsageOperationScopes;
 import com.czur.reference.application.port.entitlement.UsageReservation;
 import com.czur.reference.application.port.entitlement.UsageUnit;
+import com.czur.reference.protocol.json.ArtifactDeletionPlanJson;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
 import javax.sql.DataSource;
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.lang.management.ManagementFactory;
 import java.nio.charset.StandardCharsets;
@@ -30,6 +40,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.security.MessageDigest;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -40,6 +51,7 @@ import java.time.Clock;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -51,6 +63,7 @@ import java.util.concurrent.Future;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -78,6 +91,13 @@ class T14TotalGateIntegrationTest {
     private static final String EXPECTED_MEETING_ID = "meeting-t14-total-cleanup";
     private static final String FINALIZATION_SUFFIX = "total-finalization";
     private static final String FINALIZATION_MEETING_ID = "mtg_cross_jvm_total_finalization";
+    private static final String DELETION_MEETING_ID = "mtg_cross_jvm_total_deletion";
+    private static final String DELETION_OWNER_A = "t14-total-deletion-owner-a";
+    private static final String DELETION_OWNER_B = "t14-total-deletion-owner-b";
+    private static final Instant DELETION_ACCEPTED_AT =
+            T14WorkerCrossJvmTestSupport.ACCEPTED_AT;
+    private static final byte[] DELETION_CONTENT =
+            "t14-total-deletion-content".getBytes(StandardCharsets.UTF_8);
     private static final Instant FIXTURE_NOW = Instant.parse("2026-09-30T04:00:00Z");
     private static final Set<String> MIGRATIONS = Set.of(
             "V001__initial_schema", "V002__outbox_lease_fencing",
@@ -91,7 +111,10 @@ class T14TotalGateIntegrationTest {
             "phase", "pidA", "startA", "pidB", "startB", "postmasterStart",
             "migrationCount", "outboxEventId", "reservationId", "activeEventId",
             "activeLeaseOwner", "activeLeaseToken", "activeLeaseExpiresAt",
-            "activeLeaseClaimedAt", "activeLeaseVersion");
+            "activeLeaseClaimedAt", "activeLeaseVersion", "deletionMeetingId",
+            "deletionArtifactRoot", "deletionStepKey", "deletionLeaseOwner",
+            "deletionLeaseToken", "deletionLeaseExpiresAt", "deletionLeaseClaimedAt",
+            "deletionLeaseVersion");
     private static final Set<PosixFilePermission> PRIVATE_PERMISSIONS =
             PosixFilePermissions.fromString("rw-------");
     private static final Set<String> EMPTY_FACT_TABLES = Set.of(
@@ -115,6 +138,7 @@ class T14TotalGateIntegrationTest {
             seedOutboxEvent(runtime.dataSource());
             seedExpiredReservation(runtime.dataSource());
             prepareFinalizationLease(runtime.dataSource());
+            DeletionPrepared deletion = prepareDeletionLease(runtime.dataSource());
             JdbcOutboxStore outbox = new JdbcOutboxStore(runtime.dataSource());
             assertEquals(OutboxStore.EventStatus.PENDING,
                     outbox.find(OUTBOX_EVENT_ID).orElseThrow().status());
@@ -136,7 +160,15 @@ class T14TotalGateIntegrationTest {
                     Map.entry("activeLeaseToken", activeLease.token()),
                     Map.entry("activeLeaseExpiresAt", activeLease.expiresAt().toString()),
                     Map.entry("activeLeaseClaimedAt", activeLease.claimedAt().toString()),
-                    Map.entry("activeLeaseVersion", Long.toString(activeLease.leaseVersion()))));
+                    Map.entry("activeLeaseVersion", Long.toString(activeLease.leaseVersion())),
+                    Map.entry("deletionMeetingId", deletion.meetingId()),
+                    Map.entry("deletionArtifactRoot", deletion.artifactRoot().toString()),
+                    Map.entry("deletionStepKey", deletion.lease().key().stepKey()),
+                    Map.entry("deletionLeaseOwner", deletion.lease().owner()),
+                    Map.entry("deletionLeaseToken", deletion.lease().token()),
+                    Map.entry("deletionLeaseExpiresAt", deletion.lease().expiresAt().toString()),
+                    Map.entry("deletionLeaseClaimedAt", deletion.lease().claimedAt().toString()),
+                    Map.entry("deletionLeaseVersion", Long.toString(deletion.lease().leaseVersion()))));
         }
     }
 
@@ -149,6 +181,8 @@ class T14TotalGateIntegrationTest {
         assertEquals(RESERVATION_ID, expected.get("reservationId"));
         assertEquals(ACTIVE_OUTBOX_EVENT_ID, expected.get("activeEventId"));
         assertEquals(ACTIVE_LEASE_OWNER, expected.get("activeLeaseOwner"));
+        assertEquals(DELETION_MEETING_ID, expected.get("deletionMeetingId"));
+        assertEquals(DELETION_OWNER_A, expected.get("deletionLeaseOwner"));
         assertDifferentJvm(expected.get("pidA"), expected.get("startA"));
         try (JdbcDatabaseRuntime runtime = startRuntime()) {
             assertTrue(runtime.checkReadiness().ready(),
@@ -187,6 +221,9 @@ class T14TotalGateIntegrationTest {
                     outbox.find(ACTIVE_OUTBOX_EVENT_ID).orElseThrow().status());
             runFinalizationWorker(dataSource);
             assertFinalizationFacts(dataSource);
+            ArtifactDeletionLease deletionLease = deletionLease(expected);
+            reclaimDeletionLease(dataSource, deletionLease);
+            assertDeletionFacts(dataSource, deletionLease.meetingId(), deletionLease.artifactRoot());
             writeState(stateFile(), Map.ofEntries(
                     Map.entry("phase", "VERIFIED"),
                     Map.entry("pidA", expected.get("pidA")),
@@ -202,7 +239,15 @@ class T14TotalGateIntegrationTest {
                     Map.entry("activeLeaseToken", "REDACTED"),
                     Map.entry("activeLeaseExpiresAt", activeLease.expiresAt().toString()),
                     Map.entry("activeLeaseClaimedAt", activeLease.claimedAt().toString()),
-                    Map.entry("activeLeaseVersion", Long.toString(activeLease.leaseVersion()))));
+                    Map.entry("activeLeaseVersion", Long.toString(activeLease.leaseVersion())),
+                    Map.entry("deletionMeetingId", deletionLease.meetingId()),
+                    Map.entry("deletionArtifactRoot", deletionLease.artifactRoot().toString()),
+                    Map.entry("deletionStepKey", deletionLease.lease().key().stepKey()),
+                    Map.entry("deletionLeaseOwner", DELETION_OWNER_A),
+                    Map.entry("deletionLeaseToken", "REDACTED"),
+                    Map.entry("deletionLeaseExpiresAt", deletionLease.lease().expiresAt().toString()),
+                    Map.entry("deletionLeaseClaimedAt", deletionLease.lease().claimedAt().toString()),
+                    Map.entry("deletionLeaseVersion", Long.toString(deletionLease.lease().leaseVersion()))));
         }
     }
 
@@ -413,12 +458,232 @@ class T14TotalGateIntegrationTest {
         return stateFile().getParent().resolve("finalization-artifacts").toAbsolutePath().normalize();
     }
 
+    /**
+     * 建立 V012 删除入口的正式持久事实，然后只领取删除 Workflow lease 留给重启后
+     * 的 ArtifactDeletionWorker。Artifact/plan/item/workflow 均经正式 JDBC Store，
+     * 测试不把 canonical plan 或存储 binding 写入状态文件。
+     */
+    private static DeletionPrepared prepareDeletionLease(DataSource dataSource) throws Exception {
+        Path artifactRoot = deletionArtifactRoot();
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement("""
+                     INSERT INTO meeting (meeting_id, deployment_scope, client_session_id,
+                         subject_scope, profile_id, profile_revision, state, aggregate_version,
+                         finalization_receipt_id, input_state, manifest_state,
+                         created_at, updated_at)
+                     VALUES (?, 't14-total-deployment', ?, 'LEGACY_UNOWNED', 'profile-cross', 1,
+                         'DELETION_PENDING', 0, 'receipt-t14-total-deletion', 'INPUT_ACCEPTED',
+                         'DELETION_PENDING', ?, ?)
+                     """)) {
+            statement.setString(1, DELETION_MEETING_ID);
+            statement.setString(2, "session-" + DELETION_MEETING_ID);
+            statement.setTimestamp(3, java.sql.Timestamp.from(DELETION_ACCEPTED_AT));
+            statement.setTimestamp(4, java.sql.Timestamp.from(DELETION_ACCEPTED_AT));
+            assertEquals(1, statement.executeUpdate());
+        }
+
+        PersistentFileSystemMockArtifactStore artifacts =
+                new PersistentFileSystemMockArtifactStore(artifactRoot, 4096);
+        WriteIntentSpec spec = new WriteIntentSpec(
+                "artifact-t14-total-deletion-" + DELETION_MEETING_ID,
+                DELETION_MEETING_ID,
+                "transcript.final",
+                "application/octet-stream",
+                "zh-CN",
+                1,
+                DELETION_CONTENT.length,
+                checksum(DELETION_CONTENT));
+        ArtifactStore.WriteIntent intent = artifacts.createWriteIntent(spec).intent();
+        ArtifactStore.StageResult staged = artifacts.writeContent(
+                intent, new ByteArrayInputStream(DELETION_CONTENT));
+        ArtifactStore.ArtifactDescriptor descriptor = artifacts.completeWrite(
+                intent, staged.content()).artifact();
+        ArtifactDeletionPlan plan = new ArtifactDeletionPlan(
+                DELETION_MEETING_ID,
+                DELETION_ACCEPTED_AT,
+                null,
+                null,
+                List.of(ArtifactDeletionTarget.fromSpec(spec)));
+        try (Connection connection = dataSource.getConnection()) {
+            connection.setAutoCommit(false);
+            assertEquals(ArtifactReadyMetadataStore.PersistStatus.APPLIED,
+                    new JdbcArtifactReadyMetadataStore(connection).persistReady(descriptor).status());
+            assertEquals(ArtifactDeletionPlanStore.PersistStatus.APPLIED,
+                    new JdbcArtifactDeletionPlanStore(connection).register(plan).status());
+            connection.commit();
+        }
+        JdbcWorkflowStepStore workflow = new JdbcWorkflowStepStore(dataSource);
+        assertEquals(WorkflowStepStore.RegisterStatus.APPLIED,
+                workflow.register(ArtifactDeletionPlanJson.workflowStep(plan)).status());
+        List<WorkflowStepStore.ClaimedStep> claimed = workflow.claim(
+                new WorkflowStepStore.ClaimRequest(
+                        Set.of(ArtifactDeletionPlan.STEP_TYPE),
+                        DELETION_OWNER_A,
+                        T14WorkerCrossJvmTestSupport.FIRST_CLAIM_AT,
+                        T14WorkerCrossJvmTestSupport.LEASE_DURATION,
+                        1));
+        assertEquals(1, claimed.size());
+        assertEquals(WorkflowStep.Status.LEASED, claimed.getFirst().step().status());
+        return new DeletionPrepared(DELETION_MEETING_ID, artifactRoot, claimed.getFirst().lease());
+    }
+
+    private static ArtifactDeletionLease deletionLease(Map<String, String> expected) {
+        String meetingId = expected.get("deletionMeetingId");
+        Path root = Path.of(expected.get("deletionArtifactRoot")).toAbsolutePath().normalize();
+        assertEquals(deletionArtifactRoot(), root);
+        WorkflowStep.Key key = new WorkflowStep.Key(
+                meetingId, ArtifactDeletionPlan.STEP_TYPE, expected.get("deletionStepKey"));
+        WorkflowStepStore.LeaseToken lease = new WorkflowStepStore.LeaseToken(
+                key,
+                expected.get("deletionLeaseOwner"),
+                expected.get("deletionLeaseToken"),
+                Instant.parse(expected.get("deletionLeaseExpiresAt")),
+                Instant.parse(expected.get("deletionLeaseClaimedAt")),
+                Long.parseLong(expected.get("deletionLeaseVersion")));
+        assertEquals(T14WorkerCrossJvmTestSupport.RECOVERY_CLAIM_AT, lease.expiresAt());
+        return new ArtifactDeletionLease(meetingId, root, lease);
+    }
+
+    private static void reclaimDeletionLease(
+            DataSource dataSource, ArtifactDeletionLease deletion) throws Exception {
+        Instant recoveryAt = T14WorkerCrossJvmTestSupport.RECOVERY_CLAIM_AT;
+        JdbcWorkflowStepStore workflow = new JdbcWorkflowStepStore(dataSource);
+        assertEquals(WorkflowStepStore.CompleteStatus.LEASE_EXPIRED,
+                workflow.complete(deletion.lease(), recoveryAt).status());
+        assertEquals(WorkflowStepStore.FailStatus.LEASE_EXPIRED,
+                workflow.fail(deletion.lease(), recoveryAt, recoveryAt.plusSeconds(1),
+                        "T14_STALE_OWNER", "T14_STALE_OWNER", 3).status());
+
+        ArtifactDeletionWorker worker = new ArtifactDeletionWorker(
+                workflow,
+                deletionPlanStore(dataSource),
+                new JdbcArtifactDeletionItemUnitOfWork(
+                        dataSource,
+                        new PersistentFileSystemMockArtifactStore(
+                                deletion.artifactRoot(), T14WorkerCrossJvmTestSupport.ARTIFACT_LIMIT)),
+                new JdbcArtifactDeletionTerminalUnitOfWork(dataSource),
+                new ArtifactDeletionWorker.Config(
+                        DELETION_OWNER_B,
+                        Clock.fixed(recoveryAt, ZoneOffset.UTC),
+                        T14WorkerCrossJvmTestSupport.LEASE_DURATION,
+                        Duration.ofSeconds(5),
+                        T14WorkerCrossJvmTestSupport.RETRY_DELAY,
+                        1,
+                        3));
+        ArtifactDeletionWorker.RunResult result = worker.runOnce();
+        assertEquals(1, result.claimedCount());
+        assertEquals(1, result.items().size());
+        assertEquals(ArtifactDeletionWorker.ItemStatus.COMPLETED,
+                result.items().getFirst().status());
+        assertEquals(WorkflowStepStore.CompleteStatus.ALREADY_COMPLETED,
+                workflow.complete(deletion.lease(), recoveryAt.plusSeconds(1)).status());
+        assertEquals(WorkflowStepStore.FailStatus.ALREADY_COMPLETED,
+                workflow.fail(deletion.lease(), recoveryAt.plusSeconds(1),
+                        recoveryAt.plusSeconds(2), "T14_STALE_OWNER", "T14_STALE_OWNER", 3).status());
+    }
+
+    /** Test-only adapter: production plan Store is connection-scoped by design. */
+    private static ArtifactDeletionPlanStore deletionPlanStore(DataSource dataSource) {
+        return new ArtifactDeletionPlanStore() {
+            @Override
+            public Optional<MeetingDeletionPlan> find(String meetingId) {
+                try (Connection connection = dataSource.getConnection()) {
+                    connection.setAutoCommit(false);
+                    Optional<MeetingDeletionPlan> result =
+                            new JdbcArtifactDeletionPlanStore(connection).find(meetingId);
+                    connection.rollback();
+                    return result;
+                } catch (ArtifactDeletionPlanStore.StoreException failure) {
+                    throw failure;
+                } catch (Exception failure) {
+                    throw new ArtifactDeletionPlanStore.StoreException(
+                            ArtifactDeletionPlanStore.StoreErrorCode.STORAGE_UNAVAILABLE);
+                }
+            }
+
+            @Override
+            public PersistResult register(ArtifactDeletionPlan candidate) {
+                throw new UnsupportedOperationException("deletion gate is read-only");
+            }
+        };
+    }
+
+    private static void assertDeletionFacts(
+            DataSource dataSource, String meetingId, Path artifactRoot) throws Exception {
+        assertEquals(1L, countForMeeting(dataSource, "meeting", meetingId));
+        assertEquals("DELETED", scalar(dataSource,
+                "SELECT state FROM meeting WHERE meeting_id=?", meetingId));
+        assertEquals("DELETED", scalar(dataSource,
+                "SELECT manifest_state FROM meeting WHERE meeting_id=?", meetingId));
+        assertEquals("COMPLETED", scalar(dataSource,
+                "SELECT status FROM meeting_deletion_plan WHERE meeting_id=?", meetingId));
+        assertEquals(1L, countForMeeting(dataSource, "meeting_deletion_plan", meetingId));
+        assertEquals(1L, countForMeeting(dataSource, "artifact_deletion_item", meetingId));
+        assertEquals("DELETED", scalar(dataSource,
+                "SELECT status FROM artifact_deletion_item WHERE meeting_id=? AND ordinal=0",
+                meetingId));
+        assertEquals(0L, countForMeeting(dataSource, "artifact", meetingId));
+        assertEquals("COMPLETED", scalar(dataSource,
+                "SELECT status FROM workflow_step WHERE meeting_id=? AND step_type=?",
+                meetingId, ArtifactDeletionPlan.STEP_TYPE));
+        assertEquals(1L, countForMeeting(dataSource, "workflow_step", meetingId));
+        WorkflowStep workflow = new JdbcWorkflowStepStore(dataSource)
+                .find(new WorkflowStep.Key(
+                        meetingId,
+                        ArtifactDeletionPlan.STEP_TYPE,
+                        scalar(dataSource,
+                                "SELECT step_key FROM workflow_step WHERE meeting_id=? "
+                                        + "AND step_type=?",
+                                meetingId, ArtifactDeletionPlan.STEP_TYPE)))
+                .orElseThrow();
+        assertNull(workflow.leaseOwner());
+        assertNull(workflow.leaseUntil());
+        assertNull(workflow.nextAttemptAt());
+        assertEquals(1L, count(dataSource,
+                "SELECT count(*) FROM outbox_event "
+                        + "WHERE aggregate_id=? AND event_type='MeetingDeleted'", meetingId));
+        Path tombstones = artifactRoot.resolve("tombstones");
+        assertTrue(Files.isDirectory(tombstones, LinkOption.NOFOLLOW_LINKS));
+        assertEquals(1L, countSuffix(tombstones, ".deleted"));
+        assertEquals(0L, countSuffix(artifactRoot.resolve("objects"), ".ready"));
+        assertEquals(0L, countSuffix(artifactRoot.resolve("objects"), ".blob"));
+    }
+
+    private static Path deletionArtifactRoot() {
+        return stateFile().getParent().resolve("deletion-artifacts").toAbsolutePath().normalize();
+    }
+
+    private static String checksum(byte[] bytes) throws Exception {
+        return "sha256:" + HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(bytes));
+    }
+
+    private record DeletionPrepared(
+            String meetingId, Path artifactRoot, WorkflowStepStore.LeaseToken lease) {
+    }
+
+    private record ArtifactDeletionLease(
+            String meetingId, Path artifactRoot, WorkflowStepStore.LeaseToken lease) {
+    }
+
     private static long countForMeeting(
             DataSource dataSource, String table, String meetingId) throws Exception {
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement(
                      "SELECT count(*) FROM " + quote(table) + " WHERE meeting_id=?")) {
             statement.setString(1, meetingId);
+            try (ResultSet rows = statement.executeQuery()) {
+                assertTrue(rows.next());
+                return rows.getLong(1);
+            }
+        }
+    }
+
+    private static long count(DataSource dataSource, String sql, String value)
+            throws Exception {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, value);
             try (ResultSet rows = statement.executeQuery()) {
                 assertTrue(rows.next());
                 return rows.getLong(1);
@@ -677,7 +942,15 @@ class T14TotalGateIntegrationTest {
                 + "activeLeaseToken=" + fixedValue(values.get("activeLeaseToken")) + '\n'
                 + "activeLeaseExpiresAt=" + fixedValue(values.get("activeLeaseExpiresAt")) + '\n'
                 + "activeLeaseClaimedAt=" + fixedValue(values.get("activeLeaseClaimedAt")) + '\n'
-                + "activeLeaseVersion=" + fixedValue(values.get("activeLeaseVersion")) + '\n';
+                + "activeLeaseVersion=" + fixedValue(values.get("activeLeaseVersion")) + '\n'
+                + "deletionMeetingId=" + fixedValue(values.get("deletionMeetingId")) + '\n'
+                + "deletionArtifactRoot=" + fixedValue(values.get("deletionArtifactRoot")) + '\n'
+                + "deletionStepKey=" + fixedValue(values.get("deletionStepKey")) + '\n'
+                + "deletionLeaseOwner=" + fixedValue(values.get("deletionLeaseOwner")) + '\n'
+                + "deletionLeaseToken=" + fixedValue(values.get("deletionLeaseToken")) + '\n'
+                + "deletionLeaseExpiresAt=" + fixedValue(values.get("deletionLeaseExpiresAt")) + '\n'
+                + "deletionLeaseClaimedAt=" + fixedValue(values.get("deletionLeaseClaimedAt")) + '\n'
+                + "deletionLeaseVersion=" + fixedValue(values.get("deletionLeaseVersion")) + '\n';
         Files.writeString(path, content, StandardCharsets.UTF_8,
                 StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING);
         try {
