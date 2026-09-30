@@ -1,8 +1,13 @@
 package com.czur.reference.application.persistence.jdbc;
 
+import com.czur.reference.application.artifact.filesystem.PersistentFileSystemMockArtifactStore;
+import com.czur.reference.application.finalization.FinalizationCheckpoint;
+import com.czur.reference.application.finalization.MockFinalizationWorker;
 import com.czur.reference.application.entitlement.ExpiredReservationCleanupWorker;
 import com.czur.reference.application.outbox.OutboxDispatcher;
 import com.czur.reference.application.port.OutboxStore;
+import com.czur.reference.application.port.WorkflowStep;
+import com.czur.reference.application.port.WorkflowStepStore;
 import com.czur.reference.application.port.entitlement.AuthorizedProfileSnapshot;
 import com.czur.reference.application.port.entitlement.EntitlementIdGenerator;
 import com.czur.reference.application.port.entitlement.ExpiredReservationStore;
@@ -31,6 +36,7 @@ import java.sql.ResultSet;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -70,6 +76,8 @@ class T14TotalGateIntegrationTest {
     private static final String DEPLOYMENT_SCOPE = "t14-total-deployment";
     private static final String SUBJECT_SCOPE = "t14-total-subject";
     private static final String EXPECTED_MEETING_ID = "meeting-t14-total-cleanup";
+    private static final String FINALIZATION_SUFFIX = "total-finalization";
+    private static final String FINALIZATION_MEETING_ID = "mtg_cross_jvm_total_finalization";
     private static final Instant FIXTURE_NOW = Instant.parse("2026-09-30T04:00:00Z");
     private static final Set<String> MIGRATIONS = Set.of(
             "V001__initial_schema", "V002__outbox_lease_fencing",
@@ -106,6 +114,7 @@ class T14TotalGateIntegrationTest {
             assertEmptyBusinessFacts(runtime.dataSource());
             seedOutboxEvent(runtime.dataSource());
             seedExpiredReservation(runtime.dataSource());
+            prepareFinalizationLease(runtime.dataSource());
             JdbcOutboxStore outbox = new JdbcOutboxStore(runtime.dataSource());
             assertEquals(OutboxStore.EventStatus.PENDING,
                     outbox.find(OUTBOX_EVENT_ID).orElseThrow().status());
@@ -176,6 +185,8 @@ class T14TotalGateIntegrationTest {
             reclaimActiveLease(dataSource, activeLease);
             assertEquals(OutboxStore.EventStatus.PUBLISHED,
                     outbox.find(ACTIVE_OUTBOX_EVENT_ID).orElseThrow().status());
+            runFinalizationWorker(dataSource);
+            assertFinalizationFacts(dataSource);
             writeState(stateFile(), Map.ofEntries(
                     Map.entry("phase", "VERIFIED"),
                     Map.entry("pidA", expected.get("pidA")),
@@ -328,6 +339,113 @@ class T14TotalGateIntegrationTest {
                 throw new IllegalStateException("T14 total reserve fixture already exists");
             }
             connection.commit();
+        }
+    }
+
+    /**
+     * 通过正式建会/Stop/Admission 链建立一条持久 Finalization checkpoint，再只领取
+     * 其 Workflow lease 留给数据库重启后的正式 Worker。这里不手工插入 workflow
+     * payload，确保恢复阶段确实消费数据库中的 canonical checkpoint。
+     */
+    private static void prepareFinalizationLease(DataSource dataSource) throws Exception {
+        T14WorkerCrossJvmTestSupport.Prepared prepared =
+                T14WorkerCrossJvmTestSupport.prepare(
+                        dataSource, finalizationArtifactRoot(), FINALIZATION_SUFFIX);
+        List<WorkflowStepStore.ClaimedStep> claimed = new JdbcWorkflowStepStore(dataSource)
+                .claim(new WorkflowStepStore.ClaimRequest(
+                        Set.of(FinalizationCheckpoint.STEP_TYPE),
+                        "t14-total-finalizer-a",
+                        T14WorkerCrossJvmTestSupport.FIRST_CLAIM_AT,
+                        T14WorkerCrossJvmTestSupport.LEASE_DURATION,
+                        1));
+        assertEquals(1, claimed.size());
+        assertEquals(prepared.meetingId(), claimed.get(0).step().key().meetingId());
+        assertEquals(FINALIZATION_MEETING_ID, prepared.meetingId());
+        assertEquals(WorkflowStep.Status.LEASED, claimed.get(0).step().status());
+    }
+
+    private static void runFinalizationWorker(DataSource dataSource) throws Exception {
+        Instant recoveryAt = T14WorkerCrossJvmTestSupport.RECOVERY_CLAIM_AT;
+        MockFinalizationWorker worker = new MockFinalizationWorker(
+                new JdbcWorkflowStepStore(dataSource),
+                new PersistentFileSystemMockArtifactStore(
+                        finalizationArtifactRoot(), T14WorkerCrossJvmTestSupport.ARTIFACT_LIMIT),
+                T14WorkerCrossJvmTestSupport.entitlementProvider(
+                        dataSource, Clock.fixed(recoveryAt, ZoneOffset.UTC)),
+                new JdbcFinalizationCompletionUnitOfWork(dataSource),
+                new MockFinalizationWorker.Config(
+                        "t14-total-finalizer-b",
+                        Clock.fixed(recoveryAt, ZoneOffset.UTC),
+                        T14WorkerCrossJvmTestSupport.LEASE_DURATION,
+                        Duration.ofSeconds(5),
+                        T14WorkerCrossJvmTestSupport.RETRY_DELAY,
+                        1,
+                        3));
+        MockFinalizationWorker.RunResult result = worker.runOnce();
+        assertEquals(1, result.claimedCount());
+        assertEquals(1, result.items().size());
+        assertEquals(MockFinalizationWorker.ItemStatus.COMPLETED,
+                result.items().get(0).status());
+    }
+
+    private static void assertFinalizationFacts(DataSource dataSource) throws Exception {
+        assertEquals("READY", scalar(dataSource,
+                "SELECT state FROM meeting WHERE meeting_id=?", FINALIZATION_MEETING_ID));
+        assertEquals("COMMITTED", scalar(dataSource,
+                "SELECT status FROM usage_reservation WHERE expected_meeting_id=?",
+                FINALIZATION_MEETING_ID));
+        assertEquals(1L, countForMeeting(dataSource, "final_usage_fact", FINALIZATION_MEETING_ID));
+        assertEquals(1L, countForMeeting(
+                dataSource, "finalization_execution_fact", FINALIZATION_MEETING_ID));
+        assertEquals(1L, countForMeeting(
+                dataSource, "meeting_manifest_revision", FINALIZATION_MEETING_ID));
+        assertEquals(2L, countForMeeting(dataSource, "artifact", FINALIZATION_MEETING_ID));
+        assertEquals(1L, countForMeeting(dataSource, "workflow_step", FINALIZATION_MEETING_ID));
+        assertEquals("COMPLETED", scalar(dataSource,
+                "SELECT status FROM workflow_step WHERE meeting_id=? AND step_type=?",
+                FINALIZATION_MEETING_ID, FinalizationCheckpoint.STEP_TYPE));
+        Path root = finalizationArtifactRoot().resolve("objects");
+        assertEquals(2L, countSuffix(root, ".blob"));
+        assertEquals(2L, countSuffix(root, ".ready"));
+    }
+
+    private static Path finalizationArtifactRoot() {
+        return stateFile().getParent().resolve("finalization-artifacts").toAbsolutePath().normalize();
+    }
+
+    private static long countForMeeting(
+            DataSource dataSource, String table, String meetingId) throws Exception {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "SELECT count(*) FROM " + quote(table) + " WHERE meeting_id=?")) {
+            statement.setString(1, meetingId);
+            try (ResultSet rows = statement.executeQuery()) {
+                assertTrue(rows.next());
+                return rows.getLong(1);
+            }
+        }
+    }
+
+    private static String scalar(DataSource dataSource, String sql, String... values)
+            throws Exception {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            for (int index = 0; index < values.length; index++) {
+                statement.setString(index + 1, values[index]);
+            }
+            try (ResultSet rows = statement.executeQuery()) {
+                assertTrue(rows.next());
+                return rows.getString(1);
+            }
+        }
+    }
+
+    private static long countSuffix(Path directory, String suffix) throws Exception {
+        if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) {
+            return 0;
+        }
+        try (var paths = Files.list(directory)) {
+            return paths.filter(path -> path.getFileName().toString().endsWith(suffix)).count();
         }
     }
 
