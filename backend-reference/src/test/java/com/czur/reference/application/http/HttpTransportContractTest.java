@@ -56,6 +56,18 @@ class HttpTransportContractTest {
     }
 
     @Test
+    void requestEnforcesStrictUtf8BodyAndHeaderByteLimits() {
+        assertThrows(IllegalArgumentException.class,
+                () -> new HttpRequest("POST", "/v1/meetings", Map.of(),
+                        "é".repeat(HttpRequest.MAX_BODY_BYTES / 2 + 1)));
+        assertThrows(IllegalArgumentException.class,
+                () -> new HttpRequest("POST", "/v1/meetings", Map.of(), "bad\ud800"));
+        assertThrows(IllegalArgumentException.class,
+                () -> new HttpRequest("GET", "/v1/meetings",
+                        Map.of("X-Large", "x".repeat(HttpRequest.MAX_HEADER_BYTES)), ""));
+    }
+
+    @Test
     void responseNormalizesHeadersAndDoesNotLogBody() {
         HttpResponse response = HttpResponse.json(200, "{\"token\":\"private\"}");
 
@@ -63,6 +75,18 @@ class HttpTransportContractTest {
         assertEquals("no-store", response.headers().get("cache-control"));
         assertFalse(response.toString().contains("private"));
         assertFalse(response.toString().contains("token"));
+    }
+
+    @Test
+    void responseEnforcesStrictUtf8BodyAndHeaderByteLimits() {
+        assertThrows(IllegalArgumentException.class,
+                () -> new HttpResponse(200, Map.of(),
+                        "é".repeat(HttpResponse.MAX_BODY_BYTES / 2 + 1)));
+        assertThrows(IllegalArgumentException.class,
+                () -> new HttpResponse(200, Map.of(), "bad\udfff"));
+        assertThrows(IllegalArgumentException.class,
+                () -> new HttpResponse(200,
+                        Map.of("X-Large", "x".repeat(HttpResponse.MAX_HEADER_BYTES)), ""));
     }
 
     @Test

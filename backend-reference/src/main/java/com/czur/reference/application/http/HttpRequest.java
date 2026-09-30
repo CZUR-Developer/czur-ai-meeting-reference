@@ -5,6 +5,11 @@ import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
+import java.nio.charset.StandardCharsets;
 
 /**
  * 与 Servlet、Netty 或 JDK HttpServer 无关的入站 HTTP 请求值对象。
@@ -22,7 +27,10 @@ public record HttpRequest(
         String body) {
     public static final int MAX_PATH_CHARS = 4096;
     public static final int MAX_HEADER_COUNT = 64;
-    public static final int MAX_BODY_CHARS = 1_048_576;
+    /** body 的严格 UTF-8 字节上限，而不是 Java UTF-16 字符数上限。 */
+    public static final int MAX_BODY_BYTES = 1_048_576;
+    /** 所有规范化 header 名和值的严格 UTF-8 字节总上限。 */
+    public static final int MAX_HEADER_BYTES = 16 * 1024;
 
     public HttpRequest {
         method = normalizeMethod(method);
@@ -30,7 +38,7 @@ public record HttpRequest(
         headers = immutableHeaders(headers);
         query = immutableValues(query, "query");
         body = body == null ? "" : body;
-        if (body.length() > MAX_BODY_CHARS) {
+        if (utf8Bytes(body, "body") > MAX_BODY_BYTES) {
             throw new IllegalArgumentException("body exceeds transport limit");
         }
     }
@@ -81,6 +89,7 @@ public record HttpRequest(
             throw new IllegalArgumentException("too many headers");
         }
         Map<String, String> normalized = new LinkedHashMap<>();
+        long headerBytes = 0;
         for (Map.Entry<String, String> entry : values.entrySet()) {
             String key = entry.getKey();
             String value = entry.getValue();
@@ -92,6 +101,10 @@ public record HttpRequest(
             String lower = key.toLowerCase(Locale.ROOT);
             if (normalized.put(lower, value) != null) {
                 throw new IllegalArgumentException("duplicate header names are not allowed");
+            }
+            headerBytes += (long) utf8Bytes(lower, "header") + utf8Bytes(value, "header");
+            if (headerBytes > MAX_HEADER_BYTES) {
+                throw new IllegalArgumentException("headers exceed transport limit");
             }
         }
         return Collections.unmodifiableMap(normalized);
@@ -114,5 +127,17 @@ public record HttpRequest(
             }
         }
         return Collections.unmodifiableMap(copy);
+    }
+
+    private static int utf8Bytes(String value, String name) {
+        try {
+            ByteBuffer encoded = StandardCharsets.UTF_8.newEncoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .encode(CharBuffer.wrap(value));
+            return encoded.remaining();
+        } catch (CharacterCodingException failure) {
+            throw new IllegalArgumentException(name + " must be valid UTF-8 text");
+        }
     }
 }
