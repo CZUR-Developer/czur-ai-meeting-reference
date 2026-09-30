@@ -38,6 +38,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -46,8 +50,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * P2-T14-11 total gate: a fresh deploy migration chain survives one real PostgreSQL
  * stop/start in two independent Maven/JVM phases.  The first JVM leaves a pending
- * Outbox event and an expired unbound Reservation in PostgreSQL; the second JVM runs
- * the production Dispatcher and cleanup Worker against those durable facts.
+ * Outbox event, an active leased event, and an expired unbound Reservation in
+ * PostgreSQL; the second JVM runs the production Dispatcher and cleanup Worker against
+ * those durable facts and reclaims the expired lease with a single winner.
  */
 @EnabledIfEnvironmentVariable(named = "REFERENCE_TEST_DATABASE_URL", matches = ".+")
 @EnabledIfEnvironmentVariable(named = "T14_TOTAL_STATE_FILE", matches = ".+")
@@ -57,6 +62,10 @@ class T14TotalGateIntegrationTest {
     private static final String OUTBOX_EVENT_TYPE = "T14TotalEvent";
     private static final String UNKNOWN_OUTBOX_EVENT_ID = "t14-total-unregistered-event";
     private static final String UNKNOWN_OUTBOX_EVENT_TYPE = "T14TotalUnregisteredEvent";
+    private static final String ACTIVE_OUTBOX_EVENT_ID = "t14-total-active-event";
+    private static final String ACTIVE_OUTBOX_EVENT_TYPE = "T14TotalActiveEvent";
+    private static final String ACTIVE_LEASE_OWNER = "t14-total-owner-a";
+    private static final Duration ACTIVE_LEASE_DURATION = Duration.ofSeconds(10);
     private static final String RESERVATION_ID = "reservation-t14-total-cleanup";
     private static final String DEPLOYMENT_SCOPE = "t14-total-deployment";
     private static final String SUBJECT_SCOPE = "t14-total-subject";
@@ -72,7 +81,9 @@ class T14TotalGateIntegrationTest {
             "V012__artifact_deletion_plan");
     private static final Set<String> STATE_KEYS = Set.of(
             "phase", "pidA", "startA", "pidB", "startB", "postmasterStart",
-            "migrationCount", "outboxEventId", "reservationId");
+            "migrationCount", "outboxEventId", "reservationId", "activeEventId",
+            "activeLeaseOwner", "activeLeaseToken", "activeLeaseExpiresAt",
+            "activeLeaseClaimedAt", "activeLeaseVersion");
     private static final Set<PosixFilePermission> PRIVATE_PERMISSIONS =
             PosixFilePermissions.fromString("rw-------");
     private static final Set<String> EMPTY_FACT_TABLES = Set.of(
@@ -95,22 +106,28 @@ class T14TotalGateIntegrationTest {
             assertEmptyBusinessFacts(runtime.dataSource());
             seedOutboxEvent(runtime.dataSource());
             seedExpiredReservation(runtime.dataSource());
+            JdbcOutboxStore outbox = new JdbcOutboxStore(runtime.dataSource());
             assertEquals(OutboxStore.EventStatus.PENDING,
-                    new JdbcOutboxStore(runtime.dataSource())
-                            .find(OUTBOX_EVENT_ID).orElseThrow().status());
+                    outbox.find(OUTBOX_EVENT_ID).orElseThrow().status());
             assertEquals(OutboxStore.EventStatus.PENDING,
-                    new JdbcOutboxStore(runtime.dataSource())
-                            .find(UNKNOWN_OUTBOX_EVENT_ID).orElseThrow().status());
-            writeState(state, Map.of(
-                    "phase", "PREPARED",
-                    "pidA", Long.toString(ProcessHandle.current().pid()),
-                    "startA", Long.toString(ManagementFactory.getRuntimeMXBean().getStartTime()),
-                    "pidB", "UNSET",
-                    "startB", "UNSET",
-                    "postmasterStart", postmasterStart(runtime.dataSource()).toString(),
-                    "migrationCount", Integer.toString(MIGRATIONS.size()),
-                    "outboxEventId", OUTBOX_EVENT_ID,
-                    "reservationId", RESERVATION_ID));
+                    outbox.find(UNKNOWN_OUTBOX_EVENT_ID).orElseThrow().status());
+            OutboxStore.LeaseToken activeLease = claimActiveLease(outbox);
+            writeState(state, Map.ofEntries(
+                    Map.entry("phase", "PREPARED"),
+                    Map.entry("pidA", Long.toString(ProcessHandle.current().pid())),
+                    Map.entry("startA", Long.toString(ManagementFactory.getRuntimeMXBean().getStartTime())),
+                    Map.entry("pidB", "UNSET"),
+                    Map.entry("startB", "UNSET"),
+                    Map.entry("postmasterStart", postmasterStart(runtime.dataSource()).toString()),
+                    Map.entry("migrationCount", Integer.toString(MIGRATIONS.size())),
+                    Map.entry("outboxEventId", OUTBOX_EVENT_ID),
+                    Map.entry("reservationId", RESERVATION_ID),
+                    Map.entry("activeEventId", activeLease.eventId()),
+                    Map.entry("activeLeaseOwner", activeLease.owner()),
+                    Map.entry("activeLeaseToken", activeLease.token()),
+                    Map.entry("activeLeaseExpiresAt", activeLease.expiresAt().toString()),
+                    Map.entry("activeLeaseClaimedAt", activeLease.claimedAt().toString()),
+                    Map.entry("activeLeaseVersion", Long.toString(activeLease.leaseVersion()))));
         }
     }
 
@@ -121,6 +138,8 @@ class T14TotalGateIntegrationTest {
         assertEquals("PREPARED", expected.get("phase"));
         assertEquals(OUTBOX_EVENT_ID, expected.get("outboxEventId"));
         assertEquals(RESERVATION_ID, expected.get("reservationId"));
+        assertEquals(ACTIVE_OUTBOX_EVENT_ID, expected.get("activeEventId"));
+        assertEquals(ACTIVE_LEASE_OWNER, expected.get("activeLeaseOwner"));
         assertDifferentJvm(expected.get("pidA"), expected.get("startA"));
         try (JdbcDatabaseRuntime runtime = startRuntime()) {
             assertTrue(runtime.checkReadiness().ready(),
@@ -147,16 +166,32 @@ class T14TotalGateIntegrationTest {
             assertEquals(UsageReservation.State.CANCELLED,
                     findReservation(dataSource).orElseThrow().state());
             assertCleanupOperationFacts(dataSource);
-            writeState(stateFile(), Map.of(
-                    "phase", "VERIFIED",
-                    "pidA", expected.get("pidA"),
-                    "startA", expected.get("startA"),
-                    "pidB", Long.toString(ProcessHandle.current().pid()),
-                    "startB", Long.toString(ManagementFactory.getRuntimeMXBean().getStartTime()),
-                    "postmasterStart", after.toString(),
-                    "migrationCount", Integer.toString(MIGRATIONS.size()),
-                    "outboxEventId", OUTBOX_EVENT_ID,
-                    "reservationId", RESERVATION_ID));
+            OutboxStore.LeaseToken activeLease = new OutboxStore.LeaseToken(
+                    expected.get("activeEventId"),
+                    expected.get("activeLeaseOwner"),
+                    expected.get("activeLeaseToken"),
+                    Instant.parse(expected.get("activeLeaseExpiresAt")),
+                    Instant.parse(expected.get("activeLeaseClaimedAt")),
+                    Long.parseLong(expected.get("activeLeaseVersion")));
+            reclaimActiveLease(dataSource, activeLease);
+            assertEquals(OutboxStore.EventStatus.PUBLISHED,
+                    outbox.find(ACTIVE_OUTBOX_EVENT_ID).orElseThrow().status());
+            writeState(stateFile(), Map.ofEntries(
+                    Map.entry("phase", "VERIFIED"),
+                    Map.entry("pidA", expected.get("pidA")),
+                    Map.entry("startA", expected.get("startA")),
+                    Map.entry("pidB", Long.toString(ProcessHandle.current().pid())),
+                    Map.entry("startB", Long.toString(ManagementFactory.getRuntimeMXBean().getStartTime())),
+                    Map.entry("postmasterStart", after.toString()),
+                    Map.entry("migrationCount", Integer.toString(MIGRATIONS.size())),
+                    Map.entry("outboxEventId", OUTBOX_EVENT_ID),
+                    Map.entry("reservationId", RESERVATION_ID),
+                    Map.entry("activeEventId", ACTIVE_OUTBOX_EVENT_ID),
+                    Map.entry("activeLeaseOwner", ACTIVE_LEASE_OWNER),
+                    Map.entry("activeLeaseToken", "REDACTED"),
+                    Map.entry("activeLeaseExpiresAt", activeLease.expiresAt().toString()),
+                    Map.entry("activeLeaseClaimedAt", activeLease.claimedAt().toString()),
+                    Map.entry("activeLeaseVersion", Long.toString(activeLease.leaseVersion()))));
         }
     }
 
@@ -164,7 +199,8 @@ class T14TotalGateIntegrationTest {
         JdbcOutboxStore outbox = new JdbcOutboxStore(dataSource);
         for (String[] fixture : List.of(
                 new String[]{OUTBOX_EVENT_ID, OUTBOX_EVENT_TYPE},
-                new String[]{UNKNOWN_OUTBOX_EVENT_ID, UNKNOWN_OUTBOX_EVENT_TYPE})) {
+                new String[]{UNKNOWN_OUTBOX_EVENT_ID, UNKNOWN_OUTBOX_EVENT_TYPE},
+                new String[]{ACTIVE_OUTBOX_EVENT_ID, ACTIVE_OUTBOX_EVENT_TYPE})) {
             OutboxStore.OutboxEvent event = OutboxStore.OutboxEvent.pending(
                     fixture[0],
                     "T14Total",
@@ -176,6 +212,86 @@ class T14TotalGateIntegrationTest {
             OutboxStore.AppendResult result = outbox.append(event);
             assertEquals(OutboxStore.AppendStatus.APPENDED, result.status());
         }
+    }
+
+    private static OutboxStore.LeaseToken claimActiveLease(JdbcOutboxStore outbox) {
+        List<OutboxStore.ClaimedEvent> claimed = outbox.claim(new OutboxStore.ClaimRequest(
+                Set.of(ACTIVE_OUTBOX_EVENT_TYPE),
+                ACTIVE_LEASE_OWNER,
+                FIXTURE_NOW,
+                ACTIVE_LEASE_DURATION,
+                1));
+        assertEquals(1, claimed.size());
+        OutboxStore.LeaseToken lease = claimed.get(0).lease();
+        assertEquals(ACTIVE_OUTBOX_EVENT_ID, lease.eventId());
+        assertEquals(ACTIVE_LEASE_OWNER, lease.owner());
+        assertEquals(FIXTURE_NOW, lease.claimedAt());
+        assertEquals(FIXTURE_NOW.plus(ACTIVE_LEASE_DURATION), lease.expiresAt());
+        assertTrue(lease.leaseVersion() > 0);
+        return lease;
+    }
+
+    private static void reclaimActiveLease(
+            DataSource dataSource, OutboxStore.LeaseToken oldLease) throws Exception {
+        Instant reclaimAt = FIXTURE_NOW.plus(ACTIVE_LEASE_DURATION).plusSeconds(1);
+        JdbcOutboxStore outbox = new JdbcOutboxStore(dataSource);
+        assertEquals(OutboxStore.PublishStatus.LEASE_EXPIRED,
+                outbox.markPublished(oldLease, reclaimAt).status());
+        assertEquals(OutboxStore.FailureStatus.LEASE_EXPIRED,
+                outbox.markFailed(oldLease, reclaimAt, reclaimAt.plusSeconds(1),
+                        "t14-total-stale-owner", 3).status());
+
+        OutboxDispatcher first = activeDispatcher(dataSource, "t14-total-owner-b", reclaimAt);
+        OutboxDispatcher second = activeDispatcher(dataSource, "t14-total-owner-c", reclaimAt);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<OutboxDispatcher.RunResult> firstResult = executor.submit(() -> {
+                start.await();
+                return first.runOnce();
+            });
+            Future<OutboxDispatcher.RunResult> secondResult = executor.submit(() -> {
+                start.await();
+                return second.runOnce();
+            });
+            start.countDown();
+            List<OutboxDispatcher.RunResult> results = List.of(
+                    firstResult.get(), secondResult.get());
+            assertEquals(1, results.stream()
+                    .mapToInt(OutboxDispatcher.RunResult::claimedCount).sum());
+            assertEquals(1, results.stream()
+                    .filter(result -> result.claimedCount() == 0 && result.items().isEmpty())
+                    .count());
+            assertEquals(1, results.stream()
+                    .flatMap(result -> result.items().stream())
+                    .filter(item -> item.status() == OutboxDispatcher.ItemStatus.PUBLISHED)
+                    .count());
+            assertEquals(OutboxStore.PublishStatus.ALREADY_PUBLISHED,
+                    outbox.markPublished(oldLease, reclaimAt.plusSeconds(1)).status());
+            assertEquals(OutboxStore.FailureStatus.ALREADY_PUBLISHED,
+                    outbox.markFailed(oldLease, reclaimAt.plusSeconds(1),
+                            reclaimAt.plusSeconds(2), "t14-total-late-owner", 3).status());
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    private static OutboxDispatcher activeDispatcher(
+            DataSource dataSource, String owner, Instant now) {
+        return new OutboxDispatcher(
+                new JdbcOutboxStore(dataSource),
+                List.of(new OutboxDispatcher.HandlerRegistration(
+                        ACTIVE_OUTBOX_EVENT_TYPE, (event, context) -> {
+                            assertEquals(ACTIVE_OUTBOX_EVENT_ID, event.eventId());
+                            assertEquals(ACTIVE_OUTBOX_EVENT_TYPE, event.eventType());
+                        })),
+                new OutboxDispatcher.Config(
+                        owner,
+                        java.time.Clock.fixed(now, ZoneOffset.UTC),
+                        Duration.ofSeconds(30),
+                        Duration.ZERO,
+                        1,
+                        3));
     }
 
     private static void seedExpiredReservation(DataSource dataSource) throws Exception {
@@ -437,7 +553,13 @@ class T14TotalGateIntegrationTest {
                 + "postmasterStart=" + fixedValue(values.get("postmasterStart")) + '\n'
                 + "migrationCount=" + fixedValue(values.get("migrationCount")) + '\n'
                 + "outboxEventId=" + fixedValue(values.get("outboxEventId")) + '\n'
-                + "reservationId=" + fixedValue(values.get("reservationId")) + '\n';
+                + "reservationId=" + fixedValue(values.get("reservationId")) + '\n'
+                + "activeEventId=" + fixedValue(values.get("activeEventId")) + '\n'
+                + "activeLeaseOwner=" + fixedValue(values.get("activeLeaseOwner")) + '\n'
+                + "activeLeaseToken=" + fixedValue(values.get("activeLeaseToken")) + '\n'
+                + "activeLeaseExpiresAt=" + fixedValue(values.get("activeLeaseExpiresAt")) + '\n'
+                + "activeLeaseClaimedAt=" + fixedValue(values.get("activeLeaseClaimedAt")) + '\n'
+                + "activeLeaseVersion=" + fixedValue(values.get("activeLeaseVersion")) + '\n';
         Files.writeString(path, content, StandardCharsets.UTF_8,
                 StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING);
         try {
