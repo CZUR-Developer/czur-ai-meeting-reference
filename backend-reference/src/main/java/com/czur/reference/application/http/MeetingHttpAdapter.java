@@ -150,8 +150,14 @@ public final class MeetingHttpAdapter {
             validateEmptyStopBody(request.body());
             StopRequest decoded = decoder.decodeStop(request, meetingId, idempotencyKey);
             Objects.requireNonNull(decoded, "decoded stop request");
-            requirePathMeetingId(meetingId, decoded.intent().meetingId());
-            requireDecodedIdempotencyKey(idempotencyKey, decoded.intent().idempotencyKey());
+            try {
+                requirePathMeetingId(meetingId, decoded.intent().meetingId());
+                requireDecodedIdempotencyKey(idempotencyKey, decoded.intent().idempotencyKey());
+            } catch (RuntimeException mismatch) {
+                // 解码器已经创建凭据但尚未交给 application service，拒绝时也要清除。
+                decoded.verificationRequest().credential().close();
+                throw mismatch;
+            }
             return errors.stop(stopService.stop(decoded.verificationRequest(), decoded.intent()));
         }
 

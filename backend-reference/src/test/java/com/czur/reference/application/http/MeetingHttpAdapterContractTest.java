@@ -188,13 +188,15 @@ class MeetingHttpAdapterContractTest {
         assertEquals(400, malformed.status());
         assertNull(stop.request);
 
+        IdentityVerificationRequest mismatchedRequest = requestCredential();
         decoder.stop = new MeetingHttpAdapter.StopRequest(
-                requestCredential(), new StopMeetingIntent("mtg_other", "stop-key-1234567"));
+                mismatchedRequest, new StopMeetingIntent("mtg_other", "stop-key-1234567"));
         HttpResponse mismatch = adapter.handle(new HttpRequest(
                 "POST", "/v1/meetings/mtg_stop:stop",
                 Map.of("idempotency-key", "stop-key-1234567"), "{}"), null);
         assertEquals(400, mismatch.status());
         assertNull(stop.request);
+        assertTrue(mismatchedRequest.credential().isDestroyed());
     }
 
     @Test
