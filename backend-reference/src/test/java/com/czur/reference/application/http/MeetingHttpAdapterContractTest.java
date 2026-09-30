@@ -1,6 +1,9 @@
 package com.czur.reference.application.http;
 
 import com.czur.reference.application.command.MeetingCommandContext;
+import com.czur.reference.application.command.AuthenticatedMeetingStopApplicationService;
+import com.czur.reference.application.command.MeetingCommandResult;
+import com.czur.reference.application.command.StopMeetingIntent;
 import com.czur.reference.application.port.DeleteRequest;
 import com.czur.reference.application.port.DeleteResult;
 import com.czur.reference.application.port.FinalizationFact;
@@ -11,7 +14,12 @@ import com.czur.reference.application.port.MeetingQueryPort;
 import com.czur.reference.application.port.MeetingStatus;
 import com.czur.reference.application.port.MeetingSummary;
 import com.czur.reference.application.port.identity.Subject;
+import com.czur.reference.application.port.identity.IdentityProviderResult;
+import com.czur.reference.application.port.identity.IdentityVerificationRequest;
+import com.czur.reference.application.port.identity.SecretCredential;
 import com.czur.reference.application.port.identity.VerifiedIdentity;
+import com.czur.reference.application.port.OwnedMeetingStopUnitOfWork;
+import com.czur.reference.domain.meeting.MeetingAggregate;
 import com.czur.reference.domain.meeting.MeetingState;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -25,6 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * 会议 HTTP adapter 的 transport contract 测试。
@@ -39,6 +48,7 @@ class MeetingHttpAdapterContractTest {
     private RecordingDeletion deletion;
     private Decoder decoder;
     private MeetingHttpAdapter adapter;
+    private RecordingStop stop;
 
     @BeforeEach
     void setUp() {
@@ -48,6 +58,7 @@ class MeetingHttpAdapterContractTest {
         adapter = new MeetingHttpAdapter(
                 query, deletion, decoder,
                 new HttpErrorMapper(() -> "adapter-diagnostic"));
+        stop = new RecordingStop();
     }
 
     @Test
@@ -129,6 +140,79 @@ class MeetingHttpAdapterContractTest {
     }
 
     @Test
+    void configuredStopRouteDecodesIdentityAndMapsPendingOrAccepted() {
+        AuthenticatedMeetingStopApplicationService service = stopService();
+        adapter = new MeetingHttpAdapter(query, deletion, decoder,
+                new HttpErrorMapper(() -> "adapter-diagnostic"), service);
+        decoder.stop = new MeetingHttpAdapter.StopRequest(
+                requestCredential(), new StopMeetingIntent("mtg_stop", "stop-key-1234567"));
+        stop.result = new OwnedMeetingStopUnitOfWork.Success(
+                OwnedMeetingStopUnitOfWork.SuccessCode.ACCEPTED, stopResult(MeetingState.STOPPING));
+        query.getResult = new MeetingQueryPort.Found(status(
+                MeetingState.STOPPING,
+                FinalizationFact.pending(InputState.INPUT_COMPLETE_PENDING)));
+        HttpResponse pending = adapter.handle(new HttpRequest(
+                "POST", "/v1/meetings/mtg_stop:stop",
+                Map.of("idempotency-key", "stop-key-1234567"), "{}"), null);
+        assertEquals(202, pending.status());
+        assertFalse(pending.body().contains("updatedAt"));
+        assertTrue(pending.body().contains("INPUT_COMPLETE_PENDING"));
+
+        decoder.stop = new MeetingHttpAdapter.StopRequest(
+                requestCredential(), new StopMeetingIntent("mtg_stop", "stop-key-1234567"));
+        query.getResult = new MeetingQueryPort.Found(status(
+                MeetingState.FINALIZING, FinalizationFact.accepted("receipt")));
+        HttpResponse accepted = adapter.handle(new HttpRequest(
+                "POST", "/v1/meetings/mtg_stop:stop",
+                Map.of("idempotency-key", "stop-key-1234567"), ""), null);
+        assertEquals(200, accepted.status());
+        assertTrue(accepted.body().contains("receipt"));
+        assertFalse(accepted.body().contains("updatedAt"));
+        assertEquals("mtg_stop", stop.request.meetingId());
+    }
+
+    @Test
+    void configuredStopRouteRejectsUnsupportedBodyAndMismatchesBeforeService() {
+        adapter = new MeetingHttpAdapter(query, deletion, decoder,
+                new HttpErrorMapper(() -> "adapter-diagnostic"), stopService());
+        HttpResponse unsupported = adapter.handle(new HttpRequest(
+                "POST", "/v1/meetings/mtg_stop:stop",
+                Map.of("idempotency-key", "stop-key-1234567"),
+                "{\"lastStreamSequence\":1}"), null);
+        assertEquals(400, unsupported.status());
+        assertNull(stop.request);
+
+        HttpResponse malformed = adapter.handle(new HttpRequest(
+                "POST", "/v1/meetings/mtg_stop:stop",
+                Map.of("idempotency-key", "stop-key-1234567"), "{} trailing"), null);
+        assertEquals(400, malformed.status());
+        assertNull(stop.request);
+
+        decoder.stop = new MeetingHttpAdapter.StopRequest(
+                requestCredential(), new StopMeetingIntent("mtg_other", "stop-key-1234567"));
+        HttpResponse mismatch = adapter.handle(new HttpRequest(
+                "POST", "/v1/meetings/mtg_stop:stop",
+                Map.of("idempotency-key", "stop-key-1234567"), "{}"), null);
+        assertEquals(400, mismatch.status());
+        assertNull(stop.request);
+    }
+
+    @Test
+    void configuredStopQueryFailureDoesNotProduceSuccessBody() {
+        adapter = new MeetingHttpAdapter(query, deletion, decoder,
+                new HttpErrorMapper(() -> "adapter-diagnostic"), stopService());
+        decoder.stop = new MeetingHttpAdapter.StopRequest(
+                requestCredential(), new StopMeetingIntent("mtg_stop", "stop-key-1234567"));
+        stop.result = new OwnedMeetingStopUnitOfWork.Failure(
+                OwnedMeetingStopUnitOfWork.ErrorCode.MEETING_NOT_FOUND);
+        HttpResponse response = adapter.handle(new HttpRequest(
+                "POST", "/v1/meetings/mtg_stop:stop",
+                Map.of("idempotency-key", "stop-key-1234567"), "{}"), null);
+        assertEquals(404, response.status());
+        assertFalse(response.body().contains("meetingId"));
+    }
+
+    @Test
     void protectedRoutesRequireContextAndDoNotCallPorts() {
         HttpResponse list = adapter.handle(new HttpRequest(
                 "GET", "/v1/meetings", Map.of(), ""), null);
@@ -192,7 +276,7 @@ class MeetingHttpAdapterContractTest {
                 "deployment",
                 new VerifiedIdentity(
                         new Subject("subject"), Set.of("ROLE_USER"),
-                        Set.of("MEETING_READ", "MEETING_DELETE"),
+                        Set.of("MEETING_READ", "MEETING_DELETE", "meeting:stop"),
                         NOW.minusSeconds(60), NOW.plusSeconds(600), "credential-reference"));
     }
 
@@ -200,6 +284,32 @@ class MeetingHttpAdapterContractTest {
         return new MeetingStatus(
                 "mtg_detail", state, FinalizationFact.accepted("receipt"),
                 ManifestStatus.READY, NOW);
+    }
+
+    private static MeetingStatus status(MeetingState state, FinalizationFact fact) {
+        return new MeetingStatus("mtg_stop", state, fact, ManifestStatus.NOT_STARTED, NOW);
+    }
+
+    private static IdentityVerificationRequest requestCredential() {
+        return new IdentityVerificationRequest(
+                IdentityVerificationRequest.CredentialType.BEARER_TOKEN,
+                SecretCredential.copyOf(new byte[]{1}), "audience", "client");
+    }
+
+    private AuthenticatedMeetingStopApplicationService stopService() {
+        return new AuthenticatedMeetingStopApplicationService(
+                "deployment",
+                request -> IdentityProviderResult.success(context().identity()),
+                stop,
+                query);
+    }
+
+    private static MeetingCommandResult stopResult(MeetingState state) {
+        return new MeetingCommandResult(MeetingCommandResult.Operation.STOP_ACCEPTED,
+                MeetingAggregate.MeetingSnapshot.owned(
+                        "mtg_stop", "deployment", "session", "subject", "grant",
+                        NOW.plusSeconds(600), "reservation", "profile", 1,
+                        state, NOW, NOW.plusSeconds(1)));
     }
 
     private static MeetingStatus deletionStatus(String meetingId) {
@@ -217,12 +327,30 @@ class MeetingHttpAdapterContractTest {
 
     private static final class Decoder implements MeetingHttpAdapter.RequestDecoder {
         private DeleteRequest delete;
+        private MeetingHttpAdapter.StopRequest stop;
         private int deleteCalls;
 
         @Override
         public DeleteRequest decodeDelete(HttpRequest request, MeetingCommandContext context) {
             deleteCalls++;
             return delete;
+        }
+
+        @Override
+        public MeetingHttpAdapter.StopRequest decodeStop(
+                HttpRequest request, String pathMeetingId, String idempotencyKey) {
+            return stop;
+        }
+    }
+
+    private static final class RecordingStop implements OwnedMeetingStopUnitOfWork {
+        private StopRequest request;
+        private Result result = new Failure(ErrorCode.MEETING_NOT_FOUND);
+
+        @Override
+        public Result stop(StopRequest request) {
+            this.request = request;
+            return result;
         }
     }
 

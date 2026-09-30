@@ -1,11 +1,13 @@
 package com.czur.reference.application.http;
 
 import com.czur.reference.application.command.MeetingCommandResult;
+import com.czur.reference.application.command.AuthenticatedMeetingStopResult;
 import com.czur.reference.application.error.IdempotencyConflictException;
 import com.czur.reference.application.error.MeetingAlreadyExistsException;
 import com.czur.reference.application.error.MeetingNotFoundException;
 import com.czur.reference.application.port.DeleteResult;
 import com.czur.reference.application.port.MeetingQueryPort;
+import com.czur.reference.application.port.OwnedMeetingStopUnitOfWork;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -113,6 +115,91 @@ public final class HttpErrorMapper {
         };
     }
 
+    /** 将认证 Stop 的稳定结果映射为严格的 OpenAPI StopResponse。 */
+    public HttpResponse stop(AuthenticatedMeetingStopResult result) {
+        Objects.requireNonNull(result, "result");
+        if (result instanceof AuthenticatedMeetingStopResult.Success success) {
+            int status = success.meeting().inputState()
+                    == com.czur.reference.application.port.InputState.INPUT_ACCEPTED
+                    ? 200 : 202;
+            return success(status, stopStatus(success.meeting()));
+        }
+        if (result instanceof AuthenticatedMeetingStopResult.IdentityFailure failure) {
+            return identityFailure(failure.error().code());
+        }
+        if (result instanceof AuthenticatedMeetingStopResult.StopFailure failure) {
+            return stopFailure(failure.code());
+        }
+        if (result instanceof AuthenticatedMeetingStopResult.QueryFailure failure) {
+            return switch (failure.code()) {
+                case NOT_FOUND -> error(404, HttpErrorEnvelope.Domain.SESSION,
+                        "MEETING_NOT_FOUND", false, HttpErrorEnvelope.UserAction.NONE,
+                        "ai_meeting.session.meeting_not_found");
+                case ACCESS_DENIED -> error(403, HttpErrorEnvelope.Domain.IDENTITY,
+                        "ACCESS_DENIED", false, HttpErrorEnvelope.UserAction.CONTACT_ADMIN,
+                        "ai_meeting.identity.access_denied");
+                case CONFLICT -> error(409, HttpErrorEnvelope.Domain.CONTRACT,
+                        "STOP_QUERY_CONFLICT", false, HttpErrorEnvelope.UserAction.NONE,
+                        "ai_meeting.contract.query_conflict");
+                case UNAVAILABLE -> error(failure.retryable() ? 503 : 500,
+                        failure.retryable() ? HttpErrorEnvelope.Domain.STORAGE
+                                : HttpErrorEnvelope.Domain.INTERNAL,
+                        "STOP_QUERY_UNAVAILABLE", failure.retryable(),
+                        failure.retryable() ? HttpErrorEnvelope.UserAction.RETRY
+                                : HttpErrorEnvelope.UserAction.CONTACT_ADMIN,
+                        "ai_meeting.storage.query_unavailable");
+            };
+        }
+        return error(500, HttpErrorEnvelope.Domain.INTERNAL,
+                "INTERNAL_ERROR", false, HttpErrorEnvelope.UserAction.CONTACT_ADMIN,
+                "ai_meeting.internal.error");
+    }
+
+    private HttpResponse identityFailure(
+            com.czur.reference.application.port.identity.IdentityProviderError.Code code) {
+        return switch (code) {
+            case PERMISSION_DENIED -> error(403, HttpErrorEnvelope.Domain.IDENTITY,
+                    "PERMISSION_DENIED", false, HttpErrorEnvelope.UserAction.CONTACT_ADMIN,
+                    "ai_meeting.identity.permission_denied");
+            case PROVIDER_UNAVAILABLE -> error(503, HttpErrorEnvelope.Domain.IDENTITY,
+                    "IDENTITY_PROVIDER_UNAVAILABLE", true, HttpErrorEnvelope.UserAction.RETRY,
+                    "ai_meeting.identity.provider_unavailable");
+            case INTERNAL -> error(500, HttpErrorEnvelope.Domain.INTERNAL,
+                    "INTERNAL_ERROR", false, HttpErrorEnvelope.UserAction.CONTACT_ADMIN,
+                    "ai_meeting.internal.error");
+            case INVALID_REQUEST -> error(400, HttpErrorEnvelope.Domain.CONTRACT,
+                    "INVALID_REQUEST", false, HttpErrorEnvelope.UserAction.NONE,
+                    "ai_meeting.contract.invalid_request");
+            default -> error(401, HttpErrorEnvelope.Domain.IDENTITY,
+                    "AUTHENTICATION_FAILED", false, HttpErrorEnvelope.UserAction.LOGIN,
+                    "ai_meeting.identity.authentication_failed");
+        };
+    }
+
+    private HttpResponse stopFailure(OwnedMeetingStopUnitOfWork.ErrorCode code) {
+        return switch (code) {
+            case MEETING_NOT_FOUND -> error(404, HttpErrorEnvelope.Domain.SESSION,
+                    "MEETING_NOT_FOUND", false, HttpErrorEnvelope.UserAction.NONE,
+                    "ai_meeting.session.meeting_not_found");
+            case ACCESS_DENIED -> error(403, HttpErrorEnvelope.Domain.IDENTITY,
+                    "ACCESS_DENIED", false, HttpErrorEnvelope.UserAction.CONTACT_ADMIN,
+                    "ai_meeting.identity.access_denied");
+            case IDEMPOTENCY_CONFLICT -> error(409, HttpErrorEnvelope.Domain.CONTRACT,
+                    "IDEMPOTENCY_CONFLICT", false, HttpErrorEnvelope.UserAction.NONE,
+                    "ai_meeting.contract.idempotency_conflict");
+            case INVALID_MEETING_STATE -> error(409, HttpErrorEnvelope.Domain.SESSION,
+                    "INVALID_MEETING_STATE", false, HttpErrorEnvelope.UserAction.NONE,
+                    "ai_meeting.session.invalid_meeting_state");
+            case STORAGE_UNAVAILABLE, OUTCOME_UNKNOWN -> error(503,
+                    HttpErrorEnvelope.Domain.STORAGE, code.name(), true,
+                    HttpErrorEnvelope.UserAction.RETRY,
+                    "ai_meeting.storage.stop_unavailable");
+            case INTERNAL -> error(500, HttpErrorEnvelope.Domain.INTERNAL,
+                    "INTERNAL_ERROR", false, HttpErrorEnvelope.UserAction.CONTACT_ADMIN,
+                    "ai_meeting.internal.error");
+        };
+    }
+
     /** 创建/停止命令成功只投影稳定 meetingId/state，能力扩展由后续协议切片提供。 */
     public HttpResponse command(MeetingCommandResult result) {
         Objects.requireNonNull(result, "result");
@@ -207,6 +294,17 @@ public final class HttpErrorMapper {
         body.put("finalizationReceipt", meeting.finalizationReceipt());
         body.put("manifestState", meeting.manifestState().name());
         body.put("updatedAt", meeting.updatedAt().toString());
+        return body;
+    }
+
+    private static Map<String, Object> stopStatus(
+            com.czur.reference.application.port.MeetingStatus meeting) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("meetingId", meeting.meetingId());
+        body.put("state", meeting.state().name());
+        body.put("inputState", meeting.inputState().name());
+        body.put("finalizationReceipt", meeting.finalizationReceipt());
+        body.put("manifestState", meeting.manifestState().name());
         return body;
     }
 

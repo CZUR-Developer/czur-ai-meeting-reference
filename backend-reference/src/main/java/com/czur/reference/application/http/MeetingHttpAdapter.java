@@ -1,9 +1,17 @@
 package com.czur.reference.application.http;
 
 import com.czur.reference.application.command.MeetingCommandContext;
+import com.czur.reference.application.command.AuthenticatedMeetingStopApplicationService;
+import com.czur.reference.application.command.StopMeetingIntent;
 import com.czur.reference.application.port.DeleteRequest;
 import com.czur.reference.application.port.MeetingDeletionPort;
 import com.czur.reference.application.port.MeetingQueryPort;
+import com.czur.reference.application.port.identity.IdentityVerificationRequest;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.util.Objects;
 import java.util.logging.Level;
@@ -38,11 +46,13 @@ public final class MeetingHttpAdapter {
     private static final Pattern STOP_PATH = Pattern.compile(
             "^/v1/meetings/(mtg_[A-Za-z0-9_-]+):stop$");
     private static final int DEFAULT_PAGE_SIZE = 20;
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     private final MeetingQueryPort queryPort;
     private final MeetingDeletionPort deletionPort;
     private final RequestDecoder decoder;
     private final HttpErrorMapper errors;
+    private final AuthenticatedMeetingStopApplicationService stopService;
 
     /** 使用随机 opaque diagnosticId 的默认错误映射器。 */
     public MeetingHttpAdapter(
@@ -62,6 +72,40 @@ public final class MeetingHttpAdapter {
         this.deletionPort = Objects.requireNonNull(deletionPort, "deletionPort");
         this.decoder = Objects.requireNonNull(decoder, "decoder");
         this.errors = Objects.requireNonNull(errors, "errors");
+        this.stopService = null;
+    }
+
+    /** 装配完整认证 Stop application service 的构造器。 */
+    public MeetingHttpAdapter(
+            MeetingQueryPort queryPort,
+            MeetingDeletionPort deletionPort,
+            RequestDecoder decoder,
+            HttpErrorMapper errors,
+            AuthenticatedMeetingStopApplicationService stopService) {
+        this.queryPort = Objects.requireNonNull(queryPort, "queryPort");
+        this.deletionPort = Objects.requireNonNull(deletionPort, "deletionPort");
+        this.decoder = Objects.requireNonNull(decoder, "decoder");
+        this.errors = Objects.requireNonNull(errors, "errors");
+        this.stopService = Objects.requireNonNull(stopService, "stopService");
+    }
+
+    /** 与 runtime 常见的 service-before-mapper 装配顺序兼容。 */
+    public MeetingHttpAdapter(
+            MeetingQueryPort queryPort,
+            MeetingDeletionPort deletionPort,
+            RequestDecoder decoder,
+            AuthenticatedMeetingStopApplicationService stopService,
+            HttpErrorMapper errors) {
+        this(queryPort, deletionPort, decoder, errors, stopService);
+    }
+
+    /** 使用默认错误映射器装配认证 Stop。 */
+    public MeetingHttpAdapter(
+            MeetingQueryPort queryPort,
+            MeetingDeletionPort deletionPort,
+            RequestDecoder decoder,
+            AuthenticatedMeetingStopApplicationService stopService) {
+        this(queryPort, deletionPort, decoder, new HttpErrorMapper(), stopService);
     }
 
     /**
@@ -98,8 +142,17 @@ public final class MeetingHttpAdapter {
 
         Matcher stop = STOP_PATH.matcher(path);
         if ("POST".equals(method) && stop.matches()) {
-            // stop 与 create 同样等待拥有者/输入接管专用的正式命令 adapter。
-            return errors.notImplemented();
+            if (stopService == null) {
+                return errors.notImplemented();
+            }
+            String meetingId = stop.group(1);
+            String idempotencyKey = requireIdempotencyKey(request);
+            validateEmptyStopBody(request.body());
+            StopRequest decoded = decoder.decodeStop(request, meetingId, idempotencyKey);
+            Objects.requireNonNull(decoded, "decoded stop request");
+            requirePathMeetingId(meetingId, decoded.intent().meetingId());
+            requireDecodedIdempotencyKey(idempotencyKey, decoded.intent().idempotencyKey());
+            return errors.stop(stopService.stop(decoded.verificationRequest(), decoded.intent()));
         }
 
         if ("GET".equals(method) && MEETINGS_PATH.equals(path)) {
@@ -166,6 +219,23 @@ public final class MeetingHttpAdapter {
         }
     }
 
+    /** Stop body 的尚未持久化字段必须 fail-closed；只接受省略 body 或空对象。 */
+    private static void validateEmptyStopBody(String body) {
+        if (body == null || body.isBlank()) {
+            return;
+        }
+        try {
+            JsonNode node = JSON.reader()
+                    .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                    .readTree(body);
+            if (node == null || !node.isObject() || node.size() != 0) {
+                throw new IllegalArgumentException("stop body must be an empty object");
+            }
+        } catch (JsonProcessingException failure) {
+            throw new IllegalArgumentException("stop body is invalid JSON");
+        }
+    }
+
     private static String operationOf(HttpRequest request) {
         if ("POST".equals(request.method()) && MEETINGS_PATH.equals(request.path())) {
             return "create";
@@ -198,5 +268,31 @@ public final class MeetingHttpAdapter {
     public interface RequestDecoder {
         /** 依据已验证 context 解码删除输入，不得接受客户端覆盖的归属字段。 */
         DeleteRequest decodeDelete(HttpRequest request, MeetingCommandContext context);
+
+        /** 解码 Stop 的认证凭据与最小业务意图；不得把 body 未支持字段静默丢弃。 */
+        default StopRequest decodeStop(HttpRequest request, String pathMeetingId,
+                String idempotencyKey) {
+            return decodeStop(request, pathMeetingId);
+        }
+
+        /** 兼容只需要路径校验输入的 runtime decoder。 */
+        default StopRequest decodeStop(HttpRequest request, String pathMeetingId) {
+            return decodeStop(request);
+        }
+
+        /** 最小 Stop 解码边界；实现负责从可信 HTTP 入口生成身份请求。 */
+        default StopRequest decodeStop(HttpRequest request) {
+            throw new IllegalArgumentException("stop decoder is not configured");
+        }
+    }
+
+    /** HTTP runtime 提供的认证请求与 Stop 意图的脱敏组合。 */
+    record StopRequest(
+            IdentityVerificationRequest verificationRequest,
+            StopMeetingIntent intent) {
+        public StopRequest {
+            Objects.requireNonNull(verificationRequest, "verificationRequest");
+            Objects.requireNonNull(intent, "intent");
+        }
     }
 }
