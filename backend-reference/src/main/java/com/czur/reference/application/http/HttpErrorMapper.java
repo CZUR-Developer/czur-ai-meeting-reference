@@ -251,6 +251,19 @@ public final class HttpErrorMapper {
                 HttpErrorEnvelope.UserAction.NONE, "ai_meeting.contract.route_not_implemented");
     }
 
+    /**
+     * 参考后端 HTTP 运行时已经关闭或尚未接收请求时的关闭式响应。
+     *
+     * <p>该响应与数据库端口、模型端口和业务状态无关，只表示当前入口不再
+     * 接受请求。它使用可重试的 503，而不是把关闭状态伪装成 404 或业务错误；
+     * 调用方可以据此等待新的运行时实例。错误 envelope 不携带运行时对象、
+     * 数据库地址或关闭异常正文。</p>
+     */
+    public HttpResponse runtimeUnavailable() {
+        return error(503, HttpErrorEnvelope.Domain.INTERNAL, "RUNTIME_NOT_READY", true,
+                HttpErrorEnvelope.UserAction.RETRY, "ai_meeting.runtime.not_ready");
+    }
+
     private HttpResponse error(
             int status,
             HttpErrorEnvelope.Domain domain,

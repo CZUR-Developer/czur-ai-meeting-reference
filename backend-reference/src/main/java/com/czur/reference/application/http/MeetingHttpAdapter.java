@@ -109,6 +109,16 @@ public final class MeetingHttpAdapter {
     }
 
     /**
+     * 供同包运行时装配复用本适配器的错误映射器。
+     *
+     * <p>该访问器不暴露任何请求、凭据或业务状态；保持包级可见，避免把
+     * transport 组装细节扩大为公共业务 API。</p>
+     */
+    HttpErrorMapper errorMapper() {
+        return errors;
+    }
+
+    /**
      * 处理一个请求并返回 transport-neutral 响应。
      *
      * @param request 已由 HTTP runtime 约束过的请求值对象
