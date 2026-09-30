@@ -66,6 +66,24 @@ class JdbcV013MigrationContractTest {
         assertFalse(sql.contains("CREATE TABLE IF NOT EXISTS"));
     }
 
+    @Test
+    void freezesExistingTableCatalogGateAndRejectsWrongTableTextually() throws Exception {
+        String sql = readMigration();
+        String compact = sql.replaceAll("\\s+", " ");
+        assertTrue(compact.contains("actual_columns IS DISTINCT FROM"));
+        assertTrue(compact.contains("relkind = 'r'"));
+        assertTrue(compact.contains("relpersistence = 'p'"));
+        assertTrue(compact.contains("NOT c.relispartition"));
+        assertTrue(compact.contains("FROM pg_inherits i"));
+        assertTrue(compact.contains("meeting_create_fact 列物理契约不匹配"));
+        assertTrue(compact.contains("meeting_create_fact PK/UQ/FK 物理契约不匹配"));
+        assertTrue(compact.contains("meeting_create_fact CHECK 定义缺失或被弱化"));
+        assertTrue(compact.contains("meeting_create_fact 精确索引集合不匹配"));
+        assertTrue(compact.contains("pg_get_constraintdef(oid, TRUE)"));
+        assertTrue(compact.contains("count(*) FROM pg_index WHERE indrelid = fact_table"));
+        assertFalse(compact.contains("CREATE TABLE IF NOT EXISTS meeting_create_fact"));
+    }
+
     private static String tableBlock(String sql) {
         int start = sql.indexOf("CREATE TABLE meeting_create_fact (");
         assertTrue(start >= 0);
