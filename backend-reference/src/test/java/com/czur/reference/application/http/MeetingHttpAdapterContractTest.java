@@ -1,11 +1,6 @@
 package com.czur.reference.application.http;
 
-import com.czur.reference.application.command.CreateMeetingCommand;
 import com.czur.reference.application.command.MeetingCommandContext;
-import com.czur.reference.application.command.MeetingCommandService;
-import com.czur.reference.application.command.StopMeetingCommand;
-import com.czur.reference.application.persistence.InMemoryIdempotencyStore;
-import com.czur.reference.application.persistence.InMemoryMeetingRepository;
 import com.czur.reference.application.port.DeleteRequest;
 import com.czur.reference.application.port.DeleteResult;
 import com.czur.reference.application.port.FinalizationFact;
@@ -17,8 +12,6 @@ import com.czur.reference.application.port.MeetingStatus;
 import com.czur.reference.application.port.MeetingSummary;
 import com.czur.reference.application.port.identity.Subject;
 import com.czur.reference.application.port.identity.VerifiedIdentity;
-import com.czur.reference.domain.meeting.MeetingAggregate;
-import com.czur.reference.domain.meeting.MeetingEvent;
 import com.czur.reference.domain.meeting.MeetingState;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -36,14 +29,12 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 /**
  * 会议 HTTP adapter 的 transport contract 测试。
  *
- * <p>只使用内存命令服务和 fake query/deletion ports，不启动 HTTP server、不
- * 连接 PostgreSQL；测试重点是路由边界、认证上下文传递和稳定错误状态。</p>
+ * <p>只使用 fake query/deletion ports，不启动 HTTP server、不连接 PostgreSQL；
+ * create/stop 额外验证关闭式响应不会进入旧命令服务。</p>
  */
 class MeetingHttpAdapterContractTest {
     private static final Instant NOW = Instant.parse("2026-09-20T01:00:00Z");
 
-    private InMemoryMeetingRepository meetings;
-    private MeetingCommandService commands;
     private RecordingQuery query;
     private RecordingDeletion deletion;
     private Decoder decoder;
@@ -51,13 +42,11 @@ class MeetingHttpAdapterContractTest {
 
     @BeforeEach
     void setUp() {
-        meetings = new InMemoryMeetingRepository();
-        commands = new MeetingCommandService(meetings, new InMemoryIdempotencyStore());
         query = new RecordingQuery();
         deletion = new RecordingDeletion();
         decoder = new Decoder();
         adapter = new MeetingHttpAdapter(
-                commands, query, deletion, decoder,
+                query, deletion, decoder,
                 new HttpErrorMapper(() -> "adapter-diagnostic"));
     }
 
@@ -114,48 +103,29 @@ class MeetingHttpAdapterContractTest {
     }
 
     @Test
-    void createRouteUsesDecoderAndCommandServiceWithoutClaimingBearerValidation() {
-        decoder.create = new CreateMeetingCommand(
-                "mtg_create", "default", "session-create", "profile", 1, NOW,
-                "create-key-123456");
-
+    void createRouteFailsClosedWithoutCallingLegacyCommandService() {
         HttpResponse response = adapter.handle(new HttpRequest(
                 "POST", "/v1/meetings",
                 Map.of("authorization", "Bearer private", "idempotency-key", "create-key-123456"),
                 "{}"), null);
 
-        assertEquals(201, response.status());
-        assertEquals("mtg_create", response.body().contains("mtg_create") ? "mtg_create" : "");
+        assertEquals(501, response.status());
+        assertEquals("ROUTE_NOT_IMPLEMENTED", response.body().contains("ROUTE_NOT_IMPLEMENTED")
+                ? "ROUTE_NOT_IMPLEMENTED" : "");
         assertFalse(response.body().contains("Bearer private"));
+        assertEquals(0, decoder.deleteCalls);
     }
 
     @Test
-    void stopRouteChecksPathIdBeforeCallingCommandService() {
-        decoder.create = new CreateMeetingCommand(
-                "mtg_stop", "default", "session-stop", "profile", 1, NOW, "create-stop");
-        commands.create(decoder.create);
-        MeetingAggregate aggregate = MeetingAggregate.fromSnapshot(
-                meetings.find("mtg_stop").orElseThrow());
-        aggregate.apply(MeetingEvent.AUTHORIZE, NOW);
-        aggregate.apply(MeetingEvent.START, NOW);
-        aggregate.apply(MeetingEvent.START, NOW);
-        meetings.save(aggregate.snapshot());
-        decoder.stop = new StopMeetingCommand(
-                "mtg_stop", NOW.plusSeconds(1), "stop-key-1234567");
-
+    void stopRouteFailsClosedWithoutLegacyCommandService() {
         HttpResponse response = adapter.handle(new HttpRequest(
                 "POST", "/v1/meetings/mtg_stop:stop",
                 Map.of("idempotency-key", "stop-key-1234567"), "{}"), null);
 
-        assertEquals(200, response.status());
-        assertEquals("STOPPING", response.body().contains("STOPPING") ? "STOPPING" : "");
-
-        decoder.stop = new StopMeetingCommand(
-                "mtg_other", NOW.plusSeconds(1), "stop-other-123456");
-        HttpResponse mismatch = adapter.handle(new HttpRequest(
-                "POST", "/v1/meetings/mtg_stop:stop",
-                Map.of("idempotency-key", "stop-other-123456"), "{}"), null);
-        assertEquals(400, mismatch.status());
+        assertEquals(501, response.status());
+        assertEquals("ROUTE_NOT_IMPLEMENTED", response.body().contains("ROUTE_NOT_IMPLEMENTED")
+                ? "ROUTE_NOT_IMPLEMENTED" : "");
+        assertEquals(0, decoder.deleteCalls);
     }
 
     @Test
@@ -186,14 +156,11 @@ class MeetingHttpAdapterContractTest {
         assertEquals(400, invalidPageSize.status());
         assertFalse(unsupported.body().contains("mtg_missing"));
 
-        decoder.create = new CreateMeetingCommand(
-                "mtg_request_id", "default", "session-request-id", "profile", 1,
-                NOW, "request-id-key-123456");
         HttpResponse oversizedRequestId = adapter.handle(new HttpRequest(
                 "POST", "/v1/meetings",
                 Map.of("idempotency-key", "request-id-key-123456",
                         "x-request-id", "x".repeat(129)), "{}"), null);
-        assertEquals(400, oversizedRequestId.status());
+        assertEquals(501, oversizedRequestId.status());
     }
 
     @Test
@@ -210,15 +177,13 @@ class MeetingHttpAdapterContractTest {
     }
 
     @Test
-    void commandAndDeleteRoutesRequireOpenApiIdempotencyHeader() {
-        decoder.create = new CreateMeetingCommand(
-                "mtg_missing_key", "default", "session", "profile", 1, NOW, "key");
+    void disabledCommandRouteStaysClosedEvenWhenHeadersAreMissing() {
         HttpResponse create = adapter.handle(new HttpRequest(
                 "POST", "/v1/meetings", Map.of(), "{}"), null);
         HttpResponse delete = adapter.handle(new HttpRequest(
                 "DELETE", "/v1/meetings/mtg_missing_key", Map.of(), ""), context());
 
-        assertEquals(400, create.status());
+        assertEquals(501, create.status());
         assertEquals(400, delete.status());
     }
 
@@ -251,22 +216,12 @@ class MeetingHttpAdapterContractTest {
     }
 
     private static final class Decoder implements MeetingHttpAdapter.RequestDecoder {
-        private CreateMeetingCommand create;
-        private StopMeetingCommand stop;
         private DeleteRequest delete;
-
-        @Override
-        public CreateMeetingCommand decodeCreate(HttpRequest request) {
-            return create;
-        }
-
-        @Override
-        public StopMeetingCommand decodeStop(HttpRequest request) {
-            return stop;
-        }
+        private int deleteCalls;
 
         @Override
         public DeleteRequest decodeDelete(HttpRequest request, MeetingCommandContext context) {
+            deleteCalls++;
             return delete;
         }
     }

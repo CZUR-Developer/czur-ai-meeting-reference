@@ -153,6 +153,17 @@ public final class HttpErrorMapper {
                 HttpErrorEnvelope.UserAction.LOGIN, "ai_meeting.identity.authentication_required");
     }
 
+    /**
+     * 当前 transport slice 尚未装配安全的命令 application service 时的关闭式响应。
+     *
+     * <p>该状态不是业务成功，也不暗示稍后会自动完成请求；调用方应等待支持
+     * create/stop 的正式 adapter slice。响应不携带旧命令服务的异常或正文。</p>
+     */
+    public HttpResponse notImplemented() {
+        return error(501, HttpErrorEnvelope.Domain.CONTRACT, "ROUTE_NOT_IMPLEMENTED", false,
+                HttpErrorEnvelope.UserAction.NONE, "ai_meeting.contract.route_not_implemented");
+    }
+
     private HttpResponse error(
             int status,
             HttpErrorEnvelope.Domain domain,

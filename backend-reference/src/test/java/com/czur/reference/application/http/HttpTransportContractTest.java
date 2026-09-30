@@ -160,6 +160,20 @@ class HttpTransportContractTest {
     }
 
     @Test
+    void unsupportedCommandSliceUsesStableNotImplementedEnvelope() throws Exception {
+        HttpErrorMapper mapper = new HttpErrorMapper(() -> "diag-not-implemented");
+
+        HttpResponse response = mapper.notImplemented();
+        JsonNode error = JSON.readTree(response.body()).path("error");
+
+        assertEquals(501, response.status());
+        assertEquals("CONTRACT", error.path("domain").asText());
+        assertEquals("ROUTE_NOT_IMPLEMENTED", error.path("code").asText());
+        assertFalse(error.path("retryable").asBoolean());
+        assertEquals("diag-not-implemented", error.path("diagnosticId").asText());
+    }
+
+    @Test
     void successProjectionContainsOnlyTheDocumentedMinimalFields() throws Exception {
         HttpErrorMapper mapper = new HttpErrorMapper(() -> "diag-success");
         MeetingAggregate.MeetingSnapshot snapshot = MeetingAggregate.MeetingSnapshot.legacyUnowned(

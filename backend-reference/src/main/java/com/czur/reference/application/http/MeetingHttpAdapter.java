@@ -1,9 +1,6 @@
 package com.czur.reference.application.http;
 
-import com.czur.reference.application.command.CreateMeetingCommand;
 import com.czur.reference.application.command.MeetingCommandContext;
-import com.czur.reference.application.command.MeetingCommandService;
-import com.czur.reference.application.command.StopMeetingCommand;
 import com.czur.reference.application.port.DeleteRequest;
 import com.czur.reference.application.port.MeetingDeletionPort;
 import com.czur.reference.application.port.MeetingQueryPort;
@@ -25,10 +22,9 @@ import java.util.regex.Pattern;
  *
  * <p>本参考切片明确不在 adapter 中解析或验证 Bearer，不实现权限、计费、权益
  * 预占、能力规划、Manifest、事件、Artifact 或 Worker。GET/DELETE 要求调用方
- * 提供已经验证的 {@link MeetingCommandContext}；create/stop 目前只能调用旧的
- * {@link MeetingCommandService} 未认证参考入口，因此不能宣称已经满足 OpenAPI
- * 的生产鉴权要求。正式部署应在本类外完成身份 Provider、权限检查和相应拥有者
- * application service 装配。</p>
+ * 提供已经验证的 {@link MeetingCommandContext}。create/stop 在本 slice 中明确
+ * 关闭，返回 501 且不调用任何旧的未认证命令服务；正式部署必须另行装配完成
+ * 身份、权限、权益和完整 OpenAPI response 的 command adapter。</p>
  *
  * <p>日志只记录固定 operation 名和状态码，不记录原始 path、meetingId、Token、
  * request body、receipt 或异常消息。未知路径和当前未实现的后续 OpenAPI 路由
@@ -43,7 +39,6 @@ public final class MeetingHttpAdapter {
             "^/v1/meetings/(mtg_[A-Za-z0-9_-]+):stop$");
     private static final int DEFAULT_PAGE_SIZE = 20;
 
-    private final MeetingCommandService commandService;
     private final MeetingQueryPort queryPort;
     private final MeetingDeletionPort deletionPort;
     private final RequestDecoder decoder;
@@ -51,21 +46,18 @@ public final class MeetingHttpAdapter {
 
     /** 使用随机 opaque diagnosticId 的默认错误映射器。 */
     public MeetingHttpAdapter(
-            MeetingCommandService commandService,
             MeetingQueryPort queryPort,
             MeetingDeletionPort deletionPort,
             RequestDecoder decoder) {
-        this(commandService, queryPort, deletionPort, decoder, new HttpErrorMapper());
+        this(queryPort, deletionPort, decoder, new HttpErrorMapper());
     }
 
     /** 测试或运行时可以注入诊断 ID 生成器已经固定的错误映射器。 */
     public MeetingHttpAdapter(
-            MeetingCommandService commandService,
             MeetingQueryPort queryPort,
             MeetingDeletionPort deletionPort,
             RequestDecoder decoder,
             HttpErrorMapper errors) {
-        this.commandService = Objects.requireNonNull(commandService, "commandService");
         this.queryPort = Objects.requireNonNull(queryPort, "queryPort");
         this.deletionPort = Objects.requireNonNull(deletionPort, "deletionPort");
         this.decoder = Objects.requireNonNull(decoder, "decoder");
@@ -76,8 +68,7 @@ public final class MeetingHttpAdapter {
      * 处理一个请求并返回 transport-neutral 响应。
      *
      * @param request 已由 HTTP runtime 约束过的请求值对象
-     * @param context 外层身份 Provider 验证出的上下文；create/stop 参考入口不使用，
-     *                其余路由缺失时固定返回 401
+     * @param context 外层身份 Provider 验证出的上下文；GET/DELETE 路由缺失时固定返回 401
      * @return 成功 payload 或统一 ErrorEnvelope；不会抛出端口运行时异常
      */
     public HttpResponse handle(HttpRequest request, MeetingCommandContext context) {
@@ -100,23 +91,15 @@ public final class MeetingHttpAdapter {
         String path = request.path();
 
         if ("POST".equals(method) && MEETINGS_PATH.equals(path)) {
-            // 这是当前命令服务的 transport 参考入口；Bearer/权限不在此处验证。
-            String idempotencyKey = requireIdempotencyKey(request);
-            requireCreateBody(request);
-            validateOptionalRequestId(request);
-            CreateMeetingCommand command = decoder.decodeCreate(request);
-            requireDecodedIdempotencyKey(idempotencyKey, command.idempotencyKey());
-            return errors.command(commandService.create(command));
+            // 完整 create command/application service 尚未安全装配，必须拒绝而不是
+            // 回退到旧的未认证 MeetingCommandService。
+            return errors.notImplemented();
         }
 
         Matcher stop = STOP_PATH.matcher(path);
         if ("POST".equals(method) && stop.matches()) {
-            String idempotencyKey = requireIdempotencyKey(request);
-            validateOptionalRequestId(request);
-            StopMeetingCommand command = decoder.decodeStop(request);
-            requireDecodedIdempotencyKey(idempotencyKey, command.idempotencyKey());
-            requirePathMeetingId(stop.group(1), command.meetingId());
-            return errors.command(commandService.stop(command));
+            // stop 与 create 同样等待拥有者/输入接管专用的正式命令 adapter。
+            return errors.notImplemented();
         }
 
         if ("GET".equals(method) && MEETINGS_PATH.equals(path)) {
@@ -177,20 +160,6 @@ public final class MeetingHttpAdapter {
         return value;
     }
 
-    /** 创建请求在 OpenAPI 中必须携带 JSON body；字段/schema 校验由 decoder 执行。 */
-    private static void requireCreateBody(HttpRequest request) {
-        if (request.body().isBlank()) {
-            throw new IllegalArgumentException("create body is required");
-        }
-    }
-
-    private static void validateOptionalRequestId(HttpRequest request) {
-        String requestId = request.header("x-request-id");
-        if (requestId != null && requestId.length() > 128) {
-            throw new IllegalArgumentException("x-request-id is too long");
-        }
-    }
-
     private static void requireDecodedIdempotencyKey(String header, String decoded) {
         if (decoded == null || !header.equals(decoded)) {
             throw new IllegalArgumentException("decoded idempotency-key does not match header");
@@ -218,20 +187,15 @@ public final class MeetingHttpAdapter {
     }
 
     /**
-     * 由具体 HTTP runtime 或 JSON codec 提供的命令解码边界。
+     * 由具体 HTTP runtime 或 JSON codec 提供的删除请求解码边界。
      *
-     * <p>实现可以读取请求头中的幂等键、请求体和服务端时间，但必须自己执行
-     * OpenAPI body/schema 校验并生成规范摘要；adapter 不把原始 JSON、Bearer
-     * 或供应商字段复制进领域端口。delete 使用 adapter 已检查过的认证 context
-     * 生成 {@link DeleteRequest}，不得从客户端 body 覆盖其部署或主体。</p>
+     * <p>实现可以读取请求头中的幂等键和服务端时间，但必须生成规范摘要；adapter
+     * 不把原始 JSON、Bearer 或供应商字段复制进领域端口。delete 使用 adapter
+     * 已检查过的认证 context 生成 {@link DeleteRequest}，不得从客户端 body 覆盖
+     * 其部署或主体。create/stop 解码接口故意未暴露，避免误接入不完整的旧命令。
+     * </p>
      */
     public interface RequestDecoder {
-        /** 解码并校验 create JSON；返回的幂等键必须与请求头完全一致。 */
-        CreateMeetingCommand decodeCreate(HttpRequest request);
-
-        /** 解码可选 stop JSON；路径和幂等键一致性由 adapter 再次确认。 */
-        StopMeetingCommand decodeStop(HttpRequest request);
-
         /** 依据已验证 context 解码删除输入，不得接受客户端覆盖的归属字段。 */
         DeleteRequest decodeDelete(HttpRequest request, MeetingCommandContext context);
     }
