@@ -214,6 +214,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/StopMeetingResponse"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
         "401":
           $ref: "#/components/responses/ErrorResponse"
         "403":
@@ -755,18 +757,8 @@ components:
           $ref: "#/components/schemas/Limits"
     StopMeetingRequest:
       type: object
+      description: 请求体可省略；若提供 application/json，只允许空对象。流终点由实时 input_complete 提交。
       additionalProperties: false
-      properties:
-        lastStreamSequence:
-          type: integer
-          format: int64
-          minimum: 0
-        lastAudioPositionMs:
-          type: integer
-          format: int64
-          minimum: 0
-        recordingChecksum:
-          type: string
     StopMeetingResponse:
       type: object
       additionalProperties: false
