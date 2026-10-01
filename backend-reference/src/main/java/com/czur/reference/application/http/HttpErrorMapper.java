@@ -2,6 +2,7 @@ package com.czur.reference.application.http;
 
 import com.czur.reference.application.command.MeetingCommandResult;
 import com.czur.reference.application.command.AuthenticatedMeetingStopResult;
+import com.czur.reference.application.command.AuthenticatedCompleteMeetingCreateResult;
 import com.czur.reference.application.error.IdempotencyConflictException;
 import com.czur.reference.application.error.MeetingAlreadyExistsException;
 import com.czur.reference.application.error.MeetingNotFoundException;
@@ -13,6 +14,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.Locale;
 import java.util.function.Supplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -155,6 +157,156 @@ public final class HttpErrorMapper {
                 "ai_meeting.internal.error");
     }
 
+    /**
+     * 将完整 Create 应用结果映射为公开协议；成功只投影 V013 已提交或只读回查的事实。
+     *
+     * <p>首次和同键重放均为 201，均从应用结果携带的原始响应事实投影。失败只按
+     * 封闭结果类型和稳定枚举映射，不读取 Provider/数据库异常正文；没有
+     * retryable 位的结果不会被猜测为可重试。此方法不调用身份或创建端口。</p>
+     */
+    public HttpResponse create(AuthenticatedCompleteMeetingCreateResult result) {
+        Objects.requireNonNull(result, "result");
+        return switch (result) {
+            case AuthenticatedCompleteMeetingCreateResult.Success success ->
+                    HttpResponse.json(201, CreateMeetingPublicResponseJson.encode(
+                            success.response()));
+            case AuthenticatedCompleteMeetingCreateResult.IdentityFailure failure ->
+                    createIdentityFailure(failure.error());
+            case AuthenticatedCompleteMeetingCreateResult.EntitlementFailure failure ->
+                    createEntitlementFailure(failure.error());
+            case AuthenticatedCompleteMeetingCreateResult.Conflict ignored ->
+                    error(409, HttpErrorEnvelope.Domain.CONTRACT, "IDEMPOTENCY_CONFLICT", false,
+                            HttpErrorEnvelope.UserAction.NONE,
+                            "ai_meeting.contract.idempotency_conflict");
+            case AuthenticatedCompleteMeetingCreateResult.Inconsistent ignored ->
+                    error(500, HttpErrorEnvelope.Domain.INTERNAL, "CREATE_FACT_INCONSISTENT",
+                            false, HttpErrorEnvelope.UserAction.CONTACT_ADMIN,
+                            "ai_meeting.internal.create_inconsistent");
+            case AuthenticatedCompleteMeetingCreateResult.Unavailable ignored ->
+                    error(503, HttpErrorEnvelope.Domain.INTERNAL, "CREATE_DEPENDENCY_UNAVAILABLE",
+                            false, HttpErrorEnvelope.UserAction.CONTACT_ADMIN,
+                            "ai_meeting.internal.create_unavailable");
+            case AuthenticatedCompleteMeetingCreateResult.PreparationFailure failure ->
+                    createPreparationFailure(failure.code());
+            case AuthenticatedCompleteMeetingCreateResult.CreationFailure failure ->
+                    createCommitFailure(failure);
+        };
+    }
+
+    private HttpResponse createIdentityFailure(
+            com.czur.reference.application.port.identity.IdentityProviderError failure) {
+        boolean retryable = failure.retryable();
+        return switch (failure.code()) {
+            case INVALID_REQUEST -> error(400, HttpErrorEnvelope.Domain.CONTRACT,
+                    "INVALID_REQUEST", retryable, retryable
+                            ? HttpErrorEnvelope.UserAction.RETRY : HttpErrorEnvelope.UserAction.NONE,
+                    "ai_meeting.contract.invalid_request");
+            case PERMISSION_DENIED -> error(403, HttpErrorEnvelope.Domain.IDENTITY,
+                    "PERMISSION_DENIED", retryable, retryable
+                            ? HttpErrorEnvelope.UserAction.RETRY
+                            : HttpErrorEnvelope.UserAction.CONTACT_ADMIN,
+                    "ai_meeting.identity.permission_denied");
+            case PROVIDER_UNAVAILABLE -> error(503, HttpErrorEnvelope.Domain.IDENTITY,
+                    "IDENTITY_PROVIDER_UNAVAILABLE", retryable, retryable
+                            ? HttpErrorEnvelope.UserAction.RETRY
+                            : HttpErrorEnvelope.UserAction.CONTACT_ADMIN,
+                    "ai_meeting.identity.provider_unavailable");
+            case INTERNAL -> error(500, HttpErrorEnvelope.Domain.INTERNAL,
+                    "INTERNAL_ERROR", retryable, retryable
+                            ? HttpErrorEnvelope.UserAction.RETRY
+                            : HttpErrorEnvelope.UserAction.CONTACT_ADMIN,
+                    "ai_meeting.internal.error");
+            case INVALID_CREDENTIAL, CREDENTIAL_EXPIRED, IDENTITY_DISABLED -> error(401,
+                    HttpErrorEnvelope.Domain.IDENTITY, "AUTHENTICATION_FAILED", retryable,
+                    retryable ? HttpErrorEnvelope.UserAction.RETRY
+                            : HttpErrorEnvelope.UserAction.LOGIN,
+                    "ai_meeting.identity.authentication_failed");
+        };
+    }
+
+    private HttpResponse createEntitlementFailure(
+            com.czur.reference.application.port.entitlement.EntitlementProviderError failure) {
+        var code = failure.code();
+        boolean retryable = failure.retryable();
+        return switch (code) {
+            case INVALID_REQUEST -> error(400, HttpErrorEnvelope.Domain.CONTRACT,
+                    "ENTITLEMENT_INVALID_REQUEST", retryable,
+                    retryable ? HttpErrorEnvelope.UserAction.RETRY : HttpErrorEnvelope.UserAction.NONE,
+                    "ai_meeting.entitlement.invalid_request");
+            case PERMISSION_DENIED -> error(403, HttpErrorEnvelope.Domain.IDENTITY,
+                    "ENTITLEMENT_PERMISSION_DENIED", retryable,
+                    retryable ? HttpErrorEnvelope.UserAction.RETRY
+                            : HttpErrorEnvelope.UserAction.CONTACT_ADMIN,
+                    "ai_meeting.entitlement.permission_denied");
+            case ENTITLEMENT_DENIED, CAPABILITY_NOT_GRANTED, GRANT_EXPIRED -> error(422,
+                    HttpErrorEnvelope.Domain.ENTITLEMENT, "ENTITLEMENT_" + code.name(),
+                    retryable, retryable ? HttpErrorEnvelope.UserAction.RETRY
+                            : HttpErrorEnvelope.UserAction.NONE,
+                    "ai_meeting.entitlement." + code.name().toLowerCase(Locale.ROOT));
+            case RESERVATION_EXPIRED, RESERVATION_NOT_FOUND, RESERVATION_SCOPE_MISMATCH,
+                    RESERVATION_STATE_CONFLICT, VERSION_CONFLICT, IDEMPOTENCY_CONFLICT ->
+                    error(409, HttpErrorEnvelope.Domain.ENTITLEMENT,
+                            "ENTITLEMENT_" + code.name(), retryable,
+                            retryable ? HttpErrorEnvelope.UserAction.RETRY
+                                    : HttpErrorEnvelope.UserAction.NONE,
+                            "ai_meeting.entitlement." + code.name().toLowerCase(Locale.ROOT));
+            case PROVIDER_UNAVAILABLE -> error(503, HttpErrorEnvelope.Domain.ENTITLEMENT,
+                    "ENTITLEMENT_PROVIDER_UNAVAILABLE", retryable,
+                    retryable ? HttpErrorEnvelope.UserAction.RETRY
+                            : HttpErrorEnvelope.UserAction.CONTACT_ADMIN,
+                    "ai_meeting.entitlement.provider_unavailable");
+            case INTERNAL -> error(500, HttpErrorEnvelope.Domain.INTERNAL, "INTERNAL_ERROR",
+                    retryable, retryable ? HttpErrorEnvelope.UserAction.RETRY
+                            : HttpErrorEnvelope.UserAction.CONTACT_ADMIN,
+                    "ai_meeting.internal.error");
+        };
+    }
+
+    private HttpResponse createPreparationFailure(
+            com.czur.reference.application.command.CompleteMeetingResponseAssembler.FailureCode code) {
+        return switch (code) {
+            case WINNER_INCONSISTENT, PROFILE_MISMATCH -> error(500,
+                    HttpErrorEnvelope.Domain.INTERNAL, "CREATE_PREPARATION_INCONSISTENT", false,
+                    HttpErrorEnvelope.UserAction.CONTACT_ADMIN,
+                    "ai_meeting.internal.create_inconsistent");
+            case CAPABILITY_UNAVAILABLE -> error(422, HttpErrorEnvelope.Domain.CONTRACT,
+                    "CREATE_CAPABILITY_UNAVAILABLE", false, HttpErrorEnvelope.UserAction.NONE,
+                    "ai_meeting.contract.capability_unavailable");
+            case AUDIO_UNSUPPORTED -> error(422, HttpErrorEnvelope.Domain.AUDIO,
+                    "CREATE_AUDIO_UNSUPPORTED", false, HttpErrorEnvelope.UserAction.NONE,
+                    "ai_meeting.audio.unsupported");
+            case SESSION_UNAVAILABLE -> error(503, HttpErrorEnvelope.Domain.SESSION,
+                    "CREATE_SESSION_UNAVAILABLE", false,
+                    HttpErrorEnvelope.UserAction.CONTACT_ADMIN,
+                    "ai_meeting.session.create_unavailable");
+        };
+    }
+
+    private HttpResponse createCommitFailure(
+            AuthenticatedCompleteMeetingCreateResult.CreationFailure failure) {
+        var code = failure.code();
+        return switch (code) {
+            case IDEMPOTENCY_CONFLICT, RESERVATION_NOT_FOUND, RESERVATION_EXPIRED,
+                    RESERVATION_STATE_CONFLICT, VERSION_CONFLICT, MEETING_CONFLICT ->
+                    error(409, HttpErrorEnvelope.Domain.CONTRACT, "CREATE_" + code.name(),
+                            failure.retryable(), failure.retryable()
+                                    ? HttpErrorEnvelope.UserAction.RETRY
+                                    : HttpErrorEnvelope.UserAction.NONE,
+                            "ai_meeting.contract.create_conflict");
+            case STORAGE_UNAVAILABLE, OUTCOME_UNKNOWN -> error(503,
+                    HttpErrorEnvelope.Domain.STORAGE, "CREATE_" + code.name(),
+                    failure.retryable(), failure.retryable()
+                            ? HttpErrorEnvelope.UserAction.RETRY
+                            : HttpErrorEnvelope.UserAction.CONTACT_ADMIN,
+                    "ai_meeting.storage.create_unavailable");
+            case INTERNAL -> error(500, HttpErrorEnvelope.Domain.INTERNAL, "INTERNAL_ERROR",
+                    failure.retryable(), failure.retryable()
+                            ? HttpErrorEnvelope.UserAction.RETRY
+                            : HttpErrorEnvelope.UserAction.CONTACT_ADMIN,
+                    "ai_meeting.internal.error");
+        };
+    }
+
     private HttpResponse identityFailure(
             com.czur.reference.application.port.identity.IdentityProviderError.Code code) {
         return switch (code) {
@@ -210,6 +362,11 @@ public final class HttpErrorMapper {
     /** 捕获边界异常时仅使用白名单类型；其它异常固定为 INTERNAL。 */
     public HttpResponse exception(Throwable failure) {
         Objects.requireNonNull(failure, "failure");
+        if (failure instanceof CreateMeetingHttpRequestDecoder.DecodeFailure decodeFailure
+                && decodeFailure.kind()
+                        == CreateMeetingHttpRequestDecoder.DecodeFailure.Kind.AUTHENTICATION) {
+            return missingContext();
+        }
         if (failure instanceof IdempotencyConflictException) {
             return error(409, HttpErrorEnvelope.Domain.CONTRACT, "IDEMPOTENCY_CONFLICT", false,
                     HttpErrorEnvelope.UserAction.NONE, "ai_meeting.contract.idempotency_conflict");
