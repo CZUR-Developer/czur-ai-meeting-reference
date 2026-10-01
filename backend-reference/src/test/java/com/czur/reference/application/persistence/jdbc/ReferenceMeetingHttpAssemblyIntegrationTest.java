@@ -227,6 +227,160 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
     }
 
     @Test
+    void realHttpRealtimeRenewalIsOptInAndReplaysPersistedGrantBytes() throws Exception {
+        migrate(13);
+        String route = "/v1/meetings/mtg_closed:renewRealtimeToken";
+        String keyOne = "network-renew-key-0001";
+        String keyTwo = "network-renew-key-0002";
+        Map<String, String> enabled = config();
+        enabled.put(ReferenceMeetingDeploymentConfig.REALTIME_RENEW_ENABLED, "true");
+        var missing = assertThrows(DatabaseStartupException.class,
+                () -> ReferenceMeetingHttpAssembly.start(enabled, CLOCK));
+        assertEquals(DatabaseReadiness.Status.MIGRATION_MISSING, missing.readiness().status());
+
+        // 旧 V013 部署仍能启动其它路由；续期在 Bearer、头和正文校验前固定 501。
+        try (var closed = ReferenceMeetingHttpAssembly.start(config(), CLOCK);
+             var network = closed.newJdkHttpServer(new InetSocketAddress("127.0.0.1", 0))) {
+            network.start();
+            assertNetworkError(exchange(network.address().getPort(), "POST", route, "{}", ""),
+                    501, "ROUTE_NOT_IMPLEMENTED");
+            assertEquals(200, status(exchange(network.address().getPort(), "GET",
+                    MeetingJdkHttpServer.READINESS_PATH, "")));
+        }
+
+        migrate(14, 14);
+        enabled.put(ReferenceMeetingDeploymentConfig.CREATE_ENABLED, "true");
+        MutableClock renewalClock = new MutableClock(NOW, ZoneOffset.UTC);
+        try (var open = ReferenceMeetingHttpAssembly.start(enabled, renewalClock);
+             var network = open.newJdkHttpServer(new InetSocketAddress("127.0.0.1", 0))) {
+            network.start();
+            int port = network.address().getPort();
+            assertEquals(200, status(exchange(port, "GET",
+                    MeetingJdkHttpServer.READINESS_PATH, "")));
+            String createKey = "network-renew-create-key-0001";
+            String created = exchange(port, "POST", "/v1/meetings",
+                    createRequest(createKey, "network-renew-session").body(),
+                    networkHeaders(TOKEN, createKey, true));
+            assertEquals(201, status(created));
+            assertTrue(responseBody(created).equals(responseBody(exchange(port, "POST",
+                    "/v1/meetings", createRequest(createKey, "network-renew-session").body(),
+                    networkHeaders(TOKEN, createKey, true)))),
+                    "Create replay must preserve original bytes without logging its Token");
+            String meetingId = ERROR_JSON.readTree(responseBody(created))
+                    .path("meetingId").textValue();
+            String initialSessionToken = ERROR_JSON.readTree(responseBody(created))
+                    .path("realtime").path("sessionToken").textValue();
+            String path = "/v1/meetings/" + meetingId + ":renewRealtimeToken";
+            assertNetworkError(exchange(port, "POST", path, "",
+                    "Idempotency-Key: " + keyOne + "\r\n"),
+                    401, "AUTHENTICATION_REQUIRED");
+            assertNetworkError(exchange(port, "POST", path, "",
+                    networkHeaders(initialSessionToken, keyOne, false)),
+                    401, "AUTHENTICATION_FAILED");
+            assertNetworkError(exchange(port, "POST", path, "",
+                    networkHeaders(TOKEN, "short", false)), 400, "INVALID_REQUEST");
+            assertNetworkError(exchange(port, "POST", path, "{}",
+                    networkHeaders(TOKEN, keyOne, true)), 400, "INVALID_REQUEST");
+            assertNetworkError(exchange(port, "POST", path + "?x=1", "",
+                    networkHeaders(TOKEN, keyOne, false)), 400, "INVALID_REQUEST");
+            assertNetworkError(exchange(port, "POST",
+                    "/v1/meetings/mtg_" + "x".repeat(1021) + ":renewRealtimeToken", "",
+                    networkHeaders(TOKEN, keyOne, false)), 400, "INVALID_REQUEST");
+            assertNetworkError(exchange(port, "POST",
+                    "/v1/meetings/mtg_missing:renewRealtimeToken", "",
+                    networkHeaders(TOKEN, keyOne, false)), 404, "MEETING_NOT_FOUND");
+            assertEquals(0, count("meeting_realtime_token_grant"));
+
+            String first = exchange(port, "POST", path, "",
+                    networkHeaders(TOKEN, keyOne, false));
+            assertEquals(200, status(first));
+            String firstJson = responseBody(first);
+            assertTrue(storedRealtimeGrantJson(meetingId, keyOne).equals(firstJson),
+                    "first Grant must equal persisted JSON without logging its Token");
+            assertTrue(first.toLowerCase(java.util.Locale.ROOT)
+                    .contains("cache-control: no-store"));
+            assertEquals(meetingId, ERROR_JSON.readTree(firstJson).path("streamId").textValue());
+            assertFalse(initialSessionToken.equals(
+                    ERROR_JSON.readTree(firstJson).path("sessionToken").textValue()),
+                    "renewed Token must differ from the first session Token");
+
+            // 首次 Grant 到期后同键仍重放原文，新键从新的服务端时间签发。
+            renewalClock.advanceTo(NOW.plusSeconds(301));
+            assertTrue(firstJson.equals(responseBody(exchange(port, "POST", path, "",
+                    networkHeaders(TOKEN, keyOne, false)))),
+                    "expired same-key Grant must replay original bytes");
+
+            try (Connection connection = fixtureDataSource.getConnection();
+                 PreparedStatement change = connection.prepareStatement("""
+                         UPDATE meeting SET state='STOPPING',
+                             input_state='INPUT_COMPLETE_PENDING'
+                          WHERE meeting_id=?
+                         """)) {
+                change.setString(1, meetingId);
+                assertEquals(1, change.executeUpdate());
+            }
+            String second = exchange(port, "POST", path, "",
+                    networkHeaders(TOKEN, keyTwo, false));
+            assertEquals(200, status(second));
+            assertFalse(firstJson.equals(responseBody(second)),
+                    "new key must receive a distinct Grant");
+            assertTrue(storedRealtimeGrantJson(meetingId, keyTwo).equals(responseBody(second)),
+                    "second Grant must equal persisted JSON without logging its Token");
+            assertTrue(Instant.parse(ERROR_JSON.readTree(responseBody(second))
+                    .path("expiresAt").textValue()).isAfter(Instant.parse(
+                    ERROR_JSON.readTree(firstJson).path("expiresAt").textValue())));
+
+            try (Connection connection = fixtureDataSource.getConnection();
+                 PreparedStatement change = connection.prepareStatement("""
+                         UPDATE meeting SET state='FINALIZING', input_state='INPUT_ACCEPTED',
+                             finalization_receipt_id='receipt-network-renew'
+                          WHERE meeting_id=?
+                         """)) {
+                change.setString(1, meetingId);
+                assertEquals(1, change.executeUpdate());
+            }
+            assertTrue(firstJson.equals(responseBody(exchange(port, "POST", path, "",
+                    networkHeaders(TOKEN, keyOne, false)))),
+                    "terminal-state same-key replay must preserve original bytes");
+            assertNetworkError(exchange(port, "POST", path, "",
+                    networkHeaders(TOKEN, "network-renew-key-0003", false)),
+                    409, "INVALID_MEETING_STATE");
+            assertEquals(2, count("meeting_realtime_token_grant"));
+            assertEquals(200, status(exchange(port, "GET", "/v1/meetings/" + meetingId, "",
+                    networkHeaders(TOKEN, null, false))));
+        }
+
+        Map<String, String> foreign = new HashMap<>(enabled);
+        foreign.put(ReferenceDevIdentityConfig.SUBJECT_SCOPE, "another-renew-subject");
+        try (var other = ReferenceMeetingHttpAssembly.start(foreign, CLOCK);
+             var network = other.newJdkHttpServer(new InetSocketAddress("127.0.0.1", 0))) {
+            network.start();
+            String meetingId = createdMeetingId(other.databaseRuntime().dataSource(),
+                    "network-renew-create-key-0001");
+            assertNetworkError(exchange(network.address().getPort(), "POST",
+                    "/v1/meetings/" + meetingId + ":renewRealtimeToken", "",
+                    networkHeaders(TOKEN, keyOne, false)), 403, "ACCESS_DENIED");
+        }
+    }
+
+    private String storedRealtimeGrantJson(String meetingId, String key) throws Exception {
+        try (Connection connection = fixtureDataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement("""
+                     SELECT grant_json FROM meeting_realtime_token_grant
+                      WHERE meeting_id=? AND idempotency_key=?
+                     """)) {
+            statement.setString(1, meetingId);
+            statement.setString(2, key);
+            try (var rows = statement.executeQuery()) {
+                assertTrue(rows.next());
+                String json = rows.getString(1);
+                assertFalse(rows.next());
+                return json;
+            }
+        }
+    }
+
+    @Test
     void missingV013AndInvalidPhysicalFactRejectStartup() throws Exception {
         migrate(12);
         var missing = assertThrows(DatabaseStartupException.class,

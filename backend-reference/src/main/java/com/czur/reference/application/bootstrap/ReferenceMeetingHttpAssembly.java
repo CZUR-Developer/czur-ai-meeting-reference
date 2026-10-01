@@ -2,6 +2,7 @@ package com.czur.reference.application.bootstrap;
 
 import com.czur.reference.application.command.AuthenticatedCompleteMeetingApplicationService;
 import com.czur.reference.application.command.AuthenticatedMeetingStopApplicationService;
+import com.czur.reference.application.command.AuthenticatedRealtimeTokenRenewApplicationService;
 import com.czur.reference.application.command.CompleteMeetingResponseAssembler;
 import com.czur.reference.application.command.ReferenceCreateRealtimeSessionAllocator;
 import com.czur.reference.application.entitlement.referencedev.ReferenceDevEntitlementPolicy;
@@ -20,6 +21,9 @@ import com.czur.reference.application.persistence.jdbc.JdbcMeetingDeletionAdmiss
 import com.czur.reference.application.persistence.jdbc.JdbcMeetingQueryPort;
 import com.czur.reference.application.persistence.jdbc.JdbcMeetingManifestQueryPort;
 import com.czur.reference.application.persistence.jdbc.JdbcOwnedMeetingStopUnitOfWork;
+import com.czur.reference.application.persistence.jdbc.JdbcRenewRealtimeTokenUnitOfWork;
+import com.czur.reference.application.persistence.jdbc.DatabaseReadiness;
+import com.czur.reference.application.persistence.jdbc.DatabaseStartupException;
 import com.czur.reference.application.persistence.jdbc.JdbcReferenceDevEntitlementProvider;
 import com.czur.reference.application.persistence.jdbc.JdbcUsageReserveLookup;
 import com.czur.reference.application.port.MeetingIdGenerator;
@@ -45,8 +49,9 @@ import java.util.logging.Logger;
 /**
  * 参考会议 HTTP 装配根，拥有唯一 JDBC 池与请求运行时的生命周期。
  *
- * <p>启动前从一份可信配置完成交叉校验；数据库运行时只执行 V001～V013 的只读
- * readiness，不自动迁移或回退内存端口。查询、认证 Stop 与 T14 删除受理从同一
+ * <p>启动前从一份可信配置完成交叉校验；数据库运行时执行 V001～V013 基线只读
+ * readiness，只有显式启用实时 Token 续期时才额外检查 V014。不自动迁移或回退
+ * 内存端口。查询、认证 Stop 与 T14 删除受理从同一
  * DataSource 装配。只有可信配置显式开启 Create 才接入 V013 重放、权益与创建
  * 工作单元；关闭时请求在任何身份、权益、V013 写入或会话分配前返回 501。
  * 本对象不创建网络监听器、Worker、模型或存储适配器。</p>
@@ -62,16 +67,18 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
     private final MeetingHttpRuntime runtime;
     private final AuthenticatedMeetingHttpContextResolver contextResolver;
     private final HttpErrorMapper errors;
+    private final boolean realtimeRenewEnabled;
     private final AtomicBoolean closed = new AtomicBoolean();
 
     private ReferenceMeetingHttpAssembly(
             JdbcDatabaseRuntime database, MeetingHttpRuntime runtime,
             AuthenticatedMeetingHttpContextResolver contextResolver,
-            HttpErrorMapper errors) {
+            HttpErrorMapper errors, boolean realtimeRenewEnabled) {
         this.database = database;
         this.runtime = runtime;
         this.contextResolver = contextResolver;
         this.errors = errors;
+        this.realtimeRenewEnabled = realtimeRenewEnabled;
     }
 
     /**
@@ -97,6 +104,12 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
         JdbcDatabaseRuntime database = JdbcDatabaseRuntime.start(config.database());
         MeetingHttpRuntime runtime = null;
         try {
+            if (config.realtimeRenewEnabled()) {
+                DatabaseReadiness readiness = database.checkRealtimeCredentialReadiness();
+                if (!readiness.ready()) {
+                    throw new DatabaseStartupException(readiness);
+                }
+            }
             DataSource dataSource = database.dataSource();
             byte[] pageSecret = config.pageTokenSecretCopy();
             JdbcMeetingQueryPort query;
@@ -116,6 +129,12 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                     identity, errors);
             var stopService = new AuthenticatedMeetingStopApplicationService(
                     config.deploymentScope(), identity, stop, query);
+            var renewService = config.realtimeRenewEnabled()
+                    ? new AuthenticatedRealtimeTokenRenewApplicationService(
+                            config.deploymentScope(), identity,
+                            new JdbcRenewRealtimeTokenUnitOfWork(dataSource, clock,
+                                    config.wssTokenTtl(), new SecureRandom()))
+                    : null;
             MeetingManifestPort manifest = config.resultLinkTtl()
                     .<MeetingManifestPort>map(ttl -> new JdbcMeetingManifestQueryPort(
                             dataSource, new ManifestResultAccessPolicy(clock, ttl)))
@@ -146,14 +165,17 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                         config.capabilityLimits());
                 runtime = new MeetingHttpRuntime(query, deletion, decoder, errors, stopService,
                         create, new CreateMeetingHttpRequestDecoder(
-                                config.audience(), config.clientId()), true, manifest);
+                                config.audience(), config.clientId()), true, manifest,
+                        renewService);
             } else {
                 runtime = new MeetingHttpRuntime(query, deletion, decoder, errors, stopService,
-                        null, null, false, manifest);
+                        null, null, false, manifest, renewService);
             }
-            LOGGER.log(Level.INFO, "reference meeting HTTP 装配完成 createEnabled={0}",
-                    config.createEnabled());
-            return new ReferenceMeetingHttpAssembly(database, runtime, resolver, errors);
+            LOGGER.log(Level.INFO,
+                    "reference meeting HTTP 装配完成 createEnabled={0} realtimeRenewEnabled={1}",
+                    new Object[]{config.createEnabled(), config.realtimeRenewEnabled()});
+            return new ReferenceMeetingHttpAssembly(database, runtime, resolver, errors,
+                    config.realtimeRenewEnabled());
         } catch (RuntimeException | Error failure) {
             try {
                 if (runtime != null) {
@@ -200,7 +222,9 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
             throw new IllegalStateException("reference meeting HTTP assembly is closed");
         }
         return new MeetingJdkHttpServer(address, runtime, errors, contextResolver,
-                () -> database.checkReadiness().ready());
+                () -> database.checkReadiness().ready()
+                        && (!realtimeRenewEnabled
+                                || database.checkRealtimeCredentialReadiness().ready()));
     }
 
     /** 幂等地先关闭请求入口，再关闭唯一 JDBC 池；不删除任何数据库事实。 */

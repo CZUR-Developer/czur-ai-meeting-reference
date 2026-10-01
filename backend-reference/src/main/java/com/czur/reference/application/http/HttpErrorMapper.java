@@ -3,6 +3,7 @@ package com.czur.reference.application.http;
 import com.czur.reference.application.command.MeetingCommandResult;
 import com.czur.reference.application.command.AuthenticatedMeetingStopResult;
 import com.czur.reference.application.command.AuthenticatedCompleteMeetingCreateResult;
+import com.czur.reference.application.command.AuthenticatedRealtimeTokenRenewApplicationService;
 import com.czur.reference.application.error.IdempotencyConflictException;
 import com.czur.reference.application.error.MeetingAlreadyExistsException;
 import com.czur.reference.application.error.MeetingNotFoundException;
@@ -10,6 +11,7 @@ import com.czur.reference.application.port.DeleteResult;
 import com.czur.reference.application.port.MeetingQueryPort;
 import com.czur.reference.application.port.MeetingManifestPort;
 import com.czur.reference.application.port.OwnedMeetingStopUnitOfWork;
+import com.czur.reference.application.port.RenewRealtimeTokenUnitOfWork;
 import com.czur.reference.protocol.json.MeetingManifestJson;
 
 import java.util.LinkedHashMap;
@@ -187,6 +189,48 @@ public final class HttpErrorMapper {
         return error(500, HttpErrorEnvelope.Domain.INTERNAL,
                 "INTERNAL_ERROR", false, HttpErrorEnvelope.UserAction.CONTACT_ADMIN,
                 "ai_meeting.internal.error");
+    }
+
+    /**
+     * 续期只输出 V014 事务已经持久确认的 Grant JSON 原文，不重新编码 Token。
+     * 身份和事务错误仅依据稳定枚举映射；未知提交结果保持可重试 503。
+     */
+    public HttpResponse renew(AuthenticatedRealtimeTokenRenewApplicationService.Result result) {
+        Objects.requireNonNull(result, "result");
+        if (result instanceof AuthenticatedRealtimeTokenRenewApplicationService.IdentityFailure
+                identity) {
+            return identityVerificationFailure(identity.error());
+        }
+        if (result instanceof AuthenticatedRealtimeTokenRenewApplicationService.InternalFailure) {
+            return internalFailure();
+        }
+        RenewRealtimeTokenUnitOfWork.Result persisted =
+                ((AuthenticatedRealtimeTokenRenewApplicationService.Renewal) result).result();
+        if (persisted instanceof RenewRealtimeTokenUnitOfWork.Success success) {
+            return HttpResponse.json(200, success.persistedGrantJson());
+        }
+        RenewRealtimeTokenUnitOfWork.ErrorCode code =
+                ((RenewRealtimeTokenUnitOfWork.Failure) persisted).code();
+        return switch (code) {
+            case NOT_FOUND -> error(404, HttpErrorEnvelope.Domain.SESSION,
+                    "MEETING_NOT_FOUND", false, HttpErrorEnvelope.UserAction.NONE,
+                    "ai_meeting.session.meeting_not_found");
+            case ACCESS_DENIED -> error(403, HttpErrorEnvelope.Domain.IDENTITY,
+                    "ACCESS_DENIED", false, HttpErrorEnvelope.UserAction.CONTACT_ADMIN,
+                    "ai_meeting.identity.access_denied");
+            case STATE_CONFLICT -> error(409, HttpErrorEnvelope.Domain.SESSION,
+                    "INVALID_MEETING_STATE", false, HttpErrorEnvelope.UserAction.NONE,
+                    "ai_meeting.session.invalid_meeting_state");
+            case FACT_INCONSISTENT -> error(500, HttpErrorEnvelope.Domain.INTERNAL,
+                    "REALTIME_FACT_INCONSISTENT", false,
+                    HttpErrorEnvelope.UserAction.CONTACT_ADMIN,
+                    "ai_meeting.internal.realtime_fact_inconsistent");
+            case STORAGE_UNAVAILABLE, OUTCOME_UNKNOWN -> error(503,
+                    HttpErrorEnvelope.Domain.STORAGE, "REALTIME_" + code.name(), true,
+                    HttpErrorEnvelope.UserAction.RETRY,
+                    "ai_meeting.storage.realtime_unavailable");
+            case INTERNAL -> internalFailure();
+        };
     }
 
     /**

@@ -3,12 +3,14 @@ package com.czur.reference.application.http;
 import com.czur.reference.application.command.MeetingCommandContext;
 import com.czur.reference.application.command.AuthenticatedMeetingStopApplicationService;
 import com.czur.reference.application.command.AuthenticatedCompleteMeetingApplicationService;
+import com.czur.reference.application.command.AuthenticatedRealtimeTokenRenewApplicationService;
 import com.czur.reference.application.command.StopMeetingIntent;
 import com.czur.reference.application.port.DeleteRequest;
 import com.czur.reference.application.port.MeetingDeletionPort;
 import com.czur.reference.application.port.MeetingManifestPort;
 import com.czur.reference.application.port.MeetingQueryPort;
 import com.czur.reference.application.port.identity.IdentityVerificationRequest;
+import com.czur.reference.domain.meeting.MeetingIdPolicy;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -33,7 +35,8 @@ import java.util.regex.Pattern;
  * <p>本类本身不验证 Bearer、权限、计费或能力；显式开启 Create 时使用专用严格
  * 解码器，并调用已认证的完整应用服务。GET/DELETE 要求调用方提供已经验证的
  * {@link MeetingCommandContext}。Create 默认关闭并先返回 501；Stop 只有注入
- * 认证应用服务后才开放。两者均不回退旧的未认证命令服务。</p>
+ * 认证应用服务后才开放。实时 Token 续期仅显式注入认证服务时开放，默认先返回
+ * 501；这些路由均不回退旧的未认证命令服务。</p>
  *
  * <p>日志只记录固定 operation 名和状态码，不记录原始 path、meetingId、Token、
  * request body、receipt 或异常消息。未知路径和当前未实现的后续 OpenAPI 路由
@@ -46,6 +49,8 @@ public final class MeetingHttpAdapter {
             "^/v1/meetings/(mtg_[A-Za-z0-9_-]+)$");
     private static final Pattern STOP_PATH = Pattern.compile(
             "^/v1/meetings/(mtg_[A-Za-z0-9_-]+):stop$");
+    private static final Pattern RENEW_PATH = Pattern.compile(
+            "^/v1/meetings/(mtg_[A-Za-z0-9_-]+):renewRealtimeToken$");
     private static final Pattern MANIFEST_PATH = Pattern.compile(
             "^/v1/meetings/(mtg_[A-Za-z0-9_-]+)/manifest$");
     private static final Pattern GEN_TIME = Pattern.compile("(?:-1|0|[1-9][0-9]*)");
@@ -61,6 +66,7 @@ public final class MeetingHttpAdapter {
     private final CreateMeetingHttpRequestDecoder createDecoder;
     private final boolean createEnabled;
     private final MeetingManifestPort manifestPort;
+    private final AuthenticatedRealtimeTokenRenewApplicationService renewService;
 
     /** 使用随机 opaque diagnosticId 的默认错误映射器。 */
     public MeetingHttpAdapter(
@@ -85,6 +91,7 @@ public final class MeetingHttpAdapter {
         this.createDecoder = null;
         this.createEnabled = false;
         this.manifestPort = null;
+        this.renewService = null;
     }
 
     /** 装配完整认证 Stop application service 的构造器。 */
@@ -103,6 +110,7 @@ public final class MeetingHttpAdapter {
         this.createDecoder = null;
         this.createEnabled = false;
         this.manifestPort = null;
+        this.renewService = null;
     }
 
     /**
@@ -136,6 +144,25 @@ public final class MeetingHttpAdapter {
             CreateMeetingHttpRequestDecoder createDecoder,
             boolean createEnabled,
             MeetingManifestPort manifestPort) {
+        this(queryPort, deletionPort, decoder, errors, stopService,
+                createService, createDecoder, createEnabled, manifestPort, null);
+    }
+
+    /**
+     * 仅显式注入认证续期服务时开放公开续期路由。null 保持 501 关态，
+     * 且在校验 Bearer、body、幂等键和访问 V014 前即返回。
+     */
+    public MeetingHttpAdapter(
+            MeetingQueryPort queryPort,
+            MeetingDeletionPort deletionPort,
+            RequestDecoder decoder,
+            HttpErrorMapper errors,
+            AuthenticatedMeetingStopApplicationService stopService,
+            AuthenticatedCompleteMeetingApplicationService createService,
+            CreateMeetingHttpRequestDecoder createDecoder,
+            boolean createEnabled,
+            MeetingManifestPort manifestPort,
+            AuthenticatedRealtimeTokenRenewApplicationService renewService) {
         this.queryPort = Objects.requireNonNull(queryPort, "queryPort");
         this.deletionPort = Objects.requireNonNull(deletionPort, "deletionPort");
         this.decoder = Objects.requireNonNull(decoder, "decoder");
@@ -149,6 +176,7 @@ public final class MeetingHttpAdapter {
         this.createDecoder = createDecoder;
         this.createEnabled = createEnabled;
         this.manifestPort = manifestPort;
+        this.renewService = renewService;
     }
 
     /** 与 runtime 常见的 service-before-mapper 装配顺序兼容。 */
@@ -293,6 +321,31 @@ public final class MeetingHttpAdapter {
             return errors.stop(stopService.stop(decoded.verificationRequest(), decoded.intent()));
         }
 
+        Matcher renew = RENEW_PATH.matcher(path);
+        if ("POST".equals(method) && renew.matches()) {
+            if (renewService == null) {
+                return errors.notImplemented();
+            }
+            if (!request.query().isEmpty() || !request.body().isEmpty()) {
+                throw new IllegalArgumentException("renew request must have no body or query");
+            }
+            String meetingId = renew.group(1);
+            MeetingIdPolicy.requireValid(meetingId);
+            String idempotencyKey = requireIdempotencyKey(request);
+            var verification = decoder.decodeRenewRealtimeToken(
+                    request, meetingId, idempotencyKey);
+            try {
+                return errors.renew(renewService.renew(
+                        Objects.requireNonNull(verification, "renew verification"),
+                        meetingId, idempotencyKey));
+            } catch (RuntimeException unexpected) {
+                // 身份请求已生成后，服务或成功投影的异常不是客户端输入错误。
+                // 服务正常会关闭凭据；在尚未接手等异常窗口再次关闭也安全。
+                if (verification != null) verification.credential().close();
+                return errors.internalFailure();
+            }
+        }
+
         if ("GET".equals(method) && MEETINGS_PATH.equals(path)) {
             if (context == null) {
                 return errors.missingContext();
@@ -345,7 +398,8 @@ public final class MeetingHttpAdapter {
     /** 校验 OpenAPI 要求的幂等头；具体 scope/digest 仍由 decoder/端口负责。 */
     private static String requireIdempotencyKey(HttpRequest request) {
         String value = request.header("idempotency-key");
-        if (value == null || value.isBlank() || value.length() < 16 || value.length() > 128) {
+        if (value == null || value.isBlank() || value.length() < 16 || value.length() > 128
+                || value.codePoints().anyMatch(Character::isISOControl)) {
             throw new IllegalArgumentException("idempotency-key is invalid");
         }
         return value;
@@ -396,6 +450,9 @@ public final class MeetingHttpAdapter {
         if ("POST".equals(request.method()) && STOP_PATH.matcher(request.path()).matches()) {
             return "stop";
         }
+        if ("POST".equals(request.method()) && RENEW_PATH.matcher(request.path()).matches()) {
+            return "renewRealtimeToken";
+        }
         if ("GET".equals(request.method()) && MEETINGS_PATH.equals(request.path())) {
             return "list";
         }
@@ -436,6 +493,15 @@ public final class MeetingHttpAdapter {
         /** 最小 Stop 解码边界；实现负责从可信 HTTP 入口生成身份请求。 */
         default StopRequest decodeStop(HttpRequest request) {
             throw new IllegalArgumentException("stop decoder is not configured");
+        }
+
+        /**
+         * 续期只提交用户 Bearer 的身份请求；会议 ID 和幂等键由 adapter 的
+         * 已匹配路径/头直接构造持久命令，解码器不能覆盖归属。
+         */
+        default IdentityVerificationRequest decodeRenewRealtimeToken(
+                HttpRequest request, String pathMeetingId, String idempotencyKey) {
+            throw new IllegalArgumentException("renewal decoder is not configured");
         }
     }
 

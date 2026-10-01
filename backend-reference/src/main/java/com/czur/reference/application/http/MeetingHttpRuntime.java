@@ -2,6 +2,7 @@ package com.czur.reference.application.http;
 
 import com.czur.reference.application.command.AuthenticatedMeetingStopApplicationService;
 import com.czur.reference.application.command.AuthenticatedCompleteMeetingApplicationService;
+import com.czur.reference.application.command.AuthenticatedRealtimeTokenRenewApplicationService;
 import com.czur.reference.application.port.MeetingDeletionPort;
 import com.czur.reference.application.port.MeetingQueryPort;
 import com.czur.reference.application.port.MeetingManifestPort;
@@ -30,8 +31,8 @@ import java.util.logging.Logger;
  * 打断。这样可以在真实 server、测试 server 或未来框架适配器之间复用相同的
  * application 边界，而不会误称本参考切片已经提供了完整网络 server。</p>
  *
- * <p>既有构造器不开放 Create，继续返回 501；只有显式注入完整认证 Create
- * 应用服务、专用请求解码器并启用开关的构造器才开放该路由。任何构造器均不接收
+ * <p>既有构造器不开放 Create 或实时 Token 续期，继续返回 501；只有显式注入
+ * 相应认证服务及解码器才开放路由。任何构造器均不接收
  * 旧的未认证 {@code MeetingCommandService}。</p>
  */
 public final class MeetingHttpRuntime implements AutoCloseable {
@@ -96,8 +97,24 @@ public final class MeetingHttpRuntime implements AutoCloseable {
             CreateMeetingHttpRequestDecoder createDecoder,
             boolean createEnabled,
             MeetingManifestPort manifestPort) {
+        this(queryPort, deletionPort, decoder, errors, stopService, createService,
+                createDecoder, createEnabled, manifestPort, null);
+    }
+
+    /** 显式装配认证续期服务；null 使该路由保持 501 关闭状态。 */
+    public MeetingHttpRuntime(
+            MeetingQueryPort queryPort,
+            MeetingDeletionPort deletionPort,
+            MeetingHttpAdapter.RequestDecoder decoder,
+            HttpErrorMapper errors,
+            AuthenticatedMeetingStopApplicationService stopService,
+            AuthenticatedCompleteMeetingApplicationService createService,
+            CreateMeetingHttpRequestDecoder createDecoder,
+            boolean createEnabled,
+            MeetingManifestPort manifestPort,
+            AuthenticatedRealtimeTokenRenewApplicationService renewService) {
         this(new MeetingHttpAdapter(queryPort, deletionPort, decoder, errors, stopService,
-                createService, createDecoder, createEnabled, manifestPort), errors);
+                createService, createDecoder, createEnabled, manifestPort, renewService), errors);
     }
 
     /** 使用默认错误映射器创建已认证 Stop 运行时。 */

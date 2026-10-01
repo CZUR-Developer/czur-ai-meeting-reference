@@ -12,7 +12,7 @@ import java.util.Arrays;
 import java.util.Objects;
 
 /**
- * 参考 REST Stop/Delete 的最小请求解码器，不验证身份或授权。
+ * 参考 REST Stop/Delete/实时 Token 续期的最小请求解码器，不验证身份或授权。
  *
  * <p>Stop 的 Bearer 只作形状检查，凭据交给既有认证应用服务验证并关闭；
  * audience/clientId 只能由服务端可信配置构造，不允许从请求中读取。Stop body
@@ -62,6 +62,30 @@ public final class ReferenceMeetingHttpRequestDecoder implements MeetingHttpAdap
         } catch (RuntimeException invalidIntent) {
             throw invalid();
         }
+        return new MeetingHttpAdapter.StopRequest(
+                decodeUserBearer(request), intent);
+    }
+
+    /**
+     * 仅把已匹配续期路由的用户 Bearer 转为短生命周期身份请求。
+     * adapter 已先拒绝非空 body/query 和无效幂等键；本方法再次核对方法、路径
+     * 与头，避免未来调用方绕过路由门禁。它不读取或接受 WSS sessionToken。
+     */
+    @Override
+    public IdentityVerificationRequest decodeRenewRealtimeToken(
+            HttpRequest request, String pathMeetingId, String idempotencyKey) {
+        Objects.requireNonNull(request, "request");
+        if (!"POST".equals(request.method()) || pathMeetingId == null
+                || !request.path().equals(PATH_PREFIX + pathMeetingId + ":renewRealtimeToken")
+                || !request.query().isEmpty() || !request.body().isEmpty()) {
+            throw invalid();
+        }
+        requireMatchingKey(request, idempotencyKey);
+        return decodeUserBearer(request);
+    }
+
+    /** Stop 与续期共用的用户 Bearer 形状与清零规则。 */
+    private IdentityVerificationRequest decodeUserBearer(HttpRequest request) {
         String token = BearerAuthorization.tokenOrNull(request.header("authorization"));
         if (token == null) {
             throw new AuthenticationFailure();
@@ -70,9 +94,9 @@ public final class ReferenceMeetingHttpRequestDecoder implements MeetingHttpAdap
         SecretCredential credential = null;
         try {
             credential = SecretCredential.copyOf(temporary);
-            return new MeetingHttpAdapter.StopRequest(new IdentityVerificationRequest(
+            return new IdentityVerificationRequest(
                     IdentityVerificationRequest.CredentialType.BEARER_TOKEN,
-                    credential, audience, clientId), intent);
+                    credential, audience, clientId);
         } catch (RuntimeException failure) {
             if (credential != null) {
                 credential.close();
@@ -136,6 +160,7 @@ public final class ReferenceMeetingHttpRequestDecoder implements MeetingHttpAdap
     /** 固定文本的认证形状错误，供统一错误映射器区分 401 和业务输入 400。 */
     static final class AuthenticationFailure extends IllegalArgumentException {
         private AuthenticationFailure() {
+            // 保持既有 Stop 解码器异常契约；HTTP 公共响应只使用固定 401。
             super("invalid Stop authentication");
         }
     }
