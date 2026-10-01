@@ -11,6 +11,8 @@
     <maven.compiler.release>21</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <junit.version>5.11.0</junit.version>
+    <!-- Protobuf Java 运行时与构建期 protoc 必须锁定同一版本。 -->
+    <protobuf.version>3.25.3</protobuf.version>
   </properties>
   <dependencies>
     <!--
@@ -27,6 +29,19 @@
       <groupId>com.fasterxml.jackson.datatype</groupId>
       <artifactId>jackson-datatype-jsr310</artifactId>
       <version>2.15.4</version>
+    </dependency>
+    <!-- 生成类只供 protocol/realtime 字节边界使用，领域和 Driver 不依赖它。 -->
+    <dependency>
+      <groupId>com.google.protobuf</groupId>
+      <artifactId>protobuf-java</artifactId>
+      <version>${protobuf.version}</version>
+    </dependency>
+    <!-- 固定公开 JSON Fixture 与 Protobuf JSON Mapping 的测试。 -->
+    <dependency>
+      <groupId>com.google.protobuf</groupId>
+      <artifactId>protobuf-java-util</artifactId>
+      <version>${protobuf.version}</version>
+      <scope>test</scope>
     </dependency>
     <!--
       运行时唯一共享连接池。HikariCP 只位于数据库装配边界，不渗透到领域
@@ -76,7 +91,31 @@
     </dependency>
   </dependencies>
   <build>
+    <extensions>
+      <extension>
+        <groupId>kr.motd.maven</groupId>
+        <artifactId>os-maven-plugin</artifactId>
+        <version>1.7.1</version>
+      </extension>
+    </extensions>
     <plugins>
+      <plugin>
+        <groupId>org.xolstice.maven.plugins</groupId>
+        <artifactId>protobuf-maven-plugin</artifactId>
+        <version>0.6.1</version>
+        <configuration>
+          <!-- 仓库根 contracts/realtime.proto 是唯一源；不复制进 Java 模块。 -->
+          <protoSourceRoot>${project.basedir}/../contracts</protoSourceRoot>
+          <protocArtifact>com.google.protobuf:protoc:${protobuf.version}:exe:${os.detected.classifier}</protocArtifact>
+        </configuration>
+        <executions>
+          <execution>
+            <goals>
+              <goal>compile</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-surefire-plugin</artifactId>

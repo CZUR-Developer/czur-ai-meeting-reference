@@ -128,6 +128,11 @@ P2-T11 已验证连接池在 PostgreSQL 停止和重启后的恢复，但该切�
 mvn -B -f backend-reference/pom.xml clean test
 ```
 
+Maven 会从仓库根的 `contracts/realtime.proto` 用固定版本的 protoc 自动生成
+`target/generated-sources/` 下的 Java 类；不使用开发机预装的 `protoc`，也不提交
+生成文件。干净检出后可先运行 `mvn -B -f backend-reference/pom.xml test-compile`；
+生成类只允许留在实时协议/传输边界，不进入会议领域或 Model Driver 端口。
+
 该命令只构建本模块，不启动数据库、不调用外部服务，也不会触发父仓库的 Maven
 reactor。Fixture、公开边界和依赖检查由仓库根目录的工具脚本执行。
 
