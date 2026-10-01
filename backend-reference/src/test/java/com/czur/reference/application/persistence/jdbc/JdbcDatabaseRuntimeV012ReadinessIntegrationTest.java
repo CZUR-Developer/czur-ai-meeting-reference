@@ -30,6 +30,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  * V012 Meeting/Artifact 删除物理契约的隔离 PostgreSQL 16 readiness 门禁。
  *
  * <p>每个反例创建自己的随机 schema，顺序执行并登记 V001～V012，
+ * 并额外执行/登记当前运行时必需的 V013；
  * 然后只篡改一类 catalog 事实。证明条件是运行时明确返回
  * {@link DatabaseReadiness.Status#SCHEMA_INVALID}，而不是把篡改 SQL 失败或任意
  * {@code SQLException} 当作通过。测试不触碰 public schema，并显式拒绝共享
@@ -356,6 +357,10 @@ class JdbcDatabaseRuntimeV012ReadinessIntegrationTest {
                 execute(schema, readMigration(migration));
                 registerMigration(schema, migration);
             }
+            // V012 负例仍要满足最新运行时的 V013 门禁，才能观察 V012
+            // 的真实物理漂移，而不是被 MIGRATION_MISSING 提前截断。
+            execute(schema, readMigration("V013__meeting_create_fact.sql"));
+            registerMigration(schema, "V013__meeting_create_fact.sql");
             return schema;
         } catch (Exception failure) {
             dropSchema(schema);

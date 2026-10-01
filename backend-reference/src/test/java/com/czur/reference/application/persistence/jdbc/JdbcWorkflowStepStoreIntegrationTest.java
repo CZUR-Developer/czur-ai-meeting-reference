@@ -407,7 +407,11 @@ class JdbcWorkflowStepStoreIntegrationTest {
                 statement.execute("ALTER TABLE workflow_step DROP CONSTRAINT workflow_step_status_ck");
                 statement.execute("ALTER TABLE workflow_step ADD CONSTRAINT workflow_step_status_ck CHECK (true)");
             }
-            assertThrows(DatabaseStartupException.class, () -> runtime(schema));
+            DatabaseStartupException failure = assertThrows(
+                    DatabaseStartupException.class, () -> runtime(schema));
+            assertEquals(DatabaseReadiness.Status.SCHEMA_INVALID,
+                    failure.readiness().status());
+            assertTrue(failure.readiness().missingMigrations().isEmpty());
         } finally {
             dropSchema(schema);
         }
@@ -600,6 +604,17 @@ class JdbcWorkflowStepStoreIntegrationTest {
                     statement.setString(1, migrations.get(i).substring(0, migrations.get(i).length() - 4));
                     statement.executeUpdate();
                 }
+            }
+            if (migrationCount >= 11) {
+                // 需要启动当前 Runtime 的完整/近完整夹具补上 V013；只执行
+                // V001 的迁移反例保持原始状态，不让无关表参与该反例。
+                try (Connection connection = DriverManager.getConnection(scopedUrl(schema),
+                        required("REFERENCE_TEST_DATABASE_USER"),
+                        required("REFERENCE_TEST_DATABASE_PASSWORD"));
+                     Statement statement = connection.createStatement()) {
+                    statement.execute(readMigration("V013__meeting_create_fact.sql"));
+                }
+                registerMigrationVersion(schema, "V013__meeting_create_fact");
             }
             return schema;
         } catch (Exception failure) {
