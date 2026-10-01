@@ -208,7 +208,7 @@ public final class MeetingHttpAdapter {
             }
             String meetingId = stop.group(1);
             String idempotencyKey = requireIdempotencyKey(request);
-            validateEmptyStopBody(request.body());
+            validateEmptyStopBody(request);
             StopRequest decoded = decoder.decodeStop(request, meetingId, idempotencyKey);
             Objects.requireNonNull(decoded, "decoded stop request");
             try {
@@ -286,10 +286,21 @@ public final class MeetingHttpAdapter {
         }
     }
 
-    /** Stop body 的尚未持久化字段必须 fail-closed；只接受省略 body 或空对象。 */
-    private static void validateEmptyStopBody(String body) {
-        if (body == null || body.isBlank()) {
+    /**
+     * Stop 的请求体可省略；若提供，只接受 UTF-8 JSON 空对象。
+     *
+     * <p>必须在调用解码器（及创建凭据）前执行。空白正文不是“省略”；未知字段
+     * 和尾随内容不得静默忽略。错误描述固定，不拼接正文或 Content-Type。</p>
+     */
+    private static void validateEmptyStopBody(HttpRequest request) {
+        String body = request.body();
+        if (body.isEmpty()) {
             return;
+        }
+        String contentType = request.header("content-type");
+        if (contentType == null || !contentType.matches(
+                "(?i)application/json(?:[ \\t]*;[ \\t]*charset=utf-8)?")) {
+            throw new IllegalArgumentException("stop content-type is invalid");
         }
         try {
             JsonNode node = JSON.reader()

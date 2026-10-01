@@ -44,6 +44,11 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.logging.Handler;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
+import java.util.logging.SimpleFormatter;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -169,7 +174,8 @@ class MeetingHttpAdapterContractTest {
                 FinalizationFact.pending(InputState.INPUT_COMPLETE_PENDING)));
         HttpResponse pending = adapter.handle(new HttpRequest(
                 "POST", "/v1/meetings/mtg_stop:stop",
-                Map.of("idempotency-key", "stop-key-1234567"), "{}"), null);
+                Map.of("idempotency-key", "stop-key-1234567",
+                        "content-type", "application/json"), "{}"), null);
         assertEquals(202, pending.status());
         assertFalse(pending.body().contains("updatedAt"));
         assertTrue(pending.body().contains("INPUT_COMPLETE_PENDING"));
@@ -193,14 +199,16 @@ class MeetingHttpAdapterContractTest {
                 new HttpErrorMapper(() -> "adapter-diagnostic"), stopService());
         HttpResponse unsupported = adapter.handle(new HttpRequest(
                 "POST", "/v1/meetings/mtg_stop:stop",
-                Map.of("idempotency-key", "stop-key-1234567"),
+                Map.of("idempotency-key", "stop-key-1234567",
+                        "content-type", "application/json"),
                 "{\"lastStreamSequence\":1}"), null);
         assertEquals(400, unsupported.status());
         assertNull(stop.request);
 
         HttpResponse malformed = adapter.handle(new HttpRequest(
                 "POST", "/v1/meetings/mtg_stop:stop",
-                Map.of("idempotency-key", "stop-key-1234567"), "{} trailing"), null);
+                Map.of("idempotency-key", "stop-key-1234567",
+                        "content-type", "application/json"), "{} trailing"), null);
         assertEquals(400, malformed.status());
         assertNull(stop.request);
 
@@ -209,10 +217,79 @@ class MeetingHttpAdapterContractTest {
                 mismatchedRequest, new StopMeetingIntent("mtg_other", "stop-key-1234567"));
         HttpResponse mismatch = adapter.handle(new HttpRequest(
                 "POST", "/v1/meetings/mtg_stop:stop",
-                Map.of("idempotency-key", "stop-key-1234567"), "{}"), null);
+                Map.of("idempotency-key", "stop-key-1234567",
+                        "content-type", "application/json"), "{}"), null);
         assertEquals(400, mismatch.status());
         assertNull(stop.request);
         assertTrue(mismatchedRequest.credential().isDestroyed());
+    }
+
+    @Test
+    void stopBodyRequiresActualJsonEmptyObjectBeforeDecoderAndPort() {
+        adapter = new MeetingHttpAdapter(query, deletion, decoder,
+                new HttpErrorMapper(() -> "adapter-diagnostic"), stopService());
+        Map<String, String> json = Map.of("idempotency-key", "stop-key-1234567",
+                "content-type", "application/json; charset=UTF-8");
+        Map<String, String> plain = Map.of("idempotency-key", "stop-key-1234567",
+                "content-type", "text/plain");
+        for (HttpRequest invalid : List.of(
+                new HttpRequest("POST", "/v1/meetings/mtg_stop:stop", json, "  \t"),
+                new HttpRequest("POST", "/v1/meetings/mtg_stop:stop", plain, "{}"),
+                new HttpRequest("POST", "/v1/meetings/mtg_stop:stop",
+                        Map.of("idempotency-key", "stop-key-1234567"), "{}"),
+                new HttpRequest("POST", "/v1/meetings/mtg_stop:stop",
+                        Map.of("idempotency-key", "stop-key-1234567",
+                                "content-type", "application/json; charset=iso-8859-1"), "{}"),
+                new HttpRequest("POST", "/v1/meetings/mtg_stop:stop", json,
+                        "{\"recordingChecksum\":\"SENSITIVE_BODY\"}"),
+                new HttpRequest("POST", "/v1/meetings/mtg_stop:stop", json, "{} trailing"),
+                new HttpRequest("POST", "/v1/meetings/mtg_stop:stop", json, "[]"))) {
+            HttpResponse response = adapter.handle(invalid, null);
+            assertEquals(400, response.status());
+            assertFalse(response.body().contains("SENSITIVE_BODY"));
+            assertNull(stop.request);
+            assertEquals(0, decoder.stopCalls);
+        }
+
+        decoder.stop = new MeetingHttpAdapter.StopRequest(
+                requestCredential(), new StopMeetingIntent("mtg_stop", "stop-key-1234567"));
+        assertEquals(404, adapter.handle(new HttpRequest("POST", "/v1/meetings/mtg_stop:stop",
+                json, " \n{}\t "), null).status());
+        assertEquals(1, decoder.stopCalls);
+    }
+
+    @Test
+    void rejectedStopBodyDoesNotExposeContentInLogs() {
+        adapter = new MeetingHttpAdapter(query, deletion, decoder,
+                new HttpErrorMapper(() -> "adapter-diagnostic"), stopService());
+        String secret = "SENSITIVE_STOP_BODY_MUST_NOT_LOG";
+        CopyOnWriteArrayList<String> messages = new CopyOnWriteArrayList<>();
+        SimpleFormatter formatter = new SimpleFormatter();
+        Handler capture = new Handler() {
+            @Override public void publish(LogRecord record) {
+                messages.add(formatter.formatMessage(record));
+            }
+            @Override public void flush() {
+            }
+            @Override public void close() {
+            }
+        };
+        Logger root = Logger.getLogger("");
+        root.addHandler(capture);
+        try {
+            HttpResponse response = adapter.handle(new HttpRequest(
+                    "POST", "/v1/meetings/mtg_stop:stop",
+                    Map.of("idempotency-key", "stop-key-1234567",
+                            "content-type", "application/json"),
+                    "{\"unexpected\":\"" + secret + "\"}"), null);
+            assertEquals(400, response.status());
+            assertFalse(response.body().contains(secret));
+        } finally {
+            root.removeHandler(capture);
+        }
+        assertFalse(messages.isEmpty());
+        assertFalse(String.join("\n", messages).contains(secret));
+        assertEquals(0, decoder.stopCalls);
     }
 
     @Test
@@ -225,7 +302,8 @@ class MeetingHttpAdapterContractTest {
                 OwnedMeetingStopUnitOfWork.ErrorCode.MEETING_NOT_FOUND);
         HttpResponse response = adapter.handle(new HttpRequest(
                 "POST", "/v1/meetings/mtg_stop:stop",
-                Map.of("idempotency-key", "stop-key-1234567"), "{}"), null);
+                Map.of("idempotency-key", "stop-key-1234567",
+                        "content-type", "application/json"), "{}"), null);
         assertEquals(404, response.status());
         assertFalse(response.body().contains("meetingId"));
     }
@@ -311,7 +389,8 @@ class MeetingHttpAdapterContractTest {
         stop.result = new OwnedMeetingStopUnitOfWork.Failure(
                 OwnedMeetingStopUnitOfWork.ErrorCode.MEETING_NOT_FOUND);
         assertEquals(404, adapter.handle(new HttpRequest("POST", "/v1/meetings/mtg_stop:stop",
-                Map.of("Idempotency-Key", "stop-key-1234567"), "{}"), null).status());
+                Map.of("Idempotency-Key", "stop-key-1234567",
+                        "Content-Type", "application/json"), "{}"), null).status());
         assertNotNull(stop.request);
     }
 
@@ -398,6 +477,7 @@ class MeetingHttpAdapterContractTest {
         private DeleteRequest delete;
         private MeetingHttpAdapter.StopRequest stop;
         private int deleteCalls;
+        private int stopCalls;
 
         @Override
         public DeleteRequest decodeDelete(HttpRequest request, MeetingCommandContext context) {
@@ -408,6 +488,7 @@ class MeetingHttpAdapterContractTest {
         @Override
         public MeetingHttpAdapter.StopRequest decodeStop(
                 HttpRequest request, String pathMeetingId, String idempotencyKey) {
+            stopCalls++;
             return stop;
         }
     }
