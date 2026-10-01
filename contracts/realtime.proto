@@ -7,6 +7,7 @@ option java_package = "com.czur.aimeeting.contract.realtime.v1";
 
 // WebSocket 的每个二进制消息恰好包含一个 ClientEnvelope 或 ServerEnvelope。
 // 时间轴字段均相对于本场音频起点；墙钟字段使用 UTC RFC 3339 字符串。
+// P2 ASR-only 参考实现每会议一条稳定逻辑流：stream_id = meeting_id；重连不换流。
 message ClientEnvelope {
   string spec_version = 1;
   string meeting_id = 2;
@@ -28,6 +29,9 @@ message ServerEnvelope {
   string spec_version = 1;
   string meeting_id = 2;
   string stream_id = 3;
+  // 仅持久业务事件设置 event_id 和会议全局正序 event_sequence。
+  // audio_ack/heartbeat 是瞬时 WSS 消息：event_id 为空，event_sequence = 0，
+  // 不进入会议事件日志，也不由 REST/resume_request 补拉。
   string event_id = 4;
   uint64 event_sequence = 5;
   string emitted_at = 6;
@@ -70,7 +74,8 @@ message MeetingAudioFrame {
   uint64 start_position_ms = 2;
   uint32 duration_ms = 3;
   bytes audio = 4;
-  // 可选的 sha256 十六进制摘要，用于诊断传输损坏；不得用作业务 ID。
+  // 若提供，校验本帧原始 audio 字节的 SHA-256：无前缀、小写 64 位十六进制。
+  // 内部版本化完整帧 contentDigest 是另一摘要；checksum 不得用作业务 ID。
   string checksum = 5;
   uint64 source_generation = 6;
   uint32 format_revision = 7;
@@ -120,17 +125,21 @@ enum AudioContinuityAction {
 message InputComplete {
   uint64 last_stream_sequence = 1;
   uint64 last_audio_position_ms = 2;
+  // 若 Profile 要求录音，校验另行上传的本地录音原文件字节；
+  // SHA-256 使用无前缀、小写 64 位十六进制，不是流帧拼接摘要。
   string recording_checksum = 3;
   uint64 recording_size_bytes = 4;
   string request_id = 5;
 }
 
 message Cancel {
+  // 字段编号保留供 wire 兼容；P2 WSS 入口关闭式拒绝，取消走用户 Bearer REST。
   string request_id = 1;
   string reason_code = 2;
 }
 
 message ResumeRequest {
+  // 只补拉会议全局正序的持久业务事件，不补拉 audio_ack/heartbeat。
   uint64 after_event_sequence = 1;
 }
 
@@ -162,6 +171,8 @@ enum MeetingState {
 }
 
 message AudioAck {
+  // 参考端仅在最高连续帧字节和时间轴元数据持久提交后发送 durable=true。
+  // 未提交不发 ACK；模型 Driver 的进程内接收游标不是持久 ACK。
   uint64 accepted_stream_sequence = 1;
   uint64 accepted_audio_position_ms = 2;
   uint32 suggested_max_in_flight_frames = 3;

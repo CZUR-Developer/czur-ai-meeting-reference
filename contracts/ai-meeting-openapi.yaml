@@ -203,19 +203,48 @@ paths:
               $ref: "#/components/schemas/StopMeetingRequest"
       responses:
         "200":
-          description: 输入已被后端持久化接管；重复请求返回同一受理结果
+          description: 输入已被后端持久化接管；同键重试可从此前的 202 推进到此结果，最终 receipt 稳定
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/StopMeetingResponse"
         "202":
-          description: 停止意图已持久记录，但输入尚未完成接管；客户端不得清理本地恢复数据
+          description: 首次 Stop 意图已持久记录，但输入尚未完成接管；此中间状态和正文不承诺同键固定重放，客户端不得清理本地恢复数据
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/StopMeetingResponse"
         "400":
           $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/meetings/{meetingId}:renewRealtimeToken:
+    post:
+      tags: [Meetings]
+      operationId: renewRealtimeToken
+      summary: 已登录会议归属用户续期实时会话 Token
+      description: 仅对仍允许实时输入或恢复的会议开放，包括 STOPPING 与 INPUT_COMPLETE_PENDING；新凭据独立持久保存，不改写 Create v1 首次响应。相同幂等键重试返回同一续期结果，新一轮续期须用新键。WSS 握手使用返回的 sessionToken，不接受用户 Bearer 作为实时凭据。
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/MeetingId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/RequestId"
+      responses:
+        "200":
+          description: 新的短期实时凭据；与首次 Create 响应分开保存
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RealtimeTokenGrant"
         "401":
           $ref: "#/components/responses/ErrorResponse"
         "403":
@@ -312,6 +341,7 @@ paths:
       tags: [Meetings]
       operationId: listMeetingEvents
       summary: 按会议事件序号补拉标准事件
+      description: 仅返回会议全局正序号的持久业务事件；audioAck 和 heartbeat 是瞬时 WSS 消息，不在本接口补拉。参考实现仅支持用户 bearerAuth；resultAccessAuth 是伙伴可选扩展。
       security:
         - bearerAuth: []
         - resultAccessAuth: []
@@ -335,7 +365,7 @@ paths:
             default: 200
       responses:
         "200":
-          description: 标准事件页；每个事件与 realtime.proto 的 ServerEnvelope 对齐并且只携带一种 oneof 事件正文
+          description: 标准事件页；每项是持久 ServerEnvelope 的 Protobuf JSON Mapping，按会议全局序号读取；全量仍在时允许读取早于最小保证窗口的事件
           content:
             application/json:
               schema:
@@ -351,8 +381,14 @@ paths:
                     format: int64
                   hasMore:
                     type: boolean
+        "409":
+          description: 游标高于最高已提交会议事件序号时返回 INVALID_CURSOR；事实损坏不可伪装为 410
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
         "410":
-          description: 请求的事件已超出服务端重放窗口
+          description: 仅在可证明所需历史事件因保留策略已丢失时返回；eventReplayWindow 不是强制截断点
           content:
             application/json:
               schema:
@@ -571,6 +607,7 @@ components:
         eventReplayWindow:
           type: integer
           minimum: 1
+          description: 最小保证的会议级可重放事件数；已保留的更老事件仍可读取。
         maxReplayAudioMs:
           type: integer
           minimum: 0
@@ -741,6 +778,7 @@ components:
           type: object
           additionalProperties: false
           required: [url, subprotocol, sessionToken, expiresAt]
+          description: 首次 Create v1 响应事实；P2 ASR-only 的 streamId 按公开规则等于 meetingId，续期不会改写本对象。
           properties:
             url:
               type: string
@@ -755,6 +793,25 @@ components:
               format: date-time
         limits:
           $ref: "#/components/schemas/Limits"
+    RealtimeTokenGrant:
+      type: object
+      additionalProperties: false
+      required: [meetingId, streamId, sessionToken, expiresAt]
+      properties:
+        meetingId:
+          type: string
+          pattern: "^mtg_[A-Za-z0-9_-]+$"
+          maxLength: 1024
+        streamId:
+          type: string
+          description: P2 ASR-only 参考实现中等于 meetingId；续期和重连不换流。
+        sessionToken:
+          type: string
+          readOnly: true
+          description: 仅供绑定 meetingId/streamId 的 WSS 握手使用；不得用于 Stop/Cancel/Delete。
+        expiresAt:
+          type: string
+          format: date-time
     StopMeetingRequest:
       type: object
       description: 请求体可省略；若提供 application/json，只允许空对象。流终点由实时 input_complete 提交。
@@ -839,7 +896,7 @@ components:
     MeetingEvent:
       type: object
       additionalProperties: false
-      description: 会议全局序号的 ServerEnvelope JSON 表示；streamId 是每条事件的必填来源流元数据，不是分页过滤条件。
+      description: 会议全局正序的持久 ServerEnvelope JSON 表示；streamId 是必填来源元数据而非分页过滤条件；audioAck/heartbeat 不在此 Schema 内。
       required: [specVersion, eventId, meetingId, streamId, eventSequence, emittedAt]
       properties:
         specVersion:
@@ -852,17 +909,15 @@ components:
           maxLength: 1024
         streamId:
           type: string
+          description: P2 ASR-only 参考流固定等于 meetingId，重连不换流。
         eventSequence:
           type: string
-          pattern: "^[0-9]+$"
-          description: Protobuf JSON Mapping 中 uint64 使用十进制字符串。
+          pattern: "^[1-9][0-9]*$"
+          description: 按 meetingId 全局分配的已提交正序号；Protobuf JSON Mapping 中 uint64 使用十进制字符串。
         emittedAt:
           type: string
           format: date-time
         sessionState:
-          type: object
-          additionalProperties: true
-        audioAck:
           type: object
           additionalProperties: true
         transcriptUpsert:
@@ -883,22 +938,17 @@ components:
         error:
           type: object
           additionalProperties: true
-        heartbeat:
-          type: object
-          additionalProperties: true
         audioContinuity:
           type: object
           additionalProperties: true
       oneOf:
         - required: [sessionState]
-        - required: [audioAck]
         - required: [transcriptUpsert]
         - required: [translationUpsert]
         - required: [speakerUpdate]
         - required: [capabilityChanged]
         - required: [finalization]
         - required: [error]
-        - required: [heartbeat]
         - required: [audioContinuity]
     IssueArtifactAccessRequest:
       type: object

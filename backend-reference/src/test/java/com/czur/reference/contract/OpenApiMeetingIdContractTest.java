@@ -30,8 +30,9 @@ class OpenApiMeetingIdContractTest {
         List<String> propertyBlocks = blocksNamed(lines, "meetingId:");
         List<String> parameterBlocks = blocksNamed(lines, "MeetingId:");
 
-        assertEquals(7, propertyBlocks.size(),
-                "新增或删除公开 meetingId 属性时必须显式复核统一边界");
+        // 第 8 处是 RealtimeTokenGrant.meetingId；已复核其 ASCII pattern 与 1024 上限。
+        assertEquals(8, propertyBlocks.size(),
+                "新增或删除公开 meetingId 属性时必须显式复核统一边界（含 RealtimeTokenGrant）");
         assertEquals(1, parameterBlocks.size(), "MeetingId path parameter must be unique");
         for (String block : propertyBlocks) {
             assertMeetingIdBoundary(block);
