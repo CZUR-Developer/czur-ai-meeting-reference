@@ -16,6 +16,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -25,19 +26,35 @@ import java.util.logging.Logger;
  * <p>调用方必须显式指定监听地址，负责本对象和运行时的关闭顺序。本类不装配
  * 业务或数据库；可选的可信身份解析器只用于已匹配的查询/删除路由，Stop/Create
  * 继续由各自应用流程处理。不传解析器的旧构造器继续以空上下文关闭式拒绝
- * GET/DELETE。任何原始请求在构造
+ * 业务 GET/DELETE。内部健康路径只按完整路径匹配，不调用身份或会议端口；
+ * liveness 只反映本监听器已启动且尚未关闭，readiness 由同一装配根绑定的
+ * 数据库只读探针给出。任何原始请求在构造
  * {@link HttpRequest} 前都先经过上限与歧义检查；日志不包含 URL、头值或正文。
  * 仅供参考后端使用，不作为 TLS 终点直接暴露在公网上。</p>
  */
 public final class MeetingJdkHttpServer implements AutoCloseable {
     private static final Logger LOGGER = Logger.getLogger(MeetingJdkHttpServer.class.getName());
     private static final int MAX_QUERY_CHARS = 4096;
+    /** 仅供受信网络调用的精确存活路径；不属于公开会议协议。 */
+    public static final String LIVENESS_PATH = "/internal/health/liveness";
+    /** 仅供受信网络调用的精确就绪路径；不属于公开会议协议。 */
+    public static final String READINESS_PATH = "/internal/health/readiness";
+    private static final HttpResponse HEALTH_OK = HttpResponse.json(200, "{\"status\":\"UP\"}");
+    private static final HttpResponse HEALTH_UNAVAILABLE =
+            HttpResponse.json(503, "{\"status\":\"DOWN\"}");
+    private static final HttpResponse HEALTH_BAD_REQUEST =
+            HttpResponse.json(400, "{\"status\":\"INVALID_REQUEST\"}");
+    private static final HttpResponse HEALTH_METHOD_NOT_ALLOWED = new HttpResponse(
+            405, Map.of("content-type", "application/json", "cache-control", "no-store",
+                    "allow", "GET"), "{\"status\":\"METHOD_NOT_ALLOWED\"}");
 
     private final HttpServer server;
     private final MeetingHttpRuntime runtime;
     private final HttpErrorMapper errors;
     private final AuthenticatedMeetingHttpContextResolver contextResolver;
+    private final BooleanSupplier readinessCheck;
     private final AtomicBoolean closed = new AtomicBoolean();
+    private final AtomicBoolean started = new AtomicBoolean();
 
     /**
      * 创建尚未启动的监听器；传入端口 0 可由系统分配随机端口。
@@ -60,12 +77,28 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
     public MeetingJdkHttpServer(
             InetSocketAddress address, MeetingHttpRuntime runtime, HttpErrorMapper errors,
             AuthenticatedMeetingHttpContextResolver contextResolver) throws IOException {
+        this(address, runtime, errors, contextResolver, () -> false);
+    }
+
+    /**
+     * 创建带内部健康路径的网络入口。就绪探针必须由持有该运行时的装配根绑定到
+     * 同一 {@code JdbcDatabaseRuntime.checkReadiness()}；每次 GET 都重新读取，
+     * 不缓存启动状态。探针异常只映射固定 503。旧构造器没有数据库绑定，
+     * 因而 readiness 关闭式返回 503。
+     *
+     * @param readinessCheck 同一装配根的只读数据库就绪探针，不能调用业务端口
+     */
+    public MeetingJdkHttpServer(
+            InetSocketAddress address, MeetingHttpRuntime runtime, HttpErrorMapper errors,
+            AuthenticatedMeetingHttpContextResolver contextResolver,
+            BooleanSupplier readinessCheck) throws IOException {
         this.runtime = Objects.requireNonNull(runtime, "runtime");
         this.errors = Objects.requireNonNull(errors, "errors");
         if (contextResolver != null && contextResolver.errorMapper() != errors) {
             throw new IllegalArgumentException("HTTP error mapper must be shared");
         }
         this.contextResolver = contextResolver;
+        this.readinessCheck = Objects.requireNonNull(readinessCheck, "readinessCheck");
         this.server = HttpServer.create(Objects.requireNonNull(address, "address"), 0);
         this.server.createContext("/", this::handle);
     }
@@ -76,6 +109,7 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
             throw new IllegalStateException("HTTP server is closed");
         }
         server.start();
+        started.set(true);
         LOGGER.log(Level.INFO, "meeting HTTP 网络入口已启动");
     }
 
@@ -102,6 +136,9 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
     }
 
     private HttpResponse dispatch(HttpRequest request) {
+        if (LIVENESS_PATH.equals(request.path()) || READINESS_PATH.equals(request.path())) {
+            return health(request);
+        }
         if (contextResolver == null) {
             return runtime.handle(request, null);
         }
@@ -122,6 +159,31 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
             return runtime.handle(request, ready.context());
         }
         throw new IllegalStateException("unknown authentication resolution");
+    }
+
+    private HttpResponse health(HttpRequest request) {
+        if (!"GET".equals(request.method())) {
+            return HEALTH_METHOD_NOT_ALLOWED;
+        }
+        if (!request.query().isEmpty() || !request.body().isEmpty()) {
+            return HEALTH_BAD_REQUEST;
+        }
+        if (!started.get() || closed.get()) {
+            return HEALTH_UNAVAILABLE;
+        }
+        if (LIVENESS_PATH.equals(request.path())) {
+            return HEALTH_OK;
+        }
+        try {
+            boolean ready = readinessCheck.getAsBoolean();
+            LOGGER.log(Level.FINE, "meeting HTTP readiness 检查结果 ready={0}", ready);
+            return ready ? HEALTH_OK : HEALTH_UNAVAILABLE;
+        } catch (RuntimeException failure) {
+            LOGGER.log(Level.WARNING,
+                    "meeting HTTP readiness 探针异常 reason=PROBE_FAILURE exception={0}",
+                    failure.getClass().getSimpleName());
+            return HEALTH_UNAVAILABLE;
+        }
     }
 
     private static HttpRequest decode(HttpExchange exchange) throws IOException {

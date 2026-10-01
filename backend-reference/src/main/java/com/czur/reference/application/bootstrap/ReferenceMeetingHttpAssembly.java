@@ -8,6 +8,7 @@ import com.czur.reference.application.entitlement.referencedev.ReferenceDevEntit
 import com.czur.reference.application.http.AuthenticatedMeetingHttpContextResolver;
 import com.czur.reference.application.http.CreateMeetingHttpRequestDecoder;
 import com.czur.reference.application.http.HttpErrorMapper;
+import com.czur.reference.application.http.MeetingJdkHttpServer;
 import com.czur.reference.application.http.MeetingHttpRuntime;
 import com.czur.reference.application.http.ReferenceMeetingHttpRequestDecoder;
 import com.czur.reference.application.identity.referencedev.ReferenceDevIdentityProvider;
@@ -25,6 +26,8 @@ import com.czur.reference.application.port.entitlement.EntitlementIdGenerator;
 import com.czur.reference.domain.capability.CapabilityPlanner;
 
 import javax.sql.DataSource;
+import java.io.IOException;
+import java.net.InetSocketAddress;
 import java.time.Clock;
 import java.security.SecureRandom;
 import java.util.Arrays;
@@ -175,6 +178,22 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
 
     /** 返回已通过启动 readiness 的数据库运行时；调用方不得单独关闭。 */
     public JdbcDatabaseRuntime databaseRuntime() { return database; }
+
+    /**
+     * 为本装配根创建尚未启动的 JDK HTTP 入口，健康探针读取同一唯一 JDBC 池。
+     * 调用方须显式指定受信网络或 loopback 地址，启动及先停网络、后关闭本装配
+     * 根的顺序仍由调用方负责。本方法不增加进程入口或后台线程。
+     *
+     * @throws IOException 监听地址无法绑定；本装配根仍由调用方持有并关闭
+     * @throws IllegalStateException 本装配根已经关闭
+     */
+    public MeetingJdkHttpServer newJdkHttpServer(InetSocketAddress address) throws IOException {
+        if (closed.get()) {
+            throw new IllegalStateException("reference meeting HTTP assembly is closed");
+        }
+        return new MeetingJdkHttpServer(address, runtime, errors, contextResolver,
+                () -> database.checkReadiness().ready());
+    }
 
     /** 幂等地先关闭请求入口，再关闭唯一 JDBC 池；不删除任何数据库事实。 */
     @Override

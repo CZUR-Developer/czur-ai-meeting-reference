@@ -4,6 +4,7 @@ import com.czur.reference.application.bootstrap.ReferenceMeetingDeploymentConfig
 import com.czur.reference.application.bootstrap.ReferenceMeetingHttpAssembly;
 import com.czur.reference.application.http.AuthenticatedMeetingHttpContextResolver;
 import com.czur.reference.application.http.HttpRequest;
+import com.czur.reference.application.http.MeetingJdkHttpServer;
 import com.czur.reference.application.command.MeetingPermissions;
 import com.czur.reference.application.port.OwnedMeetingCreationUnitOfWork;
 import com.czur.reference.application.port.MeetingStartExecutionUnitOfWork;
@@ -25,6 +26,11 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.postgresql.ds.PGSimpleDataSource;
 
 import java.nio.charset.StandardCharsets;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -39,6 +45,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -162,6 +169,163 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
                 () -> ReferenceMeetingHttpAssembly.start(config(), CLOCK));
         assertEquals(DatabaseReadiness.Status.SCHEMA_INVALID,
                 broken.readiness().status());
+    }
+
+    @Test
+    @EnabledIfEnvironmentVariable(named = "T15_HEALTH_GATE_CONTAINER_ID", matches = "[0-9a-f]{64}")
+    void internalHealthUsesSameJdbcAssemblyAcrossDatabaseOutageAndRecovery()
+            throws Exception {
+        assertThrows(DatabaseStartupException.class,
+                () -> ReferenceMeetingHttpAssembly.start(config(), CLOCK),
+                "unmigrated database cannot create a ready HTTP assembly");
+        migrate(13);
+        String containerId = System.getenv("T15_HEALTH_GATE_CONTAINER_ID");
+        String runId = System.getenv("T15_HEALTH_GATE_RUN_ID");
+        assertTrue(containerId.matches("[0-9a-f]{64}"));
+        assertTrue(runId.matches("[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+"));
+        assertEquals(containerId + "|" + runId, dockerInspect(containerId),
+                "only this gate's labelled container may be interrupted");
+        try (var assembly = ReferenceMeetingHttpAssembly.start(config(), CLOCK);
+             var server = assembly.newJdkHttpServer(new InetSocketAddress(
+                     InetAddress.getByName("127.0.0.1"), 0))) {
+            server.start();
+            int port = server.address().getPort();
+            String live = exchange(port, "GET", MeetingJdkHttpServer.LIVENESS_PATH, "");
+            String ready = exchange(port, "GET", MeetingJdkHttpServer.READINESS_PATH, "");
+            assertEquals(200, status(live));
+            assertEquals(200, status(ready));
+            assertTrue(live.contains("{\"status\":\"UP\"}"));
+            assertTrue(ready.contains("{\"status\":\"UP\"}"));
+            assertFalse(ready.contains(url()));
+            assertFalse(ready.contains(password()));
+            assertFalse(ready.contains(TOKEN));
+
+            assertEquals(405, status(exchange(port, "POST",
+                    MeetingJdkHttpServer.READINESS_PATH, "")));
+            assertEquals(405, status(exchange(port, "HEAD",
+                    MeetingJdkHttpServer.LIVENESS_PATH, "")));
+            assertEquals(400, status(exchange(port, "GET",
+                    MeetingJdkHttpServer.READINESS_PATH + "?probe=1", "")));
+            assertEquals(400, status(exchange(port, "GET",
+                    MeetingJdkHttpServer.LIVENESS_PATH, "unexpected")));
+            for (String path : List.of("/internal/health/readiness/",
+                    "/internal/health/readiness-extra", "/internal/health/liveness-extra")) {
+                assertEquals(404, status(exchange(port, "GET", path, "")), path);
+            }
+            assertEquals(401, status(exchange(port, "GET", "/v1/meetings", "")));
+            assertEquals(501, status(exchange(port, "POST", "/v1/meetings", "{}")));
+            assertEquals(0, count("meeting"));
+            assertEquals(0, count("meeting_create_fact"));
+            assertEquals(0, count("usage_reservation"));
+            assertEquals(0, count("workflow_step"));
+            assertEquals(13, count("schema_migrations"));
+
+            boolean stopped = false;
+            try {
+                assertEquals(containerId + "|" + runId, dockerInspect(containerId));
+                assertTrue(url().contains(dockerOutput("port", containerId, "5432/tcp")));
+                docker("stop", "--time", "10", containerId);
+                stopped = true;
+                String unavailable = exchange(port, "GET",
+                        MeetingJdkHttpServer.READINESS_PATH, "");
+                assertEquals(503, status(unavailable));
+                assertTrue(unavailable.contains("{\"status\":\"DOWN\"}"));
+                assertFalse(unavailable.contains(url()));
+                assertFalse(unavailable.contains(password()));
+                assertEquals(200, status(exchange(port, "GET",
+                        MeetingJdkHttpServer.LIVENESS_PATH, "")));
+            } finally {
+                if (stopped) {
+                    docker("start", containerId);
+                    assertEquals(containerId + "|" + runId, dockerInspect(containerId));
+                    assertTrue(url().contains(dockerOutput("port", containerId, "5432/tcp")),
+                            "container restart must preserve the bound random host port");
+                }
+            }
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(45);
+            int recovered;
+            do {
+                recovered = status(exchange(port, "GET",
+                        MeetingJdkHttpServer.READINESS_PATH, ""));
+                if (recovered == 200) break;
+                Thread.sleep(250);
+            } while (System.nanoTime() < deadline);
+            assertEquals(200, recovered, "readiness must recover without reassembly");
+            assertEquals(0, count("meeting"));
+            assertEquals(0, count("meeting_create_fact"));
+            assertEquals(13, count("schema_migrations"));
+
+            assembly.close();
+            assertThrows(IllegalStateException.class,
+                    () -> assembly.newJdkHttpServer(new InetSocketAddress(
+                            InetAddress.getByName("127.0.0.1"), 0)));
+            assertEquals(503, status(exchange(port, "GET",
+                    MeetingJdkHttpServer.READINESS_PATH, "")));
+            assertEquals(200, status(exchange(port, "GET",
+                    MeetingJdkHttpServer.LIVENESS_PATH, "")),
+                    "liveness only describes the still-accepting network entry");
+            server.close();
+            assertThrows(IOException.class, () -> exchange(port, "GET",
+                    MeetingJdkHttpServer.READINESS_PATH, ""));
+            assertThrows(IllegalStateException.class, server::start);
+        }
+    }
+
+    private static String exchange(int port, String method, String path, String body)
+            throws Exception {
+        byte[] content = body.getBytes(StandardCharsets.UTF_8);
+        String head = method + " " + path + " HTTP/1.1\r\nHost: localhost\r\n"
+                + "Content-Length: " + content.length + "\r\nConnection: close\r\n\r\n";
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress("127.0.0.1", port), 3_000);
+            socket.setSoTimeout(10_000);
+            socket.getOutputStream().write(head.getBytes(StandardCharsets.US_ASCII));
+            socket.getOutputStream().write(content);
+            socket.getOutputStream().flush();
+            socket.shutdownOutput();
+            ByteArrayOutputStream received = new ByteArrayOutputStream();
+            socket.getInputStream().transferTo(received);
+            return received.toString(StandardCharsets.UTF_8);
+        }
+    }
+
+    private static int status(String response) {
+        return Integer.parseInt(response.substring(0, response.indexOf("\r\n"))
+                .split(" ")[1]);
+    }
+
+    private static void docker(String... arguments) throws Exception {
+        String[] command = new String[arguments.length + 1];
+        command[0] = "docker";
+        System.arraycopy(arguments, 0, command, 1, arguments.length);
+        Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
+        if (!process.waitFor(30, TimeUnit.SECONDS)) {
+            process.destroyForcibly();
+            throw new AssertionError("isolated PostgreSQL container operation timed out");
+        }
+        if (process.exitValue() != 0) {
+            throw new AssertionError("isolated PostgreSQL container operation failed");
+        }
+    }
+
+    private static String dockerInspect(String containerId) throws Exception {
+        return dockerOutput("container", "inspect", "--format",
+                "{{.Id}}|{{index .Config.Labels \"com.czur.ai-meeting.t15-health.run-id\"}}",
+                containerId);
+    }
+
+    private static String dockerOutput(String... arguments) throws Exception {
+        String[] command = new String[arguments.length + 1];
+        command[0] = "docker";
+        System.arraycopy(arguments, 0, command, 1, arguments.length);
+        Process process = new ProcessBuilder(command).start();
+        String output = new String(process.getInputStream().readAllBytes(),
+                StandardCharsets.UTF_8).trim();
+        if (!process.waitFor(10, TimeUnit.SECONDS) || process.exitValue() != 0) {
+            process.destroyForcibly();
+            throw new AssertionError("isolated PostgreSQL container ownership check failed");
+        }
+        return output;
     }
 
     @Test
