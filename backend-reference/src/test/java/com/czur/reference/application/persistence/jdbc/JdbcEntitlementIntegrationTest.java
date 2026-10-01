@@ -2,6 +2,10 @@ package com.czur.reference.application.persistence.jdbc;
 
 import com.czur.reference.application.entitlement.referencedev.ReferenceDevEntitlementPolicy;
 import com.czur.reference.application.entitlement.referencedev.ReferenceDevEntitlementPolicyConfig;
+import com.czur.reference.application.command.CompleteMeetingReserveFacts;
+import com.czur.reference.application.command.CreateMeetingRequestFact;
+import com.czur.reference.application.command.CreateMeetingRequestSnapshot;
+import com.czur.reference.application.command.MeetingRequestCanonicalizer;
 import com.czur.reference.application.port.entitlement.AuthorizeStartRequest;
 import com.czur.reference.application.port.entitlement.AuthorizedProfileSnapshot;
 import com.czur.reference.application.port.entitlement.CancelReservationRequest;
@@ -16,8 +20,10 @@ import com.czur.reference.application.port.entitlement.ReserveUsageRequest;
 import com.czur.reference.application.port.entitlement.UsageOperationResult;
 import com.czur.reference.application.port.entitlement.UsageOperationScopes;
 import com.czur.reference.application.port.entitlement.UsageReservation;
+import com.czur.reference.application.port.entitlement.UsageReserveLookup;
 import com.czur.reference.application.port.entitlement.UsageUnit;
 import com.czur.reference.application.port.entitlement.UsageEstimate;
+import com.czur.reference.application.port.model.AudioProfile;
 import com.czur.reference.application.port.identity.Subject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -45,10 +51,12 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -177,6 +185,113 @@ class JdbcEntitlementIntegrationTest {
         }
         assertEquals(2L, count("SELECT count(*) FROM usage_reservation WHERE record_format='V3'"));
         assertEquals(2L, count("SELECT count(*) FROM usage_operation"));
+    }
+
+    @Test
+    void completeCreateReserveKeyCoexistsWithLegacyAndReplaysPersistedWinner()
+            throws Exception {
+        String externalKey = "shared-external-key-12345";
+        CreateMeetingRequestFact complete = completeRequestFact(externalKey, null);
+        String internalKey = CompleteMeetingReserveFacts.internalReserveKey(complete);
+        JdbcReferenceDevEntitlementProvider provider = provider(policyAt(NOW), NOW);
+
+        // V003 操作范围保持 usage.reserve.v1；通常的相同外部键不能复用旧结果。
+        var legacy = provider.reserveUsage(reserveRequest(
+                grantAt(NOW.minusSeconds(1), NOW.plusSeconds(599)), externalKey,
+                "legacy-digest", "mtg_legacy")).valueOrThrow();
+        var firstGrant = grantAt(NOW.minusSeconds(1), NOW.plusSeconds(599));
+        var firstRequest = reserveRequest(firstGrant, internalKey,
+                complete.canonicalRequestDigest(), "mtg_v2_winner");
+        var first = provider.reserveUsage(firstRequest).valueOrThrow();
+        assertNotEquals(legacy.reservation().reservationId(), first.reservation().reservationId());
+        assertEquals(2L, count("SELECT count(*) FROM usage_operation"));
+        assertEquals(2L, count("SELECT count(*) FROM usage_reservation"));
+        assertTrue(CompleteMeetingReserveFacts.isMatchingInitialWinner(
+                first, complete, DEPLOYMENT, SUBJECT));
+
+        // 顺序重放也不能拿新 Grant 或候选会议 ID 否定已经保存的首次赢家。
+        MeetingGrant loserGrant = new MeetingGrant("new-grant", DEPLOYMENT, SUBJECT,
+                PROFILE, 1, Set.of("transcript.realtime"),
+                Set.of("transcript.realtime"), 3_600_000,
+                NOW.minusSeconds(1), NOW.plusSeconds(300));
+        var loser = provider(policyAt(NOW.plusSeconds(20)), NOW.plusSeconds(20))
+                .reserveUsage(reserveRequest(loserGrant, internalKey,
+                        complete.canonicalRequestDigest(), "mtg_loser_candidate"))
+                .valueOrThrow();
+        assertEquals(first, loser);
+        assertEquals("mtg_v2_winner", loser.reservation().expectedMeetingId());
+        assertTrue(CompleteMeetingReserveFacts.isMatchingInitialWinner(
+                loser, complete, DEPLOYMENT, SUBJECT));
+
+        var lookedUp = new JdbcUsageReserveLookup(dataSource).lookup(
+                new UsageReserveLookup.Request(DEPLOYMENT, SUBJECT,
+                        internalKey, complete.canonicalRequestDigest()));
+        assertTrue(lookedUp instanceof UsageReserveLookup.Replayed);
+        assertEquals(first, ((UsageReserveLookup.Replayed) lookedUp).result());
+
+        CreateMeetingRequestFact changedBody = completeRequestFact(
+                externalKey, "different title");
+        assertEquals(internalKey, CompleteMeetingReserveFacts.internalReserveKey(changedBody));
+        assertError(provider.reserveUsage(reserveRequest(loserGrant, internalKey,
+                        changedBody.canonicalRequestDigest(), "mtg_conflict")),
+                EntitlementProviderError.Code.IDEMPOTENCY_CONFLICT);
+    }
+
+    @Test
+    void completeCreateTwoObservedFirstMissesConvergeOnOnePersistedReserve()
+            throws Exception {
+        CreateMeetingRequestFact complete = completeRequestFact(
+                "concurrent-external-key-12345", null);
+        String internalKey = CompleteMeetingReserveFacts.internalReserveKey(complete);
+        String digest = complete.canonicalRequestDigest();
+        MeetingGrant grantA = grantAt(NOW.minusSeconds(1), NOW.plusSeconds(599));
+        MeetingGrant grantB = new MeetingGrant("different-grant", DEPLOYMENT, SUBJECT,
+                PROFILE, 1, Set.of("transcript.realtime"),
+                Set.of("transcript.realtime"), 3_600_000,
+                NOW.minusSeconds(1), NOW.plusSeconds(300));
+        assertNotEquals(grantA.grantId(), grantB.grantId());
+        assertNotEquals(grantA.expiresAt(), grantB.expiresAt());
+        ReserveUsageRequest requestA = reserveRequest(
+                grantA, internalKey, digest, "mtg_candidate_a");
+        ReserveUsageRequest requestB = reserveRequest(
+                grantB, internalKey, digest, "mtg_candidate_b");
+
+        // 每个任务先用独立连接观察 V003 未命中；双方都到达 barrier 后才允许
+        // 调用 reserveUsage。这样测试的是两方首次 miss，而非顺序重放。
+        CountDownLatch bothObservedMiss = new CountDownLatch(2);
+        CountDownLatch startReserve = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<ReserveAttempt> a = executor.submit(() -> reserveAfterLookup(
+                    requestA, bothObservedMiss, startReserve));
+            Future<ReserveAttempt> b = executor.submit(() -> reserveAfterLookup(
+                    requestB, bothObservedMiss, startReserve));
+            assertTrue(bothObservedMiss.await(10, TimeUnit.SECONDS),
+                    "两个调用方未在期限内完成各自的首次 lookup");
+            startReserve.countDown();
+            ReserveAttempt resultA = a.get(10, TimeUnit.SECONDS);
+            ReserveAttempt resultB = b.get(10, TimeUnit.SECONDS);
+            assertEquals(UsageReserveLookup.Status.NOT_FOUND, resultA.before());
+            assertEquals(UsageReserveLookup.Status.NOT_FOUND, resultB.before());
+            assertTrue(resultA.reserved().isSuccess());
+            assertTrue(resultB.reserved().isSuccess());
+            UsageOperationResult winner = resultA.reserved().valueOrThrow();
+            assertEquals(winner, resultB.reserved().valueOrThrow());
+            assertTrue(CompleteMeetingReserveFacts.isMatchingInitialWinner(
+                    winner, complete, DEPLOYMENT, SUBJECT));
+            assertTrue(Set.of("mtg_candidate_a", "mtg_candidate_b")
+                    .contains(winner.reservation().expectedMeetingId()));
+            String loserMeetingId = "mtg_candidate_a".equals(
+                    winner.reservation().expectedMeetingId())
+                    ? "mtg_candidate_b" : "mtg_candidate_a";
+            assertEquals(1L, count("SELECT count(*) FROM usage_operation"));
+            assertEquals(1L, count("SELECT count(*) FROM usage_reservation"));
+            assertEquals(0L, count("SELECT count(*) FROM usage_reservation "
+                    + "WHERE expected_meeting_id = '" + loserMeetingId + "'"));
+        } finally {
+            startReserve.countDown();
+            executor.shutdownNow();
+        }
     }
 
     @Test
@@ -524,6 +639,33 @@ class JdbcEntitlementIntegrationTest {
         return new ReserveUsageRequest(
                 DEPLOYMENT, SUBJECT, UsageOperationScopes.RESERVE, key, digest, grant,
                 new UsageEstimate(UsageUnit.MEETING_DURATION_MS, 60_000), meetingId);
+    }
+
+    private ReserveAttempt reserveAfterLookup(ReserveUsageRequest request,
+            CountDownLatch bothObservedMiss, CountDownLatch startReserve) throws Exception {
+        UsageReserveLookup.Status before = new JdbcUsageReserveLookup(dataSource).lookup(
+                new UsageReserveLookup.Request(DEPLOYMENT, SUBJECT,
+                        request.idempotencyKey(), request.requestDigest())).status();
+        bothObservedMiss.countDown();
+        assertTrue(startReserve.await(10, TimeUnit.SECONDS),
+                "未在期限内释放 reserve 并发屏障");
+        return new ReserveAttempt(before, provider(policyAt(NOW), NOW).reserveUsage(request));
+    }
+
+    private record ReserveAttempt(UsageReserveLookup.Status before,
+                                  EntitlementProviderResult<UsageOperationResult> reserved) {
+    }
+
+    private static CreateMeetingRequestFact completeRequestFact(String key, String title) {
+        var snapshot = new CreateMeetingRequestSnapshot(
+                "complete-session", new CreateMeetingRequestSnapshot.ProfileRef(PROFILE, 1),
+                new CreateMeetingRequestSnapshot.ClientDescriptor("app", "1", "v1", "device"),
+                title, "Asia/Shanghai",
+                new CreateMeetingRequestSnapshot.LanguageSelection("zh-CN", List.of()),
+                AudioProfile.pcm16kMono(100), Set.of("transcript.realtime"),
+                new CreateMeetingRequestSnapshot.ArtifactPolicy(false, false), key);
+        return new CreateMeetingRequestFact(snapshot,
+                MeetingRequestCanonicalizer.digest(snapshot), 1);
     }
 
     private void bind(UsageReservation reservation, Instant boundAt) throws SQLException {
