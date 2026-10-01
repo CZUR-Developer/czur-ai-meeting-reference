@@ -167,10 +167,15 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
     @Test
     void disabledOrInvalidConfigNeverOpensPoolAndUnavailableDatabaseDoesNotFallback()
             throws Exception {
-        Map<String, String> enabled = config();
-        enabled.put(ReferenceMeetingDeploymentConfig.CREATE_ENABLED, "true");
-        assertThrows(IllegalArgumentException.class,
+        Map<String, String> enabled = enabledConfig();
+        enabled.put(DatabaseRuntimeConfig.DATABASE_URL,
+                "jdbc:postgresql://127.0.0.1:1/unreachable");
+        // 开态也必须通过同一数据库 readiness；不能为 Create 回退内存事实源。
+        assertThrows(DatabaseStartupException.class,
                 () -> ReferenceMeetingHttpAssembly.start(enabled, CLOCK));
+        assertThrows(IllegalArgumentException.class,
+                () -> ReferenceMeetingHttpAssembly.start(invalidRequiredCapability(
+                        ReferenceMeetingDeploymentConfig.ENTITLEMENT_SUPPORTED_CAPABILITIES), CLOCK));
         enabled.put(ReferenceMeetingDeploymentConfig.CREATE_ENABLED, "invalid");
         assertThrows(IllegalArgumentException.class,
                 () -> ReferenceMeetingHttpAssembly.start(enabled, CLOCK));
@@ -179,6 +184,122 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
                 "jdbc:postgresql://127.0.0.1:1/unreachable");
         assertThrows(DatabaseStartupException.class,
                 () -> ReferenceMeetingHttpAssembly.start(unreachable, CLOCK));
+    }
+
+    @Test
+    void enabledCreateUsesV013ForFirstReplayConflictAndRestart() throws Exception {
+        migrate(13);
+        var request = createRequest("assembly-create-key-12345", "client-session-first");
+        String firstBody;
+        try (var assembly = ReferenceMeetingHttpAssembly.start(enabledConfig(), CLOCK)) {
+            var first = assembly.runtime().handle(request, null);
+            assertEquals(201, first.status());
+            assertTrue(first.body().contains("\"state\":\"CREATED\""));
+            assertTrue(first.body().contains("wss://meeting.example.invalid/v1/realtime/"));
+            firstBody = first.body();
+            var replay = assembly.runtime().handle(request, null);
+            assertEquals(201, replay.status());
+            assertEquals(firstBody, replay.body());
+            assertEquals(409, assembly.runtime().handle(createRequest(
+                    "assembly-create-key-12345", "different-client-session"), null).status());
+            assertEquals(1, count("meeting"));
+            assertEquals(1, count("meeting_create_fact"));
+            assertEquals(1, count("usage_reservation"));
+            assertEquals(1, count("usage_operation"));
+            assertEquals(1, count("outbox_event"));
+        }
+        // 新装配会生成另一随机源和空会话缓存；公开事实仍由 V013 精确重放。
+        try (var restarted = ReferenceMeetingHttpAssembly.start(enabledConfig(), CLOCK)) {
+            var replay = restarted.runtime().handle(request, null);
+            assertEquals(201, replay.status());
+            assertEquals(firstBody, replay.body());
+            assertEquals(1, count("meeting_create_fact"));
+            assertEquals(1, count("usage_reservation"));
+        }
+    }
+
+    @Test
+    void enabledCreateRejectsClientProfileCapabilityAndDeploymentOverrides() throws Exception {
+        migrate(13);
+        try (var assembly = ReferenceMeetingHttpAssembly.start(enabledConfig(), CLOCK)) {
+            var base = createRequest("override-create-key-12345", "client-session-override");
+            assertEquals(503, assembly.runtime().handle(new HttpRequest("POST", "/v1/meetings",
+                    base.headers(), base.body().replace("assembly-profile", "other-profile")),
+                    null).status());
+            assertEquals(422, assembly.runtime().handle(new HttpRequest("POST", "/v1/meetings",
+                    base.headers(), base.body().replace(
+                            "[\"transcript.realtime\"]", "[\"summary.structured\"]")),
+                    null).status());
+            assertEquals(400, assembly.runtime().handle(new HttpRequest("POST", "/v1/meetings",
+                    base.headers(), base.body().replace("\"clientSessionId\":",
+                            "\"deploymentScope\":\"other\",\"clientSessionId\":")),
+                    null).status());
+            assertEquals(0, count("meeting"));
+            assertEquals(0, count("usage_reservation"));
+            assertEquals(0, count("meeting_create_fact"));
+        }
+    }
+
+    @Test
+    void createJdbcFailureMapsToStableRedactedError() throws Exception {
+        migrate(13);
+        try (var assembly = ReferenceMeetingHttpAssembly.start(enabledConfig(), CLOCK)) {
+            try (Connection connection = fixtureDataSource.getConnection();
+                 Statement statement = connection.createStatement()) {
+                statement.execute("DROP TABLE meeting_create_fact");
+            }
+            var result = assembly.runtime().handle(
+                    createRequest("database-failure-key-12345", "client-session-db"), null);
+            assertEquals(503, result.status());
+            assertTrue(result.body().contains("CREATE_DEPENDENCY_UNAVAILABLE"));
+            assertFalse(result.body().contains("meeting_create_fact"));
+            assertFalse(result.body().contains(TOKEN));
+            assertEquals(0, count("meeting"));
+        }
+    }
+
+    @Test
+    void requiredAsrBreaksFailBeforeOpeningDatabase() {
+        for (String field : List.of(
+                ReferenceMeetingDeploymentConfig.ENTITLEMENT_SUPPORTED_CAPABILITIES,
+                ReferenceMeetingDeploymentConfig.MOCK_CAPABILITIES,
+                ReferenceMeetingDeploymentConfig.DISABLED_CAPABILITIES)) {
+            Map<String, String> invalid = invalidRequiredCapability(field);
+            invalid.put(DatabaseRuntimeConfig.DATABASE_URL,
+                    "jdbc:postgresql://127.0.0.1:1/unreachable");
+            assertThrows(IllegalArgumentException.class,
+                    () -> ReferenceMeetingHttpAssembly.start(invalid, CLOCK), field);
+        }
+    }
+
+    private Map<String, String> enabledConfig() {
+        Map<String, String> enabled = config();
+        enabled.put(ReferenceMeetingDeploymentConfig.CREATE_ENABLED, "true");
+        return enabled;
+    }
+
+    private Map<String, String> invalidRequiredCapability(String field) {
+        Map<String, String> invalid = enabledConfig();
+        if (ReferenceMeetingDeploymentConfig.DISABLED_CAPABILITIES.equals(field)) {
+            invalid.put(field, "transcript.realtime");
+        } else {
+            invalid.put(field, "summary.structured");
+        }
+        return invalid;
+    }
+
+    private HttpRequest createRequest(String key, String clientSessionId) {
+        Map<String, String> createHeaders = headers(key);
+        createHeaders.put("content-type", "application/json");
+        String body = """
+                {"clientSessionId":"%s","profile":{"id":"assembly-profile","revision":1},
+                 "client":{"appId":"app","appVersion":"1","contractVersion":"v1","deviceId":"device"},
+                 "timezone":"Asia/Shanghai","languages":{"source":"zh-CN","targets":[]},
+                 "audioProfile":{"encoding":"PCM_S16LE","sampleRateHz":16000,"channelCount":1,"frameDurationMs":100},
+                 "requestedCapabilities":["transcript.realtime"],
+                 "artifactPolicy":{"retainAudio":false,"presentationCapture":false}}
+                """.formatted(clientSessionId);
+        return new HttpRequest("POST", "/v1/meetings", createHeaders, body);
     }
 
     private void createOwned(String suffix) throws Exception {

@@ -19,7 +19,7 @@ Driver 实现中。
   覆盖会议快照、幂等记录、Outbox、跨端口工作单元，以及 P2-T11 的配置、连接池、
   readiness/liveness 和关闭生命周期。运行时不自动建表，必须先执行并登记仓库
   `deploy/migrations/V001__initial_schema.sql` 至
-  `V007__meeting_manifest_revision.sql`。
+  `V013__meeting_create_fact.sql`（V001～V013 全部版本）。
 - `domain/capability/`：P3-T01 已验收的能力描述、产品 Profile、依赖/回退规则和不可变能力计划。
 - `application/port/model/`：P3-T02 已验收的 Model Driver SPI、规范化会话/音频/事件对象、无网络 `MockModelDriver`，以及 P3-T04 的 `AlternativeTextModelDriver`。
 - 对应 `src/test/java/`：能力计划、Model Driver 生命周期、幂等、顺序、取消、超时及资源边界测试；`ModelDriverContractTestKit` 为任意 Driver 复用的测试作用域契约工具包。
@@ -59,12 +59,12 @@ Outbox 的领取、发布和失败重试继续由提交后的 Worker 使用独�
 `JdbcDatabaseRuntime` 是唯一的生产候选 JDBC 装配入口。它从
 `DATABASE_URL`、`DATABASE_USER`、`DATABASE_PASSWORD` 以及连接池参数创建一个
 共享 HikariCP `DataSource`，再向应用暴露 `JdbcMeetingUnitOfWork` 和提交后使用的
-`JdbcOutboxStore`。配置非法、数据库不可用、V001～V007 未登记，或登记了 V007 但
-Manifest revision 物理表不符合冻结契约时启动失败；不会自动执行迁移、修补半表，
+`JdbcOutboxStore`。配置非法、数据库不可用、V001～V013 未登记，或已登记迁移的
+物理表不符合冻结契约时启动失败；不会自动执行迁移、修补半表，
 也不会回退到 `InMemory*`。
 
-`checkReadiness()` 检查连接、只读探针、迁移登记，以及 V007 七列、主外键和三个
-CHECK 的只读 catalog 契约；迁移登记齐全但物理形态漂移时返回脱敏的
+`checkReadiness()` 检查连接、只读探针、V001～V013 迁移登记与物理 catalog 契约；
+迁移登记齐全但物理形态漂移时返回脱敏的
 `SCHEMA_INVALID`。`isLive()` 只表达运行时尚未关闭。因此数据库暂时中断时 readiness
 会失败而 liveness 保持正常，连接池可在数据库恢复后重新建连。`close()` 可重复调用，
 关闭后禁止继续取得业务组件。
@@ -131,7 +131,7 @@ mvn -B -f backend-reference/pom.xml clean test
 该命令只构建本模块，不启动数据库、不调用外部服务，也不会触发父仓库的 Maven
 reactor。Fixture、公开边界和依赖检查由仓库根目录的工具脚本执行。
 
-真实 PostgreSQL 事务和运行时门禁需要先执行并登记 V001～V007，再显式传入测试连接：
+真实 PostgreSQL 事务和运行时门禁需要先执行并登记 V001～V013，再显式传入一次性测试连接：
 
 ```bash
 REFERENCE_TEST_DATABASE_URL='jdbc:postgresql://127.0.0.1:5432/meeting' \
