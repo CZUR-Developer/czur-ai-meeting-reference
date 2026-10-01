@@ -560,6 +560,60 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
     }
 
     /**
+     * 新实时凭据功能的显式可选数据库门禁。
+     *
+     * <p>默认关闭的续期 REST 和尚未接入的 WSS 不应把 V014 变成旧 HTTP/T14 Worker
+     * 的全局启动前提。调用方必须先通过 {@link #start(DatabaseRuntimeConfig)} 的
+     * V001～V013 基线，再在启用新入口时调用本方法；只有同时存在完整 V014 版本
+     * 登记与精确物理契约才可开放。该方法只读，不执行迁移或修补半表。</p>
+     *
+     * @return READY、缺迁移、结构无效、数据库不可用或运行时已关闭的脱敏状态
+     */
+    public DatabaseReadiness checkRealtimeCredentialReadiness() {
+        if (closed.get()) {
+            return DatabaseReadiness.closed();
+        }
+        try (Connection connection = dataSource.getConnection()) {
+            connection.setReadOnly(true);
+            try (PreparedStatement statement = connection.prepareStatement("""
+                    SELECT version FROM schema_migrations WHERE version = ?
+                    """)) {
+                statement.setString(1, "V014__realtime_token_grant");
+                try (ResultSet rows = statement.executeQuery()) {
+                    if (!rows.next()) {
+                        return DatabaseReadiness.migrationMissing(
+                                Set.of("V014__realtime_token_grant"));
+                    }
+                    if (!"V014__realtime_token_grant".equals(rows.getString(1))
+                            || rows.next()) {
+                        return DatabaseReadiness.schemaInvalid("V014 registration inconsistent");
+                    }
+                }
+            }
+            if (!JdbcRealtimeCredentialSchema.matches(connection)) {
+                LOGGER.log(Level.WARNING,
+                        "实时凭据 readiness 物理契约校验失败 status=SCHEMA_INVALID");
+                return DatabaseReadiness.schemaInvalid("V014 catalog mismatch");
+            }
+            LOGGER.log(Level.FINE, "实时凭据 readiness 检查通过");
+            return DatabaseReadiness.success();
+        } catch (SQLException failure) {
+            if (isMissingMigrationTable(failure)) {
+                return DatabaseReadiness.migrationMissing(Set.of("V014__realtime_token_grant"));
+            }
+            LOGGER.log(Level.WARNING,
+                    "实时凭据 readiness 数据库不可用 exception={0}",
+                    failure.getClass().getSimpleName());
+            return DatabaseReadiness.unavailable("V014 database probe unavailable");
+        } catch (RuntimeException failure) {
+            LOGGER.log(Level.WARNING,
+                    "实时凭据 readiness 异常 exception={0}",
+                    failure.getClass().getSimpleName());
+            return DatabaseReadiness.schemaInvalid("V014 catalog probe failed");
+        }
+    }
+
+    /**
      * liveness 只表示运行时对象尚未关闭，不代表数据库当前可连接。
      *
      * @return 未调用 close 前为 true；数据库临时不可用时仍可能为 true
