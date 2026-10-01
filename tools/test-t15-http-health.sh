@@ -60,6 +60,11 @@ trap 'exit 130' INT TERM HUP
 command -v docker >/dev/null || fail '缺少 docker'
 command -v mvn >/dev/null || fail '缺少 mvn'
 command -v python3 >/dev/null || fail '缺少随机端口选择所需的 python3'
+TEST_SELECTOR="${1:-internalHealthUsesSameJdbcAssemblyAcrossDatabaseOutageAndRecovery}"
+case "${TEST_SELECTOR}" in
+  internalHealthUsesSameJdbcAssemblyAcrossDatabaseOutageAndRecovery|boundedNetworkOwnerCleansUniquePoolAfterBindFailureAndNormalStop) ;;
+  *) fail '不支持的定向测试选择器' ;;
+esac
 docker info >/dev/null || fail 'Docker daemon 不可用'
 [[ "${CONTAINER_NAME}" =~ ^czur-t15-health-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+-pg$ ]] \
   || fail '容器名不安全'
@@ -115,7 +120,7 @@ mvn -B --no-transfer-progress -f "${REPO_ROOT}/backend-reference/pom.xml" \
 info 'test-compile 通过'
 
 mvn -B --no-transfer-progress -f "${REPO_ROOT}/backend-reference/pom.xml" \
-  '-Dtest=ReferenceMeetingHttpAssemblyIntegrationTest#internalHealthUsesSameJdbcAssemblyAcrossDatabaseOutageAndRecovery' \
+  "-Dtest=ReferenceMeetingHttpAssemblyIntegrationTest#${TEST_SELECTOR}" \
   test >"${STATE_DIR}/test.log" 2>&1 || {
     rg 'Tests run:|BUILD FAILURE|ERROR|error:' "${STATE_DIR}/test.log" >&2 || true
     fail '健康真网络测试失败'

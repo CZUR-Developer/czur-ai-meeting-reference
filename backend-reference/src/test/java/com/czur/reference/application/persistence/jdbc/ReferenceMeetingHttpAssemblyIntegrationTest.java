@@ -1,6 +1,7 @@
 package com.czur.reference.application.persistence.jdbc;
 
 import com.czur.reference.application.bootstrap.ReferenceMeetingDeploymentConfig;
+import com.czur.reference.application.bootstrap.ReferenceMeetingJdkHttpService;
 import com.czur.reference.application.bootstrap.ReferenceMeetingHttpAssembly;
 import com.czur.reference.application.http.AuthenticatedMeetingHttpContextResolver;
 import com.czur.reference.application.http.HttpRequest;
@@ -31,6 +32,7 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.ServerSocket;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -39,6 +41,7 @@ import java.sql.PreparedStatement;
 import java.sql.Statement;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.Duration;
 import java.time.ZoneOffset;
 import java.util.HashMap;
 import java.util.List;
@@ -269,6 +272,65 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
                     MeetingJdkHttpServer.READINESS_PATH, ""));
             assertThrows(IllegalStateException.class, server::start);
         }
+    }
+
+    @Test
+    @EnabledIfEnvironmentVariable(named = "T15_HEALTH_GATE_CONTAINER_ID", matches = "[0-9a-f]{64}")
+    void boundedNetworkOwnerCleansUniquePoolAfterBindFailureAndNormalStop()
+            throws Exception {
+        migrate(13);
+        String applicationName = "t15_shutdown_" + schema;
+        Map<String, String> settings = config();
+        settings.put(DatabaseRuntimeConfig.DATABASE_URL,
+                scopedUrl() + "&ApplicationName=" + applicationName);
+        assertEquals(0, applicationConnections(applicationName));
+        try (ServerSocket occupied = new ServerSocket(0, 1,
+                InetAddress.getByName("127.0.0.1"))) {
+            assertThrows(IOException.class, () -> ReferenceMeetingJdkHttpService.start(
+                    settings, CLOCK, new InetSocketAddress("127.0.0.1",
+                            occupied.getLocalPort())));
+        }
+        awaitNoApplicationConnections(applicationName);
+
+        try (var service = ReferenceMeetingJdkHttpService.start(settings, CLOCK,
+                new InetSocketAddress("127.0.0.1", 0))) {
+            int port = service.address().getPort();
+            assertEquals(200, status(exchange(port, "GET",
+                    MeetingJdkHttpServer.LIVENESS_PATH, "")));
+            assertTrue(applicationConnections(applicationName) > 0,
+                    "the one assembly must hold a live JDBC pool while serving");
+            var closed = service.shutdown(Duration.ofSeconds(3));
+            assertTrue(closed.clean());
+            assertTrue(closed.network().clean());
+            assertTrue(closed.resourcesClosed());
+            assertEquals(closed, service.shutdown(Duration.ZERO));
+            assertThrows(IOException.class, () -> exchange(port, "GET",
+                    MeetingJdkHttpServer.READINESS_PATH, ""));
+        }
+        awaitNoApplicationConnections(applicationName);
+        assertEquals(0, count("meeting"));
+        assertEquals(0, count("meeting_create_fact"));
+    }
+
+    private int applicationConnections(String applicationName) throws Exception {
+        try (Connection connection = admin();
+             PreparedStatement statement = connection.prepareStatement(
+                     "SELECT count(*) FROM pg_stat_activity WHERE application_name = ?")) {
+            statement.setString(1, applicationName);
+            try (var rows = statement.executeQuery()) {
+                assertTrue(rows.next());
+                return rows.getInt(1);
+            }
+        }
+    }
+
+    private void awaitNoApplicationConnections(String applicationName) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+        while (applicationConnections(applicationName) != 0 && System.nanoTime() < deadline) {
+            Thread.sleep(20);
+        }
+        assertEquals(0, applicationConnections(applicationName),
+                "failed start or clean stop must leave no JDBC pool connection");
     }
 
     private static String exchange(int port, String method, String path, String body)

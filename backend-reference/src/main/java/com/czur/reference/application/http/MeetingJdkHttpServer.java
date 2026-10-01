@@ -11,11 +11,18 @@ import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -35,6 +42,9 @@ import java.util.logging.Logger;
 public final class MeetingJdkHttpServer implements AutoCloseable {
     private static final Logger LOGGER = Logger.getLogger(MeetingJdkHttpServer.class.getName());
     private static final int MAX_QUERY_CHARS = 4096;
+    private static final int DEFAULT_WORKERS = 4;
+    private static final int DEFAULT_QUEUE_CAPACITY = 16;
+    private static final Duration DEFAULT_CLOSE_TIMEOUT = Duration.ofSeconds(5);
     /** 仅供受信网络调用的精确存活路径；不属于公开会议协议。 */
     public static final String LIVENESS_PATH = "/internal/health/liveness";
     /** 仅供受信网络调用的精确就绪路径；不属于公开会议协议。 */
@@ -47,22 +57,24 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
     private static final HttpResponse HEALTH_METHOD_NOT_ALLOWED = new HttpResponse(
             405, Map.of("content-type", "application/json", "cache-control", "no-store",
                     "allow", "GET"), "{\"status\":\"METHOD_NOT_ALLOWED\"}");
-
     private final HttpServer server;
+    private final InetSocketAddress bindAddress;
     private final MeetingHttpRuntime runtime;
     private final HttpErrorMapper errors;
     private final AuthenticatedMeetingHttpContextResolver contextResolver;
     private final BooleanSupplier readinessCheck;
+    private final RequestExecutor requests;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final AtomicBoolean started = new AtomicBoolean();
+    private volatile DrainResult drainResult;
 
     /**
-     * 创建尚未启动的监听器；传入端口 0 可由系统分配随机端口。
+     * 创建尚未绑定、尚未启动的监听器；传入端口 0 在启动时随机分配。
      *
      * @param address 明确的监听地址；是否允许非 loopback 由部署者决定
      * @param runtime 已装配的传输无关运行时，本类不拥有其生命周期
      * @param errors 与运行时使用同一错误映射器
-     * @throws IOException 端口绑定失败时不留下运行中的监听器
+     * @throws IOException JDK server 创建失败；地址绑定在 {@link #start()} 执行
      */
     public MeetingJdkHttpServer(
             InetSocketAddress address, MeetingHttpRuntime runtime, HttpErrorMapper errors)
@@ -92,6 +104,18 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
             InetSocketAddress address, MeetingHttpRuntime runtime, HttpErrorMapper errors,
             AuthenticatedMeetingHttpContextResolver contextResolver,
             BooleanSupplier readinessCheck) throws IOException {
+        this(address, runtime, errors, contextResolver, readinessCheck,
+                DEFAULT_WORKERS, DEFAULT_QUEUE_CAPACITY);
+    }
+
+    /**
+     * 供小型网络实例和测试夹具配置有界执行器；至少两个 worker，使一个慢
+     * readiness 或业务调用不占住唯一 liveness 执行线程。
+     */
+    MeetingJdkHttpServer(
+            InetSocketAddress address, MeetingHttpRuntime runtime, HttpErrorMapper errors,
+            AuthenticatedMeetingHttpContextResolver contextResolver,
+            BooleanSupplier readinessCheck, int workers, int queueCapacity) throws IOException {
         this.runtime = Objects.requireNonNull(runtime, "runtime");
         this.errors = Objects.requireNonNull(errors, "errors");
         if (contextResolver != null && contextResolver.errorMapper() != errors) {
@@ -99,31 +123,92 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
         }
         this.contextResolver = contextResolver;
         this.readinessCheck = Objects.requireNonNull(readinessCheck, "readinessCheck");
-        this.server = HttpServer.create(Objects.requireNonNull(address, "address"), 0);
-        this.server.createContext("/", this::handle);
+        this.requests = new RequestExecutor(workers, queueCapacity);
+        this.bindAddress = Objects.requireNonNull(address, "address");
+        HttpServer bound;
+        try {
+            bound = HttpServer.create();
+        } catch (IOException | RuntimeException | Error failure) {
+            requests.forceStop();
+            throw failure;
+        }
+        try {
+            bound.setExecutor(requests);
+            bound.createContext("/", this::handle);
+            this.server = bound;
+        } catch (RuntimeException | Error failure) {
+            bound.stop(0);
+            requests.forceStop();
+            throw failure;
+        }
     }
 
-    /** 开始接收请求；每个 server 实例只能启动一次。 */
-    public void start() {
+    /**
+     * 绑定并开始接收请求；每个实例只能启动一次。绑定或启动失败时尝试
+     * stop JDK server 并关闭执行器；外层 owner 仍负责关闭 HTTP runtime 和数据库。
+     * 已绑定但 JDK 内部 start 异常的极端窗口不保证端口立即可重绑。
+     *
+     * @throws IOException 地址已占用或绑定失败
+     */
+    public synchronized void start() throws IOException {
         if (closed.get()) {
             throw new IllegalStateException("HTTP server is closed");
         }
-        server.start();
-        started.set(true);
-        LOGGER.log(Level.INFO, "meeting HTTP 网络入口已启动");
+        if (started.get()) {
+            throw new IllegalStateException("HTTP server already started");
+        }
+        try {
+            server.bind(bindAddress, 0);
+            server.start();
+            started.set(true);
+            LOGGER.log(Level.INFO, "meeting HTTP 网络入口已启动");
+        } catch (IOException | RuntimeException | Error failure) {
+            closed.set(true);
+            requests.closeGate();
+            try {
+                server.stop(0);
+            } catch (RuntimeException | Error cleanupFailure) {
+                failure.addSuppressed(cleanupFailure);
+            }
+            requests.forceStop();
+            LOGGER.log(Level.WARNING, "meeting HTTP 网络启动失败 reason={0}",
+                    failure.getClass().getSimpleName());
+            throw failure;
+        }
     }
 
-    /** 返回监听地址；端口 0 在启动后解析为实际随机端口。 */
+    /** 返回已启动的监听地址；未启动时拒绝读取未分配的随机端口。 */
     public InetSocketAddress address() {
+        if (!started.get()) {
+            throw new IllegalStateException("HTTP server has not started");
+        }
         return server.getAddress();
     }
+
+    /** 仅供同包网络门禁确认 Exchange 已进入执行器队列，非业务指标。 */
+    int queuedRequestsForTest() {
+        return requests.queued();
+    }
+
+    /** 仅供同包门禁同步关闭门与并发 socket 断言。 */
+    boolean closingForTest() { return closed.get(); }
+
+    /** 仅供同包门禁确认强制关闭后的 worker 已实际退出。 */
+    int liveWorkersForTest() { return requests.liveWorkers(); }
+
+    /** 仅供同包门禁确认执行器终止，不能替代超时返回时的证据快照。 */
+    boolean executorTerminatedForTest() { return requests.terminated(); }
 
     private void handle(HttpExchange exchange) throws IOException {
         try (exchange) {
             HttpResponse response;
             try {
-                HttpRequest request = decode(exchange);
-                response = dispatch(request);
+                if (closed.get()) {
+                    response = shutdownResponse(exchange);
+                } else {
+                    HttpRequest request = decode(exchange);
+                    response = closed.get() ? shutdownResponse(exchange) : dispatch(request);
+                }
             } catch (IllegalArgumentException badRequest) {
                 LOGGER.log(Level.WARNING, "meeting HTTP 原始请求被拒绝 reason=INVALID_TRANSPORT");
                 response = errors.exception(badRequest);
@@ -133,6 +218,14 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
             }
             write(exchange, response);
         }
+    }
+
+    private HttpResponse shutdownResponse(HttpExchange exchange) {
+        String path = exchange.getRequestURI().getRawPath();
+        if (LIVENESS_PATH.equals(path) || READINESS_PATH.equals(path)) {
+            return HEALTH_UNAVAILABLE;
+        }
+        return errors.runtimeUnavailable();
     }
 
     private HttpResponse dispatch(HttpRequest request) {
@@ -322,12 +415,170 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
         }
     }
 
-    /** 停止接收新连接；关闭运行时与数据库是外层 owner 的责任。 */
+    /**
+     * 以执行器受理为边界排空请求；旧请求完成或在 handler 明确收到健康路径
+     * 固定 503、业务路径公开错误 envelope 后才关闭监听器。排空期间 socket
+     * 尚绑定，但 gate 拒绝新的执行器任务。
+     * gate 后未被执行器受理的新连接由 JDK 断开，不承诺收到 HTTP 503；
+     * 这些连接不计入已受理任务或洁净排空的成功请求。
+     * 超时会停止监听并尝试中断 worker，返回非洁净结果；不保证忽略中断的
+     * 线程已退出，部署方必须终止进程并按持久事实恢复。
+     *
+     * @param timeout 整个关闭过程的单一非负截止时间，最多五分钟
+     * @return 已受理任务、排队丢弃与仍执行 worker 的关闭快照；重复调用返回同一结果
+     */
+    public synchronized DrainResult shutdown(Duration timeout) {
+        Objects.requireNonNull(timeout, "timeout");
+        if (timeout.isNegative() || timeout.compareTo(Duration.ofMinutes(5)) > 0) {
+            throw new IllegalArgumentException("HTTP close timeout must be 0..5 minutes");
+        }
+        if (drainResult != null) {
+            return drainResult;
+        }
+        long deadline = System.nanoTime() + timeout.toNanos();
+        closed.set(true);
+        requests.closeGate();
+        boolean interrupted = false;
+        try {
+            requests.awaitEmpty(deadline);
+        } catch (InterruptedException failure) {
+            interrupted = true;
+        }
+        int unfinished = requests.pending();
+        // stop(0) 仅在本执行器已受理任务排空之后作为正常路径使用。
+        // 超时路径强制断开 socket，并把遗留任务明确标记为非洁净。
+        server.stop(0);
+        int discarded = 0;
+        if (unfinished == 0 && !interrupted) {
+            requests.orderlyStop();
+        } else {
+            discarded = requests.forceStop();
+        }
+        boolean terminated = false;
+        if (!interrupted) {
+            try {
+                terminated = requests.awaitTermination(deadline);
+            } catch (InterruptedException failure) {
+                interrupted = true;
+            }
+        }
+        if (!terminated) {
+            discarded += requests.forceStop();
+        }
+        int liveWorkers = requests.liveWorkers();
+        boolean clean = unfinished == 0 && discarded == 0 && terminated && !interrupted;
+        drainResult = new DrainResult(clean, unfinished, discarded, liveWorkers);
+        LOGGER.log(clean ? Level.INFO : Level.WARNING,
+                "meeting HTTP 网络入口关闭 clean={0} unfinishedAccepted={1} "
+                        + "discardedQueued={2} liveWorkers={3}",
+                new Object[]{clean, unfinished, discarded, liveWorkers});
+        if (interrupted) {
+            Thread.currentThread().interrupt();
+        }
+        return drainResult;
+    }
+
+    /** 使用默认五秒截止时间；需判断强制关闭时应调用 {@link #shutdown(Duration)}。 */
     @Override
     public void close() {
-        if (closed.compareAndSet(false, true)) {
-            server.stop(0);
-            LOGGER.log(Level.INFO, "meeting HTTP 网络入口已关闭");
+        shutdown(DEFAULT_CLOSE_TIMEOUT);
+    }
+
+    /**
+     * 网络入口关闭结果。{@code unfinishedAccepted} 是截止时间到时仍未完成的
+     * 已受理任务数，包含排队与执行中；{@code discardedQueued} 是强制停止时
+     * 未进入 handler 的排队数；{@code liveWorkers} 仅为返回时的活线程快照。
+     * {@code clean=false} 时不能据此声称所有业务请求已完成或线程已回收。
+     */
+    public record DrainResult(
+            boolean clean, int unfinishedAccepted, int discardedQueued, int liveWorkers) {
+    }
+
+    /** 同一把锁串行化执行器受理与关闭 gate，避免漏计队列中的 Exchange。 */
+    private static final class RequestExecutor implements Executor {
+        private static final AtomicInteger THREAD_IDS = new AtomicInteger();
+        private final Object lock = new Object();
+        private final ThreadPoolExecutor pool;
+        private boolean accepting = true;
+        private int pending;
+
+        private RequestExecutor(int workers, int queueCapacity) {
+            if (workers < 2 || workers > 16 || queueCapacity < 1 || queueCapacity > 1024) {
+                throw new IllegalArgumentException("HTTP executor bounds are invalid");
+            }
+            pool = new ThreadPoolExecutor(workers, workers, 0, TimeUnit.MILLISECONDS,
+                    new ArrayBlockingQueue<>(queueCapacity), task -> {
+                        Thread thread = new Thread(task,
+                                "meeting-http-request-" + THREAD_IDS.incrementAndGet());
+                        thread.setDaemon(false);
+                        return thread;
+                    }, new ThreadPoolExecutor.AbortPolicy());
         }
+
+        @Override
+        public void execute(Runnable task) {
+            Objects.requireNonNull(task, "task");
+            synchronized (lock) {
+                if (!accepting) {
+                    throw new RejectedExecutionException("HTTP request gate is closed");
+                }
+                pending++;
+                try {
+                    pool.execute(() -> {
+                        try {
+                            task.run();
+                        } finally {
+                            synchronized (lock) {
+                                pending--;
+                                lock.notifyAll();
+                            }
+                        }
+                    });
+                } catch (RuntimeException | Error failure) {
+                    pending--;
+                    lock.notifyAll();
+                    throw failure;
+                }
+            }
+        }
+
+        private void closeGate() {
+            synchronized (lock) {
+                accepting = false;
+            }
+        }
+
+        private void awaitEmpty(long deadline) throws InterruptedException {
+            synchronized (lock) {
+                while (pending > 0) {
+                    long remaining = deadline - System.nanoTime();
+                    if (remaining <= 0) {
+                        break;
+                    }
+                    TimeUnit.NANOSECONDS.timedWait(lock, remaining);
+                }
+            }
+        }
+
+        private int pending() {
+            synchronized (lock) {
+                return pending;
+            }
+        }
+
+        private int queued() { return pool.getQueue().size(); }
+
+        private void orderlyStop() { pool.shutdown(); }
+
+        private int forceStop() { return pool.shutdownNow().size(); }
+
+        private boolean awaitTermination(long deadline) throws InterruptedException {
+            return pool.awaitTermination(Math.max(0, deadline - System.nanoTime()),
+                    TimeUnit.NANOSECONDS);
+        }
+
+        private int liveWorkers() { return pool.getActiveCount(); }
+
+        private boolean terminated() { return pool.isTerminated(); }
     }
 }
