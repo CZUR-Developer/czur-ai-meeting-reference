@@ -1,0 +1,40 @@
+{
+  "meetingId": "mtg_public_projection",
+  "state": "CREATED",
+  "acceptedProfile": {
+    "id": "standard",
+    "revision": 1
+  },
+  "grantedCapabilities": ["transcript.realtime"],
+  "capabilityDecisions": [
+    {
+      "capability": "summary.structured",
+      "availability": "UNAVAILABLE",
+      "reasonCode": "NOT_REQUESTED",
+      "requiredByProfile": false
+    },
+    {
+      "capability": "transcript.realtime",
+      "availability": "AVAILABLE",
+      "requiredByProfile": true
+    }
+  ],
+  "acceptedAudioProfile": {
+    "encoding": "PCM_S16LE",
+    "sampleRateHz": 16000,
+    "channelCount": 1,
+    "frameDurationMs": 100
+  },
+  "realtime": {
+    "url": "wss://example.test/realtime",
+    "subprotocol": "czur.ai-meeting.realtime.v1",
+    "sessionToken": "opaque-test-token",
+    "expiresAt": "2030-01-01T00:01:00Z"
+  },
+  "limits": {
+    "maxMeetingDurationMs": 120000,
+    "maxAudioFrameBytes": 3200,
+    "eventReplayWindow": 128,
+    "maxReplayAudioMs": 30000
+  }
+}
