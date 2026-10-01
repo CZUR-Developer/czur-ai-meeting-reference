@@ -1,0 +1,2 @@
+{"specVersion":"0.1","meetingId":"mtg_generic_multistream","streamId":"str_one","eventId":"evt_global_001","eventSequence":"1","emittedAt":"2026-09-15T03:00:00Z","sessionState":{"state":"MEETING_STATE_RUNNING","reasonCode":"STARTED","terminal":false}}
+{"specVersion":"0.1","meetingId":"mtg_generic_multistream","streamId":"str_two","eventId":"evt_global_002","eventSequence":"1","emittedAt":"2026-09-15T03:00:01Z","sessionState":{"state":"MEETING_STATE_RUNNING","reasonCode":"STILL_RUNNING","terminal":false}}
