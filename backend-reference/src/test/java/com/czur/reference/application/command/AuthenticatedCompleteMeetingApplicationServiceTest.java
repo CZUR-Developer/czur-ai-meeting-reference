@@ -3,6 +3,10 @@ package com.czur.reference.application.command;
 import com.czur.reference.application.port.CompleteMeetingCreateReplayLookup;
 import com.czur.reference.application.port.CompleteMeetingCreationUnitOfWork;
 import com.czur.reference.application.port.CreateRealtimeSessionAllocator;
+import com.czur.reference.application.http.CreateMeetingHttpRequestDecoder;
+import com.czur.reference.application.http.HttpErrorMapper;
+import com.czur.reference.application.http.HttpRequest;
+import com.czur.reference.application.http.MeetingHttpAdapter;
 import com.czur.reference.application.port.entitlement.AuthorizedProfileSnapshot;
 import com.czur.reference.application.port.entitlement.AuthorizeStartRequest;
 import com.czur.reference.application.port.entitlement.CancelReservationRequest;
@@ -17,6 +21,8 @@ import com.czur.reference.application.port.entitlement.UsageOperationResult;
 import com.czur.reference.application.port.entitlement.UsageReservation;
 import com.czur.reference.application.port.entitlement.UsageReserveLookup;
 import com.czur.reference.application.port.entitlement.UsageUnit;
+import com.czur.reference.application.port.MeetingDeletionPort;
+import com.czur.reference.application.port.MeetingQueryPort;
 import com.czur.reference.application.port.identity.IdentityProviderError;
 import com.czur.reference.application.port.identity.IdentityProviderResult;
 import com.czur.reference.application.port.identity.IdentityVerificationRequest;
@@ -56,6 +62,138 @@ class AuthenticatedCompleteMeetingApplicationServiceTest {
     private static final Instant NOW = Instant.parse("2030-01-01T00:00:00Z");
     private static final UsageEstimate ESTIMATE =
             new UsageEstimate(UsageUnit.MEETING_DURATION_MS, 60_000);
+    private static final String HTTP_CREATE_BODY = """
+            {"clientSessionId":"client-session","profile":{"id":"standard","revision":1},
+             "client":{"appId":"app","appVersion":"1","contractVersion":"v1","deviceId":"device"},
+             "timezone":"Asia/Shanghai","languages":{"source":"zh-CN","targets":[]},
+             "audioProfile":{"encoding":"PCM_S16LE","sampleRateHz":16000,"channelCount":1,"frameDurationMs":100},
+             "requestedCapabilities":["transcript.realtime"],
+             "artifactPolicy":{"retainAudio":false,"presentationCapture":false}}
+            """;
+
+    @Test
+    void httpCreateIsDisabledBeforeDecodingAndEnabledFirstReplayUsesOriginalResponse() {
+        var harness = new Harness();
+        var service = harness.service();
+        var decoder = new CreateMeetingHttpRequestDecoder("trusted-audience", "trusted-client");
+        var closed = httpAdapter(service, decoder, false);
+        var invalid = new HttpRequest("POST", "/v1/meetings", Map.of(), "not JSON");
+        assertEquals(501, closed.handle(invalid, null).status());
+        assertEquals(List.of(), harness.calls);
+
+        var stored = harness.storedResponse();
+        harness.reserveReads.add(new UsageReserveLookup.Replayed(harness.winner));
+        harness.createResult = new CompleteMeetingCreationUnitOfWork.Success(
+                CompleteMeetingCreationUnitOfWork.SuccessCode.CREATED, stored);
+        var enabled = httpAdapter(service, decoder, true);
+        var request = new HttpRequest("POST", "/v1/meetings", Map.of(
+                "Authorization", "Bearer private-token",
+                "Idempotency-Key", "create-external-key-12345",
+                "Content-Type", "application/json"), HTTP_CREATE_BODY);
+        var first = enabled.handle(request, null);
+        assertEquals(201, first.status());
+        assertTrue(first.body().contains("stored-token-secret"));
+        assertFalse(first.body().contains("candidate-token-secret"));
+        assertTrue(harness.verifiedCredential.isDestroyed());
+        assertTrue(harness.calls.contains("uow"));
+
+        harness.calls.clear();
+        harness.createReads.add(new CompleteMeetingCreateReplayLookup.Replayed(stored));
+        var replay = enabled.handle(request, null);
+        assertEquals(201, replay.status());
+        assertEquals(first.body(), replay.body());
+        assertEquals(List.of("verify", "create-replay"), harness.calls);
+        assertTrue(harness.verifiedCredential.isDestroyed());
+    }
+
+    @Test
+    void enabledHttpCreateSeparatesAuthenticationAndJsonFailuresBeforeBusiness() {
+        var harness = new Harness();
+        var enabled = httpAdapter(harness.service(),
+                new CreateMeetingHttpRequestDecoder("trusted-audience", "trusted-client"), true);
+        assertEquals(401, enabled.handle(new HttpRequest("POST", "/v1/meetings",
+                Map.of("Content-Type", "application/json", "Idempotency-Key",
+                        "create-external-key-12345"), HTTP_CREATE_BODY), null).status());
+        assertEquals(400, enabled.handle(new HttpRequest("POST", "/v1/meetings",
+                Map.of("Authorization", "Bearer private-token", "Content-Type", "application/json",
+                        "Idempotency-Key", "create-external-key-12345"), "{}"), null).status());
+        assertEquals(List.of(), harness.calls);
+    }
+
+    @Test
+    void unexpectedApplicationArgumentFailureMaps500AndDestroysDecodedCredential() {
+        var harness = new Harness();
+        harness.throwIllegalArgumentDuringIdentity = true;
+        var response = httpAdapter(harness.service(), httpDecoder(), true)
+                .handle(httpCreateRequest(), null);
+        assertEquals(500, response.status());
+        assertTrue(response.body().contains("INTERNAL_ERROR"));
+        assertFalse(response.body().contains("provider-secret-body"));
+        assertFalse(response.body().contains("private-token"));
+        assertEquals(List.of("verify"), harness.calls);
+        assertTrue(harness.verifiedCredential.isDestroyed());
+    }
+
+    @Test
+    void enabledHttpCreateMapsConflictPermissionCapabilityAndFactOutage() {
+        var conflict = new Harness();
+        conflict.createReads.add(new CompleteMeetingCreateReplayLookup.Conflict());
+        assertEquals(409, httpAdapter(conflict.service(), httpDecoder(), true)
+                .handle(httpCreateRequest(), null).status());
+        assertEquals(List.of("verify", "create-replay"), conflict.calls);
+
+        var forbidden = new Harness();
+        forbidden.identityResult = IdentityProviderResult.success(identity(Set.of()));
+        assertEquals(403, httpAdapter(forbidden.service(), httpDecoder(), true)
+                .handle(httpCreateRequest(), null).status());
+        assertEquals(List.of("verify"), forbidden.calls);
+
+        var capability = new Harness();
+        capability.profile = new ProductProfile("standard", 1,
+                Set.of(REALTIME, CapabilityIds.TRANSCRIPT_FINAL), Set.of(),
+                Map.of(), Map.of(), Map.of());
+        assertEquals(422, httpAdapter(capability.service(), httpDecoder(), true)
+                .handle(httpCreateRequest(), null).status());
+        assertFalse(capability.calls.contains("uow"));
+
+        var unavailable = new Harness();
+        unavailable.createReads.add(new CompleteMeetingCreateReplayLookup.Unavailable());
+        assertEquals(503, httpAdapter(unavailable.service(), httpDecoder(), true)
+                .handle(httpCreateRequest(), null).status());
+        assertEquals(List.of("verify", "create-replay"), unavailable.calls);
+        for (var harness : List.of(conflict, forbidden, capability, unavailable)) {
+            assertTrue(harness.verifiedCredential.isDestroyed());
+        }
+    }
+
+    private static CreateMeetingHttpRequestDecoder httpDecoder() {
+        return new CreateMeetingHttpRequestDecoder("trusted-audience", "trusted-client");
+    }
+
+    private static HttpRequest httpCreateRequest() {
+        return new HttpRequest("POST", "/v1/meetings", Map.of(
+                "Authorization", "Bearer private-token",
+                "Idempotency-Key", "create-external-key-12345",
+                "Content-Type", "application/json"), HTTP_CREATE_BODY);
+    }
+
+    private static MeetingHttpAdapter httpAdapter(AuthenticatedCompleteMeetingApplicationService service,
+            CreateMeetingHttpRequestDecoder createDecoder, boolean enabled) {
+        MeetingQueryPort query = new MeetingQueryPort() {
+            @Override public Result get(GetRequest request) { throw new AssertionError("no query"); }
+            @Override public ListResult list(ListRequest request) { throw new AssertionError("no list"); }
+        };
+        MeetingDeletionPort deletion = request -> { throw new AssertionError("no delete"); };
+        MeetingHttpAdapter.RequestDecoder oldDecoder = (request, context) -> {
+            throw new AssertionError("no old decoder");
+        };
+        var stopService = new AuthenticatedMeetingStopApplicationService(
+                "test-deployment", request -> { throw new AssertionError("no stop identity"); },
+                request -> { throw new AssertionError("no stop UOW"); }, query);
+        return new MeetingHttpAdapter(query, deletion, oldDecoder,
+                new HttpErrorMapper(() -> "create-route-diag"), stopService,
+                service, createDecoder, enabled);
+    }
 
     @Test
     void identityDenialAndMissingPermissionStopBeforeAnyFactReadAndCloseCredential() {
@@ -469,6 +607,8 @@ class AuthenticatedCompleteMeetingApplicationServiceTest {
                 IdentityProviderResult.success(identity(Set.of(MeetingPermissions.CREATE)));
         private EntitlementProviderResult<MeetingGrant> authorizationResult;
         private boolean throwDuringIdentity;
+        private boolean throwIllegalArgumentDuringIdentity;
+        private SecretCredential verifiedCredential;
         private ProductProfile profile = new ProductProfile("standard", 1,
                 Set.of(REALTIME), Set.of(), Map.of(), Map.of(), Map.of());
         private ProductProfile historicalProfile;
@@ -496,8 +636,12 @@ class AuthenticatedCompleteMeetingApplicationServiceTest {
             return new AuthenticatedCompleteMeetingApplicationService(DEPLOYMENT,
                     request -> {
                         calls.add("verify");
+                        verifiedCredential = request.credential();
                         if (throwDuringIdentity) {
                             throw new IllegalStateException("secret-identity-provider-error");
+                        }
+                        if (throwIllegalArgumentDuringIdentity) {
+                            throw new IllegalArgumentException("provider-secret-body");
                         }
                         return identityResult;
                     }, request -> {

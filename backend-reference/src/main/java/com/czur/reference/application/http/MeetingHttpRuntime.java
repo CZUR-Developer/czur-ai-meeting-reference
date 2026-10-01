@@ -1,6 +1,7 @@
 package com.czur.reference.application.http;
 
 import com.czur.reference.application.command.AuthenticatedMeetingStopApplicationService;
+import com.czur.reference.application.command.AuthenticatedCompleteMeetingApplicationService;
 import com.czur.reference.application.port.MeetingDeletionPort;
 import com.czur.reference.application.port.MeetingQueryPort;
 import com.czur.reference.application.command.MeetingCommandContext;
@@ -13,8 +14,9 @@ import java.util.logging.Logger;
 /**
  * 参考后端的 transport-neutral HTTP 运行时装配边界。
  *
- * <p>本类只把已经由外层部署装配的查询端口、删除端口、认证 Stop 应用服务和
- * 请求解码器组合成一个 {@link MeetingHttpAdapter}，再提供一个明确的接收/关闭
+ * <p>本类只把已经由外层部署装配的查询端口、删除端口、认证 Stop 应用服务、
+ * 可选显式开启的认证 Create 服务和请求解码器组合成一个
+ * {@link MeetingHttpAdapter}，再提供一个明确的接收/关闭
  * 生命周期。它不启动 Servlet、Netty、JDK HttpServer 或 WebSocket，不创建
  * 数据库连接池，也不持有模型、存储、Worker 或 Gateway 逻辑；具体 HTTP server
  * 只需把解码后的 {@link HttpRequest} 交给 {@link #handle(HttpRequest,
@@ -27,9 +29,9 @@ import java.util.logging.Logger;
  * 打断。这样可以在真实 server、测试 server 或未来框架适配器之间复用相同的
  * application 边界，而不会误称本参考切片已经提供了完整网络 server。</p>
  *
- * <p>构造器没有 create 命令入口，也没有旧的未认证 {@code MeetingCommandService}
- * 参数。{@code POST /v1/meetings} 因此继续沿用 adapter 的 501 关闭式响应，直到
- * 创建所需的认证事实、能力快照、实时会话和限制端口全部具备。</p>
+ * <p>既有构造器不开放 Create，继续返回 501；只有显式注入完整认证 Create
+ * 应用服务、专用请求解码器并启用开关的构造器才开放该路由。任何构造器均不接收
+ * 旧的未认证 {@code MeetingCommandService}。</p>
  */
 public final class MeetingHttpRuntime implements AutoCloseable {
     private static final Logger LOGGER = Logger.getLogger(MeetingHttpRuntime.class.getName());
@@ -59,6 +61,27 @@ public final class MeetingHttpRuntime implements AutoCloseable {
                 Objects.requireNonNull(decoder, "decoder"),
                 Objects.requireNonNull(errors, "errors"),
                 Objects.requireNonNull(stopService, "stopService")), errors);
+    }
+
+    /**
+     * 显式装配完整认证 Create；关闭开关时仍在解码或调用业务前返回 501。
+     *
+     * <p>此处只组装 transport-neutral 路由，不启动网络监听或数据库。真实服务端
+     * 的部署开关及各依赖生命周期由外层装配负责；启用时缺少 Create 服务或
+     * 解码器会在构造阶段失败，而不会处理请求后再回退旧路径。</p>
+     */
+    public MeetingHttpRuntime(
+            MeetingQueryPort queryPort,
+            MeetingDeletionPort deletionPort,
+            MeetingHttpAdapter.RequestDecoder decoder,
+            HttpErrorMapper errors,
+            AuthenticatedMeetingStopApplicationService stopService,
+            AuthenticatedCompleteMeetingApplicationService createService,
+            CreateMeetingHttpRequestDecoder createDecoder,
+            boolean createEnabled) {
+        this(new MeetingHttpAdapter(
+                queryPort, deletionPort, decoder, errors, stopService,
+                createService, createDecoder, createEnabled), errors);
     }
 
     /** 使用默认错误映射器创建已认证 Stop 运行时。 */

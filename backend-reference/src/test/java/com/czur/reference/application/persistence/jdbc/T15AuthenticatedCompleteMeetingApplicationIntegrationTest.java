@@ -1,6 +1,7 @@
 package com.czur.reference.application.persistence.jdbc;
 
 import com.czur.reference.application.command.AuthenticatedCompleteMeetingApplicationService;
+import com.czur.reference.application.command.AuthenticatedMeetingStopApplicationService;
 import com.czur.reference.application.command.AuthenticatedCompleteMeetingCreateResult;
 import com.czur.reference.application.command.CompleteMeetingResponseAssembler;
 import com.czur.reference.application.command.CompleteMeetingReserveFacts;
@@ -12,9 +13,16 @@ import com.czur.reference.application.command.MeetingRequestCanonicalizer;
 import com.czur.reference.application.command.TrustedCreateRuntimeLimits;
 import com.czur.reference.application.entitlement.referencedev.ReferenceDevEntitlementPolicy;
 import com.czur.reference.application.entitlement.referencedev.ReferenceDevEntitlementPolicyConfig;
+import com.czur.reference.application.http.CreateMeetingHttpRequestDecoder;
+import com.czur.reference.application.http.HttpErrorMapper;
+import com.czur.reference.application.http.HttpRequest;
+import com.czur.reference.application.http.MeetingHttpAdapter;
+import com.czur.reference.application.http.MeetingHttpRuntime;
 import com.czur.reference.application.port.CompleteMeetingCreateReplayLookup;
 import com.czur.reference.application.port.CompleteMeetingCreationUnitOfWork;
 import com.czur.reference.application.port.MeetingStartExecutionUnitOfWork;
+import com.czur.reference.application.port.MeetingDeletionPort;
+import com.czur.reference.application.port.MeetingQueryPort;
 import com.czur.reference.application.port.CreateRealtimeSessionAllocator;
 import com.czur.reference.application.port.entitlement.EntitlementIdGenerator;
 import com.czur.reference.application.port.entitlement.AuthorizedProfileSnapshot;
@@ -137,6 +145,53 @@ class T15AuthenticatedCompleteMeetingApplicationIntegrationTest {
                 "jdbc:postgresql://localhost:55432/shared"));
         assertEquals("jdbc:postgresql://127.0.0.1:33073/disposable",
                 isolatedDatabaseUrl("jdbc:postgresql://127.0.0.1:33073/disposable"));
+    }
+
+    @Test
+    void enabledHttpAdapterCreatesReplaysAndConflictsAgainstV013() throws Exception {
+        String key = "http-create-key-12345";
+        var service = service("http", "http-first-token",
+                new JdbcUsageReserveLookup(dataSource),
+                new JdbcCompleteMeetingCreateReplayLookup(dataSource), actualUnitOfWork());
+        MeetingQueryPort query = new MeetingQueryPort() {
+            @Override public Result get(GetRequest request) { throw new AssertionError("no query"); }
+            @Override public ListResult list(ListRequest request) { throw new AssertionError("no list"); }
+        };
+        MeetingDeletionPort deletion = request -> { throw new AssertionError("no delete"); };
+        MeetingHttpAdapter.RequestDecoder oldDecoder = (request, context) -> {
+            throw new AssertionError("no old decoder");
+        };
+        var stopService = new AuthenticatedMeetingStopApplicationService(
+                DEPLOYMENT, request -> { throw new AssertionError("no stop identity"); },
+                request -> { throw new AssertionError("no stop UOW"); }, query);
+        var headers = Map.of("Authorization", "Bearer integration-token",
+                "Idempotency-Key", key, "Content-Type", "application/json");
+        String body = """
+                {"clientSessionId":"client-session-%s","profile":{"id":"standard","revision":1},
+                 "client":{"appId":"app","appVersion":"1","contractVersion":"v1","deviceId":"device"},
+                 "timezone":"Asia/Shanghai","languages":{"source":"zh-CN","targets":[]},
+                 "audioProfile":{"encoding":"PCM_S16LE","sampleRateHz":16000,"channelCount":1,"frameDurationMs":100},
+                 "requestedCapabilities":["transcript.realtime"],
+                 "artifactPolicy":{"retainAudio":false,"presentationCapture":false}}
+                """.formatted(key);
+        try (var runtime = new MeetingHttpRuntime(query, deletion, oldDecoder,
+                new HttpErrorMapper(() -> "http-integration-diag"), stopService, service,
+                new CreateMeetingHttpRequestDecoder("meeting-api", "android-app"), true)) {
+            var request = new HttpRequest("POST", "/v1/meetings", headers, body);
+            var first = runtime.handle(request, null);
+            var replay = runtime.handle(request, null);
+            assertEquals(201, first.status());
+            assertEquals(201, replay.status());
+            assertEquals(first.body(), replay.body());
+            assertTrue(first.body().contains("http-first-token"));
+            assertFalse(first.body().contains("schemaVersion"));
+            assertEquals(409, runtime.handle(new HttpRequest("POST", "/v1/meetings", headers,
+                    body.replace("client-session-", "different-session-")), null).status());
+            assertEquals(1, count("SELECT count(*) FROM meeting_create_fact"));
+            assertEquals(1, count("SELECT count(*) FROM meeting"));
+            assertEquals(1, count("SELECT count(*) FROM usage_reservation"));
+            assertEquals(1, count("SELECT count(*) FROM outbox_event"));
+        }
     }
 
     @Test

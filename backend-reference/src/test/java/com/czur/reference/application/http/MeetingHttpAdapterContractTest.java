@@ -2,6 +2,9 @@ package com.czur.reference.application.http;
 
 import com.czur.reference.application.command.MeetingCommandContext;
 import com.czur.reference.application.command.AuthenticatedMeetingStopApplicationService;
+import com.czur.reference.application.command.AuthenticatedCompleteMeetingApplicationService;
+import com.czur.reference.application.command.CompleteMeetingResponseAssembler;
+import com.czur.reference.application.command.TrustedCreateRuntimeLimits;
 import com.czur.reference.application.command.MeetingCommandResult;
 import com.czur.reference.application.command.StopMeetingIntent;
 import com.czur.reference.application.port.DeleteRequest;
@@ -19,6 +22,19 @@ import com.czur.reference.application.port.identity.IdentityVerificationRequest;
 import com.czur.reference.application.port.identity.SecretCredential;
 import com.czur.reference.application.port.identity.VerifiedIdentity;
 import com.czur.reference.application.port.OwnedMeetingStopUnitOfWork;
+import com.czur.reference.application.port.entitlement.EntitlementProvider;
+import com.czur.reference.application.port.entitlement.EntitlementProviderResult;
+import com.czur.reference.application.port.entitlement.MeetingGrant;
+import com.czur.reference.application.port.entitlement.UsageOperationResult;
+import com.czur.reference.application.port.entitlement.AuthorizeStartRequest;
+import com.czur.reference.application.port.entitlement.ReserveUsageRequest;
+import com.czur.reference.application.port.entitlement.CommitUsageRequest;
+import com.czur.reference.application.port.entitlement.CancelReservationRequest;
+import com.czur.reference.application.port.entitlement.UsageEstimate;
+import com.czur.reference.application.port.entitlement.UsageUnit;
+import com.czur.reference.domain.capability.CapabilityDescriptor;
+import com.czur.reference.domain.capability.CapabilityPlanner;
+import com.czur.reference.domain.capability.DeploymentLimits;
 import com.czur.reference.domain.meeting.MeetingAggregate;
 import com.czur.reference.domain.meeting.MeetingState;
 import org.junit.jupiter.api.BeforeEach;
@@ -271,6 +287,57 @@ class MeetingHttpAdapterContractTest {
 
         assertEquals(501, create.status());
         assertEquals(400, delete.status());
+    }
+
+    @Test
+    void enabledCreateAssemblyPreservesExistingListDeleteAndStopRoutes() {
+        adapter = new MeetingHttpAdapter(query, deletion, decoder,
+                new HttpErrorMapper(() -> "adapter-diagnostic"), stopService(),
+                unusedCreateService(), new CreateMeetingHttpRequestDecoder("audience", "client"),
+                true);
+        query.listResult = new MeetingQueryPort.ListPage(List.of(summary()), null);
+        assertEquals(200, adapter.handle(new HttpRequest(
+                "GET", "/v1/meetings", Map.of(), ""), context()).status());
+
+        decoder.delete = new DeleteRequest(context(), "mtg_delete", "delete-key-123456",
+                "digest");
+        deletion.result = new DeleteResult.NotFound();
+        assertEquals(404, adapter.handle(new HttpRequest("DELETE", "/v1/meetings/mtg_delete",
+                Map.of("Idempotency-Key", "delete-key-123456"), ""), context()).status());
+        assertNotNull(deletion.request);
+
+        decoder.stop = new MeetingHttpAdapter.StopRequest(requestCredential(),
+                new StopMeetingIntent("mtg_stop", "stop-key-1234567"));
+        stop.result = new OwnedMeetingStopUnitOfWork.Failure(
+                OwnedMeetingStopUnitOfWork.ErrorCode.MEETING_NOT_FOUND);
+        assertEquals(404, adapter.handle(new HttpRequest("POST", "/v1/meetings/mtg_stop:stop",
+                Map.of("Idempotency-Key", "stop-key-1234567"), "{}"), null).status());
+        assertNotNull(stop.request);
+    }
+
+    private static AuthenticatedCompleteMeetingApplicationService unusedCreateService() {
+        EntitlementProvider unusedEntitlement = new EntitlementProvider() {
+            @Override public EntitlementProviderResult<MeetingGrant> authorizeStart(
+                    AuthorizeStartRequest request) { throw new AssertionError("no create"); }
+            @Override public EntitlementProviderResult<UsageOperationResult> reserveUsage(
+                    ReserveUsageRequest request) { throw new AssertionError("no create"); }
+            @Override public EntitlementProviderResult<UsageOperationResult> commitUsage(
+                    CommitUsageRequest request) { throw new AssertionError("no create"); }
+            @Override public EntitlementProviderResult<UsageOperationResult> cancelReservation(
+                    CancelReservationRequest request) { throw new AssertionError("no create"); }
+        };
+        return new AuthenticatedCompleteMeetingApplicationService("deployment",
+                request -> { throw new AssertionError("no create"); },
+                request -> { throw new AssertionError("no create"); },
+                request -> { throw new AssertionError("no create"); },
+                unusedEntitlement, () -> "mtg_unused",
+                new CompleteMeetingResponseAssembler(new CapabilityPlanner(),
+                        request -> { throw new AssertionError("no create"); },
+                        new TrustedCreateRuntimeLimits(120_000, 3_200, 128, null)),
+                request -> { throw new AssertionError("no create"); },
+                new UsageEstimate(UsageUnit.MEETING_DURATION_MS, 60_000),
+                (id, revision) -> { throw new AssertionError("no create"); },
+                new CapabilityDescriptor(Set.of("transcript.realtime")), DeploymentLimits.NONE);
     }
 
     private static MeetingCommandContext context() {

@@ -421,6 +421,12 @@ public final class HttpErrorMapper {
                 HttpErrorEnvelope.UserAction.RETRY, "ai_meeting.runtime.not_ready");
     }
 
+    /** Create 解码成功后应用/投影意外失败的固定 500；不接收或输出异常正文。 */
+    public HttpResponse internalFailure() {
+        return error(500, HttpErrorEnvelope.Domain.INTERNAL, "INTERNAL_ERROR", false,
+                HttpErrorEnvelope.UserAction.CONTACT_ADMIN, "ai_meeting.internal.error");
+    }
+
     private HttpResponse error(
             int status,
             HttpErrorEnvelope.Domain domain,

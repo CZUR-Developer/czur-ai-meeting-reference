@@ -2,6 +2,7 @@ package com.czur.reference.application.http;
 
 import com.czur.reference.application.command.MeetingCommandContext;
 import com.czur.reference.application.command.AuthenticatedMeetingStopApplicationService;
+import com.czur.reference.application.command.AuthenticatedCompleteMeetingApplicationService;
 import com.czur.reference.application.command.StopMeetingIntent;
 import com.czur.reference.application.port.DeleteRequest;
 import com.czur.reference.application.port.MeetingDeletionPort;
@@ -28,11 +29,10 @@ import java.util.regex.Pattern;
  * 任何连接生命周期；具体 runtime 只需把 {@link HttpRequest} 传入，再写出
  * {@link HttpResponse}。</p>
  *
- * <p>本参考切片明确不在 adapter 中解析或验证 Bearer，不实现权限、计费、权益
- * 预占、能力规划、Manifest、事件、Artifact 或 Worker。GET/DELETE 要求调用方
- * 提供已经验证的 {@link MeetingCommandContext}。create 仍关闭并返回 501；stop
- * 只有在注入认证 application service 后才开放，否则同样返回 501。两者都不会
- * 回退到任何旧的未认证命令服务。</p>
+ * <p>本类本身不验证 Bearer、权限、计费或能力；显式开启 Create 时使用专用严格
+ * 解码器，并调用已认证的完整应用服务。GET/DELETE 要求调用方提供已经验证的
+ * {@link MeetingCommandContext}。Create 默认关闭并先返回 501；Stop 只有注入
+ * 认证应用服务后才开放。两者均不回退旧的未认证命令服务。</p>
  *
  * <p>日志只记录固定 operation 名和状态码，不记录原始 path、meetingId、Token、
  * request body、receipt 或异常消息。未知路径和当前未实现的后续 OpenAPI 路由
@@ -53,6 +53,9 @@ public final class MeetingHttpAdapter {
     private final RequestDecoder decoder;
     private final HttpErrorMapper errors;
     private final AuthenticatedMeetingStopApplicationService stopService;
+    private final AuthenticatedCompleteMeetingApplicationService createService;
+    private final CreateMeetingHttpRequestDecoder createDecoder;
+    private final boolean createEnabled;
 
     /** 使用随机 opaque diagnosticId 的默认错误映射器。 */
     public MeetingHttpAdapter(
@@ -73,6 +76,9 @@ public final class MeetingHttpAdapter {
         this.decoder = Objects.requireNonNull(decoder, "decoder");
         this.errors = Objects.requireNonNull(errors, "errors");
         this.stopService = null;
+        this.createService = null;
+        this.createDecoder = null;
+        this.createEnabled = false;
     }
 
     /** 装配完整认证 Stop application service 的构造器。 */
@@ -87,6 +93,39 @@ public final class MeetingHttpAdapter {
         this.decoder = Objects.requireNonNull(decoder, "decoder");
         this.errors = Objects.requireNonNull(errors, "errors");
         this.stopService = Objects.requireNonNull(stopService, "stopService");
+        this.createService = null;
+        this.createDecoder = null;
+        this.createEnabled = false;
+    }
+
+    /**
+     * 显式装配完整 Create；开关默认由其它构造器保持关闭。
+     *
+     * <p>启用时必须同时传入已认证的 Create 应用服务和专用严格解码器。关闭时允许
+     * 保留这两个依赖以便灰度装配，但 Create 分支在调用任一依赖前就返回 501。
+     * 新装配必须同时提供原有 Stop 服务，避免出现仅能创建、无法停止的产品配置。</p>
+     */
+    public MeetingHttpAdapter(
+            MeetingQueryPort queryPort,
+            MeetingDeletionPort deletionPort,
+            RequestDecoder decoder,
+            HttpErrorMapper errors,
+            AuthenticatedMeetingStopApplicationService stopService,
+            AuthenticatedCompleteMeetingApplicationService createService,
+            CreateMeetingHttpRequestDecoder createDecoder,
+            boolean createEnabled) {
+        this.queryPort = Objects.requireNonNull(queryPort, "queryPort");
+        this.deletionPort = Objects.requireNonNull(deletionPort, "deletionPort");
+        this.decoder = Objects.requireNonNull(decoder, "decoder");
+        this.errors = Objects.requireNonNull(errors, "errors");
+        this.stopService = Objects.requireNonNull(stopService, "stopService");
+        if (createEnabled) {
+            Objects.requireNonNull(createService, "createService");
+            Objects.requireNonNull(createDecoder, "createDecoder");
+        }
+        this.createService = createService;
+        this.createDecoder = createDecoder;
+        this.createEnabled = createEnabled;
     }
 
     /** 与 runtime 常见的 service-before-mapper 装配顺序兼容。 */
@@ -145,9 +184,21 @@ public final class MeetingHttpAdapter {
         String path = request.path();
 
         if ("POST".equals(method) && MEETINGS_PATH.equals(path)) {
-            // 完整 create command/application service 尚未安全装配，必须拒绝而不是
-            // 回退到旧的未认证 MeetingCommandService。
-            return errors.notImplemented();
+            if (!createEnabled) {
+                // 即使请求头/body 无效，也要先关闭式拒绝，且不能触发任何解码或业务端口。
+                return errors.notImplemented();
+            }
+            try (CreateMeetingHttpRequestDecoder.Decoded decoded = createDecoder.decode(request)) {
+                try {
+                    return errors.create(createService.create(
+                            decoded.verificationRequest(), decoded.requestFact()));
+                } catch (RuntimeException unexpected) {
+                    // 解码已成功；此后异常来自应用端口或公开响应投影，不能把
+                    // IllegalArgumentException 误判成客户端 400。try-with-resources
+                    // 仍负责清理凭据，且响应/日志均不包含异常正文。
+                    return errors.internalFailure();
+                }
+            }
         }
 
         Matcher stop = STOP_PATH.matcher(path);
@@ -278,8 +329,8 @@ public final class MeetingHttpAdapter {
      * <p>实现可以读取请求头中的幂等键和服务端时间，但必须生成规范摘要；adapter
      * 不把原始 JSON、Bearer 或供应商字段复制进领域端口。delete 使用 adapter
      * 已检查过的认证 context 生成 {@link DeleteRequest}，不得从客户端 body 覆盖
-     * 其部署或主体。create 解码接口故意未暴露，避免误接入不完整的旧命令；Stop
-     * 解码只在完整 application service 装配时使用。</p>
+     * 其部署或主体。完整 Create 使用独立的严格解码器，不进入这个兼容旧路由的
+     * 接口；Stop 解码只在完整认证 application service 装配时使用。</p>
      */
     public interface RequestDecoder {
         /** 依据已验证 context 解码删除输入，不得接受客户端覆盖的归属字段。 */
