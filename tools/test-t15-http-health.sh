@@ -147,6 +147,8 @@ command -v docker >/dev/null || fail '缺少 docker'
 command -v mvn >/dev/null || fail '缺少 mvn'
 command -v python3 >/dev/null || fail '缺少随机端口选择所需的 python3'
 TEST_SELECTOR="${1:-internalHealthUsesSameJdbcAssemblyAcrossDatabaseOutageAndRecovery}"
+TEST_TARGET=''
+EXPECTED_SUREFIRE_COUNTS='1,0,0,0'
 case "${TEST_SELECTOR}" in
   internalHealthUsesSameJdbcAssemblyAcrossDatabaseOutageAndRecovery|\
   boundedNetworkOwnerCleansUniquePoolAfterBindFailureAndNormalStop|\
@@ -155,7 +157,11 @@ case "${TEST_SELECTOR}" in
   realHttpOpenToClosedRollbackPreservesV1AndV2Facts|\
   realHttpCreateAndTrustedV2StartPreserveAsrOnlyFacts|\
   realHttpStopAdmissionAndMockWorkerPublishAsrOnlyResult|\
-  realHttpAnonymousManifestUsesFrozenJdbcFactsAndRevokesOnDelete) ;;
+  realHttpAnonymousManifestUsesFrozenJdbcFactsAndRevokesOnDelete)
+    TEST_TARGET="ReferenceMeetingHttpAssemblyIntegrationTest#${TEST_SELECTOR}" ;;
+  MockFinalizationWorkerFaultInjectionIntegrationTest)
+    TEST_TARGET='MockFinalizationWorkerFaultInjectionIntegrationTest'
+    EXPECTED_SUREFIRE_COUNTS='14,0,0,0' ;;
   *) fail '不支持的定向测试选择器' ;;
 esac
 docker info >/dev/null || fail 'Docker daemon 不可用'
@@ -221,13 +227,13 @@ info 'test-compile 通过'
 
 STAGE='test'
 mvn -B --no-transfer-progress -f "${REPO_ROOT}/backend-reference/pom.xml" \
-  "-Dtest=ReferenceMeetingHttpAssemblyIntegrationTest#${TEST_SELECTOR}" \
+  "-Dtest=${TEST_TARGET}" \
   test >"${STATE_DIR}/test.log" 2>&1 || {
-    fail '健康真网络测试失败'
+    fail '定向测试失败'
   }
 STAGE='summary'
 capture_surefire_counts
-[[ "${SUREFIRE_COUNTS}" == '1,0,0,0' ]] || fail 'Surefire 数量不可信'
-info 'Tests run: 1, Failures: 0, Errors: 0, Skipped: 0'
+[[ "${SUREFIRE_COUNTS}" == "${EXPECTED_SUREFIRE_COUNTS}" ]] || fail 'Surefire 数量不可信'
+info "Tests run: ${SUREFIRE_COUNTS%%,*}, Failures: 0, Errors: 0, Skipped: 0"
 info '正在精确清理本次专属 PostgreSQL 容器、数据卷和日志目录'
 STAGE='cleanup'
