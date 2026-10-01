@@ -177,6 +177,33 @@ class JdbcCreateMeetingFactStoreIntegrationTest {
     }
 
     @Test
+    void readOnlyRepeatableSnapshotUsesTheSameStrictV013DecoderWithoutRowLock()
+            throws Exception {
+        CreateMeetingFactStore.Record winner = record(MEETING_ID);
+        try (Connection connection = tx()) {
+            new JdbcCreateMeetingFactStore(connection).persist(winner);
+            connection.commit();
+        }
+        try (Connection connection = dataSource.getConnection()) {
+            connection.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+            connection.setReadOnly(true);
+            connection.setAutoCommit(false);
+            var store = new JdbcCreateMeetingFactStore(connection);
+            var read = store.findByMeetingIdReadOnly(MEETING_ID).orElseThrow();
+            assertEquals(winner.scope(), read.scope());
+            assertEquals(winner.response().realtime().sessionToken(),
+                    read.response().realtime().sessionToken());
+            connection.rollback();
+        }
+        try (Connection connection = tx()) {
+            assertThrows(IllegalStateException.class,
+                    () -> new JdbcCreateMeetingFactStore(connection)
+                            .findByMeetingIdReadOnly(MEETING_ID));
+            connection.rollback();
+        }
+    }
+
+    @Test
     void readinessRequiresRegisteredAndPhysicalV013() throws Exception {
         try (JdbcDatabaseRuntime runtime = JdbcDatabaseRuntime.start(runtimeConfig(schema))) {
             assertTrue(runtime.checkReadiness().ready());

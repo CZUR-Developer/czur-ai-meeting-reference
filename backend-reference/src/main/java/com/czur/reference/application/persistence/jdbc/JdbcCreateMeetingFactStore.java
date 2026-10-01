@@ -51,15 +51,15 @@ final class JdbcCreateMeetingFactStore implements CreateMeetingFactStore {
               FROM meeting_create_fact
              WHERE scope = ? AND idempotency_key = ?
             """;
-    private static final String FIND_BY_MEETING_SQL = """
+    private static final String FIND_BY_MEETING_BASE_SQL = """
             SELECT scope, idempotency_key,
                    request_schema_version, request_digest, request_json,
                    response_schema_version, response_status, response_type,
                    response_json, response_sha256, meeting_id, created_at
               FROM meeting_create_fact
              WHERE meeting_id = ?
-             FOR SHARE
             """;
+    private static final String FIND_BY_MEETING_SQL = FIND_BY_MEETING_BASE_SQL + " FOR SHARE";
     private static final String PROBE_DIGEST_SQL = """
             SELECT request_schema_version, request_digest, request_json
               FROM meeting_create_fact
@@ -163,15 +163,42 @@ final class JdbcCreateMeetingFactStore implements CreateMeetingFactStore {
      * 因为旧数据库可能尚未安装 V013。</p>
      */
     Optional<CreateMeetingFactStore.Record> findByMeetingId(String meetingId) {
+        return findByMeetingIdUsing(meetingId, FIND_BY_MEETING_SQL, "FIND_BY_MEETING");
+    }
+
+    /**
+     * 在调用方的只读 REPEATABLE_READ 事务中，无行锁读取同一份 V013 严格事实。
+     *
+     * <p>实时凭据核验需要在同一 MVCC 快照里读取 Meeting、首次会话和续期；
+     * PostgreSQL 只读事务不能执行上面的 {@code FOR SHARE}。此入口只更换 SQL 的
+     * 锁定方式，仍复用完整的字段、规范 JSON、摘要、scope/key 和会议 ID 校验；
+     * 它不适用于需要与会议更新串行化的 Start/续期写事务。</p>
+     */
+    Optional<CreateMeetingFactStore.Record> findByMeetingIdReadOnly(String meetingId) {
+        try {
+            if (!connection.isReadOnly()
+                    || connection.getTransactionIsolation() < Connection.TRANSACTION_REPEATABLE_READ) {
+                throw new IllegalStateException(
+                        "read-only V013 lookup requires a repeatable snapshot");
+            }
+        } catch (SQLException failure) {
+            throw sqlFailure("FIND_BY_MEETING_READ_ONLY", failure);
+        }
+        return findByMeetingIdUsing(meetingId, FIND_BY_MEETING_BASE_SQL,
+                "FIND_BY_MEETING_READ_ONLY");
+    }
+
+    private Optional<CreateMeetingFactStore.Record> findByMeetingIdUsing(
+            String meetingId, String sql, String operation) {
         requireText("meetingId", meetingId);
         requireExplicitTransaction();
         try {
             pinSearchPath();
-            try (PreparedStatement statement = connection.prepareStatement(FIND_BY_MEETING_SQL)) {
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
                 statement.setString(1, meetingId);
                 try (ResultSet rows = statement.executeQuery()) {
                     if (!rows.next()) {
-                        logResult("FIND_BY_MEETING", "EMPTY");
+                        logResult(operation, "EMPTY");
                         return Optional.empty();
                     }
                     String scope = requiredText(rows, "scope");
@@ -181,21 +208,21 @@ final class JdbcCreateMeetingFactStore implements CreateMeetingFactStore {
                     if (rows.next()) {
                         throw corruptData();
                     }
-                    logResult("FIND_BY_MEETING", "PRESENT");
+                    logResult(operation, "PRESENT");
                     return Optional.of(stored.record());
                 }
             }
         } catch (StoredFactException failure) {
-            logFailure("FIND_BY_MEETING", failure.kind(), "N/A");
+            logFailure(operation, failure.kind(), "N/A");
             throw failure;
         } catch (SQLException failure) {
             if ("42P01".equals(failure.getSQLState())) {
-                logFailure("FIND_BY_MEETING", FailureKind.CORRUPT_DATA, "42P01");
+                logFailure(operation, FailureKind.CORRUPT_DATA, "42P01");
                 throw corruptData();
             }
-            throw sqlFailure("FIND_BY_MEETING", failure);
+            throw sqlFailure(operation, failure);
         } catch (RuntimeException failure) {
-            throw runtimeFailure("FIND_BY_MEETING");
+            throw runtimeFailure(operation);
         }
     }
 
