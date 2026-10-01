@@ -12,15 +12,18 @@ import com.czur.reference.application.http.MeetingJdkHttpServer;
 import com.czur.reference.application.http.MeetingHttpRuntime;
 import com.czur.reference.application.http.ReferenceMeetingHttpRequestDecoder;
 import com.czur.reference.application.identity.referencedev.ReferenceDevIdentityProvider;
+import com.czur.reference.application.manifest.ManifestResultAccessPolicy;
 import com.czur.reference.application.persistence.jdbc.JdbcDatabaseRuntime;
 import com.czur.reference.application.persistence.jdbc.JdbcCompleteMeetingCreateReplayLookup;
 import com.czur.reference.application.persistence.jdbc.JdbcCompleteMeetingCreationUnitOfWork;
 import com.czur.reference.application.persistence.jdbc.JdbcMeetingDeletionAdmissionUnitOfWork;
 import com.czur.reference.application.persistence.jdbc.JdbcMeetingQueryPort;
+import com.czur.reference.application.persistence.jdbc.JdbcMeetingManifestQueryPort;
 import com.czur.reference.application.persistence.jdbc.JdbcOwnedMeetingStopUnitOfWork;
 import com.czur.reference.application.persistence.jdbc.JdbcReferenceDevEntitlementProvider;
 import com.czur.reference.application.persistence.jdbc.JdbcUsageReserveLookup;
 import com.czur.reference.application.port.MeetingIdGenerator;
+import com.czur.reference.application.port.MeetingManifestPort;
 import com.czur.reference.application.port.ProductProfileCatalog;
 import com.czur.reference.application.port.entitlement.EntitlementIdGenerator;
 import com.czur.reference.domain.capability.CapabilityPlanner;
@@ -113,6 +116,10 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                     identity, errors);
             var stopService = new AuthenticatedMeetingStopApplicationService(
                     config.deploymentScope(), identity, stop, query);
+            MeetingManifestPort manifest = config.resultLinkTtl()
+                    .<MeetingManifestPort>map(ttl -> new JdbcMeetingManifestQueryPort(
+                            dataSource, new ManifestResultAccessPolicy(clock, ttl)))
+                    .orElse(null);
             if (config.createEnabled()) {
                 // 与查询、Stop、Delete 共用唯一连接池、身份 Provider、Clock 和错误映射。
                 // ID 仅由服务端安全随机源生成；首次公开响应由 V013 持久化。
@@ -139,9 +146,10 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                         config.capabilityLimits());
                 runtime = new MeetingHttpRuntime(query, deletion, decoder, errors, stopService,
                         create, new CreateMeetingHttpRequestDecoder(
-                                config.audience(), config.clientId()), true);
+                                config.audience(), config.clientId()), true, manifest);
             } else {
-                runtime = new MeetingHttpRuntime(query, deletion, decoder, errors, stopService);
+                runtime = new MeetingHttpRuntime(query, deletion, decoder, errors, stopService,
+                        null, null, false, manifest);
             }
             LOGGER.log(Level.INFO, "reference meeting HTTP 装配完成 createEnabled={0}",
                     config.createEnabled());

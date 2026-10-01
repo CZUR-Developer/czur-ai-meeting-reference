@@ -153,7 +153,8 @@ case "${TEST_SELECTOR}" in
   pausedDatabaseReadinessUsesPgjdbcSocketBoundAndRecoversOnSamePool|\
   closedAssemblyUsesRealQueryStopAndT14DeletionPorts|\
   realHttpCreateAndTrustedV2StartPreserveAsrOnlyFacts|\
-  realHttpStopAdmissionAndMockWorkerPublishAsrOnlyResult) ;;
+  realHttpStopAdmissionAndMockWorkerPublishAsrOnlyResult|\
+  realHttpAnonymousManifestUsesFrozenJdbcFactsAndRevokesOnDelete) ;;
   *) fail '不支持的定向测试选择器' ;;
 esac
 docker info >/dev/null || fail 'Docker daemon 不可用'
@@ -167,7 +168,8 @@ docker volume inspect "${VOLUME_NAME}" >/dev/null 2>&1 && fail '卷名碰撞'
 STAGE='setup'
 STATE_DIR="$(mktemp -d /tmp/czur-t15-health-state.XXXXXX)"
 chmod 700 -- "${STATE_DIR}"
-if [[ "${TEST_SELECTOR}" == realHttpStopAdmissionAndMockWorkerPublishAsrOnlyResult ]]; then
+if [[ "${TEST_SELECTOR}" == realHttpStopAdmissionAndMockWorkerPublishAsrOnlyResult \
+    || "${TEST_SELECTOR}" == realHttpAnonymousManifestUsesFrozenJdbcFactsAndRevokesOnDelete ]]; then
   ARTIFACT_ROOT="${STATE_DIR}/artifacts"
   mkdir -m 700 -- "${ARTIFACT_ROOT}"
   export T15_HEALTH_GATE_ARTIFACT_ROOT="${ARTIFACT_ROOT}"

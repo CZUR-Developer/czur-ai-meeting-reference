@@ -40,6 +40,7 @@ import com.czur.reference.domain.capability.CapabilityPlanner;
 import com.czur.reference.domain.capability.CapabilityDecision;
 import com.czur.reference.protocol.json.FinalizationCheckpointJson;
 import com.czur.reference.protocol.json.FinalizationExecutionFactJson;
+import com.czur.reference.protocol.json.MeetingManifestJson;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -705,9 +706,37 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
     @Test
     @EnabledIfEnvironmentVariable(named = "T15_HEALTH_GATE_CONTAINER_ID", matches = "[0-9a-f]{64}")
     void realHttpStopAdmissionAndMockWorkerPublishAsrOnlyResult() throws Exception {
+        runHttpFinalizationFlow(false);
+    }
+
+    @Test
+    @EnabledIfEnvironmentVariable(named = "T15_HEALTH_GATE_CONTAINER_ID", matches = "[0-9a-f]{64}")
+    void realHttpAnonymousManifestUsesFrozenJdbcFactsAndRevokesOnDelete() throws Exception {
+        runHttpFinalizationFlow(true);
+    }
+
+    private void runHttpFinalizationFlow(boolean manifestEnabled) throws Exception {
         migrate(13);
+        if (manifestEnabled) {
+            // 旧配置即使没有 TTL 也可启动；新路由在任何 genTime 解析或 JDBC 查询前 501。
+            try (var defaultAssembly = ReferenceMeetingHttpAssembly.start(config(), CLOCK);
+                 var defaultNetwork = defaultAssembly.newJdkHttpServer(
+                         new InetSocketAddress("127.0.0.1", 0))) {
+                defaultNetwork.start();
+                assertNetworkError(exchange(defaultNetwork.address().getPort(), "POST",
+                        "/v1/meetings", "not JSON", ""),
+                        501, "ROUTE_NOT_IMPLEMENTED");
+                assertNetworkError(exchange(defaultNetwork.address().getPort(), "GET",
+                        "/v1/meetings/mtg_missing/manifest?genTime=invalid", "", ""),
+                        501, "ROUTE_NOT_IMPLEMENTED");
+                assertTrue(defaultNetwork.shutdown(Duration.ofSeconds(3)).clean());
+            }
+        }
         Map<String, String> enabled = config();
         enabled.put(ReferenceMeetingDeploymentConfig.CREATE_ENABLED, "true");
+        if (manifestEnabled) {
+            enabled.put(ReferenceMeetingDeploymentConfig.RESULT_LINK_TTL_MS, "60000");
+        }
         var trusted = ReferenceMeetingDeploymentConfig.fromEnvironment(enabled);
         MutableClock httpClock = new MutableClock(NOW, ZoneOffset.UTC);
         Path artifactRoot = Path.of(System.getenv("T15_HEALTH_GATE_ARTIFACT_ROOT"));
@@ -730,6 +759,26 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
              var network = assembly.newJdkHttpServer(new InetSocketAddress("127.0.0.1", 0))) {
             network.start();
             int port = network.address().getPort();
+            String invalidManifestPath = "/v1/meetings/mtg_missing/manifest";
+            if (manifestEnabled) {
+                assertNetworkError(exchange(port, "GET", invalidManifestPath
+                        + "?genTime=-1", "", ""), 404, "MANIFEST_NOT_FOUND");
+                for (String query : List.of("", "?genTime=", "?genTime=-2",
+                        "?genTime=01", "?genTime=9223372036854775808",
+                        "?genTime=-1&extra=1", "?genTime=-1&genTime=0")) {
+                    assertNetworkError(exchange(port, "GET", invalidManifestPath + query,
+                            "", ""), 400, "INVALID_REQUEST");
+                }
+                assertNetworkError(exchange(port, "GET", invalidManifestPath
+                        + "?genTime=-1", "{}", ""), 400, "INVALID_REQUEST");
+                assertNetworkError(exchange(port, "GET", invalidManifestPath
+                        + "/extra?genTime=-1", "", ""), 404, "ROUTE_NOT_FOUND");
+                assertNetworkError(exchange(port, "POST", invalidManifestPath
+                        + "?genTime=-1", "", ""), 404, "ROUTE_NOT_FOUND");
+            } else {
+                assertNetworkError(exchange(port, "GET", invalidManifestPath
+                        + "?genTime=invalid", "", ""), 501, "ROUTE_NOT_IMPLEMENTED");
+            }
             DataSource source = assembly.databaseRuntime().dataSource();
             String createKey = "finalization-create-key-123456789";
             String clientSession = "finalization-client-session-sentinel";
@@ -841,6 +890,19 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
                     networkHeaders(TOKEN, null, false));
             assertEquals(200, status(pending));
             assertTrue(responseBody(pending).contains("\"manifestState\":\"GENERATING\""));
+            String manifestPath = path + "/manifest";
+            if (manifestEnabled) {
+                String pendingManifest = exchange(port, "GET", manifestPath + "?genTime=-1",
+                        "", "");
+                assertEquals(202, status(pendingManifest));
+                JsonNode pendingJson = ERROR_JSON.readTree(responseBody(pendingManifest));
+                assertEquals(meetingId, pendingJson.path("meetingId").asText());
+                assertEquals("GENERATING", pendingJson.path("manifestState").asText());
+                assertFalse(pendingJson.has("artifacts"));
+                assertEquals(202, status(exchange(port, "GET", manifestPath + "?genTime=-1",
+                        "", networkHeaders(wrongStopToken, null, false))),
+                        "invalid Bearer must not turn anonymous Manifest GET into login");
+            }
             String prematureDeleteKey = "premature-delete-key-123456789";
             assertNetworkError(exchange(port, "DELETE", path, "",
                     networkHeaders(TOKEN, prematureDeleteKey, false)),
@@ -909,6 +971,24 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
             var found = assertInstanceOf(MeetingManifestPort.Found.class,
                     manifestQuery.get(new MeetingManifestPort.Request(meetingId, -1)));
             assertEquals(manifest, found.manifest());
+            if (manifestEnabled) {
+                String completeManifest = exchange(port, "GET", manifestPath
+                        + "?genTime=" + NOW.toEpochMilli(), "", "");
+                assertEquals(200, status(completeManifest));
+                assertEquals(MeetingManifestJson.encode(manifest), responseBody(completeManifest));
+                assertEquals(200, status(exchange(port, "GET", manifestPath
+                        + "?genTime=" + NOW.toEpochMilli(), "",
+                        networkHeaders(wrongStopToken, null, false))),
+                        "invalid Bearer must not turn anonymous Manifest GET into login");
+                assertEquals(200, status(exchange(port, "GET", manifestPath + "?genTime="
+                        + NOW.minusSeconds(60).plusMillis(1).toEpochMilli(), "", "")),
+                        "link remains valid 1 ms before the TTL boundary");
+                assertEquals(200, status(exchange(port, "GET", manifestPath + "?genTime=-1",
+                        "", "")), "-1 is a documented permanent URL, not an auth proof");
+                assertNetworkError(exchange(port, "GET", manifestPath + "?genTime="
+                        + NOW.minusSeconds(60).toEpochMilli(), "", ""),
+                        403, "ACCESS_DENIED");
+            }
 
             String ready = exchange(port, "GET", path, "",
                     networkHeaders(TOKEN, null, false));
@@ -985,6 +1065,12 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
             assertTrue(worker.runOnce().idle(), "deletion must not requeue finalization");
             assertInstanceOf(MeetingManifestPort.AccessDenied.class,
                     manifestQuery.get(new MeetingManifestPort.Request(meetingId, -1)));
+            if (manifestEnabled) {
+                assertNetworkError(exchange(port, "GET", manifestPath + "?genTime=-1",
+                        "", ""), 403, "ACCESS_DENIED");
+                assertNetworkError(exchange(port, "GET", manifestPath + "?genTime="
+                        + NOW.toEpochMilli(), "", ""), 403, "ACCESS_DENIED");
+            }
             assertTrue(network.shutdown(Duration.ofSeconds(3)).clean());
             synchronized (logs) {
                 String text = logs.toString();
