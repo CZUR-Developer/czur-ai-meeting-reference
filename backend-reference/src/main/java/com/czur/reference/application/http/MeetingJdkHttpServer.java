@@ -22,9 +22,10 @@ import java.util.logging.Logger;
 /**
  * JDK HTTP server 到 {@link MeetingHttpRuntime} 的最小网络字节边界。
  *
- * <p>调用方必须显式指定监听地址，负责本对象和运行时的关闭顺序。本类不做身份
- * 验证、不装配业务或数据库；在 15-02 接入可信认证上下文之前，只能向运行时
- * 传入空上下文，故 GET/DELETE 仍按既有 401 关闭式处理。任何原始请求在构造
+ * <p>调用方必须显式指定监听地址，负责本对象和运行时的关闭顺序。本类不装配
+ * 业务或数据库；可选的可信身份解析器只用于已匹配的查询/删除路由，Stop/Create
+ * 继续由各自应用流程处理。不传解析器的旧构造器继续以空上下文关闭式拒绝
+ * GET/DELETE。任何原始请求在构造
  * {@link HttpRequest} 前都先经过上限与歧义检查；日志不包含 URL、头值或正文。
  * 仅供参考后端使用，不作为 TLS 终点直接暴露在公网上。</p>
  */
@@ -35,6 +36,7 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
     private final HttpServer server;
     private final MeetingHttpRuntime runtime;
     private final HttpErrorMapper errors;
+    private final AuthenticatedMeetingHttpContextResolver contextResolver;
     private final AtomicBoolean closed = new AtomicBoolean();
 
     /**
@@ -48,8 +50,22 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
     public MeetingJdkHttpServer(
             InetSocketAddress address, MeetingHttpRuntime runtime, HttpErrorMapper errors)
             throws IOException {
+        this(address, runtime, errors, null);
+    }
+
+    /**
+     * 创建可认证 GET/list/DELETE 的网络入口。解析器的可信配置与身份 Provider
+     * 由外层装配；它与运行时必须共享同一错误映射实例。未匹配路由不会访问解析器。
+     */
+    public MeetingJdkHttpServer(
+            InetSocketAddress address, MeetingHttpRuntime runtime, HttpErrorMapper errors,
+            AuthenticatedMeetingHttpContextResolver contextResolver) throws IOException {
         this.runtime = Objects.requireNonNull(runtime, "runtime");
         this.errors = Objects.requireNonNull(errors, "errors");
+        if (contextResolver != null && contextResolver.errorMapper() != errors) {
+            throw new IllegalArgumentException("HTTP error mapper must be shared");
+        }
+        this.contextResolver = contextResolver;
         this.server = HttpServer.create(Objects.requireNonNull(address, "address"), 0);
         this.server.createContext("/", this::handle);
     }
@@ -73,7 +89,7 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
             HttpResponse response;
             try {
                 HttpRequest request = decode(exchange);
-                response = runtime.handle(request, null);
+                response = dispatch(request);
             } catch (IllegalArgumentException badRequest) {
                 LOGGER.log(Level.WARNING, "meeting HTTP 原始请求被拒绝 reason=INVALID_TRANSPORT");
                 response = errors.exception(badRequest);
@@ -83,6 +99,29 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
             }
             write(exchange, response);
         }
+    }
+
+    private HttpResponse dispatch(HttpRequest request) {
+        if (contextResolver == null) {
+            return runtime.handle(request, null);
+        }
+        MeetingHttpAdapter.AuthenticationRoute route =
+                MeetingHttpAdapter.authenticationRoute(request);
+        if (route == MeetingHttpAdapter.AuthenticationRoute.NONE) {
+            return runtime.handle(request, null);
+        }
+        AuthenticatedMeetingHttpContextResolver.Resolution resolution = switch (route) {
+            case READ -> contextResolver.forRead(request);
+            case DELETE -> contextResolver.forDelete(request);
+            case NONE -> throw new IllegalStateException("unreachable authentication route");
+        };
+        if (resolution instanceof AuthenticatedMeetingHttpContextResolver.Rejected rejected) {
+            return rejected.response();
+        }
+        if (resolution instanceof AuthenticatedMeetingHttpContextResolver.Ready ready) {
+            return runtime.handle(request, ready.context());
+        }
+        throw new IllegalStateException("unknown authentication resolution");
     }
 
     private static HttpRequest decode(HttpExchange exchange) throws IOException {

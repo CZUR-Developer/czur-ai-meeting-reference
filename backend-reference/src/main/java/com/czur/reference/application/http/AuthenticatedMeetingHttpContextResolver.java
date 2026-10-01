@@ -23,7 +23,7 @@ import java.util.Objects;
  *
  * <p>读取入口只建立身份，不凭空增加未冻结的 read 权限码。删除入口在返回
  * context 前要求 {@link MeetingPermissions#DELETE}；会议归属仍由已有删除端口
- * 按数据库权威事实检查。本类尚未连接 JDK HTTP server；网络接线留 15-02-03b。
+ * 按数据库权威事实检查。JDK HTTP server 仅在已匹配的查询/删除路由调用本解析器。
  * 不支持 OpenAPI 中可选的 resultAccessAuth 安全方案。</p>
  */
 public final class AuthenticatedMeetingHttpContextResolver {
@@ -56,6 +56,11 @@ public final class AuthenticatedMeetingHttpContextResolver {
     /** 验证 DELETE 凭据和 {@code meeting:delete} 权限；尚不调用删除端口。 */
     public Resolution forDelete(HttpRequest request) {
         return resolve(request, "DELETE", true);
+    }
+
+    /** 供同包网络入口确认拒绝响应与运行时使用同一个错误映射实例。 */
+    HttpErrorMapper errorMapper() {
+        return errors;
     }
 
     private Resolution resolve(HttpRequest request, String method, boolean requireDelete) {

@@ -158,6 +158,32 @@ public final class MeetingHttpAdapter {
     }
 
     /**
+     * 供网络入口复用当前 REST 路由的身份要求，避免另写一套路由正则。
+     *
+     * <p>这里只判断方法和路径，不提前校验 query、body 或幂等头；这些仍由
+     * adapter 的原有分支处理。未知路由、Create 和自带认证流程的 Stop 均不由
+     * 外层查询/删除解析器验证。</p>
+     */
+    static AuthenticationRoute authenticationRoute(HttpRequest request) {
+        Objects.requireNonNull(request, "request");
+        if ("GET".equals(request.method()) && MEETINGS_PATH.equals(request.path())) {
+            return AuthenticationRoute.READ;
+        }
+        if (DETAIL_PATH.matcher(request.path()).matches()) {
+            return switch (request.method()) {
+                case "GET" -> AuthenticationRoute.READ;
+                case "DELETE" -> AuthenticationRoute.DELETE;
+                default -> AuthenticationRoute.NONE;
+            };
+        }
+        return AuthenticationRoute.NONE;
+    }
+
+    enum AuthenticationRoute {
+        READ, DELETE, NONE
+    }
+
+    /**
      * 处理一个请求并返回 transport-neutral 响应。
      *
      * @param request 已由 HTTP runtime 约束过的请求值对象
