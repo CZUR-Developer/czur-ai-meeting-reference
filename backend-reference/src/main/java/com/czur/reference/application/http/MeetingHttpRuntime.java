@@ -4,6 +4,7 @@ import com.czur.reference.application.command.AuthenticatedMeetingStopApplicatio
 import com.czur.reference.application.command.AuthenticatedCompleteMeetingApplicationService;
 import com.czur.reference.application.port.MeetingDeletionPort;
 import com.czur.reference.application.port.MeetingQueryPort;
+import com.czur.reference.application.port.MeetingManifestPort;
 import com.czur.reference.application.command.MeetingCommandContext;
 
 import java.util.Objects;
@@ -82,6 +83,21 @@ public final class MeetingHttpRuntime implements AutoCloseable {
         this(new MeetingHttpAdapter(
                 queryPort, deletionPort, decoder, errors, stopService,
                 createService, createDecoder, createEnabled), errors);
+    }
+
+    /** 在同一 adapter 内可选接入匿名 Manifest 端口；null 保留旧 501 行为。 */
+    public MeetingHttpRuntime(
+            MeetingQueryPort queryPort,
+            MeetingDeletionPort deletionPort,
+            MeetingHttpAdapter.RequestDecoder decoder,
+            HttpErrorMapper errors,
+            AuthenticatedMeetingStopApplicationService stopService,
+            AuthenticatedCompleteMeetingApplicationService createService,
+            CreateMeetingHttpRequestDecoder createDecoder,
+            boolean createEnabled,
+            MeetingManifestPort manifestPort) {
+        this(new MeetingHttpAdapter(queryPort, deletionPort, decoder, errors, stopService,
+                createService, createDecoder, createEnabled, manifestPort), errors);
     }
 
     /** 使用默认错误映射器创建已认证 Stop 运行时。 */

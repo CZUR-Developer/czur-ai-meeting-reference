@@ -8,7 +8,9 @@ import com.czur.reference.application.error.MeetingAlreadyExistsException;
 import com.czur.reference.application.error.MeetingNotFoundException;
 import com.czur.reference.application.port.DeleteResult;
 import com.czur.reference.application.port.MeetingQueryPort;
+import com.czur.reference.application.port.MeetingManifestPort;
 import com.czur.reference.application.port.OwnedMeetingStopUnitOfWork;
+import com.czur.reference.protocol.json.MeetingManifestJson;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -63,6 +65,36 @@ public final class HttpErrorMapper {
                     "QUERY_" + unavailable.reason().name(), unavailable.retryable(),
                     HttpErrorEnvelope.UserAction.RETRY,
                     "ai_meeting.storage.query_unavailable");
+        };
+    }
+
+    /** 匿名结果查询只映射既有端口的稳定结果，不推断 JDBC 或策略异常消息。 */
+    public HttpResponse manifest(MeetingManifestPort.Result result) {
+        Objects.requireNonNull(result, "result");
+        return switch (result) {
+            case MeetingManifestPort.Pending pending ->
+                    success(202, meetingStatus(pending.meetingStatus()));
+            case MeetingManifestPort.Found found ->
+                    HttpResponse.json(200, MeetingManifestJson.encode(found.manifest()));
+            case MeetingManifestPort.NotFound ignored -> error(404,
+                    HttpErrorEnvelope.Domain.SESSION, "MANIFEST_NOT_FOUND", false,
+                    HttpErrorEnvelope.UserAction.NONE, "ai_meeting.session.manifest_not_found");
+            case MeetingManifestPort.Conflict conflict -> error(409,
+                    HttpErrorEnvelope.Domain.CONTRACT,
+                    "MANIFEST_" + conflict.reason().name(), false,
+                    HttpErrorEnvelope.UserAction.NONE, "ai_meeting.contract.manifest_conflict");
+            case MeetingManifestPort.AccessDenied ignored -> error(403,
+                    HttpErrorEnvelope.Domain.IDENTITY, "ACCESS_DENIED", false,
+                    HttpErrorEnvelope.UserAction.CONTACT_ADMIN,
+                    "ai_meeting.identity.access_denied");
+            case MeetingManifestPort.Unavailable unavailable -> error(
+                    unavailable.retryable() ? 503 : 500,
+                    unavailable.retryable()
+                            ? HttpErrorEnvelope.Domain.STORAGE : HttpErrorEnvelope.Domain.INTERNAL,
+                    "MANIFEST_" + unavailable.reason().name(), unavailable.retryable(),
+                    unavailable.retryable() ? HttpErrorEnvelope.UserAction.RETRY
+                            : HttpErrorEnvelope.UserAction.CONTACT_ADMIN,
+                    "ai_meeting.storage.manifest_unavailable");
         };
     }
 

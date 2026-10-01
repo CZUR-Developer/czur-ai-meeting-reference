@@ -6,6 +6,7 @@ import com.czur.reference.application.command.AuthenticatedCompleteMeetingApplic
 import com.czur.reference.application.command.StopMeetingIntent;
 import com.czur.reference.application.port.DeleteRequest;
 import com.czur.reference.application.port.MeetingDeletionPort;
+import com.czur.reference.application.port.MeetingManifestPort;
 import com.czur.reference.application.port.MeetingQueryPort;
 import com.czur.reference.application.port.identity.IdentityVerificationRequest;
 
@@ -45,6 +46,9 @@ public final class MeetingHttpAdapter {
             "^/v1/meetings/(mtg_[A-Za-z0-9_-]+)$");
     private static final Pattern STOP_PATH = Pattern.compile(
             "^/v1/meetings/(mtg_[A-Za-z0-9_-]+):stop$");
+    private static final Pattern MANIFEST_PATH = Pattern.compile(
+            "^/v1/meetings/(mtg_[A-Za-z0-9_-]+)/manifest$");
+    private static final Pattern GEN_TIME = Pattern.compile("(?:-1|0|[1-9][0-9]*)");
     private static final int DEFAULT_PAGE_SIZE = 20;
     private static final ObjectMapper JSON = new ObjectMapper();
 
@@ -56,6 +60,7 @@ public final class MeetingHttpAdapter {
     private final AuthenticatedCompleteMeetingApplicationService createService;
     private final CreateMeetingHttpRequestDecoder createDecoder;
     private final boolean createEnabled;
+    private final MeetingManifestPort manifestPort;
 
     /** 使用随机 opaque diagnosticId 的默认错误映射器。 */
     public MeetingHttpAdapter(
@@ -79,6 +84,7 @@ public final class MeetingHttpAdapter {
         this.createService = null;
         this.createDecoder = null;
         this.createEnabled = false;
+        this.manifestPort = null;
     }
 
     /** 装配完整认证 Stop application service 的构造器。 */
@@ -96,6 +102,7 @@ public final class MeetingHttpAdapter {
         this.createService = null;
         this.createDecoder = null;
         this.createEnabled = false;
+        this.manifestPort = null;
     }
 
     /**
@@ -114,6 +121,21 @@ public final class MeetingHttpAdapter {
             AuthenticatedCompleteMeetingApplicationService createService,
             CreateMeetingHttpRequestDecoder createDecoder,
             boolean createEnabled) {
+        this(queryPort, deletionPort, decoder, errors, stopService,
+                createService, createDecoder, createEnabled, null);
+    }
+
+    /** 显式接入匿名结果查询；null 端口使新路由在解析输入前返回 501。 */
+    public MeetingHttpAdapter(
+            MeetingQueryPort queryPort,
+            MeetingDeletionPort deletionPort,
+            RequestDecoder decoder,
+            HttpErrorMapper errors,
+            AuthenticatedMeetingStopApplicationService stopService,
+            AuthenticatedCompleteMeetingApplicationService createService,
+            CreateMeetingHttpRequestDecoder createDecoder,
+            boolean createEnabled,
+            MeetingManifestPort manifestPort) {
         this.queryPort = Objects.requireNonNull(queryPort, "queryPort");
         this.deletionPort = Objects.requireNonNull(deletionPort, "deletionPort");
         this.decoder = Objects.requireNonNull(decoder, "decoder");
@@ -126,6 +148,7 @@ public final class MeetingHttpAdapter {
         this.createService = createService;
         this.createDecoder = createDecoder;
         this.createEnabled = createEnabled;
+        this.manifestPort = manifestPort;
     }
 
     /** 与 runtime 常见的 service-before-mapper 装配顺序兼容。 */
@@ -208,6 +231,28 @@ public final class MeetingHttpAdapter {
     private HttpResponse dispatch(HttpRequest request, MeetingCommandContext context) {
         String method = request.method();
         String path = request.path();
+
+        Matcher manifest = MANIFEST_PATH.matcher(path);
+        if ("GET".equals(method) && manifest.matches()) {
+            if (manifestPort == null) {
+                return errors.notImplemented();
+            }
+            if (!request.body().isEmpty() || request.query().size() != 1) {
+                throw new IllegalArgumentException("manifest request is invalid");
+            }
+            String raw = request.query().get("genTime");
+            if (raw == null || !GEN_TIME.matcher(raw).matches()) {
+                throw new IllegalArgumentException("genTime is invalid");
+            }
+            long genTime;
+            try {
+                genTime = Long.parseLong(raw);
+            } catch (NumberFormatException failure) {
+                throw new IllegalArgumentException("genTime is invalid");
+            }
+            return errors.manifest(manifestPort.get(
+                    new MeetingManifestPort.Request(manifest.group(1), genTime)));
+        }
 
         if ("POST".equals(method) && MEETINGS_PATH.equals(path)) {
             if (!createEnabled) {
@@ -341,6 +386,10 @@ public final class MeetingHttpAdapter {
     }
 
     private static String operationOf(HttpRequest request) {
+        if ("GET".equals(request.method())
+                && MANIFEST_PATH.matcher(request.path()).matches()) {
+            return "manifest";
+        }
         if ("POST".equals(request.method()) && MEETINGS_PATH.equals(request.path())) {
             return "create";
         }
