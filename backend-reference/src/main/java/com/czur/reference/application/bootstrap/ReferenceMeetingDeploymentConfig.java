@@ -23,6 +23,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
 
@@ -67,6 +68,7 @@ public final class ReferenceMeetingDeploymentConfig {
     public static final String WSS_ORIGIN = "AI_MEETING_WSS_ORIGIN";
     public static final String WSS_TOKEN_TTL_MS = "AI_MEETING_WSS_TOKEN_TTL_MS";
     public static final String CREATE_ENABLED = "AI_MEETING_CREATE_ENABLED";
+    public static final String RESULT_LINK_TTL_MS = "AI_MEETING_RESULT_LINK_TTL_MS";
 
     private final DatabaseRuntimeConfig database;
     private final ReferenceDevIdentityConfig identity;
@@ -83,6 +85,7 @@ public final class ReferenceMeetingDeploymentConfig {
     private final URI wssOrigin;
     private final Duration wssTokenTtl;
     private final boolean createEnabled;
+    private final Duration resultLinkTtl;
 
     private ReferenceMeetingDeploymentConfig(
             DatabaseRuntimeConfig database,
@@ -92,7 +95,7 @@ public final class ReferenceMeetingDeploymentConfig {
             CapabilityDescriptor mockCapabilities, DeploymentLimits capabilityLimits,
             UsageEstimate trustedEstimate, TrustedCreateRuntimeLimits runtimeLimits,
             byte[] pageTokenSecret, URI wssOrigin, Duration wssTokenTtl,
-            boolean createEnabled) {
+            boolean createEnabled, Duration resultLinkTtl) {
         this.database = database;
         this.identity = identity;
         this.deploymentScope = deploymentScope;
@@ -108,6 +111,7 @@ public final class ReferenceMeetingDeploymentConfig {
         this.wssOrigin = wssOrigin;
         this.wssTokenTtl = wssTokenTtl;
         this.createEnabled = createEnabled;
+        this.resultLinkTtl = resultLinkTtl;
     }
 
     /**
@@ -244,9 +248,12 @@ public final class ReferenceMeetingDeploymentConfig {
             URI wssOrigin = wssOrigin(environment);
             Duration tokenTtl = positiveDuration(environment, WSS_TOKEN_TTL_MS);
             boolean enabled = strictBoolean(environment.get(CREATE_ENABLED));
+            // 缺项保持旧部署行为：仅新 Manifest 路由关闭，不影响既有会议入口。
+            Duration resultLinkTtl = environment.containsKey(RESULT_LINK_TTL_MS)
+                    ? positiveDuration(environment, RESULT_LINK_TTL_MS) : null;
             return new ReferenceMeetingDeploymentConfig(database, identity, scope,
                     audience, clientId, profile, entitlement, mock, limits, estimate,
-                    runtimeLimits, secret, wssOrigin, tokenTtl, enabled);
+                    runtimeLimits, secret, wssOrigin, tokenTtl, enabled, resultLinkTtl);
         } finally {
             Arrays.fill(secret, (byte) 0);
         }
@@ -272,6 +279,8 @@ public final class ReferenceMeetingDeploymentConfig {
     public Duration wssTokenTtl() { return wssTokenTtl; }
     /** 缺省严格为 false，只有显式字符串 true 才允许开放 Create。 */
     public boolean createEnabled() { return createEnabled; }
+    /** 仅显式配置正值 TTL 时开放匿名 Manifest GET；genTime 不是防篡改凭证。 */
+    public Optional<Duration> resultLinkTtl() { return Optional.ofNullable(resultLinkTtl); }
 
     @Override
     public String toString() {

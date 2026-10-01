@@ -21,6 +21,7 @@ import org.junit.jupiter.api.Test;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.Duration;
 import java.time.ZoneOffset;
 import java.util.HashMap;
 import java.util.List;
@@ -365,6 +366,21 @@ class ReferenceMeetingDeploymentConfigTest {
                 "jdbc:postgresql://unreachable.example.invalid:5432/demo",
                 "demo-subject", "trusted-audience"}) {
             assertFalse(description.contains(sensitive));
+        }
+    }
+
+    @Test
+    void optionalResultLinkTtlRequiresExplicitPositiveMilliseconds() {
+        Map<String, String> values = valid();
+        assertTrue(ReferenceMeetingDeploymentConfig.fromEnvironment(values)
+                .resultLinkTtl().isEmpty());
+        values.put(ReferenceMeetingDeploymentConfig.RESULT_LINK_TTL_MS, "60000");
+        assertEquals(Duration.ofMinutes(1), ReferenceMeetingDeploymentConfig
+                .fromEnvironment(values).resultLinkTtl().orElseThrow());
+        for (String malformed : List.of("", "0", "-1", " 1", "1 ",
+                "1.5", "999999999999999999999999-SECRET")) {
+            values.put(ReferenceMeetingDeploymentConfig.RESULT_LINK_TTL_MS, malformed);
+            rejects(values, ReferenceMeetingDeploymentConfig.RESULT_LINK_TTL_MS);
         }
     }
 
