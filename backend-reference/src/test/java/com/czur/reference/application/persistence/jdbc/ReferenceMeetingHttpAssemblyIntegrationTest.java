@@ -20,6 +20,7 @@ import com.czur.reference.domain.meeting.MeetingState;
 import com.czur.reference.domain.meeting.MeetingAggregate;
 import com.czur.reference.domain.meeting.MeetingEvent;
 import com.czur.reference.domain.capability.CapabilityPlanner;
+import com.zaxxer.hikari.HikariDataSource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -32,12 +33,14 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.net.ServerSocket;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Clock;
 import java.time.Instant;
@@ -48,6 +51,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -272,6 +278,129 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
                     MeetingJdkHttpServer.READINESS_PATH, ""));
             assertThrows(IllegalStateException.class, server::start);
         }
+    }
+
+    @Test
+    @EnabledIfEnvironmentVariable(named = "T15_HEALTH_GATE_CONTAINER_ID", matches = "[0-9a-f]{64}")
+    void pausedDatabaseReadinessUsesPgjdbcSocketBoundAndRecoversOnSamePool()
+            throws Exception {
+        migrate(13);
+        String containerId = System.getenv("T15_HEALTH_GATE_CONTAINER_ID");
+        String runId = System.getenv("T15_HEALTH_GATE_RUN_ID");
+        assertTrue(containerId.matches("[0-9a-f]{64}"));
+        assertTrue(runId.matches("[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+"));
+        assertEquals(containerId + "|" + runId, dockerInspect(containerId));
+        String applicationName = "t15_pause_" + schema;
+        Map<String, String> settings = config();
+        settings.put(DatabaseRuntimeConfig.DATABASE_URL,
+                scopedUrl() + "&ApplicationName=" + applicationName);
+        settings.put(DatabaseRuntimeConfig.DATABASE_SOCKET_TIMEOUT_SECONDS, "1");
+        settings.put(DatabaseRuntimeConfig.DATABASE_CONNECTION_TIMEOUT_MS, "5000");
+        settings.put(DatabaseRuntimeConfig.DATABASE_VALIDATION_TIMEOUT_MS, "4000");
+        assertEquals(0, applicationConnections(applicationName));
+        try (var assembly = ReferenceMeetingHttpAssembly.start(settings, CLOCK);
+             var server = assembly.newJdkHttpServer(new InetSocketAddress(
+                     InetAddress.getByName("127.0.0.1"), 0))) {
+            assertEquals("1", ((HikariDataSource) assembly.databaseRuntime().dataSource())
+                    .getDataSourceProperties().getProperty("socketTimeout"),
+                    "the one assembly pool must receive the validated pgjdbc property");
+            server.start();
+            int port = server.address().getPort();
+            assertEquals(200, status(exchange(port, "GET",
+                    MeetingJdkHttpServer.READINESS_PATH, "")));
+            assertEquals(200, status(exchange(port, "GET",
+                    MeetingJdkHttpServer.LIVENESS_PATH, "")));
+            assertTrue(applicationConnections(applicationName) > 0);
+
+            // 借出连接后再 pause；以下直接 JDBC 读不经过 Hikari 借出/校验。
+            try (Connection borrowed = assembly.databaseRuntime().dataSource().getConnection();
+                 PreparedStatement directProbe = borrowed.prepareStatement("SELECT 1")) {
+                try (var row = directProbe.executeQuery()) {
+                    assertTrue(row.next());
+                    assertEquals(1, row.getInt(1));
+                }
+                ExecutorService client = Executors.newSingleThreadExecutor();
+                boolean paused = false;
+                try {
+                    assertEquals(containerId + "|" + runId, dockerInspect(containerId));
+                    assertTrue(url().contains(dockerOutput("port", containerId, "5432/tcp")));
+                    docker("pause", containerId);
+                    paused = true;
+                    assertEquals("true", dockerOutput("container", "inspect", "--format",
+                            "{{.State.Paused}}", containerId));
+
+                    long directStarted = System.nanoTime();
+                    Future<SQLException> directRead = client.submit(() -> {
+                        try (var row = directProbe.executeQuery()) {
+                            return null;
+                        } catch (SQLException failure) {
+                            return failure;
+                        }
+                    });
+                    SQLException readFailure = assertInstanceOf(SQLException.class,
+                            directRead.get(4, TimeUnit.SECONDS));
+                    assertTrue(Duration.ofNanos(System.nanoTime() - directStarted)
+                            .compareTo(Duration.ofSeconds(4)) < 0);
+                    Throwable cause = readFailure;
+                    while (cause != null && !(cause instanceof SocketTimeoutException)) {
+                        cause = cause.getCause();
+                    }
+                    assertInstanceOf(SocketTimeoutException.class, cause,
+                            "borrowed connection must fail on pgjdbc socket read timeout");
+
+                    long started = System.nanoTime();
+                    Future<String> readiness = client.submit(() -> exchange(port, "GET",
+                            MeetingJdkHttpServer.READINESS_PATH, ""));
+                    Thread.sleep(100);
+                    assertFalse(readiness.isDone(), "paused socket read should still be in flight");
+                    long liveStarted = System.nanoTime();
+                    assertEquals(200, status(exchange(port, "GET",
+                            MeetingJdkHttpServer.LIVENESS_PATH, "")));
+                    assertTrue(Duration.ofNanos(System.nanoTime() - liveStarted)
+                            .compareTo(Duration.ofSeconds(2)) < 0,
+                            "liveness must not wait for the blocked database read");
+                    String unavailable = readiness.get(6, TimeUnit.SECONDS);
+                    assertEquals(503, status(unavailable),
+                            "readiness must return a real HTTP 503, not just time out the client");
+                    assertTrue(Duration.ofNanos(System.nanoTime() - started)
+                            .compareTo(Duration.ofSeconds(6)) < 0);
+                    assertTrue(unavailable.contains("{\"status\":\"DOWN\"}"));
+                    assertFalse(unavailable.contains(url()));
+                    assertFalse(unavailable.contains(password()));
+                    assertFalse(unavailable.contains(TOKEN));
+                } finally {
+                    try {
+                        if (paused) {
+                            docker("unpause", containerId);
+                            assertEquals("false", dockerOutput("container", "inspect", "--format",
+                                    "{{.State.Paused}}", containerId));
+                        }
+                    } finally {
+                        client.shutdownNow();
+                        assertTrue(client.awaitTermination(12, TimeUnit.SECONDS));
+                    }
+                }
+            }
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(45);
+            int recovered;
+            do {
+                recovered = status(exchange(port, "GET",
+                        MeetingJdkHttpServer.READINESS_PATH, ""));
+                if (recovered == 200) break;
+                Thread.sleep(250);
+            } while (System.nanoTime() < deadline);
+            assertEquals(200, recovered, "the same assembly and pool must recover after unpause");
+            assertEquals(13, count("schema_migrations"));
+            assertEquals(0, count("meeting"));
+            var closed = server.shutdown(Duration.ofSeconds(3));
+            assertTrue(closed.clean());
+            assertEquals(0, closed.liveWorkers());
+            assembly.close();
+            assertFalse(assembly.databaseRuntime().isLive());
+            assertThrows(IOException.class, () -> exchange(port, "GET",
+                    MeetingJdkHttpServer.LIVENESS_PATH, ""));
+        }
+        awaitNoApplicationConnections(applicationName);
     }
 
     @Test

@@ -55,6 +55,14 @@ DATABASE_PASSWORD='<从 Secret Manager 注入>' \
 ./migrate.sh
 ```
 
+参考后端的 `DATABASE_SOCKET_TIMEOUT_SECONDS` 默认是 `5`，只接受正整数秒。
+它作为 pgjdbc 的 `socketTimeout` 注入同一个 Hikari 连接池，既限制健康探针的
+单次 socket 读，也限制同池业务查询的单次读；不能当作整个 readiness/catalog
+检查的绝对总截止时间。为防止 URL 覆盖受控值，应用拒绝 `DATABASE_URL` 中的
+原样 `socketTimeout` 查询键（含无等号形式；pgjdbc 42.6.2 的键大小写敏感且
+不解码）。请按业务查询耗时选择该值，
+不要在连接 URL 中另设同名参数。
+
 迁移账号只需要迁移期间的建表权限；应用账号应按部署方策略限制为运行所需的
 最小权限。脚本日志只输出迁移版本和结果，不输出完整连接串、密码、Token、
 音频或会议正文。

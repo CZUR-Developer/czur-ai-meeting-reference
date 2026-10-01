@@ -644,6 +644,8 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
         hikari.setPassword(config.password());
         hikari.setConnectionTimeout(config.connectionTimeout().toMillis());
         hikari.setValidationTimeout(config.validationTimeout().toMillis());
+        hikari.addDataSourceProperty("socketTimeout",
+                Long.toString(config.socketTimeout().toSeconds()));
         hikari.setMaximumPoolSize(config.maximumPoolSize());
         hikari.setMinimumIdle(config.minimumIdle());
         hikari.setPoolName("czur-meeting-db");

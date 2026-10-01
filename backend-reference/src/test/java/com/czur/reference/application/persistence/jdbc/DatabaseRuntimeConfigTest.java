@@ -21,6 +21,7 @@ class DatabaseRuntimeConfigTest {
         Map<String, String> environment = validEnvironment();
         environment.put(DatabaseRuntimeConfig.DATABASE_CONNECTION_TIMEOUT_MS, "700");
         environment.put(DatabaseRuntimeConfig.DATABASE_VALIDATION_TIMEOUT_MS, "400");
+        environment.put(DatabaseRuntimeConfig.DATABASE_SOCKET_TIMEOUT_SECONDS, "2");
         environment.put(DatabaseRuntimeConfig.DATABASE_MAX_POOL_SIZE, "4");
         environment.put(DatabaseRuntimeConfig.DATABASE_MIN_IDLE, "2");
 
@@ -28,11 +29,60 @@ class DatabaseRuntimeConfigTest {
 
         assertEquals(Duration.ofMillis(700), config.connectionTimeout());
         assertEquals(Duration.ofMillis(400), config.validationTimeout());
+        assertEquals(Duration.ofSeconds(2), config.socketTimeout());
         assertEquals(4, config.maximumPoolSize());
         assertEquals(2, config.minimumIdle());
         assertFalse(config.toString().contains(DB_VALUE));
         assertFalse(config.toString().contains(URL));
         assertFalse(config.toString().contains("app-user"));
+    }
+
+    @Test
+    void defaultsToFiveSecondSocketReadTimeoutAndPreservesOldFactory() {
+        assertEquals(Duration.ofSeconds(5),
+                DatabaseRuntimeConfig.fromEnvironment(validEnvironment()).socketTimeout());
+        assertEquals(Duration.ofSeconds(5), DatabaseRuntimeConfig.of(URL, "app-user", DB_VALUE,
+                Duration.ofSeconds(1), Duration.ofSeconds(1), 2, 0).socketTimeout());
+        assertEquals(Duration.ofSeconds(3), DatabaseRuntimeConfig.of(URL, "app-user", DB_VALUE,
+                Duration.ofSeconds(1), Duration.ofSeconds(1), Duration.ofSeconds(3),
+                2, 0).socketTimeout());
+    }
+
+    @Test
+    void rejectsInvalidSocketReadTimeoutWithoutDisablingPgjdbcBound() {
+        for (String value : List.of("", " ", "0", "-1", "1.5", "not-a-number", "2147484",
+                "2147483648")) {
+            Map<String, String> environment = validEnvironment();
+            environment.put(DatabaseRuntimeConfig.DATABASE_SOCKET_TIMEOUT_SECONDS, value);
+            assertSafeFailure(environment, DatabaseRuntimeConfig.DATABASE_SOCKET_TIMEOUT_SECONDS);
+        }
+        for (Duration duration : List.of(Duration.ZERO, Duration.ofMillis(999),
+                Duration.ofMillis(1_500), Duration.ofSeconds(2_147_484))) {
+            IllegalArgumentException failure = assertThrows(IllegalArgumentException.class,
+                    () -> DatabaseRuntimeConfig.of(URL, "app-user", DB_VALUE,
+                            Duration.ofSeconds(1), Duration.ofSeconds(1), duration, 2, 0));
+            assertTrue(failure.getMessage().contains(
+                    DatabaseRuntimeConfig.DATABASE_SOCKET_TIMEOUT_SECONDS));
+            assertFalse(failure.getMessage().contains(URL));
+            assertFalse(failure.getMessage().contains(DB_VALUE));
+        }
+    }
+
+    @Test
+    void rejectsExactPgjdbcUrlSocketTimeoutOverrides() {
+        for (String suffix : List.of("?socketTimeout=0", "?socketTimeout",
+                "?ApplicationName=gate&socketTimeout=999")) {
+            Map<String, String> environment = validEnvironment();
+            environment.put(DatabaseRuntimeConfig.DATABASE_URL, URL + suffix);
+            assertSafeFailure(environment, DatabaseRuntimeConfig.DATABASE_URL);
+        }
+        for (String suffix : List.of("?ApplicationName=gate&currentSchema=public",
+                "?SOCKETTIMEOUT=0", "?socket%54imeout=0")) {
+            Map<String, String> permitted = validEnvironment();
+            permitted.put(DatabaseRuntimeConfig.DATABASE_URL, URL + suffix);
+            assertEquals(permitted.get(DatabaseRuntimeConfig.DATABASE_URL),
+                    DatabaseRuntimeConfig.fromEnvironment(permitted).url());
+        }
     }
 
     @Test

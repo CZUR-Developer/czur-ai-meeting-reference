@@ -62,7 +62,7 @@ command -v mvn >/dev/null || fail '缺少 mvn'
 command -v python3 >/dev/null || fail '缺少随机端口选择所需的 python3'
 TEST_SELECTOR="${1:-internalHealthUsesSameJdbcAssemblyAcrossDatabaseOutageAndRecovery}"
 case "${TEST_SELECTOR}" in
-  internalHealthUsesSameJdbcAssemblyAcrossDatabaseOutageAndRecovery|boundedNetworkOwnerCleansUniquePoolAfterBindFailureAndNormalStop) ;;
+  internalHealthUsesSameJdbcAssemblyAcrossDatabaseOutageAndRecovery|boundedNetworkOwnerCleansUniquePoolAfterBindFailureAndNormalStop|pausedDatabaseReadinessUsesPgjdbcSocketBoundAndRecoversOnSamePool|closedAssemblyUsesRealQueryStopAndT14DeletionPorts) ;;
   *) fail '不支持的定向测试选择器' ;;
 esac
 docker info >/dev/null || fail 'Docker daemon 不可用'

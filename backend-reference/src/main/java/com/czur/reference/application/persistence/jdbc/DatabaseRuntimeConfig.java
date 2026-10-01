@@ -21,11 +21,14 @@ public final class DatabaseRuntimeConfig {
     public static final String DATABASE_PASSWORD = String.join("", "DATABASE", "_PASSWORD");
     public static final String DATABASE_CONNECTION_TIMEOUT_MS = "DATABASE_CONNECTION_TIMEOUT_MS";
     public static final String DATABASE_VALIDATION_TIMEOUT_MS = "DATABASE_VALIDATION_TIMEOUT_MS";
+    public static final String DATABASE_SOCKET_TIMEOUT_SECONDS = "DATABASE_SOCKET_TIMEOUT_SECONDS";
     public static final String DATABASE_MAX_POOL_SIZE = "DATABASE_MAX_POOL_SIZE";
     public static final String DATABASE_MIN_IDLE = "DATABASE_MIN_IDLE";
 
     private static final long DEFAULT_CONNECTION_TIMEOUT_MS = 5_000;
     private static final long DEFAULT_VALIDATION_TIMEOUT_MS = 3_000;
+    private static final int DEFAULT_SOCKET_TIMEOUT_SECONDS = 5;
+    private static final long MAX_SOCKET_TIMEOUT_SECONDS = Integer.MAX_VALUE / 1_000;
     private static final int DEFAULT_MAX_POOL_SIZE = 10;
     private static final int DEFAULT_MIN_IDLE = 1;
     private static final long HIKARI_MIN_TIMEOUT_MS = 250;
@@ -36,6 +39,7 @@ public final class DatabaseRuntimeConfig {
     private final String credential;
     private final Duration connectionTimeout;
     private final Duration validationTimeout;
+    private final Duration socketTimeout;
     private final int maximumPoolSize;
     private final int minimumIdle;
 
@@ -45,6 +49,7 @@ public final class DatabaseRuntimeConfig {
             String credential,
             Duration connectionTimeout,
             Duration validationTimeout,
+            Duration socketTimeout,
             int maximumPoolSize,
             int minimumIdle) {
         this.url = validateUrl(url);
@@ -52,6 +57,12 @@ public final class DatabaseRuntimeConfig {
         this.credential = requireText(DATABASE_PASSWORD, credential);
         this.connectionTimeout = requirePositive(DATABASE_CONNECTION_TIMEOUT_MS, connectionTimeout);
         this.validationTimeout = requirePositive(DATABASE_VALIDATION_TIMEOUT_MS, validationTimeout);
+        this.socketTimeout = requirePositive(DATABASE_SOCKET_TIMEOUT_SECONDS, socketTimeout);
+        if (this.socketTimeout.getNano() != 0
+                || this.socketTimeout.getSeconds() > MAX_SOCKET_TIMEOUT_SECONDS) {
+            throw invalid(DATABASE_SOCKET_TIMEOUT_SECONDS,
+                    "必须是可由 pgjdbc 表示的正整数秒");
+        }
         if (this.validationTimeout.compareTo(this.connectionTimeout) > 0) {
             throw invalid(DATABASE_VALIDATION_TIMEOUT_MS,
                     "不能大于连接超时时间");
@@ -91,6 +102,7 @@ public final class DatabaseRuntimeConfig {
                 environment.get(DATABASE_PASSWORD),
                 duration(environment, DATABASE_CONNECTION_TIMEOUT_MS, DEFAULT_CONNECTION_TIMEOUT_MS),
                 duration(environment, DATABASE_VALIDATION_TIMEOUT_MS, DEFAULT_VALIDATION_TIMEOUT_MS),
+                socketTimeout(environment),
                 integer(environment, DATABASE_MAX_POOL_SIZE, DEFAULT_MAX_POOL_SIZE),
                 integer(environment, DATABASE_MIN_IDLE, DEFAULT_MIN_IDLE));
     }
@@ -106,7 +118,23 @@ public final class DatabaseRuntimeConfig {
             int minimumIdle) {
         return new DatabaseRuntimeConfig(
                 url, username, password, connectionTimeout, validationTimeout,
+                Duration.ofSeconds(DEFAULT_SOCKET_TIMEOUT_SECONDS),
                 maximumPoolSize, minimumIdle);
+    }
+
+    /** 显式覆盖 pgjdbc 单次 socket 读超时；原有 {@code of} 调用保持五秒默认值。 */
+    public static DatabaseRuntimeConfig of(
+            String url,
+            String username,
+            String password,
+            Duration connectionTimeout,
+            Duration validationTimeout,
+            Duration socketTimeout,
+            int maximumPoolSize,
+            int minimumIdle) {
+        return new DatabaseRuntimeConfig(
+                url, username, password, connectionTimeout, validationTimeout,
+                socketTimeout, maximumPoolSize, minimumIdle);
     }
 
     /** 返回仅供 JDBC 连接池使用的 PostgreSQL 地址；调用方不得写入日志。 */
@@ -134,6 +162,11 @@ public final class DatabaseRuntimeConfig {
         return validationTimeout;
     }
 
+    /** 同一连接池中健康探针与业务查询共用的 pgjdbc 单次 socket 读超时。 */
+    public Duration socketTimeout() {
+        return socketTimeout;
+    }
+
     /** 返回连接池最大连接数。 */
     public int maximumPoolSize() {
         return maximumPoolSize;
@@ -153,6 +186,7 @@ public final class DatabaseRuntimeConfig {
                 ", password=<redacted>" +
                 ", connectionTimeout=" + connectionTimeout +
                 ", validationTimeout=" + validationTimeout +
+                ", socketTimeout=" + socketTimeout +
                 ", maximumPoolSize=" + maximumPoolSize +
                 ", minimumIdle=" + minimumIdle +
                 '}';
@@ -177,12 +211,32 @@ public final class DatabaseRuntimeConfig {
                 || hostAndPort.indexOf(',') >= 0) {
             throw invalid(DATABASE_URL, "必须包含有效主机");
         }
+        if (hasSocketTimeoutQueryKey(url)) {
+            throw invalid(DATABASE_URL, "不得在连接地址中覆盖 socketTimeout");
+        }
         String lower = url.toLowerCase(java.util.Locale.ROOT);
         if (lower.matches(".*[?&](user|password)=[^&]*.*")) {
             throw invalid(DATABASE_URL, "不得在连接地址中嵌入账号或密码");
         }
         validatePort(hostAndPort);
         return url;
+    }
+
+    private static boolean hasSocketTimeoutQueryKey(String url) {
+        int question = url.indexOf('?');
+        if (question < 0) {
+            return false;
+        }
+        for (String parameter : url.substring(question + 1).split("&", -1)) {
+            int separator = parameter.indexOf('=');
+            String key = separator < 0 ? parameter : parameter.substring(0, separator);
+            // pgjdbc 42.6.2 的 URL key 原样且大小写敏感，首个 '=' 前的
+            // 精确 socketTimeout 会覆盖连接属性；无 '=' 也会产生同名 key。
+            if ("socketTimeout".equals(key)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static Duration duration(Map<String, String> environment, String name, long fallbackMs) {
@@ -199,6 +253,15 @@ public final class DatabaseRuntimeConfig {
         } catch (NumberFormatException failure) {
             throw invalid(name, "必须是正整数毫秒");
         }
+    }
+
+    private static Duration socketTimeout(Map<String, String> environment) {
+        String value = environment.get(DATABASE_SOCKET_TIMEOUT_SECONDS);
+        if (value != null && value.isBlank()) {
+            throw invalid(DATABASE_SOCKET_TIMEOUT_SECONDS, "必须是正整数秒");
+        }
+        return Duration.ofSeconds(integer(environment, DATABASE_SOCKET_TIMEOUT_SECONDS,
+                DEFAULT_SOCKET_TIMEOUT_SECONDS));
     }
 
     private static int integer(Map<String, String> environment, String name, int fallback) {
