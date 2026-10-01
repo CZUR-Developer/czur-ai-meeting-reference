@@ -13,48 +13,134 @@ STATE_DIR=''
 CONTAINER_ID=''
 CREATED_CONTAINER=0
 CREATED_VOLUME=0
+STAGE='preflight'
+SUREFIRE_COUNTS='NA'
+CONTAINER_CLEANUP='NOT_CREATED'
+VOLUME_CLEANUP='NOT_CREATED'
+STATE_CLEANUP='NOT_CREATED'
 
 fail() { printf '[ERROR] %s\n' "$*" >&2; exit 1; }
 info() { printf '[INFO] %s\n' "$*"; }
 
 cleanup() {
-  local metadata id label
+  local metadata id label removable failed=0 docker_available=1
+  if (( CREATED_CONTAINER || CREATED_VOLUME )); then
+    docker info >/dev/null 2>&1 || docker_available=0
+  fi
   if (( CREATED_CONTAINER )); then
-    metadata="$(docker container inspect --format \
-      '{{.Id}}|{{index .Config.Labels "com.czur.ai-meeting.t15-health.run-id"}}' \
-      "${CONTAINER_NAME}" 2>/dev/null || true)"
-    if [[ -n "${metadata}" ]]; then
-      id="${metadata%%|*}"
-      label="${metadata#*|}"
-      if [[ "${id}" =~ ^[0-9a-f]{64}$ && "${label}" == "${RUN_ID}" \
-          && ( -z "${CONTAINER_ID}" || "${id}" == "${CONTAINER_ID}" ) ]]; then
-        if [[ "$(docker container inspect --format '{{.State.Paused}}' "${id}")" == true ]]; then
-          docker unpause -- "${id}" >/dev/null || return 1
+    if (( ! docker_available )); then
+      CONTAINER_CLEANUP='UNKNOWN_DAEMON'
+      failed=1
+    else
+      CONTAINER_CLEANUP='ABSENT'
+      metadata="$(docker container inspect --format \
+        '{{.Id}}|{{index .Config.Labels "com.czur.ai-meeting.t15-health.run-id"}}' \
+        "${CONTAINER_NAME}" 2>/dev/null || true)"
+      if [[ -n "${metadata}" ]]; then
+        id="${metadata%%|*}"
+        label="${metadata#*|}"
+        if [[ "${id}" =~ ^[0-9a-f]{64}$ && "${label}" == "${RUN_ID}" \
+            && ( -z "${CONTAINER_ID}" || "${id}" == "${CONTAINER_ID}" ) ]]; then
+          removable=1
+          if [[ "$(docker container inspect --format '{{.State.Paused}}' "${id}")" == true ]]; then
+            docker unpause -- "${id}" >/dev/null 2>&1 || removable=0
+          fi
+          if (( removable )) && docker rm -f -- "${id}" >/dev/null 2>&1 \
+              && ! docker container inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
+            CONTAINER_CLEANUP='REMOVED'
+          else
+            CONTAINER_CLEANUP='FAILED'
+            failed=1
+          fi
+        else
+          CONTAINER_CLEANUP='REFUSED_OWNER_MISMATCH'
+          failed=1
         fi
-        docker rm -f -- "${id}" >/dev/null || return 1
-      else
-        printf '[ERROR] 容器归属不符，拒绝清理\n' >&2; return 1
       fi
     fi
   fi
   if (( CREATED_VOLUME )); then
-    metadata="$(docker volume inspect --format \
-      '{{.Name}}|{{index .Labels "com.czur.ai-meeting.t15-health.run-id"}}' \
-      "${VOLUME_NAME}" 2>/dev/null || true)"
-    if [[ -n "${metadata}" ]]; then
-      label="${metadata#*|}"
-      if [[ "${metadata%%|*}" == "${VOLUME_NAME}" && "${label}" == "${RUN_ID}" ]]; then
-        docker volume rm -- "${VOLUME_NAME}" >/dev/null || return 1
-      else
-        printf '[ERROR] 数据卷归属不符，拒绝清理\n' >&2; return 1
+    if (( ! docker_available )); then
+      VOLUME_CLEANUP='UNKNOWN_DAEMON'
+      failed=1
+    else
+      VOLUME_CLEANUP='ABSENT'
+      metadata="$(docker volume inspect --format \
+        '{{.Name}}|{{index .Labels "com.czur.ai-meeting.t15-health.run-id"}}' \
+        "${VOLUME_NAME}" 2>/dev/null || true)"
+      if [[ -n "${metadata}" ]]; then
+        label="${metadata#*|}"
+        if [[ "${metadata%%|*}" == "${VOLUME_NAME}" && "${label}" == "${RUN_ID}" ]]; then
+          if docker volume rm -- "${VOLUME_NAME}" >/dev/null 2>&1 \
+              && ! docker volume inspect "${VOLUME_NAME}" >/dev/null 2>&1; then
+            VOLUME_CLEANUP='REMOVED'
+          else
+            VOLUME_CLEANUP='FAILED'
+            failed=1
+          fi
+        else
+          VOLUME_CLEANUP='REFUSED_OWNER_MISMATCH'
+          failed=1
+        fi
       fi
     fi
   fi
-  if [[ -n "${STATE_DIR}" && "${STATE_DIR}" == /tmp/czur-t15-health-state.* ]]; then
-    rm -rf -- "${STATE_DIR}"
+  if [[ -n "${STATE_DIR}" ]]; then
+    if [[ "${STATE_DIR}" == /tmp/czur-t15-health-state.* ]]; then
+      if [[ -d "${STATE_DIR}" ]]; then
+        if rm -rf -- "${STATE_DIR}" && [[ ! -e "${STATE_DIR}" ]]; then
+          STATE_CLEANUP='REMOVED'
+        else
+          STATE_CLEANUP='FAILED'
+          failed=1
+        fi
+      else
+        STATE_CLEANUP='ABSENT'
+      fi
+    else
+      STATE_CLEANUP='REFUSED_UNSAFE_PATH'
+      failed=1
+    fi
+  fi
+  return "${failed}"
+}
+
+capture_surefire_counts() {
+  local raw=''
+  if [[ -n "${STATE_DIR}" && -f "${STATE_DIR}/test.log" ]]; then
+    raw="$(rg -o 'Tests run: [0-9]+, Failures: [0-9]+, Errors: [0-9]+, Skipped: [0-9]+' \
+      "${STATE_DIR}/test.log" 2>/dev/null | tail -1 || true)"
+  fi
+  if [[ "${raw}" =~ ^Tests[[:space:]]run:[[:space:]]([0-9]+),[[:space:]]Failures:[[:space:]]([0-9]+),[[:space:]]Errors:[[:space:]]([0-9]+),[[:space:]]Skipped:[[:space:]]([0-9]+)$ ]]; then
+    SUREFIRE_COUNTS="${BASH_REMATCH[1]},${BASH_REMATCH[2]},${BASH_REMATCH[3]},${BASH_REMATCH[4]}"
   fi
 }
-trap cleanup EXIT
+
+on_exit() {
+  local result=$? cleanup_failed=0 diagnostic_dir=''
+  trap - EXIT
+  set +e
+  capture_surefire_counts
+  cleanup || cleanup_failed=1
+  if (( result == 0 && cleanup_failed == 0 )); then
+    info '隔离资源已清理'
+    exit 0
+  fi
+  if (( result == 0 )); then result=1; fi
+  diagnostic_dir="$(mktemp -d /tmp/czur-t15-health-diagnostic.XXXXXX)"
+  if [[ -n "${diagnostic_dir}" ]]; then
+    chmod 700 -- "${diagnostic_dir}"
+    (umask 077; printf 'stage=%s\nexit_code=%s\nsurefire_counts=%s\ncontainer_cleanup=%s\nvolume_cleanup=%s\nstate_cleanup=%s\n' \
+      "${STAGE}" "${result}" "${SUREFIRE_COUNTS}" "${CONTAINER_CLEANUP}" \
+      "${VOLUME_CLEANUP}" "${STATE_CLEANUP}" >"${diagnostic_dir}/summary.txt")
+    chmod 600 -- "${diagnostic_dir}/summary.txt"
+    info "失败诊断仅保留白名单摘要：${diagnostic_dir}/summary.txt"
+  else
+    printf '[ERROR] 无法建立私有失败诊断目录\n' >&2
+  fi
+  exit "${result}"
+}
+trap on_exit EXIT
 trap 'exit 130' INT TERM HUP
 
 command -v docker >/dev/null || fail '缺少 docker'
@@ -66,7 +152,8 @@ case "${TEST_SELECTOR}" in
   boundedNetworkOwnerCleansUniquePoolAfterBindFailureAndNormalStop|\
   pausedDatabaseReadinessUsesPgjdbcSocketBoundAndRecoversOnSamePool|\
   closedAssemblyUsesRealQueryStopAndT14DeletionPorts|\
-  realHttpCreateAndTrustedV2StartPreserveAsrOnlyFacts) ;;
+  realHttpCreateAndTrustedV2StartPreserveAsrOnlyFacts|\
+  realHttpStopAdmissionAndMockWorkerPublishAsrOnlyResult) ;;
   *) fail '不支持的定向测试选择器' ;;
 esac
 docker info >/dev/null || fail 'Docker daemon 不可用'
@@ -77,8 +164,14 @@ docker info >/dev/null || fail 'Docker daemon 不可用'
 docker container inspect "${CONTAINER_NAME}" >/dev/null 2>&1 && fail '容器名碰撞'
 docker volume inspect "${VOLUME_NAME}" >/dev/null 2>&1 && fail '卷名碰撞'
 
+STAGE='setup'
 STATE_DIR="$(mktemp -d /tmp/czur-t15-health-state.XXXXXX)"
 chmod 700 -- "${STATE_DIR}"
+if [[ "${TEST_SELECTOR}" == realHttpStopAdmissionAndMockWorkerPublishAsrOnlyResult ]]; then
+  ARTIFACT_ROOT="${STATE_DIR}/artifacts"
+  mkdir -m 700 -- "${ARTIFACT_ROOT}"
+  export T15_HEALTH_GATE_ARTIFACT_ROOT="${ARTIFACT_ROOT}"
+fi
 DB_NAME='t15_health_gate'
 DB_USER='t15_health_user'
 DB_PASSWORD="${RESOURCE_PREFIX}-${RANDOM}"
@@ -116,31 +209,22 @@ export REFERENCE_TEST_DATABASE_PASSWORD="${DB_PASSWORD}"
 export T15_HEALTH_GATE_CONTAINER_ID="${CONTAINER_ID}"
 export T15_HEALTH_GATE_RUN_ID="${RUN_ID}"
 
+STAGE='compile'
 mvn -B --no-transfer-progress -f "${REPO_ROOT}/backend-reference/pom.xml" \
   test-compile >"${STATE_DIR}/compile.log" 2>&1 || {
-    rg 'BUILD FAILURE|ERROR|error:' "${STATE_DIR}/compile.log" >&2 || true
     fail 'test-compile 失败'
   }
 info 'test-compile 通过'
 
+STAGE='test'
 mvn -B --no-transfer-progress -f "${REPO_ROOT}/backend-reference/pom.xml" \
   "-Dtest=ReferenceMeetingHttpAssemblyIntegrationTest#${TEST_SELECTOR}" \
   test >"${STATE_DIR}/test.log" 2>&1 || {
-    rg 'Tests run:|BUILD FAILURE|ERROR|error:' "${STATE_DIR}/test.log" >&2 || true
     fail '健康真网络测试失败'
   }
-SUMMARY="$(rg 'Tests run: [0-9]+, Failures: [0-9]+, Errors: [0-9]+, Skipped: [0-9]+' \
-  "${STATE_DIR}/test.log" | tail -1)"
-[[ "${SUMMARY}" == *'Tests run: 1, Failures: 0, Errors: 0, Skipped: 0'* ]] \
-  || fail "Surefire 数量不可信: ${SUMMARY}"
-info "${SUMMARY}"
+STAGE='summary'
+capture_surefire_counts
+[[ "${SUREFIRE_COUNTS}" == '1,0,0,0' ]] || fail 'Surefire 数量不可信'
+info 'Tests run: 1, Failures: 0, Errors: 0, Skipped: 0'
 info '正在精确清理本次专属 PostgreSQL 容器、数据卷和日志目录'
-cleanup
-CONTAINER_ID=''
-CREATED_CONTAINER=0
-CREATED_VOLUME=0
-STATE_DIR=''
-trap - EXIT INT TERM HUP
-docker container inspect "${CONTAINER_NAME}" >/dev/null 2>&1 && fail '容器未清理'
-docker volume inspect "${VOLUME_NAME}" >/dev/null 2>&1 && fail '数据卷未清理'
-info '隔离资源已清理'
+STAGE='cleanup'

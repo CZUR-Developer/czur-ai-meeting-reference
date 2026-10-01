@@ -3,7 +3,12 @@ package com.czur.reference.application.persistence.jdbc;
 import com.czur.reference.application.bootstrap.ReferenceMeetingDeploymentConfig;
 import com.czur.reference.application.bootstrap.ReferenceMeetingJdkHttpService;
 import com.czur.reference.application.bootstrap.ReferenceMeetingHttpAssembly;
+import com.czur.reference.application.artifact.filesystem.PersistentFileSystemMockArtifactStore;
+import com.czur.reference.application.entitlement.referencedev.ReferenceDevEntitlementPolicy;
+import com.czur.reference.application.finalization.DeterministicMockFinalizationPlanner;
+import com.czur.reference.application.finalization.FinalizationCheckpoint;
 import com.czur.reference.application.finalization.FinalizationExecutionFact;
+import com.czur.reference.application.finalization.MockFinalizationWorker;
 import com.czur.reference.application.http.AuthenticatedMeetingHttpContextResolver;
 import com.czur.reference.application.http.HttpRequest;
 import com.czur.reference.application.http.MeetingJdkHttpServer;
@@ -11,18 +16,30 @@ import com.czur.reference.application.command.MeetingPermissions;
 import com.czur.reference.application.port.OwnedMeetingCreationUnitOfWork;
 import com.czur.reference.application.port.MeetingStartExecutionUnitOfWork;
 import com.czur.reference.application.port.CreateMeetingFactStore;
+import com.czur.reference.application.port.FinalizationAdmissionUnitOfWork;
+import com.czur.reference.application.port.FinalizationInputFact;
+import com.czur.reference.application.port.ManifestStatus;
+import com.czur.reference.application.port.MeetingManifest;
+import com.czur.reference.application.port.MeetingManifestPort;
+import com.czur.reference.application.port.WorkflowStep;
+import com.czur.reference.application.port.artifact.ArtifactReadyMetadataStore;
+import com.czur.reference.application.port.artifact.ArtifactStore;
 import com.czur.reference.application.port.entitlement.AuthorizedProfileSnapshot;
+import com.czur.reference.application.port.entitlement.EntitlementIdGenerator;
 import com.czur.reference.application.port.entitlement.MeetingGrant;
 import com.czur.reference.application.port.entitlement.UsageEstimate;
 import com.czur.reference.application.port.entitlement.UsageOperationResult;
 import com.czur.reference.application.port.entitlement.UsageReservation;
 import com.czur.reference.application.port.entitlement.UsageUnit;
 import com.czur.reference.application.identity.referencedev.ReferenceDevIdentityConfig;
+import com.czur.reference.application.manifest.ManifestResultAccessPolicy;
 import com.czur.reference.domain.meeting.MeetingState;
 import com.czur.reference.domain.meeting.MeetingAggregate;
 import com.czur.reference.domain.meeting.MeetingEvent;
 import com.czur.reference.domain.capability.CapabilityPlanner;
 import com.czur.reference.domain.capability.CapabilityDecision;
+import com.czur.reference.protocol.json.FinalizationCheckpointJson;
+import com.czur.reference.protocol.json.FinalizationExecutionFactJson;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -53,8 +70,10 @@ import java.sql.Statement;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.Duration;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -63,6 +82,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Handler;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
@@ -83,6 +103,34 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
     private static final String TOKEN = "local-test-token-0123456789-abcdefgh";
     private static final String SCOPE = "assembly-deployment";
     private static final String SUBJECT = "assembly-subject";
+
+    private static final class MutableClock extends Clock {
+        private final AtomicReference<Instant> now;
+        private final ZoneId zone;
+
+        private MutableClock(Instant now, ZoneId zone) {
+            this(new AtomicReference<>(now), zone);
+        }
+
+        private MutableClock(AtomicReference<Instant> now, ZoneId zone) {
+            this.now = now;
+            this.zone = zone;
+        }
+
+        void advanceTo(Instant instant) {
+            now.updateAndGet(current -> {
+                if (instant.isBefore(current)) {
+                    throw new IllegalArgumentException("test clock cannot move backwards");
+                }
+                return instant;
+            });
+        }
+
+        @Override public ZoneId getZone() { return zone; }
+        @Override public Clock withZone(ZoneId zone) { return new MutableClock(now, zone); }
+        @Override public Instant instant() { return now.get(); }
+    }
+
     private String schema;
     private PGSimpleDataSource fixtureDataSource;
 
@@ -654,6 +702,306 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
         awaitNoApplicationConnections(applicationName);
     }
 
+    @Test
+    @EnabledIfEnvironmentVariable(named = "T15_HEALTH_GATE_CONTAINER_ID", matches = "[0-9a-f]{64}")
+    void realHttpStopAdmissionAndMockWorkerPublishAsrOnlyResult() throws Exception {
+        migrate(13);
+        Map<String, String> enabled = config();
+        enabled.put(ReferenceMeetingDeploymentConfig.CREATE_ENABLED, "true");
+        var trusted = ReferenceMeetingDeploymentConfig.fromEnvironment(enabled);
+        MutableClock httpClock = new MutableClock(NOW, ZoneOffset.UTC);
+        Path artifactRoot = Path.of(System.getenv("T15_HEALTH_GATE_ARTIFACT_ROOT"));
+        assertTrue(Files.isDirectory(artifactRoot), "gate must own a private Artifact directory");
+        var artifacts = new PersistentFileSystemMockArtifactStore(artifactRoot, 4096);
+        StringBuilder logs = new StringBuilder();
+        SimpleFormatter formatter = new SimpleFormatter();
+        Handler capture = new Handler() {
+            @Override public void publish(LogRecord record) {
+                synchronized (logs) {
+                    logs.append(formatter.formatMessage(record)).append('\n');
+                }
+            }
+            @Override public void flush() { }
+            @Override public void close() { }
+        };
+        Logger root = Logger.getLogger("");
+        root.addHandler(capture);
+        try (var assembly = ReferenceMeetingHttpAssembly.start(enabled, httpClock);
+             var network = assembly.newJdkHttpServer(new InetSocketAddress("127.0.0.1", 0))) {
+            network.start();
+            int port = network.address().getPort();
+            DataSource source = assembly.databaseRuntime().dataSource();
+            String createKey = "finalization-create-key-123456789";
+            String clientSession = "finalization-client-session-sentinel";
+            String created = exchange(port, "POST", "/v1/meetings",
+                    createRequest(createKey, clientSession).body(),
+                    networkHeaders(TOKEN, createKey, true));
+            assertEquals(201, status(created));
+            assertTrue(responseBody(created).contains("\"state\":\"CREATED\""));
+            String meetingId = createdMeetingId(source, createKey);
+            var createFact = createFact(source, meetingId);
+            assertEquals(Set.of("transcript.realtime"),
+                    createFact.response().grantedCapabilities());
+            assertEquals(CapabilityDecision.Action.ENABLE,
+                    createFact.response().capabilityDecisions().getFirst().action());
+            assertEquals(List.of("mock.transcript"),
+                    createFact.response().capabilityDecisions().getFirst().affectedWorkflows());
+            assertEquals(List.of("transcript.final"),
+                    createFact.response().capabilityDecisions().getFirst().producedArtifacts());
+
+            var started = assertInstanceOf(MeetingStartExecutionUnitOfWork.Success.class,
+                    new JdbcMeetingStartExecutionUnitOfWork(source, new CapabilityPlanner())
+                            .startCompleteCreate(new MeetingStartExecutionUnitOfWork.StartRequest(
+                                    SCOPE, SUBJECT, meetingId, NOW, null, trusted.profile(),
+                                    Set.of("transcript.realtime"), trusted.mockCapabilities(),
+                                    trusted.capabilityLimits())));
+            assertEquals(MeetingStartExecutionUnitOfWork.SuccessCode.STARTED, started.code());
+            FinalizationExecutionFact execution = executionFact(source, meetingId);
+            assertEquals(createFact.response().capabilityDecisions(),
+                    execution.capabilityPlan().decisions());
+
+            String path = "/v1/meetings/" + meetingId;
+            String stopKey = "finalization-stop-key-123456789";
+            String wrongStopToken = "wrong-stop-token-0123456789-abcdefgh";
+            String noAuthStopKey = "no-auth-stop-key-123456789";
+            String wrongAuthStopKey = "wrong-auth-stop-key-123456789";
+            String shortStopKey = "short";
+            String malformedStopKey = "malformed-stop-key-123456789";
+            String objectStopKey = "object-stop-key-123456789";
+            assertNetworkError(exchange(port, "POST", path + ":stop", "",
+                    "Idempotency-Key: " + noAuthStopKey + "\r\n"),
+                    401, "AUTHENTICATION_REQUIRED");
+            assertNetworkError(exchange(port, "POST", path + ":stop", "",
+                    networkHeaders(wrongStopToken, wrongAuthStopKey, false)),
+                    401, "AUTHENTICATION_FAILED");
+            assertNetworkError(exchange(port, "POST", path + ":stop", "",
+                    networkHeaders(TOKEN, null, false)), 400, "INVALID_REQUEST");
+            assertNetworkError(exchange(port, "POST", path + ":stop", "",
+                    networkHeaders(TOKEN, shortStopKey, false)), 400, "INVALID_REQUEST");
+            assertNetworkError(exchange(port, "POST", path + ":stop", "{bad",
+                    networkHeaders(TOKEN, malformedStopKey, true)),
+                    400, "INVALID_REQUEST");
+            assertNetworkError(exchange(port, "POST", path + ":stop", "{\"unexpected\":1}",
+                    networkHeaders(TOKEN, objectStopKey, true)),
+                    400, "INVALID_REQUEST");
+            assertEquals("STARTING", meetingState(meetingId));
+            assertEquals(0, count("workflow_step"));
+            String firstStop = exchange(port, "POST", path + ":stop", "",
+                    networkHeaders(TOKEN, stopKey, false));
+            assertEquals(202, status(firstStop));
+            assertTrue(responseBody(firstStop).contains("\"state\":\"STOPPING\""));
+            String replayStop = exchange(port, "POST", path + ":stop", "",
+                    networkHeaders(TOKEN, stopKey, false));
+            assertEquals(202, status(replayStop));
+            assertTrue(MessageDigest.isEqual(
+                    responseBody(firstStop).getBytes(StandardCharsets.UTF_8),
+                    responseBody(replayStop).getBytes(StandardCharsets.UTF_8)),
+                    "pending Stop replay must preserve public response bytes");
+            assertEquals(1, count("usage_operation"));
+            assertEquals(0, count("durable_input_fact"));
+            assertEquals(0, count("workflow_step"));
+
+            // 仅测试可信侧执行 Admission：V008/V009、receipt 和 Workflow 由原工作单元原子提交。
+            FinalizationInputFact input = new FinalizationInputFact(
+                    meetingId, "mock-input-binding-" + meetingId, 3, 2_000,
+                    "zh-CN", List.of(), NOW.plusSeconds(1),
+                    sha256Bytes("mock-input".getBytes(StandardCharsets.UTF_8)));
+            var request = new FinalizationAdmissionUnitOfWork.AdmissionRequest(
+                    SCOPE, SUBJECT, meetingId, input);
+            var admission = new JdbcFinalizationAdmissionUnitOfWork(source,
+                    () -> "receipt-" + UUID.randomUUID(),
+                    new DeterministicMockFinalizationPlanner());
+            var admitted = assertInstanceOf(FinalizationAdmissionUnitOfWork.Success.class,
+                    admission.admit(request));
+            assertEquals(FinalizationAdmissionUnitOfWork.SuccessCode.ADMITTED, admitted.code());
+            var replayed = assertInstanceOf(FinalizationAdmissionUnitOfWork.Success.class,
+                    admission.admit(request));
+            assertEquals(FinalizationAdmissionUnitOfWork.SuccessCode.REPLAYED, replayed.code());
+            assertEquals(admitted.finalization().finalizationReceipt(),
+                    replayed.finalization().finalizationReceipt());
+            assertEquals(admitted.workflowKey(), replayed.workflowKey());
+            WorkflowStep step = new JdbcWorkflowStepStore(source)
+                    .find(admitted.workflowKey()).orElseThrow();
+            assertEquals(FinalizationCheckpoint.STEP_TYPE, step.key().stepType());
+            assertEquals(FinalizationCheckpoint.CHECKPOINT_TYPE, step.checkpointType());
+            FinalizationCheckpoint checkpoint = FinalizationCheckpointJson.decode(
+                    step.canonicalPayload());
+            assertEquals(FinalizationExecutionFactJson.sha256(execution),
+                    checkpoint.executionFactDigest());
+            assertEquals(FinalizationCheckpoint.inputFactDigest(input),
+                    checkpoint.inputFactDigest());
+            assertEquals(1, checkpoint.artifacts().size());
+            assertEquals("transcript.final",
+                    checkpoint.artifacts().getFirst().spec().artifactType());
+            assertEquals(1, count("durable_input_fact"));
+            assertEquals(1, count("final_usage_fact"));
+            assertEquals(1, count("workflow_step"));
+            assertEquals(0, count("artifact"));
+            String pending = exchange(port, "GET", path, "",
+                    networkHeaders(TOKEN, null, false));
+            assertEquals(200, status(pending));
+            assertTrue(responseBody(pending).contains("\"manifestState\":\"GENERATING\""));
+            String prematureDeleteKey = "premature-delete-key-123456789";
+            assertNetworkError(exchange(port, "DELETE", path, "",
+                    networkHeaders(TOKEN, prematureDeleteKey, false)),
+                    409, "DELETE_INVALID_MEETING_STATE");
+            assertEquals(0, count("meeting_deletion_plan"));
+
+            Clock workerClock = Clock.fixed(NOW.plusSeconds(2), ZoneOffset.UTC);
+            EntitlementIdGenerator ids = new EntitlementIdGenerator() {
+                @Override public String newGrantId() { return "grant_" + UUID.randomUUID(); }
+                @Override public String newReservationId() {
+                    return "reservation_" + UUID.randomUUID();
+                }
+                @Override public String newLeaseToken() { return "lease_" + UUID.randomUUID(); }
+            };
+            var entitlement = new JdbcReferenceDevEntitlementProvider(source,
+                    new ReferenceDevEntitlementPolicy(trusted.entitlement(), workerClock, ids),
+                    workerClock);
+            var worker = new MockFinalizationWorker(
+                    new JdbcWorkflowStepStore(source), artifacts, entitlement,
+                    new JdbcFinalizationCompletionUnitOfWork(source),
+                    new MockFinalizationWorker.Config("t15-finalization-worker", workerClock,
+                            Duration.ofSeconds(30), Duration.ofSeconds(5), Duration.ZERO, 1, 3));
+            var completed = worker.runOnce();
+            assertEquals(1, completed.claimedCount());
+            assertEquals(MockFinalizationWorker.ItemStatus.COMPLETED,
+                    completed.items().getFirst().status());
+            assertTrue(worker.runOnce().idle(), "terminal Worker replay must be idle");
+            assertEquals(WorkflowStep.Status.COMPLETED,
+                    new JdbcWorkflowStepStore(source).find(admitted.workflowKey())
+                            .orElseThrow().status());
+
+            MeetingManifest manifest = manifest(source, meetingId);
+            assertEquals(ManifestStatus.READY, manifest.status());
+            assertEquals(1, manifest.manifestRevision());
+            assertEquals(1, manifest.artifacts().size());
+            MeetingManifest.ArtifactRef reference = manifest.artifacts().getFirst();
+            assertEquals("transcript.final", reference.type());
+            assertEquals(MeetingManifest.ArtifactStatus.READY, reference.status());
+            var material = checkpoint.artifacts().getFirst();
+            assertEquals(material.spec().artifactId(), reference.artifactId());
+            var readyMetadata = artifactMetadata(source, meetingId);
+            assertEquals(1, readyMetadata.size());
+            var persistedArtifact = readyMetadata.getFirst().artifact();
+            assertEquals(material.spec(), persistedArtifact.intent().spec());
+            assertEquals(material.claim(), persistedArtifact.content());
+            assertEquals(reference.artifactId(), persistedArtifact.intent().spec().artifactId());
+            assertEquals(reference.size(), persistedArtifact.content().size());
+            assertEquals(reference.checksum(), persistedArtifact.content().checksum());
+            byte[] physical;
+            try (ArtifactStore.ReadHandle read = artifacts.openRead(
+                    persistedArtifact.intent().binding())) {
+                physical = read.content().readAllBytes();
+                assertEquals(persistedArtifact, read.artifact());
+            }
+            assertTrue(MessageDigest.isEqual(material.canonicalContentBytes(), physical),
+                    "physical Artifact must match the frozen checkpoint bytes");
+            assertTrue(physical.length > 0, "published Artifact must contain physical bytes");
+            assertEquals(reference.size(), physical.length);
+            assertEquals(reference.checksum(), sha256Bytes(physical));
+            assertEquals(1, count("artifact"));
+            assertEquals(1, count("meeting_manifest_revision"));
+            assertEquals(2, count("usage_operation"));
+            assertEquals("READY", meetingState(meetingId));
+            var manifestQuery = new JdbcMeetingManifestQueryPort(source,
+                    new ManifestResultAccessPolicy(CLOCK, Duration.ofHours(1)));
+            var found = assertInstanceOf(MeetingManifestPort.Found.class,
+                    manifestQuery.get(new MeetingManifestPort.Request(meetingId, -1)));
+            assertEquals(manifest, found.manifest());
+
+            String ready = exchange(port, "GET", path, "",
+                    networkHeaders(TOKEN, null, false));
+            assertEquals(200, status(ready));
+            assertTrue(responseBody(ready).contains("\"manifestState\":\"READY\""));
+            assertTrue(responseBody(ready).contains(
+                    admitted.finalization().finalizationReceipt()));
+            String list = exchange(port, "GET", "/v1/meetings", "",
+                    networkHeaders(TOKEN, null, false));
+            assertEquals(200, status(list));
+            assertTrue(responseBody(list).contains(meetingId));
+            String acceptedStop = exchange(port, "POST", path + ":stop", "",
+                    networkHeaders(TOKEN, stopKey, false));
+            assertEquals(200, status(acceptedStop));
+            assertTrue(responseBody(acceptedStop).contains(
+                    admitted.finalization().finalizationReceipt()));
+            assertEquals(2, count("usage_operation"));
+
+            Map<String, String> other = new HashMap<>(config());
+            String otherToken = "other-finalization-token-0123456789-abcdefgh";
+            String foreignDeleteKey = "foreign-delete-key-123456789";
+            other.put(ReferenceDevIdentityConfig.BEARER_TOKEN, otherToken);
+            other.put(ReferenceDevIdentityConfig.SUBJECT_SCOPE, "other-finalization-subject");
+            try (var foreign = ReferenceMeetingHttpAssembly.start(other, CLOCK);
+                 var foreignNetwork = foreign.newJdkHttpServer(
+                         new InetSocketAddress("127.0.0.1", 0))) {
+                foreignNetwork.start();
+                assertNetworkError(exchange(foreignNetwork.address().getPort(), "GET", path, "",
+                        networkHeaders(otherToken, null, false)), 403, "ACCESS_DENIED");
+                String foreignList = exchange(foreignNetwork.address().getPort(), "GET",
+                        "/v1/meetings", "", networkHeaders(otherToken, null, false));
+                assertEquals(200, status(foreignList));
+                assertFalse(responseBody(foreignList).contains(meetingId));
+                assertNetworkError(exchange(foreignNetwork.address().getPort(),
+                        "DELETE", path, "",
+                        networkHeaders(otherToken, foreignDeleteKey, false)),
+                        403, "ACCESS_DENIED");
+            }
+            Map<String, String> noDelete = new HashMap<>(config());
+            String readOnlyToken = "read-only-finalization-token-0123456789-abcdefgh";
+            String deniedDeleteKey = "denied-delete-key-123456789";
+            noDelete.put(ReferenceDevIdentityConfig.BEARER_TOKEN, readOnlyToken);
+            noDelete.put(ReferenceDevIdentityConfig.PERMISSIONS,
+                    "meeting:create," + MeetingPermissions.STOP);
+            try (var readOnly = ReferenceMeetingHttpAssembly.start(noDelete, CLOCK);
+                 var readOnlyNetwork = readOnly.newJdkHttpServer(
+                         new InetSocketAddress("127.0.0.1", 0))) {
+                readOnlyNetwork.start();
+                assertNetworkError(exchange(readOnlyNetwork.address().getPort(),
+                        "DELETE", path, "",
+                        networkHeaders(readOnlyToken, deniedDeleteKey, false)),
+                        403, "PERMISSION_DENIED");
+            }
+            assertEquals(0, count("meeting_deletion_plan"));
+            String deleteKey = "finalization-delete-key-123456789";
+            // Worker 已用 NOW+2 更新会议；真实 HTTP 删除时间必须随生命周期向前。
+            httpClock.advanceTo(NOW.plusSeconds(3));
+            String deleted = exchange(port, "DELETE", path, "",
+                    networkHeaders(TOKEN, deleteKey, false));
+            assertEquals(202, status(deleted));
+            assertEquals(202, status(exchange(port, "DELETE", path, "",
+                    networkHeaders(TOKEN, deleteKey, false))));
+            assertEquals("DELETION_PENDING", meetingState(meetingId));
+            String pendingDeletion = exchange(port, "GET", path, "",
+                    networkHeaders(TOKEN, null, false));
+            assertEquals(200, status(pendingDeletion));
+            assertTrue(responseBody(pendingDeletion).contains(
+                    "\"manifestState\":\"DELETION_PENDING\""));
+            assertEquals(1, count("meeting_deletion_plan"));
+            assertEquals(1, count("meeting_deletion_plan WHERE target_count=1"));
+            assertEquals(2, count("meeting_manifest_revision"));
+            assertEquals(1, count("artifact"));
+            assertEquals(2, count("usage_operation"));
+            assertTrue(worker.runOnce().idle(), "deletion must not requeue finalization");
+            assertInstanceOf(MeetingManifestPort.AccessDenied.class,
+                    manifestQuery.get(new MeetingManifestPort.Request(meetingId, -1)));
+            assertTrue(network.shutdown(Duration.ofSeconds(3)).clean());
+            synchronized (logs) {
+                String text = logs.toString();
+                for (String secret : List.of(TOKEN, wrongStopToken, otherToken, readOnlyToken,
+                        createKey, clientSession, stopKey, noAuthStopKey, wrongAuthStopKey,
+                        shortStopKey, malformedStopKey, objectStopKey, prematureDeleteKey,
+                        foreignDeleteKey, deniedDeleteKey, deleteKey, input.inputBinding(),
+                        admitted.finalization().finalizationReceipt(), password(), url())) {
+                    assertFalse(text.contains(secret),
+                            "HTTP and Worker logs must not contain request secrets");
+                }
+            }
+        } finally {
+            root.removeHandler(capture);
+        }
+    }
+
     private int applicationConnections(String applicationName) throws Exception {
         try (Connection connection = admin();
              PreparedStatement statement = connection.prepareStatement(
@@ -766,6 +1114,32 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
             connection.rollback();
             return result;
         }
+    }
+
+    private static MeetingManifest manifest(DataSource source, String meetingId) throws Exception {
+        try (Connection connection = source.getConnection()) {
+            connection.setAutoCommit(false);
+            var result = new JdbcManifestFactStore(connection)
+                    .findLatest(meetingId).orElseThrow();
+            connection.rollback();
+            return result;
+        }
+    }
+
+    private static List<ArtifactReadyMetadataStore.ReadyMetadata> artifactMetadata(
+            DataSource source, String meetingId) throws Exception {
+        try (Connection connection = source.getConnection()) {
+            connection.setAutoCommit(false);
+            var result = new JdbcArtifactReadyMetadataStore(connection)
+                    .findByMeetingId(meetingId);
+            connection.rollback();
+            return result;
+        }
+    }
+
+    private static String sha256Bytes(byte[] content) throws Exception {
+        return "sha256:" + HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(content));
     }
 
     private static String exchange(int port, String method, String path, String body)
