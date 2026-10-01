@@ -13,9 +13,10 @@ import java.util.Objects;
 /**
  * 新认证会议命令的 opaque（不透明）幂等范围编码器。
  *
- * <p>{@code idempotency_record.subject_scope} 是既有数据库主键的一部分，V003
- * 不拆列。新命令因此把部署范围、稳定主体和操作范围编码成一个不可由调用方
- * 手工拼接的字符串。格式固定为：</p>
+ * <p>编码结果是持久化幂等事实的服务端 scope：旧版认证命令写入
+ * {@code idempotency_record.subject_scope}，完整 Create 写入 V013
+ * {@code meeting_create_fact.scope}。两者都把部署范围、稳定主体和操作范围
+ * 编码成不可由调用方手工拼接的字符串。格式固定为：</p>
  *
  * <pre>{@code
  * AIMS|1|<base64url长度>:<deployment><长度>:<subject><长度>:<operation>
@@ -33,6 +34,9 @@ import java.util.Objects;
 public final class IdempotencyScopeCodec {
     /** 新认证创建命令写入编码范围时使用的稳定操作名。 */
     public static final String MEETING_CREATE_OPERATION = "meeting.create.v1";
+
+    /** 完整 Create 请求/响应事实使用的独立操作名；不得与旧 Outcome 混写。 */
+    public static final String MEETING_CREATE_V2_OPERATION = "meeting.create.v2";
 
     /** 新认证停止命令写入编码范围时使用的稳定操作名。 */
     public static final String MEETING_STOP_OPERATION = "meeting.stop.v1";
@@ -53,7 +57,7 @@ public final class IdempotencyScopeCodec {
      * @param deploymentScope 服务端配置决定的稳定部署范围
      * @param subjectScope 身份 Provider 返回的稳定主体，不得使用 Token 或显示名
      * @param operationScope 由服务端代码冻结的版本化操作名
-     * @return 可直接作为 {@code idempotency_record.subject_scope} 的 opaque key
+     * @return 可作为对应版本持久化幂等 scope 的 opaque key
      */
     public static String encode(
             String deploymentScope,
@@ -72,6 +76,11 @@ public final class IdempotencyScopeCodec {
     /** 为新认证创建命令生成范围；旧兼容命令不得调用该方法后回写历史记录。 */
     public static String meetingCreate(String deploymentScope, String subjectScope) {
         return encode(deploymentScope, subjectScope, MEETING_CREATE_OPERATION);
+    }
+
+    /** 为完整 Create 事实生成服务端范围；与旧创建记录物理隔离。 */
+    public static String meetingCreateV2(String deploymentScope, String subjectScope) {
+        return encode(deploymentScope, subjectScope, MEETING_CREATE_V2_OPERATION);
     }
 
     /** 为新认证停止命令生成范围；归属校验必须发生在读取该范围的结果之前。 */

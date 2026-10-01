@@ -51,6 +51,11 @@ final class JdbcCreateMeetingFactStore implements CreateMeetingFactStore {
               FROM meeting_create_fact
              WHERE scope = ? AND idempotency_key = ?
             """;
+    private static final String PROBE_DIGEST_SQL = """
+            SELECT request_schema_version, request_digest, request_json
+              FROM meeting_create_fact
+             WHERE scope = ? AND idempotency_key = ?
+            """;
     private static final String INSERT_SQL = """
             INSERT INTO meeting_create_fact (
                 scope, idempotency_key,
@@ -66,6 +71,47 @@ final class JdbcCreateMeetingFactStore implements CreateMeetingFactStore {
     /** 绑定调用方当前连接；构造过程不访问数据库，也不接管连接生命周期。 */
     JdbcCreateMeetingFactStore(Connection connection) {
         this.connection = Objects.requireNonNull(connection, "connection");
+    }
+
+    /**
+     * 只读取并验证赢家请求侧事实，不读取或解码响应正文。
+     *
+     * <p>先严格解码规范请求 JSON 并重算摘要，避免合法形状的坏 digest 被误报
+     * 为幂等冲突；上层工作单元持有 scope/key 的事务锁后调用：真实异摘要
+     * 立即返回冲突，同摘要才进入 {@link #find(String, String)} 的响应校验。
+     * 该探针不承诺
+     * 单独完成并发串行化，也不修改事实。</p>
+     */
+    Optional<String> probeRequestDigest(String scope, String key) {
+        requireLookup(scope, key);
+        requireExplicitTransaction();
+        try {
+            pinSearchPath();
+            try (PreparedStatement statement = connection.prepareStatement(PROBE_DIGEST_SQL)) {
+                statement.setString(1, scope);
+                statement.setString(2, key);
+                try (ResultSet rows = statement.executeQuery()) {
+                    if (!rows.next()) {
+                        return Optional.empty();
+                    }
+                    int version = requiredInt(rows, "request_schema_version");
+                    String digest = requiredText(rows, "request_digest");
+                    String requestJson = requiredText(rows, "request_json");
+                    requireValidRequestFact(version, digest, requestJson, key);
+                    if (rows.next()) {
+                        throw corruptData();
+                    }
+                    return Optional.of(digest);
+                }
+            }
+        } catch (StoredFactException failure) {
+            logFailure("PROBE", failure.kind(), "N/A");
+            throw failure;
+        } catch (SQLException failure) {
+            throw sqlFailure("PROBE", failure);
+        } catch (RuntimeException failure) {
+            throw runtimeFailure("PROBE");
+        }
     }
 
     @Override
@@ -194,11 +240,8 @@ final class JdbcCreateMeetingFactStore implements CreateMeetingFactStore {
             requireStored(responseStatus == 201 && "SUCCESS".equals(responseType));
             requireStored(responseSha256 != null && responseSha256.length == 32);
 
-            CreateMeetingRequestFact request = CreateMeetingRequestFactJson.decode(requestJson);
-            requireStored(request.schemaVersion() == requestSchemaVersion);
-            requireStored(request.canonicalRequestDigest().equals(requestDigest));
-            requireStored(requestJson.equals(CreateMeetingRequestFactJson.encode(request)));
-            requireStored(request.requestSnapshot().idempotencyKey().equals(key));
+            CreateMeetingRequestFact request = requireValidRequestFact(
+                    requestSchemaVersion, requestDigest, requestJson, key);
 
             CreateMeetingResponseFact response = CreateMeetingResponseFactJson.decode(responseJson);
             requireStored(response.meetingId().equals(meetingId));
@@ -232,6 +275,25 @@ final class JdbcCreateMeetingFactStore implements CreateMeetingFactStore {
                 && record.request().canonicalRequestDigest()
                 .equals(candidate.request().canonicalRequestDigest())
                 && record.response().meetingId().equals(candidate.response().meetingId());
+    }
+
+    /** 请求侧的完整规范校验供摘要探针和全行读取共用；绝不接触响应正文。 */
+    private static CreateMeetingRequestFact requireValidRequestFact(
+            int schemaVersion, String digest, String requestJson, String key) {
+        try {
+            requireStored(schemaVersion == CreateMeetingRequestFactJson.SCHEMA_VERSION);
+            requireStored(digest.matches("[0-9a-f]{64}"));
+            CreateMeetingRequestFact request = CreateMeetingRequestFactJson.decode(requestJson);
+            requireStored(request.schemaVersion() == schemaVersion);
+            requireStored(request.canonicalRequestDigest().equals(digest));
+            requireStored(requestJson.equals(CreateMeetingRequestFactJson.encode(request)));
+            requireStored(request.requestSnapshot().idempotencyKey().equals(key));
+            return request;
+        } catch (StoredFactException failure) {
+            throw failure;
+        } catch (RuntimeException failure) {
+            throw corruptData();
+        }
     }
 
     private void pinSearchPath() throws SQLException {

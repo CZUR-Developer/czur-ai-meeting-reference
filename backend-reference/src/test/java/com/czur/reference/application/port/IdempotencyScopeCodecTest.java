@@ -34,6 +34,8 @@ class IdempotencyScopeCodecTest {
         String baseline = IdempotencyScopeCodec.meetingCreate("deployment-a", "subject-a");
         String stop = IdempotencyScopeCodec.meetingStop("deployment-a", "subject-a");
         String delete = IdempotencyScopeCodec.meetingDelete("deployment-a", "subject-a");
+        String completeCreate = IdempotencyScopeCodec.meetingCreateV2(
+                "deployment-a", "subject-a");
 
         assertNotEquals(baseline,
                 IdempotencyScopeCodec.meetingCreate("deployment-b", "subject-a"));
@@ -41,11 +43,16 @@ class IdempotencyScopeCodecTest {
                 IdempotencyScopeCodec.meetingCreate("deployment-a", "subject-b"));
         assertNotEquals(baseline, stop);
         assertNotEquals(baseline, delete);
+        assertNotEquals(baseline, completeCreate);
         assertNotEquals(stop, delete);
         assertEquals(new IdempotencyScopeCodec.Components(
                         "deployment-a", "subject-a",
                         IdempotencyScopeCodec.MEETING_DELETE_OPERATION),
                 IdempotencyScopeCodec.decode(delete));
+        assertEquals(new IdempotencyScopeCodec.Components(
+                        "deployment-a", "subject-a",
+                        IdempotencyScopeCodec.MEETING_CREATE_V2_OPERATION),
+                IdempotencyScopeCodec.decode(completeCreate));
     }
 
     @Test
@@ -72,6 +79,7 @@ class IdempotencyScopeCodecTest {
         String invalidSubjectTwo = "private-subject-\uDC01";
         List<BiFunction<String, String, String>> commandScopes = List.of(
                 IdempotencyScopeCodec::meetingCreate,
+                IdempotencyScopeCodec::meetingCreateV2,
                 IdempotencyScopeCodec::meetingStop,
                 IdempotencyScopeCodec::meetingDelete);
 
