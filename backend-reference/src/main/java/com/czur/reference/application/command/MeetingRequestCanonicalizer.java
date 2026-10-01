@@ -36,12 +36,16 @@ public final class MeetingRequestCanonicalizer {
     /** 首版停止意图编码版本。改变字段或编码方式时必须递增。 */
     public static final int STOP_SCHEMA_VERSION = 1;
 
+    /** 首版删除意图编码版本。改变字段或编码方式时必须递增。 */
+    public static final int DELETE_SCHEMA_VERSION = 1;
+
     /** 完整 Create 请求快照的独立编码版本；不改变旧 CreateIntent 摘要。 */
     public static final int CREATE_SNAPSHOT_SCHEMA_VERSION = 1;
 
     private static final String DOMAIN = "czur.ai-meeting.request";
     private static final String CREATE_OPERATION = "meeting.create";
     private static final String STOP_OPERATION = "meeting.stop";
+    private static final String DELETE_OPERATION = "meeting.delete";
 
     private MeetingRequestCanonicalizer() {
     }
@@ -136,6 +140,23 @@ public final class MeetingRequestCanonicalizer {
             writeText(output, STOP_OPERATION);
             output.writeInt(STOP_SCHEMA_VERSION);
             writeText(output, intent.meetingId());
+        }));
+    }
+
+    /**
+     * 计算删除业务意图摘要：版本化 domain、operation 和 meetingId。
+     *
+     * <p>幂等键只用于定位记录；主体、部署和权限属于可信服务端上下文，均不进入
+     * 意图摘要。输入按严格 UTF-8 长度前缀编码，摘要为 64 位小写 SHA-256。
+     * 同一会议的不同幂等键产生同一摘要，不同会议产生不同摘要。</p>
+     */
+    public static String deleteDigest(String meetingId) {
+        com.czur.reference.domain.meeting.MeetingIdPolicy.requireValid(meetingId);
+        return sha256(encode(output -> {
+            writeText(output, DOMAIN);
+            writeText(output, DELETE_OPERATION);
+            output.writeInt(DELETE_SCHEMA_VERSION);
+            writeText(output, meetingId);
         }));
     }
 

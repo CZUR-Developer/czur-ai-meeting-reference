@@ -367,6 +367,9 @@ public final class HttpErrorMapper {
                         == CreateMeetingHttpRequestDecoder.DecodeFailure.Kind.AUTHENTICATION) {
             return missingContext();
         }
+        if (failure instanceof ReferenceMeetingHttpRequestDecoder.AuthenticationFailure) {
+            return missingContext();
+        }
         if (failure instanceof IdempotencyConflictException) {
             return error(409, HttpErrorEnvelope.Domain.CONTRACT, "IDEMPOTENCY_CONFLICT", false,
                     HttpErrorEnvelope.UserAction.NONE, "ai_meeting.contract.idempotency_conflict");
