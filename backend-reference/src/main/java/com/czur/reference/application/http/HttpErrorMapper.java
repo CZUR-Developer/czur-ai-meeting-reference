@@ -328,6 +328,17 @@ public final class HttpErrorMapper {
         };
     }
 
+    /**
+     * 已验证用户的读取/删除入口使用与 Stop 一致的稳定身份错误映射。
+     *
+     * <p>只读取 Provider 的枚举错误码，不接收 Token、远端错误正文或异常消息。
+     * 缺失/畸形 Bearer 由调用方使用 {@link #missingContext()}。</p>
+     */
+    public HttpResponse identityVerificationFailure(
+            com.czur.reference.application.port.identity.IdentityProviderError error) {
+        return identityFailure(Objects.requireNonNull(error, "error").code());
+    }
+
     private HttpResponse stopFailure(OwnedMeetingStopUnitOfWork.ErrorCode code) {
         return switch (code) {
             case MEETING_NOT_FOUND -> error(404, HttpErrorEnvelope.Domain.SESSION,
