@@ -7,7 +7,6 @@ import com.czur.reference.application.port.RealtimeCredentialVerifier;
 import com.czur.reference.application.realtime.RealtimeAccessPolicy;
 import com.czur.reference.domain.meeting.MeetingOwnership;
 import com.czur.reference.domain.meeting.MeetingState;
-import com.czur.reference.protocol.json.RealtimeTokenGrantJson;
 
 import javax.sql.DataSource;
 import java.nio.charset.StandardCharsets;
@@ -54,7 +53,8 @@ public final class JdbcRealtimeCredentialVerifier implements RealtimeCredentialV
              WHERE meeting_id = ?
             """;
     private static final String ACTIVE_GRANTS_SQL = """
-            SELECT grant_json, grant_sha256, token_sha256, issued_at, expires_at
+            SELECT idempotency_key, grant_json, grant_sha256, token_sha256,
+                   issued_at, expires_at
               FROM meeting_realtime_token_grant
              WHERE meeting_id = ? AND expires_at > ?
              ORDER BY issued_at, idempotency_key
@@ -101,6 +101,8 @@ public final class JdbcRealtimeCredentialVerifier implements RealtimeCredentialV
             LOGGER.log(Level.WARNING, "实时凭据核验存储故障 sqlState={0}", failure.getSQLState());
             return new Unavailable(true);
         } catch (InvalidFact failure) {
+            return factInconsistent();
+        } catch (JdbcRealtimeTokenGrantFact.CorruptFact failure) {
             return factInconsistent();
         } catch (RuntimeException failure) {
             // 已通过参数校验的同步读取中出现异常，不能回退到缓存或猜测状态。
@@ -209,24 +211,8 @@ public final class JdbcRealtimeCredentialVerifier implements RealtimeCredentialV
             statement.setTimestamp(2, Timestamp.from(now));
             try (ResultSet rows = statement.executeQuery()) {
                 while (rows.next()) {
-                    String json = rows.getString("grant_json");
-                    byte[] jsonDigest = rows.getBytes("grant_sha256");
-                    byte[] tokenDigest = rows.getBytes("token_sha256");
-                    Timestamp issued = rows.getTimestamp("issued_at");
-                    Timestamp expires = rows.getTimestamp("expires_at");
-                    requireFact(json != null && jsonDigest != null && jsonDigest.length == 32
-                            && tokenDigest != null && tokenDigest.length == 32
-                            && issued != null && expires != null
-                            && issued.toInstant().isBefore(expires.toInstant()));
-                    var grant = decodeGrant(json);
-                    requireFact(meetingId.equals(grant.meetingId())
-                            && meetingId.equals(grant.streamId())
-                            && expires.toInstant().equals(grant.expiresAt())
-                            && MessageDigest.isEqual(jsonDigest,
-                                    sha256(json.getBytes(StandardCharsets.UTF_8)))
-                            && MessageDigest.isEqual(tokenDigest,
-                                    sha256(grant.sessionToken().getBytes(StandardCharsets.UTF_8))));
-                    if (MessageDigest.isEqual(requestedDigest, tokenDigest)) {
+                    var grant = JdbcRealtimeTokenGrantFact.read(rows, meetingId, null);
+                    if (grant.matchesTokenDigest(requestedDigest)) {
                         // V014 的唯一约束无法覆盖 V013 首次 Token；两个不同的
                         // Grant 若声称同一凭据，不能任意选择较晚期限。
                         requireFact(matchedExpiry == null);
@@ -236,15 +222,6 @@ public final class JdbcRealtimeCredentialVerifier implements RealtimeCredentialV
             }
         }
         return matchedExpiry;
-    }
-
-    private static com.czur.reference.application.port.RenewRealtimeTokenUnitOfWork.Grant
-            decodeGrant(String json) {
-        try {
-            return RealtimeTokenGrantJson.decode(json);
-        } catch (RuntimeException malformed) {
-            throw new InvalidFact();
-        }
     }
 
     private static MeetingState parseState(String value) {
