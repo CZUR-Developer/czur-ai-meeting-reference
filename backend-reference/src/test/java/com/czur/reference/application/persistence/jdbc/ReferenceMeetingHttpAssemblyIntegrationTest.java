@@ -3,12 +3,14 @@ package com.czur.reference.application.persistence.jdbc;
 import com.czur.reference.application.bootstrap.ReferenceMeetingDeploymentConfig;
 import com.czur.reference.application.bootstrap.ReferenceMeetingJdkHttpService;
 import com.czur.reference.application.bootstrap.ReferenceMeetingHttpAssembly;
+import com.czur.reference.application.finalization.FinalizationExecutionFact;
 import com.czur.reference.application.http.AuthenticatedMeetingHttpContextResolver;
 import com.czur.reference.application.http.HttpRequest;
 import com.czur.reference.application.http.MeetingJdkHttpServer;
 import com.czur.reference.application.command.MeetingPermissions;
 import com.czur.reference.application.port.OwnedMeetingCreationUnitOfWork;
 import com.czur.reference.application.port.MeetingStartExecutionUnitOfWork;
+import com.czur.reference.application.port.CreateMeetingFactStore;
 import com.czur.reference.application.port.entitlement.AuthorizedProfileSnapshot;
 import com.czur.reference.application.port.entitlement.MeetingGrant;
 import com.czur.reference.application.port.entitlement.UsageEstimate;
@@ -20,6 +22,10 @@ import com.czur.reference.domain.meeting.MeetingState;
 import com.czur.reference.domain.meeting.MeetingAggregate;
 import com.czur.reference.domain.meeting.MeetingEvent;
 import com.czur.reference.domain.capability.CapabilityPlanner;
+import com.czur.reference.domain.capability.CapabilityDecision;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariDataSource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -27,6 +33,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.postgresql.ds.PGSimpleDataSource;
 
+import javax.sql.DataSource;
 import java.nio.charset.StandardCharsets;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -37,6 +44,7 @@ import java.net.SocketTimeoutException;
 import java.net.ServerSocket;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
@@ -55,6 +63,10 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.Handler;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
+import java.util.logging.SimpleFormatter;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -65,6 +77,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /** 每个用例使用独立 schema；测试命令须注入一次性 PostgreSQL 16 实例。 */
 @EnabledIfEnvironmentVariable(named = "REFERENCE_TEST_DATABASE_URL", matches = ".+")
 class ReferenceMeetingHttpAssemblyIntegrationTest {
+    private static final ObjectMapper ERROR_JSON = new ObjectMapper();
     private static final Instant NOW = Instant.parse("2026-10-01T10:00:00Z");
     private static final Clock CLOCK = Clock.fixed(NOW, ZoneOffset.UTC);
     private static final String TOKEN = "local-test-token-0123456789-abcdefgh";
@@ -441,6 +454,206 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
         assertEquals(0, count("meeting_create_fact"));
     }
 
+    @Test
+    @EnabledIfEnvironmentVariable(named = "T15_HEALTH_GATE_CONTAINER_ID", matches = "[0-9a-f]{64}")
+    void realHttpCreateAndTrustedV2StartPreserveAsrOnlyFacts() throws Exception {
+        String applicationName = "t15_create_http_" + schema;
+        Map<String, String> settings = config();
+        settings.put(DatabaseRuntimeConfig.DATABASE_URL,
+                scopedUrl() + "&ApplicationName=" + applicationName);
+        int candidatePort;
+        try (ServerSocket reserved = new ServerSocket(0, 1,
+                InetAddress.getByName("127.0.0.1"))) {
+            candidatePort = reserved.getLocalPort();
+        }
+        assertThrows(DatabaseStartupException.class,
+                () -> ReferenceMeetingJdkHttpService.start(settings, CLOCK,
+                        new InetSocketAddress("127.0.0.1", candidatePort)));
+        awaitNoApplicationConnections(applicationName);
+        try (ServerSocket rebound = new ServerSocket()) {
+            rebound.setReuseAddress(true);
+            rebound.bind(new InetSocketAddress("127.0.0.1", candidatePort));
+        }
+
+        migrate(13);
+        try (var disabled = ReferenceMeetingHttpAssembly.start(settings, CLOCK);
+             var network = disabled.newJdkHttpServer(
+                     new InetSocketAddress("127.0.0.1", 0))) {
+            network.start();
+            assertNetworkError(exchange(network.address().getPort(), "POST",
+                    "/v1/meetings", "not JSON", ""), 501, "ROUTE_NOT_IMPLEMENTED");
+            assertEquals(0, count("meeting"));
+            assertEquals(0, count("meeting_create_fact"));
+            assertEquals(0, count("usage_reservation"));
+            assertEquals(0, count("workflow_step"));
+        }
+        awaitNoApplicationConnections(applicationName);
+
+        Map<String, String> enabled = new HashMap<>(settings);
+        enabled.put(ReferenceMeetingDeploymentConfig.CREATE_ENABLED, "true");
+        var trusted = ReferenceMeetingDeploymentConfig.fromEnvironment(enabled);
+        String key = "network-create-key-123456789";
+        String clientSession = "client-session-secret-sentinel";
+        StringBuilder logs = new StringBuilder();
+        SimpleFormatter formatter = new SimpleFormatter();
+        Handler capture = new Handler() {
+            @Override public void publish(LogRecord record) {
+                synchronized (logs) {
+                    logs.append(formatter.formatMessage(record)).append('\n');
+                }
+            }
+            @Override public void flush() { }
+            @Override public void close() { }
+        };
+        Logger root = Logger.getLogger("");
+        root.addHandler(capture);
+        try (var assembly = ReferenceMeetingHttpAssembly.start(enabled, CLOCK);
+             var network = assembly.newJdkHttpServer(
+                     new InetSocketAddress("127.0.0.1", 0))) {
+            network.start();
+            int port = network.address().getPort();
+            String missingAuth = exchange(port, "POST", "/v1/meetings",
+                    createRequest(key, clientSession).body(), "Content-Type: application/json\r\n"
+                            + "Idempotency-Key: " + key + "\r\n");
+            assertNetworkError(missingAuth, 401, "AUTHENTICATION_REQUIRED");
+            String invalidToken = "invalid-token-0123456789-abcdefgh";
+            String rejectedToken = exchange(port, "POST", "/v1/meetings",
+                    createRequest(key, clientSession).body(),
+                    networkHeaders(invalidToken, key, true));
+            assertNetworkError(rejectedToken, 401, "AUTHENTICATION_FAILED");
+            String badJson = exchange(port, "POST", "/v1/meetings", "not JSON",
+                    networkHeaders(TOKEN, "bad-json-key-123456789", true));
+            assertNetworkError(badJson, 400, "INVALID_REQUEST");
+            assertEquals(0, count("meeting"));
+
+            String first = exchange(port, "POST", "/v1/meetings",
+                    createRequest(key, clientSession).body(), networkHeaders(TOKEN, key, true));
+            assertEquals(201, status(first));
+            assertTrue(responseBody(first).contains("\"state\":\"CREATED\""));
+            String meetingId = createdMeetingId(assembly.databaseRuntime().dataSource(), key);
+            assertTrue(responseBody(first).contains("\"meetingId\":\"" + meetingId + "\""));
+            String replay = exchange(port, "POST", "/v1/meetings",
+                    createRequest(key, clientSession).body(), networkHeaders(TOKEN, key, true));
+            assertEquals(201, status(replay));
+            assertTrue(MessageDigest.isEqual(
+                    responseBody(first).getBytes(StandardCharsets.UTF_8),
+                    responseBody(replay).getBytes(StandardCharsets.UTF_8)),
+                    "same-key Create replay must preserve public response bytes");
+            String conflictingCreate = exchange(port, "POST", "/v1/meetings",
+                    createRequest(key, "different-session").body(),
+                    networkHeaders(TOKEN, key, true));
+            assertNetworkError(conflictingCreate, 409, "IDEMPOTENCY_CONFLICT");
+            assertEquals(1, count("meeting"));
+            assertEquals(1, count("meeting_create_fact"));
+            assertEquals(1, count("usage_reservation"));
+            assertEquals(1, count("usage_operation"));
+
+            String path = "/v1/meetings/" + meetingId;
+            String rejectedStop = exchange(port, "POST", path + ":stop", "",
+                    networkHeaders(TOKEN, "direct-stop-key-123456789", false));
+            assertNetworkError(rejectedStop, 409, "INVALID_MEETING_STATE");
+            assertEquals("CREATED", meetingState(meetingId));
+            assertEquals(0, count("finalization_execution_fact"));
+            assertEquals(0, count("workflow_step"));
+            assertEquals(200, status(exchange(port, "GET", path, "",
+                    networkHeaders(TOKEN, null, false))));
+            String ownerList = exchange(port, "GET", "/v1/meetings", "",
+                    networkHeaders(TOKEN, null, false));
+            assertEquals(200, status(ownerList));
+            assertTrue(responseBody(ownerList).contains(meetingId));
+
+            CreateMeetingFactStore.Record createFact = createFact(
+                    assembly.databaseRuntime().dataSource(), meetingId);
+            assertEquals(Set.of("transcript.realtime"),
+                    createFact.request().requestSnapshot().requestedCapabilities());
+            assertEquals(Set.of("transcript.realtime"),
+                    createFact.response().grantedCapabilities());
+            assertEquals(1, createFact.response().capabilityDecisions().size());
+            CapabilityDecision decision = createFact.response().capabilityDecisions().getFirst();
+            assertEquals("transcript.realtime", decision.capability());
+            assertEquals(CapabilityDecision.Action.ENABLE, decision.action());
+            assertEquals(List.of("mock.transcript"), decision.affectedWorkflows());
+            assertEquals(List.of("transcript.final"), decision.producedArtifacts());
+
+            var started = assertInstanceOf(MeetingStartExecutionUnitOfWork.Success.class,
+                    new JdbcMeetingStartExecutionUnitOfWork(
+                            assembly.databaseRuntime().dataSource(), new CapabilityPlanner())
+                            .startCompleteCreate(new MeetingStartExecutionUnitOfWork.StartRequest(
+                                    SCOPE, SUBJECT, meetingId, NOW, null, trusted.profile(),
+                                    Set.of("transcript.realtime"), trusted.mockCapabilities(),
+                                    trusted.capabilityLimits())));
+            assertEquals(MeetingStartExecutionUnitOfWork.SuccessCode.STARTED, started.code());
+            assertEquals(MeetingState.STARTING, started.meeting().state());
+            FinalizationExecutionFact execution = executionFact(
+                    assembly.databaseRuntime().dataSource(), meetingId);
+            assertEquals(1, count("finalization_execution_fact"));
+            assertEquals(createFact.response().capabilityDecisions(),
+                    execution.capabilityPlan().decisions());
+            assertEquals(List.of("mock.transcript"),
+                    execution.capabilityPlan().decisions().getFirst().affectedWorkflows());
+            assertEquals(List.of("transcript.final"),
+                    execution.capabilityPlan().decisions().getFirst().producedArtifacts());
+
+            Map<String, String> other = new HashMap<>(settings);
+            String otherToken = "other-subject-token-0123456789-abcdefgh";
+            other.put(ReferenceDevIdentityConfig.BEARER_TOKEN, otherToken);
+            other.put(ReferenceDevIdentityConfig.SUBJECT_SCOPE, "other-subject");
+            try (var foreign = ReferenceMeetingHttpAssembly.start(other, CLOCK);
+                 var foreignNetwork = foreign.newJdkHttpServer(
+                         new InetSocketAddress("127.0.0.1", 0))) {
+                foreignNetwork.start();
+                int foreignPort = foreignNetwork.address().getPort();
+                assertNetworkError(exchange(foreignPort, "GET", path, "",
+                        networkHeaders(otherToken, null, false)), 403, "ACCESS_DENIED");
+                String foreignList = exchange(foreignPort, "GET", "/v1/meetings", "",
+                        networkHeaders(otherToken, null, false));
+                assertEquals(200, status(foreignList));
+                assertFalse(responseBody(foreignList).contains(meetingId));
+            }
+            Map<String, String> noDelete = new HashMap<>(settings);
+            String readOnlyToken = "read-only-token-0123456789-abcdefgh";
+            noDelete.put(ReferenceDevIdentityConfig.BEARER_TOKEN, readOnlyToken);
+            noDelete.put(ReferenceDevIdentityConfig.PERMISSIONS,
+                    "meeting:create," + MeetingPermissions.STOP);
+            try (var readOnly = ReferenceMeetingHttpAssembly.start(noDelete, CLOCK);
+                 var readOnlyNetwork = readOnly.newJdkHttpServer(
+                         new InetSocketAddress("127.0.0.1", 0))) {
+                readOnlyNetwork.start();
+                assertNetworkError(exchange(readOnlyNetwork.address().getPort(),
+                        "DELETE", path, "",
+                        networkHeaders(readOnlyToken, "delete-denied-key-123456789", false)),
+                        403, "PERMISSION_DENIED");
+            }
+            assertEquals(0, count("meeting_deletion_plan"));
+            assertEquals("STARTING", meetingState(meetingId));
+            String invalidPath = exchange(port, "GET", path + "/unexpected", "",
+                    networkHeaders(TOKEN, null, false));
+            assertNetworkError(invalidPath, 404, "ROUTE_NOT_FOUND");
+            for (String response : List.of(missingAuth, rejectedToken, badJson,
+                    conflictingCreate, rejectedStop, invalidPath)) {
+                assertFalse(response.contains(TOKEN));
+                assertFalse(response.contains(invalidToken));
+                assertFalse(response.contains(password()));
+                assertFalse(response.contains(url()));
+            }
+            synchronized (logs) {
+                String text = logs.toString();
+                assertFalse(text.contains(TOKEN));
+                assertFalse(text.contains(invalidToken));
+                assertFalse(text.contains(otherToken));
+                assertFalse(text.contains(readOnlyToken));
+                assertFalse(text.contains(password()));
+                assertFalse(text.contains(url()));
+                assertFalse(text.contains(key));
+                assertFalse(text.contains(clientSession));
+            }
+            assertTrue(network.shutdown(Duration.ofSeconds(3)).clean());
+        } finally {
+            root.removeHandler(capture);
+        }
+        awaitNoApplicationConnections(applicationName);
+    }
+
     private int applicationConnections(String applicationName) throws Exception {
         try (Connection connection = admin();
              PreparedStatement statement = connection.prepareStatement(
@@ -462,11 +675,111 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
                 "failed start or clean stop must leave no JDBC pool connection");
     }
 
+    private static String networkHeaders(String token, String key, boolean json) {
+        StringBuilder result = new StringBuilder("Authorization: Bearer ").append(token)
+                .append("\r\n");
+        if (key != null) {
+            result.append("Idempotency-Key: ").append(key).append("\r\n");
+        }
+        if (json) {
+            result.append("Content-Type: application/json\r\n");
+        }
+        return result.toString();
+    }
+
+    private static String responseBody(String response) {
+        int boundary = response.indexOf("\r\n\r\n");
+        assertTrue(boundary >= 0, "HTTP response must contain a header/body boundary");
+        return response.substring(boundary + 4);
+    }
+
+    private static void assertNetworkError(String response, int expectedStatus,
+                                           String expectedCode) {
+        assertEquals(expectedStatus, status(response));
+        JsonNode root;
+        try {
+            root = ERROR_JSON.readTree(responseBody(response));
+        } catch (JsonProcessingException invalid) {
+            throw new AssertionError("HTTP error body must be JSON");
+        }
+        assertTrue(root != null && root.isObject(), "HTTP error root must be an object");
+        assertEquals(2, root.size(), "HTTP error root must have two fields");
+        assertTrue("0.1".equals(root.path("specVersion").textValue()),
+                "HTTP error specVersion must be stable");
+        JsonNode error = root.path("error");
+        assertTrue(error.isObject(), "HTTP error payload must be an object");
+        assertEquals(8, error.size(), "HTTP error payload must have eight fields");
+        for (String field : List.of("domain", "code", "severity", "retryable",
+                "retryAfterMs", "userAction", "messageKey", "diagnosticId")) {
+            assertTrue(error.has(field), "HTTP error payload lacks a required field");
+        }
+        assertTrue(expectedCode.equals(error.path("code").textValue()),
+                "HTTP error code must be stable");
+        assertTrue(error.path("domain").isTextual(), "HTTP error domain must be text");
+        assertTrue("FATAL".equals(error.path("severity").textValue()),
+                "HTTP error severity must be stable");
+        assertTrue(error.path("retryable").isBoolean(),
+                "HTTP error retryable must be boolean");
+        assertFalse(error.path("retryable").booleanValue(),
+                "these HTTP request errors must not be retryable");
+        assertTrue(error.path("retryAfterMs").isNull(),
+                "non-retryable HTTP error must have null retryAfterMs");
+        assertTrue(error.path("userAction").isTextual(),
+                "HTTP error userAction must be text");
+        assertTrue(error.path("messageKey").isTextual(),
+                "HTTP error messageKey must be text");
+        assertTrue(error.path("diagnosticId").isTextual(),
+                "HTTP error diagnosticId must be text");
+    }
+
+    private static String createdMeetingId(DataSource source, String key) throws Exception {
+        try (Connection connection = source.getConnection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "SELECT meeting_id FROM meeting_create_fact WHERE idempotency_key=?")) {
+            statement.setString(1, key);
+            try (var rows = statement.executeQuery()) {
+                assertTrue(rows.next());
+                String meetingId = rows.getString(1);
+                assertFalse(rows.next());
+                return meetingId;
+            }
+        }
+    }
+
+    private static CreateMeetingFactStore.Record createFact(DataSource source, String meetingId)
+            throws Exception {
+        try (Connection connection = source.getConnection()) {
+            connection.setAutoCommit(false);
+            var result = new JdbcCreateMeetingFactStore(connection)
+                    .findByMeetingId(meetingId).orElseThrow();
+            connection.rollback();
+            return result;
+        }
+    }
+
+    private static FinalizationExecutionFact executionFact(DataSource source, String meetingId)
+            throws Exception {
+        try (Connection connection = source.getConnection()) {
+            connection.setAutoCommit(false);
+            var result = new JdbcFinalizationExecutionFactStore(connection)
+                    .find(meetingId).orElseThrow();
+            connection.rollback();
+            return result;
+        }
+    }
+
     private static String exchange(int port, String method, String path, String body)
+            throws Exception {
+        return exchange(port, method, path, body, "");
+    }
+
+    private static String exchange(
+            int port, String method, String path, String body, String extraHeaders)
             throws Exception {
         byte[] content = body.getBytes(StandardCharsets.UTF_8);
         String head = method + " " + path + " HTTP/1.1\r\nHost: localhost\r\n"
-                + "Content-Length: " + content.length + "\r\nConnection: close\r\n\r\n";
+                + extraHeaders + "Content-Length: " + content.length
+                + "\r\nConnection: close\r\n\r\n";
         try (Socket socket = new Socket()) {
             socket.connect(new InetSocketAddress("127.0.0.1", port), 3_000);
             socket.setSoTimeout(10_000);
