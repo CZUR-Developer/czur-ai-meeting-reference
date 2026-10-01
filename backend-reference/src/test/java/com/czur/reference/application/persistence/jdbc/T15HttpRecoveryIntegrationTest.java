@@ -3,6 +3,7 @@ package com.czur.reference.application.persistence.jdbc;
 import com.czur.reference.application.artifact.filesystem.PersistentFileSystemMockArtifactStore;
 import com.czur.reference.application.bootstrap.ReferenceMeetingDeploymentConfig;
 import com.czur.reference.application.bootstrap.ReferenceMeetingHttpAssembly;
+import com.czur.reference.application.deletion.MeetingDeletionPlan;
 import com.czur.reference.application.entitlement.referencedev.ReferenceDevEntitlementPolicy;
 import com.czur.reference.application.finalization.DeterministicMockFinalizationPlanner;
 import com.czur.reference.application.finalization.FinalizationCheckpoint;
@@ -31,6 +32,8 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.ZoneOffset;
@@ -41,7 +44,9 @@ import java.util.UUID;
 import static com.czur.reference.application.persistence.jdbc.T15HttpRecoveryFixtures.*;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -192,6 +197,134 @@ class T15HttpRecoveryIntegrationTest {
         writeState(state);
     }
 
+    @Test
+    @EnabledIfEnvironmentVariable(named = "T15_HTTP_RECOVERY_STAGE", matches = "B")
+    void phaseBReopensArtifactAndReplaysAfterDatabaseRestart() throws Exception {
+        State previous = readState();
+        assertNotEquals(previous.phasePid(), ProcessHandle.current().pid(),
+                "B must execute in a different JVM");
+        assertFalse(ProcessHandle.of(previous.phasePid()).map(ProcessHandle::isAlive)
+                        .orElse(false), "A JVM must exit before B starts");
+        assertTrue(Files.isDirectory(artifactRoot()));
+        var artifacts = new PersistentFileSystemMockArtifactStore(artifactRoot(), 4096);
+        Clock resumedClock = Clock.fixed(NOW.plusSeconds(3), ZoneOffset.UTC);
+        try (var assembly = ReferenceMeetingHttpAssembly.start(config(), resumedClock);
+             var network = assembly.newJdkHttpServer(new InetSocketAddress("127.0.0.1", 0))) {
+            network.start();
+            int port = network.address().getPort();
+            DataSource source = assembly.databaseRuntime().dataSource();
+            assertTrue(postmasterStart(source).isAfter(previous.postmasterStart()),
+                    "PostgreSQL postmaster must restart on the retained volume");
+            assertEquals(previous.meetingId(), createdMeetingId(source));
+
+            // 首个业务操作是新 Store 对 A 的 READY binding 做物理读回；不得先重跑 Worker/DELETE。
+            var metadata = artifactMetadata(source, previous.meetingId());
+            assertEquals(1, metadata.size());
+            var descriptor = metadata.getFirst().artifact();
+            assertEquals(previous.artifactId(), descriptor.intent().spec().artifactId());
+            assertEquals(previous.artifactSize(), descriptor.content().size());
+            assertEquals(previous.artifactSha256(), descriptor.content().checksum());
+            byte[] physical;
+            try (ArtifactStore.ReadHandle read = artifacts.openRead(
+                    descriptor.intent().binding())) {
+                physical = read.content().readAllBytes();
+                assertEquals(descriptor, read.artifact());
+            }
+            assertEquals(previous.artifactSize(), physical.length);
+            assertEquals(previous.artifactSha256(), sha256(physical));
+
+            var found = assertInstanceOf(MeetingManifestPort.Found.class,
+                    new JdbcMeetingManifestQueryPort(source,
+                            new ManifestResultAccessPolicy(resumedClock, Duration.ofMinutes(1)))
+                            .get(new MeetingManifestPort.Request(previous.meetingId(), -1)));
+            var manifest = found.manifest();
+            assertEquals(ManifestStatus.READY, manifest.status());
+            assertEquals(1, manifest.artifacts().size());
+            assertEquals(previous.artifactId(), manifest.artifacts().getFirst().artifactId());
+            assertEquals(previous.artifactSize(), manifest.artifacts().getFirst().size());
+            assertEquals(previous.artifactSha256(), manifest.artifacts().getFirst().checksum());
+            assertEquals("transcript.final", manifest.artifacts().getFirst().type());
+
+            String path = "/v1/meetings/" + previous.meetingId();
+            var replay = exchange(port, "POST", "/v1/meetings", createBody(),
+                    authorization(CREATE_KEY, true));
+            assertEquals(201, replay.status());
+            assertEquals(previous.createLength(), replay.bodyBytes().length);
+            assertEquals(previous.createSha256(), sha256(replay.bodyBytes()));
+            assertEquals(1, count(source, "meeting_create_fact"));
+            assertEquals(1, count(source, "usage_reservation"));
+            assertEquals(2, count(source, "usage_operation"));
+
+            var execution = executionFact(source, previous.meetingId());
+            var workflow = finalizationWorkflow(source, previous.meetingId());
+            assertEquals(WorkflowStep.Status.COMPLETED, workflow.status());
+            var checkpoint = FinalizationCheckpointJson.decode(workflow.canonicalPayload());
+            assertEquals(FinalizationExecutionFactJson.sha256(execution),
+                    checkpoint.executionFactDigest());
+            assertEquals(1, checkpoint.artifacts().size());
+            assertArrayEquals(checkpoint.artifacts().getFirst().canonicalContentBytes(), physical);
+            assertEquals(1, count(source, "workflow_step"));
+            assertEquals(1, count(source, "durable_input_fact"));
+            assertEquals(1, count(source, "final_usage_fact"));
+            assertEquals(1, count(source, "artifact"));
+            assertEquals(1, count(source, "meeting_manifest_revision"));
+            String receipt = finalizationReceipt(source, previous.meetingId());
+            assertEquals(previous.receiptSha256(), sha256(receipt));
+
+            var publicManifest = exchange(port, "GET", path + "/manifest?genTime=-1", "", "");
+            assertEquals(200, publicManifest.status());
+            assertEquals(MeetingManifestJson.encode(manifest), publicManifest.body());
+            var meeting = exchange(port, "GET", path, "", authorization(null, false));
+            assertEquals(200, meeting.status());
+            assertTrue(meeting.body().contains(receipt));
+            var stopReplay = exchange(port, "POST", path + ":stop", "",
+                    authorization(STOP_KEY, false));
+            assertEquals(200, stopReplay.status());
+            assertTrue(stopReplay.body().contains(receipt));
+
+            var entitlement = new JdbcReferenceDevEntitlementProvider(source,
+                    new ReferenceDevEntitlementPolicy(
+                            ReferenceMeetingDeploymentConfig.fromEnvironment(config())
+                                    .entitlement(), resumedClock, new EntitlementIdGenerator() {
+                                @Override public String newGrantId() { return "grant_" + UUID.randomUUID(); }
+                                @Override public String newReservationId() {
+                                    return "reservation_" + UUID.randomUUID();
+                                }
+                                @Override public String newLeaseToken() {
+                                    return "lease_" + UUID.randomUUID();
+                                }
+                            }), resumedClock);
+            var worker = new MockFinalizationWorker(new JdbcWorkflowStepStore(source), artifacts,
+                    entitlement, new JdbcFinalizationCompletionUnitOfWork(source),
+                    new MockFinalizationWorker.Config("t15-http-recovery-b", resumedClock,
+                            Duration.ofSeconds(30), Duration.ofSeconds(5), Duration.ZERO, 1, 3));
+            assertTrue(worker.runOnce().idle(), "completed workflow must not republish");
+            assertEquals(1, count(source, "artifact"));
+            assertEquals(1, count(source, "meeting_manifest_revision"));
+            assertEquals(2, count(source, "usage_operation"));
+
+            var deleted = exchange(port, "DELETE", path, "",
+                    authorization("t15-http-recovery-delete-key-123456", false));
+            assertEquals(202, deleted.status());
+            assertEquals(202, exchange(port, "DELETE", path, "",
+                    authorization("t15-http-recovery-delete-key-123456", false)).status());
+            assertEquals(1, count(source, "meeting_deletion_plan"));
+            var deletionPlan = deletionPlan(source, previous.meetingId());
+            assertEquals(MeetingDeletionPlan.PlanStatus.PENDING, deletionPlan.status());
+            assertEquals(1, deletionPlan.items().size());
+            assertEquals(MeetingDeletionPlan.ItemStatus.PENDING,
+                    deletionPlan.items().getFirst().status());
+            assertEquals(previous.artifactId(),
+                    deletionPlan.items().getFirst().target().spec().artifactId());
+            assertEquals(2, count(source, "meeting_manifest_revision"));
+            assertEquals(1, count(source, "artifact"));
+            assertEquals(2, count(source, "usage_operation"));
+            assertEquals(403, exchange(port, "GET", path + "/manifest?genTime=-1", "", "")
+                    .status());
+            assertTrue(network.shutdown(Duration.ofSeconds(3)).clean());
+        }
+    }
+
     static FinalizationInputFact input(String meetingId) throws Exception {
         return new FinalizationInputFact(meetingId, "mock-input-binding-" + meetingId,
                 3, 2_000, "zh-CN", List.of(), NOW.plusSeconds(1),
@@ -228,6 +361,48 @@ class T15HttpRecoveryIntegrationTest {
                     .findByMeetingId(meetingId);
             connection.rollback();
             return metadata;
+        }
+    }
+
+    private static WorkflowStep finalizationWorkflow(DataSource source, String meetingId)
+            throws Exception {
+        try (Connection connection = source.getConnection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "SELECT step_type, step_key FROM workflow_step WHERE meeting_id=?")) {
+            statement.setString(1, meetingId);
+            try (ResultSet rows = statement.executeQuery()) {
+                if (!rows.next()) throw new AssertionError("finalization Workflow missing");
+                var key = new WorkflowStep.Key(meetingId, rows.getString(1), rows.getString(2));
+                if (rows.next()) throw new AssertionError("finalization Workflow duplicated");
+                assertEquals(FinalizationCheckpoint.STEP_TYPE, key.stepType());
+                return new JdbcWorkflowStepStore(source).find(key).orElseThrow();
+            }
+        }
+    }
+
+    private static String finalizationReceipt(DataSource source, String meetingId)
+            throws Exception {
+        try (Connection connection = source.getConnection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "SELECT finalization_receipt_id FROM meeting WHERE meeting_id=?")) {
+            statement.setString(1, meetingId);
+            try (ResultSet rows = statement.executeQuery()) {
+                if (!rows.next()) throw new AssertionError("meeting missing");
+                String receipt = rows.getString(1);
+                if (rows.next()) throw new AssertionError("meeting duplicated");
+                assertTrue(receipt != null && !receipt.isBlank());
+                return receipt;
+            }
+        }
+    }
+
+    private static MeetingDeletionPlan deletionPlan(DataSource source, String meetingId)
+            throws Exception {
+        try (Connection connection = source.getConnection()) {
+            connection.setAutoCommit(false);
+            var plan = new JdbcArtifactDeletionPlanStore(connection).find(meetingId).orElseThrow();
+            connection.rollback();
+            return plan;
         }
     }
 }

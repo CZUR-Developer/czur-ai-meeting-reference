@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# 04-04 A-only 门禁：本次随机 PG16/卷/Artifact 目录，V001–V013 只迁移一次。
-# 后续 B 提交在同一次脚本运行中重启本容器并用第二个 Maven/JVM 读取原物理产物。
+# 04-04 两 JVM 门禁：本次随机 PG16/卷/Artifact 目录，V001–V013 只迁移一次。
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM}"
@@ -16,6 +15,8 @@ CREATED_VOLUME=0
 CONTAINER_ID=''
 STAGE='preflight'
 SUREFIRE_COUNTS='NA'
+A_SUREFIRE_COUNTS='NA'
+B_SUREFIRE_COUNTS='NA'
 CONTAINER_CLEANUP='NOT_CREATED'
 VOLUME_CLEANUP='NOT_CREATED'
 STATE_CLEANUP='NOT_CREATED'
@@ -104,10 +105,11 @@ cleanup() {
 }
 
 capture_surefire_counts() {
-  local raw=''
-  if [[ -n "${STATE_DIR}" && -f "${STATE_DIR}/phase-a.log" ]]; then
+  local file="$1" raw=''
+  SUREFIRE_COUNTS='NA'
+  if [[ -n "${STATE_DIR}" && -f "${file}" ]]; then
     raw="$(rg -o 'Tests run: [0-9]+, Failures: [0-9]+, Errors: [0-9]+, Skipped: [0-9]+' \
-      "${STATE_DIR}/phase-a.log" 2>/dev/null | tail -1 || true)"
+      "${file}" 2>/dev/null | tail -1 || true)"
   fi
   if [[ "${raw}" =~ ^Tests[[:space:]]run:[[:space:]]([0-9]+),[[:space:]]Failures:[[:space:]]([0-9]+),[[:space:]]Errors:[[:space:]]([0-9]+),[[:space:]]Skipped:[[:space:]]([0-9]+)$ ]]; then
     SUREFIRE_COUNTS="${BASH_REMATCH[1]},${BASH_REMATCH[2]},${BASH_REMATCH[3]},${BASH_REMATCH[4]}"
@@ -118,7 +120,12 @@ on_exit() {
   local result=$? cleanup_failed=0 diagnostic_dir=''
   trap - EXIT
   set +e
-  capture_surefire_counts
+  if [[ -n "${STATE_DIR}" ]]; then
+    capture_surefire_counts "${STATE_DIR}/phase-a.log"
+    A_SUREFIRE_COUNTS="${SUREFIRE_COUNTS}"
+    capture_surefire_counts "${STATE_DIR}/phase-b.log"
+    B_SUREFIRE_COUNTS="${SUREFIRE_COUNTS}"
+  fi
   cleanup || cleanup_failed=1
   if (( result == 0 && cleanup_failed == 0 )); then
     info '隔离 PostgreSQL 容器、卷及私有 Artifact/状态目录已清理'
@@ -128,8 +135,8 @@ on_exit() {
   diagnostic_dir="$(mktemp -d /tmp/czur-t15-http-recovery-diagnostic.XXXXXX)"
   if [[ -n "${diagnostic_dir}" ]]; then
     chmod 700 -- "${diagnostic_dir}"
-    (umask 077; printf 'stage=%s\nexit_code=%s\nsurefire_counts=%s\ncontainer_cleanup=%s\nvolume_cleanup=%s\nstate_cleanup=%s\n' \
-      "${STAGE}" "${result}" "${SUREFIRE_COUNTS}" "${CONTAINER_CLEANUP}" \
+    (umask 077; printf 'stage=%s\nexit_code=%s\nphase_a_surefire=%s\nphase_b_surefire=%s\ncontainer_cleanup=%s\nvolume_cleanup=%s\nstate_cleanup=%s\n' \
+      "${STAGE}" "${result}" "${A_SUREFIRE_COUNTS}" "${B_SUREFIRE_COUNTS}" "${CONTAINER_CLEANUP}" \
       "${VOLUME_CLEANUP}" "${STATE_CLEANUP}" >"${diagnostic_dir}/summary.txt")
     chmod 600 -- "${diagnostic_dir}/summary.txt"
     info "失败诊断仅保留白名单摘要：${diagnostic_dir}/summary.txt"
@@ -182,6 +189,11 @@ CONTAINER_ID="$(docker container inspect --format '{{.Id}}' "${CONTAINER_NAME}")
 [[ "$(docker volume inspect --format \
   '{{index .Labels "com.czur.ai-meeting.t15-http-recovery.run-id"}}' \
   "${VOLUME_NAME}")" == "${RUN_ID}" ]] || fail '数据卷归属不符'
+mounted_volume="$(docker container inspect --format \
+  '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}' \
+  "${CONTAINER_ID}")"
+[[ "${mounted_volume}" == "${VOLUME_NAME}" ]] || fail 'PostgreSQL 未使用本次专属卷'
+artifact_identity="$(stat -c '%d:%i' -- "${T15_HTTP_RECOVERY_ARTIFACT_ROOT}")"
 
 wait_ready() {
   local attempt
@@ -224,8 +236,9 @@ STAGE='phase-a'
 mvn -B --no-transfer-progress -f "${REPO_ROOT}/backend-reference/pom.xml" \
   '-Dtest=T15HttpRecoveryIntegrationTest#phaseAPublishesPersistentArtifactOverRealHttp' \
   test >"${STATE_DIR}/phase-a.log" 2>&1 || fail '阶段 A Maven/JVM 失败'
-capture_surefire_counts
+capture_surefire_counts "${STATE_DIR}/phase-a.log"
 [[ "${SUREFIRE_COUNTS}" == '1,0,0,0' ]] || fail '阶段 A Surefire 数量不可信'
+A_SUREFIRE_COUNTS="${SUREFIRE_COUNTS}"
 [[ -f "${T15_HTTP_RECOVERY_STATE_FILE}" && ! -L "${T15_HTTP_RECOVERY_STATE_FILE}" ]] \
   || fail '阶段 A 未写出普通状态文件'
 [[ "$(stat -c '%a' "${T15_HTTP_RECOVERY_STATE_FILE}")" == 600 ]] \
@@ -235,5 +248,45 @@ if rg -a -q 'Bearer|t15-recovery-token|wss://|sessionToken' \
   fail '跨进程状态文件含禁止内容'
 fi
 info '阶段 A：Tests run: 1, Failures: 0, Errors: 0, Skipped: 0'
-info 'A-only 持久 Artifact 发布门禁通过，开始清理本次专属资源'
+STAGE='database-restart'
+docker stop --time 30 "${CONTAINER_ID}" >/dev/null || fail 'PostgreSQL 停止失败'
+docker start "${CONTAINER_ID}" >/dev/null || fail 'PostgreSQL 重启失败'
+[[ "$(docker container inspect --format '{{.Id}}' "${CONTAINER_NAME}")" == "${CONTAINER_ID}" ]] \
+  || fail '重启后容器 ID 变化'
+[[ "$(docker container inspect --format \
+  '{{index .Config.Labels "com.czur.ai-meeting.t15-http-recovery.run-id"}}' \
+  "${CONTAINER_ID}")" == "${RUN_ID}" ]] || fail '重启后容器归属变化'
+[[ "$(docker container inspect --format \
+  '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}' \
+  "${CONTAINER_ID}")" == "${VOLUME_NAME}" ]] || fail '重启后 PostgreSQL 卷变化'
+[[ "$(stat -c '%d:%i' -- "${T15_HTTP_RECOVERY_ARTIFACT_ROOT}")" == "${artifact_identity}" ]] \
+  || fail '重启后 Artifact 目录变化'
+wait_ready || fail 'PostgreSQL 重启后未就绪'
+binding="$(docker port "${CONTAINER_ID}" 5432/tcp)"
+[[ "${binding}" =~ ^127\.0\.0\.1:[0-9]+$ && "${binding}" != '127.0.0.1:55432' ]] \
+  || fail '重启后数据库未随机绑定独占 loopback'
+for (( attempt=1; attempt<=90; attempt++ )); do
+  if { exec 3<>"/dev/tcp/127.0.0.1/${binding##*:}"; } 2>/dev/null; then
+    exec 3>&-
+    break
+  fi
+  sleep 1
+done
+(( attempt <= 90 )) || fail '重启后宿主数据库 loopback 端口未就绪'
+export REFERENCE_TEST_DATABASE_URL="jdbc:postgresql://${binding}/${DB_NAME}"
+[[ "$(docker exec --env "PGPASSWORD=${DB_PASSWORD}" "${CONTAINER_ID}" \
+  psql --username "${DB_USER}" --dbname "${DB_NAME}" --tuples-only --no-align \
+  --command 'SELECT count(*) FROM schema_migrations;' | tr -d '[:space:]')" == 13 ]] \
+  || fail '重启后迁移登记不完整'
+
+STAGE='phase-b'
+export T15_HTTP_RECOVERY_STAGE='B'
+mvn -B --no-transfer-progress -f "${REPO_ROOT}/backend-reference/pom.xml" \
+  '-Dtest=T15HttpRecoveryIntegrationTest#phaseBReopensArtifactAndReplaysAfterDatabaseRestart' \
+  test >"${STATE_DIR}/phase-b.log" 2>&1 || fail '阶段 B Maven/JVM 失败'
+capture_surefire_counts "${STATE_DIR}/phase-b.log"
+[[ "${SUREFIRE_COUNTS}" == '1,0,0,0' ]] || fail '阶段 B Surefire 数量不可信'
+B_SUREFIRE_COUNTS="${SUREFIRE_COUNTS}"
+info '阶段 B：Tests run: 1, Failures: 0, Errors: 0, Skipped: 0'
+info 'A→数据库重启→B 持久 Artifact 读回与事实恢复门禁通过，开始清理本次专属资源'
 STAGE='cleanup'
