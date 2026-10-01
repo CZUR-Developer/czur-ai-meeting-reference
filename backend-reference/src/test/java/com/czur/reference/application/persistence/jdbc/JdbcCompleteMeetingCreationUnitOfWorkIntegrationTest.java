@@ -6,6 +6,7 @@ import com.czur.reference.application.command.CreateMeetingResponseFact;
 import com.czur.reference.application.command.MeetingCommandEventFactory;
 import com.czur.reference.application.command.MeetingRequestCanonicalizer;
 import com.czur.reference.application.port.CompleteMeetingCreationUnitOfWork;
+import com.czur.reference.application.port.CompleteMeetingCreateReplayLookup;
 import com.czur.reference.application.port.IdempotencyScopeCodec;
 import com.czur.reference.application.port.entitlement.AuthorizedProfileSnapshot;
 import com.czur.reference.application.port.entitlement.MeetingGrant;
@@ -121,6 +122,63 @@ class JdbcCompleteMeetingCreationUnitOfWorkIntegrationTest {
                     "SELECT occurred_at FROM outbox_event WHERE aggregate_id = 'mtg_complete_first'"));
         }
         assertFalse(scope.equals(IdempotencyScopeCodec.meetingCreate(DEPLOYMENT, SUBJECT)));
+    }
+
+    @Test
+    void v2ReadOnlyReplayMissThenReturnsOriginalResponseAndConflictsWithoutDecodingResponse()
+            throws Exception {
+        var reserve = insertReserve("lookup", "mtg_complete_lookup");
+        var first = request(reserve, KEY, null, "original-token");
+        var lookup = new JdbcCompleteMeetingCreateReplayLookup(dataSource);
+        var firstKey = lookupRequest(first);
+        assertEquals(CompleteMeetingCreateReplayLookup.Status.NOT_FOUND,
+                lookup.lookup(firstKey).status());
+        success(unitOfWork(CREATED_AT).create(first));
+        var replay = (CompleteMeetingCreateReplayLookup.Replayed) lookup.lookup(firstKey);
+        assertEquals("original-token", replay.response().realtime().sessionToken());
+        assertEquals(CompleteMeetingCreateReplayLookup.Status.NOT_FOUND,
+                lookup.lookup(new CompleteMeetingCreateReplayLookup.Request(
+                        DEPLOYMENT, "another-subject", KEY,
+                        first.requestFact().canonicalRequestDigest())).status());
+
+        // 即使旧响应已损坏，异摘要请求仍只能看到冲突，不能触碰响应解码。
+        try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
+            statement.execute("ALTER TABLE meeting_create_fact DROP CONSTRAINT meeting_create_fact_response_ck");
+            statement.execute("UPDATE meeting_create_fact SET response_sha256 = decode(repeat('0', 64), 'hex')");
+        }
+        var another = request(reserve, KEY, "different title", "irrelevant-token");
+        assertEquals(CompleteMeetingCreateReplayLookup.Status.CONFLICT,
+                lookup.lookup(lookupRequest(another)).status());
+        assertEquals(CompleteMeetingCreateReplayLookup.Status.INCONSISTENT,
+                lookup.lookup(firstKey).status());
+    }
+
+    @Test
+    void v2ReadOnlyReplayRejectsValidShapeButIncorrectStoredRequestDigest() throws Exception {
+        var reserve = insertReserve("lookup-digest", "mtg_complete_lookup_digest");
+        var first = request(reserve, KEY, null, "first-token");
+        success(unitOfWork(CREATED_AT).create(first));
+        try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
+            statement.execute("UPDATE meeting_create_fact SET request_digest = repeat('a', 64)");
+        }
+        var lookup = new JdbcCompleteMeetingCreateReplayLookup(dataSource);
+        assertEquals(CompleteMeetingCreateReplayLookup.Status.INCONSISTENT,
+                lookup.lookup(lookupRequest(first)).status());
+        var another = request(reserve, KEY, "different title", "ignored-token");
+        assertEquals(CompleteMeetingCreateReplayLookup.Status.INCONSISTENT,
+                lookup.lookup(lookupRequest(another)).status());
+    }
+
+    @Test
+    void v2ReadOnlyReplayTreatsDatabaseFailureAsUnavailableNotMiss() throws Exception {
+        var reserve = insertReserve("lookup-db", "mtg_complete_lookup_db");
+        var first = request(reserve, KEY, null, "first-token");
+        try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
+            statement.execute("DROP TABLE meeting_create_fact");
+        }
+        assertEquals(CompleteMeetingCreateReplayLookup.Status.UNAVAILABLE,
+                new JdbcCompleteMeetingCreateReplayLookup(dataSource)
+                        .lookup(lookupRequest(first)).status());
     }
 
     @Test
@@ -298,6 +356,14 @@ class JdbcCompleteMeetingCreationUnitOfWorkIntegrationTest {
     private JdbcCompleteMeetingCreationUnitOfWork unitOfWork(Instant at) {
         return new JdbcCompleteMeetingCreationUnitOfWork(
                 dataSource, Clock.fixed(at, ZoneOffset.UTC));
+    }
+
+    private static CompleteMeetingCreateReplayLookup.Request lookupRequest(
+            CompleteMeetingCreationUnitOfWork.CreateRequest request) {
+        return new CompleteMeetingCreateReplayLookup.Request(
+                request.deploymentScope(), request.subjectScope(),
+                request.requestFact().requestSnapshot().idempotencyKey(),
+                request.requestFact().canonicalRequestDigest());
     }
 
     private UsageOperationResult insertReserve(String suffix, String meetingId) throws Exception {
