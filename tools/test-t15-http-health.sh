@@ -152,6 +152,7 @@ case "${TEST_SELECTOR}" in
   boundedNetworkOwnerCleansUniquePoolAfterBindFailureAndNormalStop|\
   pausedDatabaseReadinessUsesPgjdbcSocketBoundAndRecoversOnSamePool|\
   closedAssemblyUsesRealQueryStopAndT14DeletionPorts|\
+  realHttpOpenToClosedRollbackPreservesV1AndV2Facts|\
   realHttpCreateAndTrustedV2StartPreserveAsrOnlyFacts|\
   realHttpStopAdmissionAndMockWorkerPublishAsrOnlyResult|\
   realHttpAnonymousManifestUsesFrozenJdbcFactsAndRevokesOnDelete) ;;

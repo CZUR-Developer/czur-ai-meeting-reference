@@ -14,6 +14,7 @@ import com.czur.reference.application.http.HttpRequest;
 import com.czur.reference.application.http.MeetingJdkHttpServer;
 import com.czur.reference.application.command.MeetingPermissions;
 import com.czur.reference.application.port.OwnedMeetingCreationUnitOfWork;
+import com.czur.reference.application.port.IdempotencyScopeCodec;
 import com.czur.reference.application.port.MeetingStartExecutionUnitOfWork;
 import com.czur.reference.application.port.CreateMeetingFactStore;
 import com.czur.reference.application.port.FinalizationAdmissionUnitOfWork;
@@ -92,6 +93,7 @@ import java.util.logging.SimpleFormatter;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -713,6 +715,81 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
     @EnabledIfEnvironmentVariable(named = "T15_HEALTH_GATE_CONTAINER_ID", matches = "[0-9a-f]{64}")
     void realHttpAnonymousManifestUsesFrozenJdbcFactsAndRevokesOnDelete() throws Exception {
         runHttpFinalizationFlow(true);
+    }
+
+    @Test
+    @EnabledIfEnvironmentVariable(named = "T15_HEALTH_GATE_CONTAINER_ID", matches = "[0-9a-f]{64}")
+    void realHttpOpenToClosedRollbackPreservesV1AndV2Facts() throws Exception {
+        migrate(13);
+        var v1Request = createOwned("rollback_v1");
+        String key = v1Request.idempotencyKey();
+        String v1MeetingId = v1Request.meetingId();
+        String v1Scope = IdempotencyScopeCodec.meetingCreate(SCOPE, SUBJECT);
+        String v2Scope = IdempotencyScopeCodec.meetingCreateV2(SCOPE, SUBJECT);
+        assertNotEquals(v1Scope, v2Scope);
+        var v1Store = new JdbcMeetingCreateOutcomeStore(fixtureDataSource, CLOCK);
+        var firstV1 = v1Store.find(v1Scope, key).orElseThrow();
+        assertEquals(1, count("idempotency_record"));
+        assertEquals(0, count("meeting_create_fact"));
+
+        String v2MeetingId;
+        Map<String, String> openConfig = config();
+        openConfig.put(ReferenceMeetingDeploymentConfig.CREATE_ENABLED, "true");
+        try (var open = ReferenceMeetingHttpAssembly.start(openConfig, CLOCK);
+             var network = open.newJdkHttpServer(new InetSocketAddress("127.0.0.1", 0))) {
+            network.start();
+            int port = network.address().getPort();
+            String first = exchange(port, "POST", "/v1/meetings",
+                    createRequest(key, "rollback-v2-session").body(),
+                    networkHeaders(TOKEN, key, true));
+            assertEquals(201, status(first));
+            v2MeetingId = createdMeetingId(open.databaseRuntime().dataSource(), key);
+            assertNotEquals(v1MeetingId, v2MeetingId);
+            assertTrue(responseBody(first).contains("\"meetingId\":\"" + v2MeetingId + "\""));
+            assertEquals(v2Scope, createFact(open.databaseRuntime().dataSource(),
+                    v2MeetingId).scope());
+            assertEquals(key, createFact(open.databaseRuntime().dataSource(),
+                    v2MeetingId).key());
+            assertEquals(firstV1, v1Store.find(v1Scope, key).orElseThrow());
+            assertEquals(1, count("idempotency_record"));
+            assertEquals(1, count("meeting_create_fact"));
+            assertTrue(network.shutdown(Duration.ofSeconds(3)).clean());
+        }
+
+        // 同一 schema、同一 V013 历史事实；仅重新装配默认关态，不回滚迁移。
+        List<Integer> beforeClosedRequests = creationFactCounts();
+        assertEquals(List.of(2, 1, 1, 2, 2, 2), beforeClosedRequests);
+        try (var closed = ReferenceMeetingHttpAssembly.start(config(), CLOCK);
+             var network = closed.newJdkHttpServer(new InetSocketAddress("127.0.0.1", 0))) {
+            network.start();
+            int port = network.address().getPort();
+            assertEquals(200, status(exchange(port, "GET", "/v1/meetings/" + v1MeetingId,
+                    "", networkHeaders(TOKEN, null, false))));
+            assertEquals(200, status(exchange(port, "GET", "/v1/meetings/" + v2MeetingId,
+                    "", networkHeaders(TOKEN, null, false))));
+            String list = exchange(port, "GET", "/v1/meetings", "",
+                    networkHeaders(TOKEN, null, false));
+            assertEquals(200, status(list));
+            assertTrue(responseBody(list).contains(v1MeetingId));
+            assertTrue(responseBody(list).contains(v2MeetingId));
+
+            assertNetworkError(exchange(port, "POST", "/v1/meetings",
+                    createRequest(key, "rollback-v2-session").body(),
+                    networkHeaders(TOKEN, key, true)), 501, "ROUTE_NOT_IMPLEMENTED");
+            assertNetworkError(exchange(port, "POST", "/v1/meetings", "not JSON", ""),
+                    501, "ROUTE_NOT_IMPLEMENTED");
+            var v1Replay = assertInstanceOf(OwnedMeetingCreationUnitOfWork.Success.class,
+                    new JdbcOwnedMeetingCreationUnitOfWork(fixtureDataSource, CLOCK)
+                            .create(v1Request));
+            assertEquals(OwnedMeetingCreationUnitOfWork.SuccessCode.REPLAYED,
+                    v1Replay.code());
+            assertEquals(v1MeetingId, v1Replay.result().meeting().meetingId());
+            assertEquals(firstV1, v1Store.find(v1Scope, key).orElseThrow());
+            assertEquals(v2Scope, createFact(closed.databaseRuntime().dataSource(),
+                    v2MeetingId).scope());
+            assertEquals(beforeClosedRequests, creationFactCounts());
+            assertTrue(network.shutdown(Duration.ofSeconds(3)).clean());
+        }
     }
 
     private void runHttpFinalizationFlow(boolean manifestEnabled) throws Exception {
@@ -1430,7 +1507,8 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
         return new HttpRequest("POST", "/v1/meetings", createHeaders, body);
     }
 
-    private void createOwned(String suffix) throws Exception {
+    private OwnedMeetingCreationUnitOfWork.CreateRequest createOwned(String suffix)
+            throws Exception {
         String meetingId = "mtg_" + suffix;
         Instant created = NOW.minusSeconds(120);
         MeetingGrant grant = new MeetingGrant("grant-" + suffix, SCOPE, SUBJECT,
@@ -1451,13 +1529,14 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
                     connection, reserve, created.minusSeconds(10)));
             connection.commit();
         }
+        var request = new OwnedMeetingCreationUnitOfWork.CreateRequest(
+                SCOPE, SUBJECT, meetingId, "session-" + suffix,
+                "create-key-" + suffix, "create-digest-" + suffix, reserve);
         var createdResult = new JdbcOwnedMeetingCreationUnitOfWork(
-                fixtureDataSource, Clock.fixed(created, ZoneOffset.UTC)).create(
-                        new OwnedMeetingCreationUnitOfWork.CreateRequest(
-                                SCOPE, SUBJECT, meetingId, "session-" + suffix,
-                                "create-key-" + suffix, "create-digest-" + suffix, reserve));
+                fixtureDataSource, Clock.fixed(created, ZoneOffset.UTC)).create(request);
         assertInstanceOf(OwnedMeetingCreationUnitOfWork.Success.class, createdResult);
         assertEquals("CREATED", meetingState(meetingId));
+        return request;
     }
 
     private void startOwned(String suffix) {
@@ -1587,6 +1666,12 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
             assertTrue(rows.next());
             return rows.getInt(1);
         }
+    }
+
+    private List<Integer> creationFactCounts() throws Exception {
+        return List.of(count("meeting"), count("meeting_create_fact"),
+                count("idempotency_record"), count("usage_reservation"),
+                count("usage_operation"), count("outbox_event"));
     }
 
     private Connection admin() throws Exception {
