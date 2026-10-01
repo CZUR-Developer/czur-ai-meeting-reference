@@ -121,6 +121,16 @@ class CreateMeetingHttpRequestDecoderTest {
                     Map.of("Authorization", malformed, "Content-Type", "application/json",
                             "Idempotency-Key", KEY), BODY));
         }
+        rejectAuthentication(new HttpRequest("POST", "/v1/meetings",
+                Map.of("Authorization", "Bearer " + "a".repeat(8193),
+                        "Content-Type", "application/json", "Idempotency-Key", KEY), BODY));
+        try (var decoded = DECODER.decode(new HttpRequest("POST", "/v1/meetings",
+                Map.of("Authorization", "Bearer " + "a".repeat(8192),
+                        "Content-Type", "application/json", "Idempotency-Key", KEY), BODY))) {
+            int tokenLength = decoded.verificationRequest().credential().useBytes(
+                    bytes -> bytes.length);
+            assertEquals(8192, tokenLength);
+        }
         reject(new HttpRequest("POST", "/v1/meetings",
                 Map.of("Authorization", "Bearer " + TOKEN, "Content-Type", "text/plain",
                         "Idempotency-Key", KEY), BODY));

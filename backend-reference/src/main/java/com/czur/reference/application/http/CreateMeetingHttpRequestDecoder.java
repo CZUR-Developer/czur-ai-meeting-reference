@@ -69,7 +69,10 @@ public final class CreateMeetingHttpRequestDecoder {
             }
             // 先检查认证头形状，使缺失/畸形 Bearer 与坏业务输入同时出现时稳定
             // 分类为认证错误；实际 Token 有效性仍由身份 Provider 验证。
-            String bearer = requireBearer(request.header("authorization"));
+            String bearer = BearerAuthorization.tokenOrNull(request.header("authorization"));
+            if (bearer == null) {
+                throw invalidAuthentication();
+            }
             requireJsonContentType(request.header("content-type"));
             String idempotencyKey = requireHeaderValue(request.header("idempotency-key"), 16, 128);
             String requestId = request.header("x-request-id");
@@ -255,38 +258,6 @@ public final class CreateMeetingHttpRequestDecoder {
             if (Character.isISOControl(value.charAt(index))) { throw invalid(); }
         }
         return value;
-    }
-
-    private static String requireBearer(String authorization) {
-        if (authorization == null || authorization.length() < 8
-                || !authorization.regionMatches(true, 0, "Bearer", 0, 6)
-                || authorization.charAt(6) != ' ') {
-            throw invalidAuthentication();
-        }
-        // RFC 6750: "Bearer" 1*SP b64token。HTAB 与 token 内空格均不接受。
-        int tokenStart = 7;
-        while (tokenStart < authorization.length() && authorization.charAt(tokenStart) == ' ') {
-            tokenStart++;
-        }
-        String token = authorization.substring(tokenStart);
-        if (token.isEmpty() || token.length() > 8192) { throw invalidAuthentication(); }
-        boolean padding = false;
-        for (int index = 0; index < token.length(); index++) {
-            char character = token.charAt(index);
-            if (character == '=') {
-                padding = true;
-            } else if (padding || !isBearerCharacter(character)) {
-                throw invalidAuthentication();
-            }
-        }
-        if (padding && token.charAt(0) == '=') { throw invalidAuthentication(); }
-        return token;
-    }
-
-    private static boolean isBearerCharacter(char value) {
-        return (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z')
-                || (value >= '0' && value <= '9') || value == '-' || value == '.'
-                || value == '_' || value == '~' || value == '+' || value == '/';
     }
 
     private static DecodeFailure invalid() {
