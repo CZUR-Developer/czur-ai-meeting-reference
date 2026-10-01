@@ -20,8 +20,10 @@ import java.util.TreeSet;
  * 在会议开始前冻结执行含义并原子推进 owned Meeting 的本地工作单元。
  *
  * <p>首次成功必须在同一个本地数据库事务中完成以下事实：锁定 Meeting，核对
- * 部署、主体、Profile 和首次权益预占，使用首次 reserve 中持久化的授权能力运行
- * Capability Planner，写入不可变的 {@link FinalizationExecutionFact}，最后把
+ * 部署、主体、Profile 和首次权益预占。旧 v1 创建链使用首次授权事实运行
+ * Capability Planner；完整 v2 Create 链以 V013 已冻结的 revision 1 计划为权威，
+ * 用当前能力重新计算只作可执行性核对。然后写入不可变的
+ * {@link FinalizationExecutionFact}，最后把
  * Meeting 推进到 STARTING。任何一步失败都必须整体回滚，不能出现“已开始但没有
  * execution fact”或“有 execution fact 但仍未开始”的半状态。</p>
  *
@@ -43,12 +45,26 @@ import java.util.TreeSet;
 public interface MeetingStartExecutionUnitOfWork {
 
     /**
-     * 注册或重放一场会议的开始执行事实。
+     * 注册或重放旧 v1 创建链会议的开始执行事实。
      *
      * @param request 已由可信应用层组装、且不包含 Token、密码或模型密钥的完整输入
      * @return 首次开始、稳定重放或固定错误分类
      */
     Result start(StartRequest request);
+
+    /**
+     * 开始由完整 v2 Create 创建的会议。
+     *
+     * <p>可信应用层必须显式选择此入口，不能根据客户端标志或权益键的外形
+     * 猜测来源。首次路径强制在同一事务读取并验证 V013 首次响应；缺行、损坏
+     * 或当前能力计划漂移均关闭式失败，不会退回旧 v1 规划。已有 V011 执行事实
+     * 时仍优先按历史事实重放，不读取 V013 或重算计划。此入口要求部署 V013；
+     * 旧 v1 调用方继续使用 {@link #start(StartRequest)}。</p>
+     *
+     * @param request 已由可信应用层组装的开始输入，不包含凭据或模型密钥
+     * @return 首次开始、历史重放或固定错误分类
+     */
+    Result startCompleteCreate(StartRequest request);
 
     /**
      * 会议开始事务的显式输入。
@@ -57,7 +73,8 @@ public interface MeetingStartExecutionUnitOfWork {
      * 授权快照完全相同；实现不能直接信任该集合，也不能接收调用方另行声明的
      * granted 集合。granted 能力只能从数据库中的首次授权事实取得。
      * {@code requestedCapabilities}、{@code modelCapabilities} 和
-     * {@code deploymentLimits} 都只用于事实不存在时的首次规划；已存在 execution
+     * {@code deploymentLimits} 只用于执行事实不存在时的旧 v1 首次规划或完整 v2
+     * 首次可执行性核对；已存在 execution
      * fact 的重放直接返回已冻结 Plan，不依赖旧 reserve 行仍然可读。</p>
      *
      * <p>{@code startedAt} 必须已经是 PostgreSQL {@code timestamptz(6)} 可无损
@@ -196,6 +213,7 @@ public interface MeetingStartExecutionUnitOfWork {
         ACCESS_DENIED(false),
         PROFILE_MISMATCH(false),
         AUTHORIZATION_INCONSISTENT(false),
+        CREATE_FACT_INCONSISTENT(false),
         CAPABILITY_PLAN_FAILED(false),
         EXECUTION_FACT_CONFLICT(false),
         FACT_INCONSISTENT(false),

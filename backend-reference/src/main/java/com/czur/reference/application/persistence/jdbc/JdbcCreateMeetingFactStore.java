@@ -51,6 +51,15 @@ final class JdbcCreateMeetingFactStore implements CreateMeetingFactStore {
               FROM meeting_create_fact
              WHERE scope = ? AND idempotency_key = ?
             """;
+    private static final String FIND_BY_MEETING_SQL = """
+            SELECT scope, idempotency_key,
+                   request_schema_version, request_digest, request_json,
+                   response_schema_version, response_status, response_type,
+                   response_json, response_sha256, meeting_id, created_at
+              FROM meeting_create_fact
+             WHERE meeting_id = ?
+             FOR SHARE
+            """;
     private static final String PROBE_DIGEST_SQL = """
             SELECT request_schema_version, request_digest, request_json
               FROM meeting_create_fact
@@ -143,6 +152,50 @@ final class JdbcCreateMeetingFactStore implements CreateMeetingFactStore {
             throw sqlFailure("FIND", failure);
         } catch (RuntimeException failure) {
             throw runtimeFailure("FIND");
+        }
+    }
+
+    /**
+     * 在 Start 已锁定 Meeting 的同一事务中，按 V013 唯一会议标识读取首次事实。
+     *
+     * <p>此方法仍逐列执行与 scope/key 查询完全相同的严格正文、版本和哈希校验；
+     * 不因索引唯一而信任 JSON 或跳过二次行数检查。旧 v1 Start 不应调用本方法，
+     * 因为旧数据库可能尚未安装 V013。</p>
+     */
+    Optional<CreateMeetingFactStore.Record> findByMeetingId(String meetingId) {
+        requireText("meetingId", meetingId);
+        requireExplicitTransaction();
+        try {
+            pinSearchPath();
+            try (PreparedStatement statement = connection.prepareStatement(FIND_BY_MEETING_SQL)) {
+                statement.setString(1, meetingId);
+                try (ResultSet rows = statement.executeQuery()) {
+                    if (!rows.next()) {
+                        logResult("FIND_BY_MEETING", "EMPTY");
+                        return Optional.empty();
+                    }
+                    String scope = requiredText(rows, "scope");
+                    String key = requiredText(rows, "idempotency_key");
+                    StoredFact stored = readStoredFact(rows, scope, key);
+                    requireStored(meetingId.equals(stored.record().response().meetingId()));
+                    if (rows.next()) {
+                        throw corruptData();
+                    }
+                    logResult("FIND_BY_MEETING", "PRESENT");
+                    return Optional.of(stored.record());
+                }
+            }
+        } catch (StoredFactException failure) {
+            logFailure("FIND_BY_MEETING", failure.kind(), "N/A");
+            throw failure;
+        } catch (SQLException failure) {
+            if ("42P01".equals(failure.getSQLState())) {
+                logFailure("FIND_BY_MEETING", FailureKind.CORRUPT_DATA, "42P01");
+                throw corruptData();
+            }
+            throw sqlFailure("FIND_BY_MEETING", failure);
+        } catch (RuntimeException failure) {
+            throw runtimeFailure("FIND_BY_MEETING");
         }
     }
 

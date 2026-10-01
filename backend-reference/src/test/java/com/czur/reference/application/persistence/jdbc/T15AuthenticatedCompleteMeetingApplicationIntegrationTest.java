@@ -3,8 +3,10 @@ package com.czur.reference.application.persistence.jdbc;
 import com.czur.reference.application.command.AuthenticatedCompleteMeetingApplicationService;
 import com.czur.reference.application.command.AuthenticatedCompleteMeetingCreateResult;
 import com.czur.reference.application.command.CompleteMeetingResponseAssembler;
+import com.czur.reference.application.command.CompleteMeetingReserveFacts;
 import com.czur.reference.application.command.CreateMeetingRequestFact;
 import com.czur.reference.application.command.CreateMeetingRequestSnapshot;
+import com.czur.reference.application.command.CreateMeetingResponseFact;
 import com.czur.reference.application.command.MeetingPermissions;
 import com.czur.reference.application.command.MeetingRequestCanonicalizer;
 import com.czur.reference.application.command.TrustedCreateRuntimeLimits;
@@ -12,9 +14,14 @@ import com.czur.reference.application.entitlement.referencedev.ReferenceDevEntit
 import com.czur.reference.application.entitlement.referencedev.ReferenceDevEntitlementPolicyConfig;
 import com.czur.reference.application.port.CompleteMeetingCreateReplayLookup;
 import com.czur.reference.application.port.CompleteMeetingCreationUnitOfWork;
+import com.czur.reference.application.port.MeetingStartExecutionUnitOfWork;
 import com.czur.reference.application.port.CreateRealtimeSessionAllocator;
 import com.czur.reference.application.port.entitlement.EntitlementIdGenerator;
+import com.czur.reference.application.port.entitlement.AuthorizedProfileSnapshot;
+import com.czur.reference.application.port.entitlement.MeetingGrant;
 import com.czur.reference.application.port.entitlement.UsageEstimate;
+import com.czur.reference.application.port.entitlement.UsageOperationResult;
+import com.czur.reference.application.port.entitlement.UsageReservation;
 import com.czur.reference.application.port.entitlement.UsageReserveLookup;
 import com.czur.reference.application.port.entitlement.UsageUnit;
 import com.czur.reference.application.port.identity.IdentityProviderResult;
@@ -24,10 +31,13 @@ import com.czur.reference.application.port.identity.Subject;
 import com.czur.reference.application.port.identity.VerifiedIdentity;
 import com.czur.reference.application.port.model.AudioProfile;
 import com.czur.reference.domain.capability.CapabilityDescriptor;
+import com.czur.reference.domain.capability.CapabilityDecision;
 import com.czur.reference.domain.capability.CapabilityIds;
 import com.czur.reference.domain.capability.CapabilityPlanner;
 import com.czur.reference.domain.capability.DeploymentLimits;
 import com.czur.reference.domain.capability.ProductProfile;
+import com.czur.reference.domain.meeting.MeetingState;
+import com.czur.reference.protocol.json.CreateMeetingResponseFactJson;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -39,6 +49,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.time.Clock;
@@ -94,6 +105,15 @@ class T15AuthenticatedCompleteMeetingApplicationIntegrationTest {
         dataSource = postgres(schema);
         for (String migration : List.of("V001__initial_schema.sql",
                 "V002__outbox_lease_fencing.sql", "V003__identity_entitlement.sql",
+                "V004__meeting_event_envelope.sql",
+                "V005__meeting_finalization_fact.sql",
+                "V006__meeting_read_model.sql",
+                "V007__meeting_manifest_revision.sql",
+                "V008__durable_input_fact.sql",
+                "V009__final_usage_fact.sql",
+                "V010__workflow_step_fencing.sql",
+                "V011__finalization_execution_artifact_ready.sql",
+                "V012__artifact_deletion_plan.sql",
                 "V013__meeting_create_fact.sql")) {
             apply(migration);
         }
@@ -217,6 +237,252 @@ class T15AuthenticatedCompleteMeetingApplicationIntegrationTest {
         assertEquals(1, count("SELECT count(*) FROM usage_reservation "
                 + "WHERE bound_meeting_id IS NULL AND version = 0 AND status = 'RESERVED'"));
         assertEquals(1, count("SELECT count(*) FROM outbox_event"));
+    }
+
+    @Test
+    void completeCreateStartUsesFrozenRevisionOnePlan() throws Exception {
+        var created = createForStart("create-start-consistent-12345", "start-ok");
+        var start = assertInstanceOf(MeetingStartExecutionUnitOfWork.Success.class,
+                startUnitOfWork().startCompleteCreate(startRequest(
+                        created.response().meetingId(), providerAll(), DeploymentLimits.NONE)));
+        assertEquals(MeetingStartExecutionUnitOfWork.SuccessCode.STARTED, start.code());
+        assertEquals(MeetingState.STARTING, start.meeting().state());
+        assertEquals(1L, start.executionFact().capabilityPlan().planRevision());
+        assertEquals(created.response().capabilityDecisions(),
+                start.executionFact().capabilityPlan().decisions());
+        assertEquals(1, count("SELECT count(*) FROM finalization_execution_fact"));
+    }
+
+    @Test
+    void completeCreateStartRejectsChangedModelAndDeploymentWithoutWritingV011()
+            throws Exception {
+        var modelMeeting = createForStart("create-start-model-change-12345", "model-change");
+        var modelFailure = assertInstanceOf(MeetingStartExecutionUnitOfWork.Failure.class,
+                startUnitOfWork().startCompleteCreate(startRequest(
+                        modelMeeting.response().meetingId(),
+                        new CapabilityDescriptor(Set.of()), DeploymentLimits.NONE)));
+        assertEquals(MeetingStartExecutionUnitOfWork.ErrorCode.CAPABILITY_PLAN_FAILED,
+                modelFailure.code());
+
+        var deploymentMeeting = createForStart(
+                "create-start-deployment-change-12345", "deployment-change");
+        var deploymentFailure = assertInstanceOf(MeetingStartExecutionUnitOfWork.Failure.class,
+                startUnitOfWork().startCompleteCreate(startRequest(
+                        deploymentMeeting.response().meetingId(), providerAll(),
+                        new DeploymentLimits(Set.of(REALTIME)))));
+        assertEquals(MeetingStartExecutionUnitOfWork.ErrorCode.CAPABILITY_PLAN_FAILED,
+                deploymentFailure.code());
+        var profileMeeting = createForStart(
+                "create-start-profile-change-12345", "profile-change");
+        var changedProfile = new ProductProfile("standard", 1,
+                Set.of(REALTIME), Set.of(CapabilityIds.SUMMARY_STRUCTURED),
+                Map.of(), Map.of(), Map.of());
+        var profileFailure = assertInstanceOf(MeetingStartExecutionUnitOfWork.Failure.class,
+                startUnitOfWork().startCompleteCreate(
+                        new MeetingStartExecutionUnitOfWork.StartRequest(
+                                DEPLOYMENT, SUBJECT, profileMeeting.response().meetingId(),
+                                NOW.plusSeconds(11), null, changedProfile,
+                                Set.of(REALTIME), providerAll(), DeploymentLimits.NONE)));
+        assertEquals(MeetingStartExecutionUnitOfWork.ErrorCode.CAPABILITY_PLAN_FAILED,
+                profileFailure.code());
+        assertEquals(0, count("SELECT count(*) FROM finalization_execution_fact"));
+        assertEquals(3, count("SELECT count(*) FROM meeting WHERE state='CREATED'"));
+    }
+
+    @Test
+    void completeCreateStartRequiresV013ButExistingV011ReplaysBeforeReadingIt()
+            throws Exception {
+        var missing = createForStart("create-start-missing-fact-12345", "missing-fact");
+        try (Connection connection = dataSource.getConnection(); Statement statement =
+                     connection.createStatement()) {
+            statement.execute("DELETE FROM meeting_create_fact WHERE meeting_id='"
+                    + missing.response().meetingId() + "'");
+        }
+        var noFact = assertInstanceOf(MeetingStartExecutionUnitOfWork.Failure.class,
+                startUnitOfWork().startCompleteCreate(startRequest(
+                        missing.response().meetingId(), providerAll(), DeploymentLimits.NONE)));
+        assertEquals(MeetingStartExecutionUnitOfWork.ErrorCode.CREATE_FACT_INCONSISTENT,
+                noFact.code());
+
+        var created = createForStart("create-start-replay-before-fact-12345", "replay-first");
+        var first = assertInstanceOf(MeetingStartExecutionUnitOfWork.Success.class,
+                startUnitOfWork().startCompleteCreate(startRequest(
+                        created.response().meetingId(), providerAll(), DeploymentLimits.NONE)));
+        try (Connection connection = dataSource.getConnection(); Statement statement =
+                     connection.createStatement()) {
+            statement.execute("UPDATE meeting_create_fact SET request_digest=repeat('a',64) "
+                    + "WHERE meeting_id='" + created.response().meetingId() + "'");
+        }
+        var replay = assertInstanceOf(MeetingStartExecutionUnitOfWork.Success.class,
+                startUnitOfWork().startCompleteCreate(startRequest(
+                        created.response().meetingId(), new CapabilityDescriptor(Set.of()),
+                        new DeploymentLimits(Set.of(REALTIME)))));
+        assertEquals(MeetingStartExecutionUnitOfWork.SuccessCode.REPLAYED, replay.code());
+        assertEquals(first.executionFact(), replay.executionFact());
+        assertEquals(1, count("SELECT count(*) FROM finalization_execution_fact"));
+    }
+
+    @Test
+    void completeCreateStartRejectsStoredScopeMismatch() throws Exception {
+        var created = createForStart("create-start-scope-mismatch-12345", "scope-mismatch");
+        try (Connection connection = dataSource.getConnection(); Statement statement =
+                     connection.createStatement()) {
+            statement.execute("UPDATE meeting_create_fact SET scope='wrong-scope'");
+        }
+        var failure = assertInstanceOf(MeetingStartExecutionUnitOfWork.Failure.class,
+                startUnitOfWork().startCompleteCreate(startRequest(
+                        created.response().meetingId(), providerAll(), DeploymentLimits.NONE)));
+        assertEquals(MeetingStartExecutionUnitOfWork.ErrorCode.CREATE_FACT_INCONSISTENT,
+                failure.code());
+        assertEquals(0, count("SELECT count(*) FROM finalization_execution_fact"));
+    }
+
+    @Test
+    void completeCreateStartRejectsNonFirstPlanRevisionInValidV013Response()
+            throws Exception {
+        var created = createForStart("create-start-plan-revision-12345", "revision");
+        var original = created.response();
+        var changed = original.capabilityDecisions().stream()
+                .map(decision -> new CapabilityDecision(decision.capability(),
+                        decision.availability(), decision.requiredByProfile(),
+                        decision.action(), decision.fallbackCapability(),
+                        decision.affectedWorkflows(), decision.producedArtifacts(),
+                        decision.warningCode(), 2L))
+                .toList();
+        var response = new CreateMeetingResponseFact(original.meetingId(),
+                original.state(), original.acceptedProfile(),
+                original.grantedCapabilities(), changed,
+                original.acceptedAudioProfile(), original.realtime(), original.limits());
+        overwriteCreateResponse(response);
+        var failure = assertInstanceOf(MeetingStartExecutionUnitOfWork.Failure.class,
+                startUnitOfWork().startCompleteCreate(startRequest(
+                        original.meetingId(), providerAll(), DeploymentLimits.NONE)));
+        assertEquals(MeetingStartExecutionUnitOfWork.ErrorCode.CREATE_FACT_INCONSISTENT,
+                failure.code());
+        assertEquals(0, count("SELECT count(*) FROM finalization_execution_fact"));
+    }
+
+    @Test
+    void completeCreateStartRejectsV013WithoutEnabledRealtimeDecision()
+            throws Exception {
+        var created = createForStart("create-start-no-realtime-12345", "no-realtime");
+        var original = created.response();
+        overwriteCreateResponse(new CreateMeetingResponseFact(original.meetingId(),
+                original.state(), original.acceptedProfile(),
+                original.grantedCapabilities(), List.of(),
+                original.acceptedAudioProfile(), original.realtime(), original.limits()));
+        var failure = assertInstanceOf(MeetingStartExecutionUnitOfWork.Failure.class,
+                startUnitOfWork().startCompleteCreate(startRequest(
+                        original.meetingId(), providerAll(), DeploymentLimits.NONE)));
+        assertEquals(MeetingStartExecutionUnitOfWork.ErrorCode.CREATE_FACT_INCONSISTENT,
+                failure.code());
+        assertEquals(0, count("SELECT count(*) FROM finalization_execution_fact"));
+    }
+
+    /** 模拟已保存响应被改写，但仍保持 V013 的规范 JSON 与 SHA-256 约束有效。 */
+    private void overwriteCreateResponse(CreateMeetingResponseFact response)
+            throws Exception {
+        String json = CreateMeetingResponseFactJson.encode(response);
+        try (Connection connection = dataSource.getConnection(); PreparedStatement statement =
+                     connection.prepareStatement("""
+                             UPDATE meeting_create_fact
+                                SET response_json=?,
+                                    response_sha256=sha256(convert_to(?, 'UTF8'))
+                              WHERE meeting_id=?
+                             """)) {
+            statement.setString(1, json);
+            statement.setString(2, json);
+            statement.setString(3, response.meetingId());
+            assertEquals(1, statement.executeUpdate());
+        }
+    }
+
+    @Test
+    void completeCreateStartRejectsOptionalDisabledDecisionDriftWithSameEnabledSet()
+            throws Exception {
+        String optional = CapabilityIds.SUMMARY_STRUCTURED;
+        String meetingId = "mtg_optional_decision_drift";
+        var requestFact = requestFact("create-start-optional-drift-12345");
+        var profile = new ProductProfile("standard", 1, Set.of(REALTIME),
+                Set.of(optional), Map.of(), Map.of(), Map.of());
+        var granted = Set.of(REALTIME, optional);
+        var grant = new MeetingGrant("grant-optional-drift", DEPLOYMENT, SUBJECT,
+                "standard", 1, Set.of(REALTIME), granted, 3_600_000,
+                NOW.minusSeconds(10), NOW.plusSeconds(300));
+        var reservation = UsageReservation.reserved("reservation-optional-drift", grant,
+                meetingId, ESTIMATE, NOW, NOW.plusSeconds(200));
+        var reserve = UsageOperationResult.reserve(DEPLOYMENT, SUBJECT,
+                CompleteMeetingReserveFacts.internalReserveKey(requestFact),
+                requestFact.canonicalRequestDigest(), grant.expiresAt(),
+                AuthorizedProfileSnapshot.from(grant), reservation);
+        try (Connection connection = dataSource.getConnection()) {
+            connection.setAutoCommit(false);
+            JdbcUsageReservationStore.insertReservation(connection, reservation);
+            assertTrue(JdbcUsageReservationStore.insertOperation(connection, reserve, NOW));
+            connection.commit();
+        }
+        var provider = new CapabilityDescriptor(granted);
+        var planner = new CapabilityPlanner();
+        var frozen = planner.plan(provider, profile, Set.of(REALTIME), granted,
+                DeploymentLimits.NONE, 1L);
+        var restricted = new DeploymentLimits(Set.of(optional));
+        var now = planner.plan(provider, profile, Set.of(REALTIME), granted,
+                restricted, 1L);
+        assertEquals(frozen.enabledCapabilities(), now.enabledCapabilities());
+        assertEquals(CapabilityDecision.Action.DISABLE,
+                frozen.decisionFor(optional).action());
+        assertEquals(CapabilityDecision.Availability.AVAILABLE,
+                frozen.decisionFor(optional).availability());
+        assertEquals(CapabilityDecision.Availability.UNAVAILABLE,
+                now.decisionFor(optional).availability());
+        assertFalse(now.failed());
+
+        var response = new CreateMeetingResponseFact(meetingId, MeetingState.CREATED,
+                requestFact.requestSnapshot().profile(), granted, frozen.decisions(),
+                requestFact.requestSnapshot().audioProfile(),
+                new CreateMeetingResponseFact.RealtimeSession(
+                        URI.create("wss://example.test/v1/realtime/optional"),
+                        CreateMeetingResponseFact.REALTIME_SUBPROTOCOL,
+                        "optional-token", NOW.plusSeconds(70)),
+                new CreateMeetingResponseFact.Limits(120_000, 3_200, 128, null));
+        assertInstanceOf(CompleteMeetingCreationUnitOfWork.Success.class,
+                actualUnitOfWork().create(new CompleteMeetingCreationUnitOfWork.CreateRequest(
+                        DEPLOYMENT, SUBJECT, requestFact, response, reserve)));
+        var startRequest = new MeetingStartExecutionUnitOfWork.StartRequest(
+                DEPLOYMENT, SUBJECT, meetingId, NOW.plusSeconds(11), null,
+                profile, Set.of(REALTIME), provider, restricted);
+        var failure = assertInstanceOf(MeetingStartExecutionUnitOfWork.Failure.class,
+                startUnitOfWork().startCompleteCreate(startRequest));
+        assertEquals(MeetingStartExecutionUnitOfWork.ErrorCode.CAPABILITY_PLAN_FAILED,
+                failure.code());
+        assertEquals(0, count("SELECT count(*) FROM finalization_execution_fact"));
+        assertEquals(1, count("SELECT count(*) FROM meeting WHERE state='CREATED'"));
+    }
+
+    private AuthenticatedCompleteMeetingCreateResult.Success createForStart(
+            String key, String suffix) {
+        return assertInstanceOf(AuthenticatedCompleteMeetingCreateResult.Success.class,
+                service(suffix, "start-token-" + suffix,
+                        new JdbcUsageReserveLookup(dataSource),
+                        new JdbcCompleteMeetingCreateReplayLookup(dataSource), actualUnitOfWork())
+                        .create(verification(secret()), requestFact(key)));
+    }
+
+    private JdbcMeetingStartExecutionUnitOfWork startUnitOfWork() {
+        return new JdbcMeetingStartExecutionUnitOfWork(dataSource, new CapabilityPlanner());
+    }
+
+    private static MeetingStartExecutionUnitOfWork.StartRequest startRequest(
+            String meetingId, CapabilityDescriptor provider, DeploymentLimits limits) {
+        return new MeetingStartExecutionUnitOfWork.StartRequest(
+                DEPLOYMENT, SUBJECT, meetingId, NOW.plusSeconds(11), null,
+                new ProductProfile("standard", 1, Set.of(REALTIME), Set.of(),
+                        Map.of(), Map.of(), Map.of()),
+                Set.of(REALTIME), provider, limits);
+    }
+
+    private static CapabilityDescriptor providerAll() {
+        return new CapabilityDescriptor(Set.of(REALTIME));
     }
 
     private AuthenticatedCompleteMeetingApplicationService service(String suffix, String token,

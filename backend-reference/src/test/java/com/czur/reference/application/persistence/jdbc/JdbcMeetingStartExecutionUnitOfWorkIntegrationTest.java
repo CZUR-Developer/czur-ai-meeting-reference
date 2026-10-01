@@ -166,6 +166,20 @@ class JdbcMeetingStartExecutionUnitOfWorkIntegrationTest {
     }
 
     @Test
+    void explicitCompleteCreatePathCannotFallBackToLegacyWhenV013IsNotInstalled()
+            throws Exception {
+        String meetingId = createOwnedMeeting("legacy-only-schema");
+        var start = request(meetingId, null, profile(), providerAll(),
+                DeploymentLimits.NONE);
+        var unitOfWork = unitOfWork(dataSource);
+        assertFailure(unitOfWork.startCompleteCreate(start),
+                MeetingStartExecutionUnitOfWork.ErrorCode.CREATE_FACT_INCONSISTENT);
+        assertEquals(MeetingState.CREATED, readMeeting(meetingId).state());
+        assertEquals(MeetingStartExecutionUnitOfWork.SuccessCode.STARTED,
+                success(unitOfWork.start(start)).code());
+    }
+
+    @Test
     void authorizedPathAppliesOnlyStartAndUsesExplicitStartedAt() throws Exception {
         String meetingId = createOwnedMeeting("authorized");
         try (Connection connection = dataSource.getConnection()) {

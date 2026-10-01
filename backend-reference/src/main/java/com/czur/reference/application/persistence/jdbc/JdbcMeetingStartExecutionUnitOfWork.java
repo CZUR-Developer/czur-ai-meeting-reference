@@ -2,7 +2,13 @@ package com.czur.reference.application.persistence.jdbc;
 
 import com.czur.reference.application.finalization.FinalizationExecutionFact;
 import com.czur.reference.application.finalization.ProductProfileSnapshot;
+import com.czur.reference.application.command.CreateMeetingRequestFact;
+import com.czur.reference.application.command.CreateMeetingRequestSnapshot;
+import com.czur.reference.application.command.CreateMeetingResponseFact;
+import com.czur.reference.application.command.CompleteMeetingReserveFacts;
+import com.czur.reference.application.port.CreateMeetingFactStore;
 import com.czur.reference.application.port.FinalizationExecutionFactStore;
+import com.czur.reference.application.port.IdempotencyScopeCodec;
 import com.czur.reference.application.port.MeetingStartExecutionUnitOfWork;
 import com.czur.reference.application.port.entitlement.AuthorizedProfileSnapshot;
 import com.czur.reference.application.port.entitlement.UsageOperationResult;
@@ -11,6 +17,8 @@ import com.czur.reference.application.port.entitlement.UsageReservation;
 import com.czur.reference.application.port.entitlement.UsageUnit;
 import com.czur.reference.domain.capability.CapabilityPlan;
 import com.czur.reference.domain.capability.CapabilityPlanner;
+import com.czur.reference.domain.capability.CapabilityDecision;
+import com.czur.reference.domain.capability.CapabilityIds;
 import com.czur.reference.domain.meeting.MeetingAggregate;
 import com.czur.reference.domain.meeting.MeetingEvent;
 import com.czur.reference.domain.meeting.MeetingOwnership;
@@ -32,7 +40,8 @@ import java.util.logging.Logger;
  *
  * <p>首次路径严格按以下顺序执行：锁定 Meeting、验证归属和 Profile、锁定主
  * Reservation、反查并严格解码首次 reserve 的 AuthorizedProfileSnapshot、运行
- * {@link CapabilityPlanner}、写入 V011 execution fact、应用领域状态转换并 CAS
+ * {@link CapabilityPlanner}（完整 v2 Create 则核对 V013 原计划）、写入 V011
+ * execution fact、应用领域状态转换并 CAS
  * 更新 Meeting，最后统一提交。所有 JDBC 原语共享同一个显式事务；本类不读取
  * Clock，也不允许数据库默认时间参与 startedAt。</p>
  *
@@ -91,7 +100,18 @@ public final class JdbcMeetingStartExecutionUnitOfWork
      */
     @Override
     public Result start(StartRequest request) {
+        return startInMode(request, StartMode.LEGACY_V1);
+    }
+
+    /** 完整 v2 Create 的专用入口；模式由可信装配选择，不读取客户端版本标志。 */
+    @Override
+    public Result startCompleteCreate(StartRequest request) {
+        return startInMode(request, StartMode.COMPLETE_CREATE_V2);
+    }
+
+    private Result startInMode(StartRequest request, StartMode mode) {
         Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(mode, "mode");
         Connection connection = null;
         boolean previousAutoCommit = true;
         boolean transactionStarted = false;
@@ -188,20 +208,50 @@ public final class JdbcMeetingStartExecutionUnitOfWork
                         connection, resolution, ErrorCode.START_TIME_CONFLICT, phase);
             }
 
+            CapabilityPlan createPlan = null;
+            if (mode == StartMode.COMPLETE_CREATE_V2) {
+                phase = Phase.CREATE_FACT_READ;
+                Optional<CreateMeetingFactStore.Record> createFact =
+                        new JdbcCreateMeetingFactStore(connection)
+                                .findByMeetingId(request.meetingId());
+                if (createFact.isEmpty()
+                        || !sameCompleteCreateFacts(
+                                request, current, authorization, createFact.orElseThrow())) {
+                    return failAndRollback(connection, resolution,
+                            ErrorCode.CREATE_FACT_INCONSISTENT, phase);
+                }
+                CreateMeetingResponseFact response = createFact.orElseThrow().response();
+                if (response.capabilityDecisions().stream()
+                        .anyMatch(decision -> decision.planRevision() != 1L)) {
+                    return failAndRollback(connection, resolution,
+                            ErrorCode.CREATE_FACT_INCONSISTENT, phase);
+                }
+                createPlan = new CapabilityPlan(1L, response.capabilityDecisions());
+                CapabilityDecision realtime = createPlan.decisionFor(
+                        CapabilityIds.TRANSCRIPT_REALTIME);
+                if (createPlan.failed() || realtime == null
+                        || realtime.action() != CapabilityDecision.Action.ENABLE) {
+                    return failAndRollback(connection, resolution,
+                            ErrorCode.CREATE_FACT_INCONSISTENT, phase);
+                }
+            }
+
             phase = Phase.CAPABILITY_PLAN;
             AuthorizedProfileSnapshot authorized = authorization.profile();
-            CapabilityPlan plan = capabilityPlanner.plan(
+            CapabilityPlan currentPlan = capabilityPlanner.plan(
                     request.modelCapabilities(),
                     request.productProfile(),
                     authorized.requestedCapabilities(),
                     authorized.grantedCapabilities(),
                     request.deploymentLimits(),
                     1L);
-            if (plan.failed()) {
+            if (currentPlan.failed()
+                    || (createPlan != null && !createPlan.equals(currentPlan))) {
                 return failAndRollback(
                         connection, resolution,
                         ErrorCode.CAPABILITY_PLAN_FAILED, phase);
             }
+            CapabilityPlan plan = createPlan == null ? currentPlan : createPlan;
 
             FinalizationExecutionFact candidate = FinalizationExecutionFact.freeze(
                     request.meetingId(),
@@ -247,6 +297,18 @@ public final class JdbcMeetingStartExecutionUnitOfWork
                     "会议开始执行事实已原子提交 state=STARTING planRevision={0}",
                     plan.planRevision());
             return new Success(SuccessCode.STARTED, aggregate.snapshot(), candidate);
+        } catch (JdbcCreateMeetingFactStore.StoredFactException failure) {
+            if (commitStarted) {
+                return loggedFailure(ErrorCode.OUTCOME_UNKNOWN, Phase.COMMIT, null);
+            }
+            if (transactionStarted) {
+                resolution.rollback(connection);
+            }
+            ErrorCode code = failure.kind()
+                    == JdbcCreateMeetingFactStore.FailureKind.STORAGE_UNAVAILABLE
+                    ? ErrorCode.STORAGE_UNAVAILABLE
+                    : ErrorCode.CREATE_FACT_INCONSISTENT;
+            return loggedFailure(code, phase, null);
         } catch (JdbcFinalizationExecutionFactStore.StoredFactException failure) {
             if (commitStarted) {
                 return loggedFailure(ErrorCode.OUTCOME_UNKNOWN, Phase.COMMIT, null);
@@ -366,7 +428,9 @@ public final class JdbcMeetingStartExecutionUnitOfWork
                 result.requireAuthorizedProfileSnapshot(),
                 result.reservation(),
                 reservation.orElseThrow().reservation(),
-                result.grantExpiresAt());
+                result.grantExpiresAt(),
+                row.idempotencyKey(),
+                row.requestDigest());
     }
 
     /** 返回 null 表示持久授权链与请求及 Meeting 完全一致。 */
@@ -420,6 +484,44 @@ public final class JdbcMeetingStartExecutionUnitOfWork
             return ErrorCode.AUTHORIZATION_INCONSISTENT;
         }
         return null;
+    }
+
+    /**
+     * 把 V013 完整首次响应绑定到已锁定 Meeting 和首次 reserve，而非只相信
+     * meeting_id 索引命中。标题属于 Start 的显式输入，可在 Create 后改变，因此
+     * 不要求它与 Create 请求标题相等；能力请求与冻结计划则不得改变。
+     */
+    private static boolean sameCompleteCreateFacts(
+            StartRequest request,
+            MeetingAggregate.MeetingSnapshot meeting,
+            AuthorizationFacts authorization,
+            CreateMeetingFactStore.Record fact) {
+        CreateMeetingRequestFact requestFact = fact.request();
+        CreateMeetingRequestSnapshot snapshot = requestFact.requestSnapshot();
+        CreateMeetingResponseFact response = fact.response();
+        return fact.scope().equals(IdempotencyScopeCodec.meetingCreateV2(
+                        meeting.deploymentScope(), meeting.subjectScope()))
+                && fact.key().equals(snapshot.idempotencyKey())
+                && OwnedMeetingCreationFacts.samePersistentInstant(
+                        fact.createdAt(), meeting.createdAt())
+                && meeting.meetingId().equals(response.meetingId())
+                && meeting.clientSessionId().equals(snapshot.clientSessionId())
+                && meeting.profileId().equals(snapshot.profile().id())
+                && meeting.profileRevision() == snapshot.profile().revision()
+                && response.acceptedProfile().equals(snapshot.profile())
+                && response.acceptedAudioProfile().equals(snapshot.audioProfile())
+                && snapshot.requestedCapabilities().equals(
+                        authorization.profile().requestedCapabilities())
+                && request.requestedCapabilities().equals(
+                        snapshot.requestedCapabilities())
+                && response.grantedCapabilities().equals(
+                        authorization.profile().grantedCapabilities())
+                && response.limits().maxMeetingDurationMs()
+                        <= authorization.profile().maxDurationMs()
+                && CompleteMeetingReserveFacts.internalReserveKey(requestFact)
+                        .equals(authorization.reserveKey())
+                && requestFact.canonicalRequestDigest()
+                        .equals(authorization.reserveRequestDigest());
     }
 
     /**
@@ -549,16 +651,25 @@ public final class JdbcMeetingStartExecutionUnitOfWork
             AuthorizedProfileSnapshot profile,
             UsageReservation firstReservation,
             UsageReservation currentReservation,
-            java.time.Instant grantExpiresAt) {
+            java.time.Instant grantExpiresAt,
+            String reserveKey,
+            String reserveRequestDigest) {
         private static AuthorizationFacts missing() {
-            return new AuthorizationFacts(null, null, null, null);
+            return new AuthorizationFacts(null, null, null, null, null, null);
         }
 
         private boolean present() {
             return profile != null
                     && firstReservation != null
                     && currentReservation != null
-                    && grantExpiresAt != null;
+                    && grantExpiresAt != null
+                    && reserveKey != null
+                    && reserveRequestDigest != null;
+        }
+
+        @Override
+        public String toString() {
+            return "AuthorizationFacts[redacted]";
         }
     }
 
@@ -581,11 +692,17 @@ public final class JdbcMeetingStartExecutionUnitOfWork
         ACCESS_CHECK,
         EXECUTION_FACT_READ,
         AUTHORIZATION_READ,
+        CREATE_FACT_READ,
         REPLAY_CHECK,
         STATE_CHECK,
         CAPABILITY_PLAN,
         EXECUTION_FACT_WRITE,
         MEETING_UPDATE,
         COMMIT
+    }
+
+    private enum StartMode {
+        LEGACY_V1,
+        COMPLETE_CREATE_V2
     }
 }
