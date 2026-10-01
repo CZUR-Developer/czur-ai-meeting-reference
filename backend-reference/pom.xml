@@ -37,12 +37,25 @@
       <artifactId>HikariCP</artifactId>
       <version>5.1.0</version>
     </dependency>
-    <!-- Hikari 使用 SLF4J；将其统一桥接到本参考后端已有的 JUL 分级日志。 -->
+    <!-- Hikari 与 WebSocket 组件统一使用 SLF4J 2 API，避免混装 1.7 provider。 -->
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+      <version>2.0.13</version>
+    </dependency>
+    <!-- 将第三方库日志桥接到本参考后端已有的 JUL 分级日志。 -->
     <dependency>
       <groupId>org.slf4j</groupId>
       <artifactId>slf4j-jdk14</artifactId>
-      <version>1.7.36</version>
+      <version>2.0.13</version>
       <scope>runtime</scope>
+    </dependency>
+    <!-- T16-01 只做测试级 WSS/TLS 可行性小试，生产入口留待 T16-06。 -->
+    <dependency>
+      <groupId>org.java-websocket</groupId>
+      <artifactId>Java-WebSocket</artifactId>
+      <version>1.6.0</version>
+      <scope>test</scope>
     </dependency>
     <!--
       JDBC 适配器只依赖 javax.sql.DataSource 和 java.sql；驱动放在运行时边界，
