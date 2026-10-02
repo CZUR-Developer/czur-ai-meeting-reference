@@ -1,0 +1,9 @@
+# 只向镜像构建传送 Java 生产源码、Maven 描述和唯一实时协议源。
+*
+!backend-reference/
+!backend-reference/pom.xml
+!backend-reference/src/
+!backend-reference/src/main/
+!backend-reference/src/main/**
+!contracts/
+!contracts/realtime.proto
