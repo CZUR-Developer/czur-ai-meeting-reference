@@ -1,6 +1,7 @@
 package com.czur.reference.application.port.model;
 
 import com.czur.reference.domain.capability.CapabilityDescriptor;
+import com.czur.reference.domain.capability.CapabilityIds;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -235,9 +236,9 @@ public final class MockModelDriver implements ModelDriver {
                     segmentStartMs,
                     record.lastAudioPositionMs,
                     session.spec().sourceLanguage(),
-                    "mock partial revision " + revision,
+                    "模拟实时字幕（修订 " + revision + "）",
                     false,
-                    speakerReference(),
+                    speakerReference(session),
                     0.5,
                     List.of(),
                     List.of());
@@ -674,8 +675,10 @@ public final class MockModelDriver implements ModelDriver {
         }
     }
 
-    private SpeakerReference speakerReference() {
-        return descriptor.supports("speaker.diarization.session")
+    private SpeakerReference speakerReference(ModelDriverSession session) {
+        return descriptor.supports(CapabilityIds.SPEAKER_DIARIZATION_SESSION)
+                && session.spec().enabledCapabilities().contains(
+                        CapabilityIds.SPEAKER_DIARIZATION_SESSION)
                 ? new SpeakerReference("mock-speaker-1", null, null)
                 : null;
     }

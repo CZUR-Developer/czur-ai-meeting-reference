@@ -36,12 +36,11 @@
       <artifactId>protobuf-java</artifactId>
       <version>${protobuf.version}</version>
     </dependency>
-    <!-- 固定公开 JSON Fixture 与 Protobuf JSON Mapping 的测试。 -->
+    <!-- 固定公开 JSON Fixture，并供持久实时事件使用严格 Protobuf JSON Mapping。 -->
     <dependency>
       <groupId>com.google.protobuf</groupId>
       <artifactId>protobuf-java-util</artifactId>
       <version>${protobuf.version}</version>
-      <scope>test</scope>
     </dependency>
     <!--
       运行时唯一共享连接池。HikariCP 只位于数据库装配边界，不渗透到领域

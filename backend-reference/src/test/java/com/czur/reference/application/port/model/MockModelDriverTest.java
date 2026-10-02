@@ -26,6 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -95,6 +96,18 @@ class MockModelDriverTest {
         assertEquals(7, session.spec().planRevision());
         assertFalse(session.spec().enabledCapabilities().contains(
                 CapabilityIds.SPEAKER_DIARIZATION_SESSION));
+    }
+
+    @Test
+    void asrOnlyFrozenPlanOmitsSpeakerEvenWhenDescriptorSupportsIt() {
+        ModelDriverSession session = open("open-asr-only", spec("stream-asr-only",
+                Set.of(CapabilityIds.TRANSCRIPT_REALTIME), 1));
+        assertTrue(driver.start(session, context("start-asr-only")).isSuccess());
+        assertTrue(driver.acceptAudio(session, frame(1, 0),
+                context("frame-asr-only")).isSuccess());
+
+        assertEquals(1, sink.transcripts.size());
+        assertNull(sink.transcripts.getFirst().speaker());
     }
 
     @Test
