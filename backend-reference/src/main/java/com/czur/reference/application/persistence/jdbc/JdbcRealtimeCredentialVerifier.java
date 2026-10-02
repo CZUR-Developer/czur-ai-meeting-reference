@@ -142,6 +142,15 @@ public final class JdbcRealtimeCredentialVerifier implements RealtimeCredentialV
                 && first.response().acceptedProfile().id().equals(meeting.profileId())
                 && first.response().acceptedProfile().revision() == meeting.profileRevision()
                 && first.createdAt().equals(meeting.createdAt()));
+        requireFact(first.request().requestSnapshot().audioProfile()
+                .equals(first.response().acceptedAudioProfile()));
+        AudioContract audioContract;
+        try {
+            audioContract = new AudioContract(first.response().acceptedAudioProfile(),
+                    first.response().limits().maxAudioFrameBytes());
+        } catch (IllegalArgumentException malformed) {
+            throw new InvalidFact();
+        }
         MeetingState state = parseState(meeting.state());
         InputState inputState = parseInputState(meeting.inputState());
 
@@ -167,8 +176,8 @@ public final class JdbcRealtimeCredentialVerifier implements RealtimeCredentialV
                 return new Denied();
             }
             return switch (RealtimeAccessPolicy.classify(state, inputState)) {
-                case WRITE -> new Granted(AccessMode.WRITE, matchedExpiry);
-                case READ_ONLY -> new Granted(AccessMode.READ_ONLY, matchedExpiry);
+                case WRITE -> new Granted(AccessMode.WRITE, matchedExpiry, audioContract);
+                case READ_ONLY -> new Granted(AccessMode.READ_ONLY, matchedExpiry, audioContract);
                 case DENY -> new Denied();
                 case FACT_INCONSISTENT -> factInconsistent();
             };

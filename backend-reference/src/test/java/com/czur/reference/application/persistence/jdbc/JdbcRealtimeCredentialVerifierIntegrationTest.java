@@ -3,6 +3,7 @@ package com.czur.reference.application.persistence.jdbc;
 import com.czur.reference.application.port.RealtimeCredentialVerifier;
 import com.czur.reference.application.port.RenewRealtimeTokenUnitOfWork;
 import com.czur.reference.application.port.identity.SecretCredential;
+import com.czur.reference.application.port.model.AudioProfile;
 import com.czur.reference.protocol.json.RealtimeTokenGrantJson;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -361,11 +362,49 @@ class JdbcRealtimeCredentialVerifierIntegrationTest {
                 verify(T15CreateRecoveryFixtures.DEPLOYMENT, FIRST_TOKEN, MEETING, NOW));
     }
 
+    @Test
+    void persistedCreateRequestAndResponseAudioMustAgree() throws Exception {
+        // 重算数据库摘要，证明失败来自两个各自合法的 V013 正文互相矛盾，
+        // 而不是单个 JSON 或 SHA-256 损坏。
+        mutateResponseJson("\"frameDurationMs\":100", "\"frameDurationMs\":120");
+        assertInstanceOf(RealtimeCredentialVerifier.FactInconsistent.class,
+                verify(T15CreateRecoveryFixtures.DEPLOYMENT, FIRST_TOKEN, MEETING, NOW));
+    }
+
+    @Test
+    void persistedAudioLimitMustFitNominalFrame() throws Exception {
+        mutateResponseJson("\"maxAudioFrameBytes\":64000",
+                "\"maxAudioFrameBytes\":3199");
+        assertInstanceOf(RealtimeCredentialVerifier.FactInconsistent.class,
+                verify(T15CreateRecoveryFixtures.DEPLOYMENT, FIRST_TOKEN, MEETING, NOW));
+    }
+
+    @Test
+    void firstAndRenewedTokensUseThePersistedCreateAudioLimit() throws Exception {
+        mutateResponseJson("\"maxAudioFrameBytes\":64000",
+                "\"maxAudioFrameBytes\":4000");
+        String renewed = token((byte) 6);
+        insertGrant("renew-audio-limit-0006", renewed, NOW.plusSeconds(60));
+        for (String credential : List.of(FIRST_TOKEN, renewed)) {
+            var granted = assertInstanceOf(RealtimeCredentialVerifier.Granted.class,
+                    verify(T15CreateRecoveryFixtures.DEPLOYMENT, credential, MEETING, NOW));
+            assertEquals(AudioProfile.pcm16kMono(100), granted.audioContract().audioProfile());
+            assertEquals(4_000, granted.audioContract().maxAudioFrameBytes());
+        }
+        setState("FINALIZING", "INPUT_ACCEPTED");
+        var readOnly = assertInstanceOf(RealtimeCredentialVerifier.Granted.class,
+                verify(T15CreateRecoveryFixtures.DEPLOYMENT, renewed, MEETING, NOW));
+        assertEquals(RealtimeCredentialVerifier.AccessMode.READ_ONLY, readOnly.access());
+        assertEquals(4_000, readOnly.audioContract().maxAudioFrameBytes());
+    }
+
     private void assertAccess(String token, String meetingId, Instant now,
             RealtimeCredentialVerifier.AccessMode expected) {
         var granted = assertInstanceOf(RealtimeCredentialVerifier.Granted.class,
                 verify(T15CreateRecoveryFixtures.DEPLOYMENT, token, meetingId, now));
         assertEquals(expected, granted.access());
+        assertEquals(AudioProfile.pcm16kMono(100), granted.audioContract().audioProfile());
+        assertEquals(64_000, granted.audioContract().maxAudioFrameBytes());
     }
 
     private RealtimeCredentialVerifier.Result verify(
@@ -428,6 +467,24 @@ class JdbcRealtimeCredentialVerifierIntegrationTest {
             statement.setString(1, scope);
             statement.setString(2, MEETING);
             statement.executeUpdate();
+        }
+    }
+
+    private void mutateResponseJson(String original, String replacement) throws Exception {
+        try (Connection connection = source(schema).getConnection();
+             PreparedStatement statement = connection.prepareStatement("""
+                     UPDATE meeting_create_fact
+                        SET response_json = replace(response_json, ?, ?),
+                            response_sha256 = sha256(convert_to(
+                                    replace(response_json, ?, ?), 'UTF8'))
+                      WHERE meeting_id = ?
+                     """)) {
+            statement.setString(1, original);
+            statement.setString(2, replacement);
+            statement.setString(3, original);
+            statement.setString(4, replacement);
+            statement.setString(5, MEETING);
+            assertEquals(1, statement.executeUpdate());
         }
     }
 

@@ -6,6 +6,7 @@ import com.czur.reference.application.port.RenewRealtimeTokenUnitOfWork;
 import com.czur.reference.application.port.identity.SecretCredential;
 import com.czur.reference.application.port.identity.Subject;
 import com.czur.reference.application.port.identity.VerifiedIdentity;
+import com.czur.reference.application.port.model.AudioProfile;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -54,8 +55,31 @@ class RealtimeCredentialContractsTest {
                         Instant.parse("2030-01-01T00:05:00Z")));
         assertThrows(NullPointerException.class,
                 () -> new RealtimeCredentialVerifier.Granted(
-                        null, Instant.parse("2030-01-01T00:05:00Z")));
+                        null, Instant.parse("2030-01-01T00:05:00Z"),
+                        new RealtimeCredentialVerifier.AudioContract(
+                                AudioProfile.pcm16kMono(100), 3_200)));
+        assertThrows(NullPointerException.class,
+                () -> new RealtimeCredentialVerifier.Granted(
+                        RealtimeCredentialVerifier.AccessMode.WRITE,
+                        Instant.parse("2030-01-01T00:05:00Z"), null));
         assertEquals(persistedJson, success.persistedGrantJson());
+    }
+
+    @Test
+    void trustedAudioContractRequiresSupportedProfileAndACompleteNominalFrame() {
+        var profile = AudioProfile.pcm16kMono(100);
+        var contract = new RealtimeCredentialVerifier.AudioContract(profile, 3_200);
+        assertEquals(profile, contract.audioProfile());
+        assertEquals(3_200, contract.maxAudioFrameBytes());
+        assertThrows(IllegalArgumentException.class,
+                () -> new RealtimeCredentialVerifier.AudioContract(profile, 3_199));
+        assertThrows(IllegalArgumentException.class,
+                () -> new RealtimeCredentialVerifier.AudioContract(
+                        AudioProfile.pcm16kMono(201), 6_432));
+        assertThrows(IllegalArgumentException.class,
+                () -> new RealtimeCredentialVerifier.AudioContract(
+                        new AudioProfile(AudioProfile.AudioEncoding.UNKNOWN, 16_000, 1, 100),
+                        3_200));
     }
 
     @Test

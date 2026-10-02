@@ -1,6 +1,7 @@
 package com.czur.reference.application.port;
 
 import com.czur.reference.application.port.identity.SecretCredential;
+import com.czur.reference.application.port.model.AudioProfile;
 import com.czur.reference.domain.meeting.MeetingIdPolicy;
 
 import java.time.Instant;
@@ -43,11 +44,35 @@ public interface RealtimeCredentialVerifier {
     sealed interface Result permits Granted, Denied, FactInconsistent, Unavailable {
     }
 
-    /** 仅由有效凭据和一致持久快照产生，授权期限为独占截止时刻。 */
-    record Granted(AccessMode access, Instant expiresAt) implements Result {
+    /**
+     * 仅由有效凭据和一致持久快照产生；期限为独占截止时刻，音频合同来自
+     * 同一份 V013 首次 Create 响应，不能用客户端声称的格式或当前部署配置替代。
+     */
+    record Granted(AccessMode access, Instant expiresAt, AudioContract audioContract)
+            implements Result {
         public Granted {
             Objects.requireNonNull(access, "access");
             Objects.requireNonNull(expiresAt, "expiresAt");
+            Objects.requireNonNull(audioContract, "audioContract");
+        }
+    }
+
+    /**
+     * 实时入口可传给协议校验器的可信音频合同；保持应用端口独立于传输协议类。
+     * 首版只接受 PCM S16LE、16 kHz 单声道、20～200 ms 名义帧，最大字节数
+     * 至少能容纳一帧完整名义音频。只读授权也保留同一合同以供恢复连接使用。
+     */
+    record AudioContract(AudioProfile audioProfile, int maxAudioFrameBytes) {
+        public AudioContract {
+            Objects.requireNonNull(audioProfile, "audioProfile");
+            if (audioProfile.encoding() != AudioProfile.AudioEncoding.PCM_S16LE
+                    || audioProfile.sampleRateHz() != 16_000
+                    || audioProfile.channelCount() != 1
+                    || audioProfile.frameDurationMs() < 20
+                    || audioProfile.frameDurationMs() > 200
+                    || maxAudioFrameBytes < audioProfile.frameDurationMs() * 32) {
+                throw new IllegalArgumentException("invalid trusted audio contract");
+            }
         }
     }
 
