@@ -65,12 +65,11 @@
       <version>2.0.13</version>
       <scope>runtime</scope>
     </dependency>
-    <!-- T16-01 只做测试级 WSS/TLS 可行性小试，生产入口留待 T16-06。 -->
+    <!-- T16 正式 WSS 传输入口复用已通过 TLS 小试的固定版本组件。 -->
     <dependency>
       <groupId>org.java-websocket</groupId>
       <artifactId>Java-WebSocket</artifactId>
       <version>1.6.0</version>
-      <scope>test</scope>
     </dependency>
     <!--
       JDBC 适配器只依赖 javax.sql.DataSource 和 java.sql；驱动放在运行时边界，
