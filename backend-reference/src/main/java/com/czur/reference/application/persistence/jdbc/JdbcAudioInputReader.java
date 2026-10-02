@@ -19,7 +19,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * V015 单流输入的只读 JDBC 组件，供后续完整持久端口组合使用。
+ * V015 单流输入的只读 JDBC 组件，由持久写端复用读取与帧事实核验。
  *
  * <p>一次读取使用一个只读 REPEATABLE_READ 事务：游标、完成声明和帧页来自同一
  * PostgreSQL 快照。{@code readCursor} 核对末帧与游标终点，
@@ -28,8 +28,8 @@ import java.util.logging.Logger;
  * ACK、不读取模型处理游标，也不向 EventLog 写原始音频。</p>
  *
  * <p>调用者负责既有会议/实时凭据授权；本类不新增认证层。数据库运行时持有
- * DataSource 的生命周期。本类不在生产入口装配，后续写端就绪后才开放实时
- * 音频。错误日志仅记录稳定分类和白名单 SQLState，不记录会议 ID、连接 ID、
+ * DataSource 的生命周期。本组件及写端尚未装配到生产入口。错误日志仅记录
+ * 稳定分类和白名单 SQLState，不记录会议 ID、连接 ID、
  * 原始音频、摘要、Token 或完整声明。</p>
  */
 final class JdbcAudioInputReader {
@@ -140,7 +140,7 @@ final class JdbcAudioInputReader {
         }
     }
 
-    private static DurableAudioInputPort.Cursor loadCursor(Connection connection, String meetingId)
+    static DurableAudioInputPort.Cursor loadCursor(Connection connection, String meetingId)
             throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(CURSOR_SQL)) {
             statement.setString(1, meetingId);
@@ -179,7 +179,7 @@ final class JdbcAudioInputReader {
         }
     }
 
-    private static void validateLastFrame(Connection connection, String meetingId,
+    static void validateLastFrame(Connection connection, String meetingId,
             DurableAudioInputPort.Cursor cursor) throws SQLException {
         long accepted = cursor.acceptedStreamSequence();
         if (accepted > 0) {
@@ -221,7 +221,7 @@ final class JdbcAudioInputReader {
         return frames;
     }
 
-    private static MeetingAudioFrame decodeFrame(ResultSet rows) throws SQLException {
+    static MeetingAudioFrame decodeFrame(ResultSet rows) throws SQLException {
         long sequence = rows.getLong("stream_sequence");
         long start = rows.getLong("start_position_ms");
         int duration = rows.getInt("duration_ms");
@@ -283,6 +283,6 @@ final class JdbcAudioInputReader {
                 : new DurableAudioInputPort.UnavailableRead();
     }
 
-    private static final class CorruptFact extends RuntimeException {
+    static final class CorruptFact extends RuntimeException {
     }
 }
