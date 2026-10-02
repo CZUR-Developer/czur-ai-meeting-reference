@@ -65,6 +65,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.LongStream;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
@@ -103,9 +104,9 @@ class MeetingRealtimeWssServerTest {
         TestTls tls = TestTls.create(temporaryDirectory);
         FakeVerifier verifier = new FakeVerifier();
         FakeAudio audio = new FakeAudio();
-        EventLog first = transcriptEvent(1);
-        EventLog second = transcriptEvent(2);
-        EventLog third = transcriptEvent(3);
+        List<EventLog> firstPage = LongStream.rangeClosed(1, 32)
+                .mapToObj(MeetingRealtimeWssServerTest::transcriptEvent).toList();
+        EventLog last = transcriptEvent(33);
         AtomicInteger reads = new AtomicInteger();
         RealtimeEventLogPort events = request -> {
             reads.incrementAndGet();
@@ -113,11 +114,11 @@ class MeetingRealtimeWssServerTest {
             assertEquals(MEETING, request.grant().readOwnership().meetingId());
             return request.afterSequence() == 0
                     ? new MeetingEventLogPort.Page(new MeetingEventPage(
-                            List.of(first, second), 2, true))
-                    : request.afterSequence() == 2
+                            firstPage, 32, true))
+                    : request.afterSequence() == 32
                             ? new MeetingEventLogPort.Page(new MeetingEventPage(
-                                    List.of(third), 3, false))
-                            : new MeetingEventLogPort.Page(MeetingEventPage.empty(3));
+                                    List.of(last), 33, false))
+                            : new MeetingEventLogPort.Page(MeetingEventPage.empty(33));
         };
         try (Fixture fixture = new Fixture(tls, verifier, audio, null, null, events);
              HttpClient client = HttpClient.newBuilder().sslContext(tls.trusted()).build()) {
@@ -130,31 +131,37 @@ class MeetingRealtimeWssServerTest {
                 var socket = connect(client, fixture.uri(MEETING), TOKEN,
                         CreateMeetingResponseFact.REALTIME_SUBPROTOCOL, listener);
                 socket.sendBinary(ByteBuffer.wrap(resume(0).toByteArray()), true).join();
-                awaitCount(listener.ackCount, 3);
+                awaitCount(listener.ackCount, 33);
                 List<ServerEnvelope> received = listener.messages();
-                assertEquals(List.of(1L, 2L, 0L), received.stream()
+                assertEquals(LongStream.rangeClosed(1, 32).boxed().toList(),
+                        received.subList(0, 32).stream()
                         .map(ServerEnvelope::getEventSequence).toList());
                 assertTrue(received.get(0).hasTranscriptUpsert());
-                assertTrue(received.get(1).hasTranscriptUpsert());
-                assertTrue(received.get(2).hasResumePageEnd());
-                assertEquals(2, received.get(2).getResumePageEnd().getLastEventSequence());
-                assertTrue(received.get(2).getResumePageEnd().getHasMore());
+                assertTrue(received.get(31).hasTranscriptUpsert());
+                assertTrue(received.get(32).hasResumePageEnd());
+                assertEquals(32, received.get(32).getResumePageEnd().getLastEventSequence());
+                assertTrue(received.get(32).getResumePageEnd().getHasMore());
 
-                socket.sendBinary(ByteBuffer.wrap(resume(2).toByteArray()), true).join();
-                awaitCount(listener.ackCount, 5);
+                socket.sendBinary(ByteBuffer.wrap(resume(32).toByteArray()), true).join();
+                awaitCount(listener.ackCount, 35);
                 received = listener.messages();
-                assertEquals(3, received.get(3).getEventSequence());
-                assertTrue(received.get(4).hasResumePageEnd());
-                assertEquals(3, received.get(4).getResumePageEnd().getLastEventSequence());
-                assertFalse(received.get(4).getResumePageEnd().getHasMore());
+                assertEquals(33, received.get(33).getEventSequence());
+                assertTrue(received.get(34).hasResumePageEnd());
+                assertEquals(33, received.get(34).getResumePageEnd().getLastEventSequence());
+                assertFalse(received.get(34).getResumePageEnd().getHasMore());
 
-                socket.sendBinary(ByteBuffer.wrap(resume(3).toByteArray()), true).join();
-                awaitCount(listener.ackCount, 6);
+                socket.sendBinary(ByteBuffer.wrap(resume(33).toByteArray()), true).join();
+                awaitCount(listener.ackCount, 36);
                 received = listener.messages();
-                assertTrue(received.get(5).hasResumePageEnd());
-                assertEquals(3, received.get(5).getResumePageEnd().getLastEventSequence());
-                assertFalse(received.get(5).getResumePageEnd().getHasMore());
-                socket.sendClose(java.net.http.WebSocket.NORMAL_CLOSURE, "done").join();
+                assertTrue(received.get(35).hasResumePageEnd());
+                assertEquals(33, received.get(35).getResumePageEnd().getLastEventSequence());
+                assertFalse(received.get(35).getResumePageEnd().getHasMore());
+                if (mode == RealtimeCredentialVerifier.AccessMode.READ_ONLY) {
+                    sendForExpectedClose(socket, start().toByteArray());
+                    assertEquals(1008, listener.closed.orTimeout(5, TimeUnit.SECONDS).join());
+                } else {
+                    socket.sendClose(java.net.http.WebSocket.NORMAL_CLOSURE, "done").join();
+                }
                 listener.closed.orTimeout(5, TimeUnit.SECONDS).join();
             }
             assertEquals(6, reads.get());
