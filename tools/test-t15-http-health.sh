@@ -159,6 +159,8 @@ case "${TEST_SELECTOR}" in
   realHttpStopAdmissionAndMockWorkerPublishAsrOnlyResult|\
   realHttpAnonymousManifestUsesFrozenJdbcFactsAndRevokesOnDelete)
     TEST_TARGET="ReferenceMeetingHttpAssemblyIntegrationTest#${TEST_SELECTOR}" ;;
+  ReferenceMeetingRealtimeWssIntegrationTest)
+    TEST_TARGET='ReferenceMeetingRealtimeWssIntegrationTest' ;;
   MockFinalizationWorkerFaultInjectionIntegrationTest)
     TEST_TARGET='MockFinalizationWorkerFaultInjectionIntegrationTest'
     EXPECTED_SUREFIRE_COUNTS='14,0,0,0' ;;
