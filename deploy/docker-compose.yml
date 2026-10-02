@@ -1,26 +1,43 @@
 services:
-  api:
-    image: ${REFERENCE_API_IMAGE:-czur-ai-meeting-reference-api:local}
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: czur-ai-meeting-reference-api:local
+    env_file: .env
+    environment:
+      AI_MEETING_HTTP_BIND: 0.0.0.0:8080
+      AI_MEETING_WSS_BIND: 0.0.0.0:8443
+      AI_MEETING_TLS_KEYSTORE_PATH: /run/meeting/tls.p12
+      AI_MEETING_ARTIFACT_ROOT: /var/lib/meeting/artifacts
+    ports:
+      - "${API_PORT:-8080}:8080"
+      - "${WSS_PORT:-8443}:8443"
+    volumes:
+      - meeting-artifacts:/var/lib/meeting/artifacts
+      - ${AI_MEETING_TLS_KEYSTORE_FILE:-./local-meeting.p12}:/run/meeting/tls.p12:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  migrate:
+    image: postgres:16
     environment:
       DATABASE_URL: ${DATABASE_URL:-jdbc:postgresql://db:5432/meeting}
       DATABASE_USER: ${DATABASE_USER:-meeting}
       DATABASE_PASSWORD: ${DATABASE_PASSWORD:-change-me-locally}
-      STORAGE_ROOT: ${STORAGE_ROOT:-/var/lib/meeting}
-      MODEL_ENDPOINT: ${MODEL_ENDPOINT:-http://model:9000}
-    ports: ["${API_PORT:-8080}:8080"]
-    volumes: ["meeting-storage:${STORAGE_MOUNT:-/var/lib/meeting}"]
-  worker:
-    image: ${REFERENCE_WORKER_IMAGE:-czur-ai-meeting-reference-worker:local}
-    environment:
-      DATABASE_URL: ${DATABASE_URL:-jdbc:postgresql://db:5432/meeting}
-      DATABASE_USER: ${DATABASE_USER:-meeting}
-      DATABASE_PASSWORD: ${DATABASE_PASSWORD:-change-me-locally}
-      MODEL_ENDPOINT: ${MODEL_ENDPOINT:-http://model:9000}
+    volumes:
+      - ./migrate.sh:/migrations/migrate.sh:ro
+      - ./migrations:/migrations/migrations:ro
+    entrypoint: ["/bin/bash", "/migrations/migrate.sh"]
+    depends_on:
+      db:
+        condition: service_healthy
+        required: false
+
   db:
-    # 数据库容器只用于本地演示和契约测试。默认 docker compose up 不会启用
-    # database profile；CZUR 或合作伙伴生产环境应注入外部 DATABASE_URL。
     profiles: [database]
-    image: postgres:16-alpine
+    image: postgres:16
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-meeting}
       POSTGRES_USER: ${POSTGRES_USER:-meeting}
@@ -30,69 +47,9 @@ services:
       interval: 5s
       timeout: 5s
       retries: 12
-      start_period: 5s
-    volumes: ["meeting-db:/var/lib/postgresql/data"]
-  migrate:
-    # migrate 是一次性任务，必须在 database profile 下显式运行。它不承载
-    # 业务逻辑，只执行 deploy/migrations 中的版本化 SQL。
-    profiles: [database]
-    image: postgres:16-alpine
-    environment:
-      PGHOST: db
-      PGPORT: 5432
-      PGDATABASE: ${POSTGRES_DB:-meeting}
-      PGUSER: ${POSTGRES_USER:-meeting}
-      PGPASSWORD: ${POSTGRES_PASSWORD:-change-me-locally}
-      LOG_LEVEL: ${MIGRATION_LOG_LEVEL:-INFO}
     volumes:
-      - ./migrations:/migrations:ro
-    depends_on:
-      db:
-        condition: service_healthy
-    entrypoint: ["/bin/sh", "-ec"]
-    # Compose V1 会把 command 字符串按空白拆成多个参数；显式使用只有
-    # 一个元素的数组，确保整个多行脚本作为 /bin/sh -ec 的同一个参数传入。
-    command:
-      - |
-        log() { level="$$1"; shift; printf '[%s] %s\n' "$$level" "$$*"; }
-        export LC_ALL=C
-        log INFO "等待 PostgreSQL 健康检查通过"
-        pg_isready -q
-        log INFO "开始执行版本化数据库迁移"
-        psql -v ON_ERROR_STOP=1 <<'SQL'
-        CREATE TABLE IF NOT EXISTS schema_migrations (
-            version TEXT PRIMARY KEY,
-            applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
-        SQL
-        found=0
-        for file in /migrations/V*.sql; do
-          [ -f "$$file" ] || continue
-          found=1
-          version="$$(basename "$$file" .sql)"
-          applied="$$(psql -v ON_ERROR_STOP=1 -Atqc "SELECT 1 FROM schema_migrations WHERE version = '$$version' LIMIT 1")"
-          if [ "$$applied" = "1" ]; then
-            log DEBUG "跳过已应用迁移 $$version"
-            continue
-          fi
-          log INFO "执行迁移 $$version"
-          psql -v ON_ERROR_STOP=1 -f "$$file"
-          psql -v ON_ERROR_STOP=1 -c "INSERT INTO schema_migrations(version) VALUES ('$$version') ON CONFLICT (version) DO NOTHING"
-        done
-        if [ "$$found" -eq 0 ]; then
-          log ERROR "迁移目录中没有 V*.sql 文件"
-          exit 1
-        fi
-        log INFO "数据库迁移完成"
-  model:
-    image: ${REFERENCE_MODEL_IMAGE:-partner-model:local}
-    profiles: [model]
-  storage:
-    image: ${REFERENCE_STORAGE_IMAGE:-minio/minio:latest}
-    profiles: [object-storage]
-    command: server /data
-    volumes: ["meeting-object-data:/data"]
+      - meeting-db:/var/lib/postgresql/data
+
 volumes:
-  meeting-storage:
+  meeting-artifacts:
   meeting-db:
-  meeting-object-data:
