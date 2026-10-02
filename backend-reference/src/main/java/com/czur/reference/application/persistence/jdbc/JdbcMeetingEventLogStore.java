@@ -270,7 +270,7 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
         }
     }
 
-    private static Optional<EventLog> findByEventId(Connection connection, String eventId)
+    static Optional<EventLog> findByEventId(Connection connection, String eventId)
             throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(FIND_BY_EVENT_ID_SQL)) {
             statement.setString(1, eventId);
@@ -280,7 +280,7 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
         }
     }
 
-    private static boolean lockMeeting(Connection connection, String meetingId) throws SQLException {
+    static boolean lockMeeting(Connection connection, String meetingId) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(LOCK_MEETING_SQL)) {
             statement.setString(1, meetingId);
             try (ResultSet rows = statement.executeQuery()) {
@@ -289,7 +289,7 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
         }
     }
 
-    private static long currentSequence(Connection connection, String meetingId) throws SQLException {
+    static long currentSequence(Connection connection, String meetingId) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(MAX_SEQUENCE_SQL)) {
             statement.setString(1, meetingId);
             try (ResultSet rows = statement.executeQuery()) {
