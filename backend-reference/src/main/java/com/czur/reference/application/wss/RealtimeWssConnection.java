@@ -1,6 +1,7 @@
 package com.czur.reference.application.wss;
 
 import com.czur.aimeeting.contract.realtime.v1.ClientEnvelope;
+import com.czur.reference.application.finalization.MeetingInputReconciler;
 import com.czur.reference.application.port.DurableAudioInputPort;
 import com.czur.reference.application.port.RealtimeCredentialVerifier;
 import com.czur.reference.application.port.identity.SecretCredential;
@@ -15,6 +16,8 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.Objects;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * 一条物理 WSS 连接的传输适配器；不持有数据库或业务状态的第二份事实源。
@@ -26,18 +29,20 @@ import java.util.Objects;
  * 只有其 {@link RealtimeAudioIngress.DurableAckCursor} 可以产生 ACK；未知提交、
  * 旧 epoch、拒绝及存储故障都关闭连接，不回退到内存游标。</p>
  *
- * <p>本切片只支持 stream_start 与 audio_frame。其它 body 在后续短会切片接入前
- * 明确关闭，不在这里实现 Stop 或事件补拉。Mock 字幕由应用层从 V015 帧恢复并
+ * <p>本切片支持 stream_start、audio_frame 和 input_complete；Stop 仍走认证
+ * REST，事件补拉留给后续切片。Mock 字幕由应用层从 V015 帧恢复并
  * 持久发布；本层只把已存事件编码成 ACK 之后的第二条消息。关闭连接必须调用
  * {@link #close()} 销毁凭据与本连接 Mock 会话；
  * 对象按连接串行处理，同步方法也防止库回调并发时重复绑定。</p>
  */
 public final class RealtimeWssConnection implements AutoCloseable {
+    private static final Logger LOGGER = Logger.getLogger(RealtimeWssConnection.class.getName());
     private final String meetingId;
     private final SecretCredential credential;
     private final RealtimeCredentialVerifier verifier;
     private final RealtimeAudioIngress ingress;
     private final RealtimeTranscriptSessions transcriptSessions;
+    private final MeetingInputReconciler inputReconciler;
     private final Clock clock;
     private final Instant initialExpiresAt;
     private final RealtimeCredentialVerifier.AudioContract audioContract;
@@ -50,13 +55,15 @@ public final class RealtimeWssConnection implements AutoCloseable {
 
     private RealtimeWssConnection(String meetingId, SecretCredential credential,
             RealtimeCredentialVerifier verifier, RealtimeAudioIngress ingress,
-            RealtimeTranscriptSessions transcriptSessions, Clock clock,
+            RealtimeTranscriptSessions transcriptSessions,
+            MeetingInputReconciler inputReconciler, Clock clock,
             RealtimeCredentialVerifier.AudioContract audioContract, Instant initialExpiresAt) {
         this.meetingId = meetingId;
         this.credential = credential;
         this.verifier = verifier;
         this.ingress = ingress;
         this.transcriptSessions = transcriptSessions;
+        this.inputReconciler = inputReconciler;
         this.clock = clock;
         this.initialExpiresAt = Objects.requireNonNull(initialExpiresAt, "initialExpiresAt");
         this.audioContract = audioContract;
@@ -77,6 +84,14 @@ public final class RealtimeWssConnection implements AutoCloseable {
     public static RealtimeWssConnection open(String meetingId, SecretCredential credential,
             RealtimeCredentialVerifier verifier, RealtimeAudioIngress ingress,
             RealtimeTranscriptSessions transcriptSessions, Clock clock) {
+        return open(meetingId, credential, verifier, ingress, transcriptSessions, null, clock);
+    }
+
+    /** 正式装配复用 REST Stop 的同一收口编排器；旧传输定向测试可省略。 */
+    public static RealtimeWssConnection open(String meetingId, SecretCredential credential,
+            RealtimeCredentialVerifier verifier, RealtimeAudioIngress ingress,
+            RealtimeTranscriptSessions transcriptSessions,
+            MeetingInputReconciler inputReconciler, Clock clock) {
         Objects.requireNonNull(credential, "credential");
         try {
             MeetingIdPolicy.requireValid(meetingId);
@@ -90,7 +105,7 @@ public final class RealtimeWssConnection implements AutoCloseable {
                 throw new SessionRejected();
             }
             return new RealtimeWssConnection(meetingId, credential, verifier, ingress,
-                    transcriptSessions, clock,
+                    transcriptSessions, inputReconciler, clock,
                     granted.audioContract(), granted.expiresAt());
         } catch (RuntimeException failure) {
             credential.close();
@@ -119,6 +134,7 @@ public final class RealtimeWssConnection implements AutoCloseable {
             return switch (envelope.getBodyCase()) {
                 case STREAM_START -> begin(grant);
                 case AUDIO_FRAME -> append(grant, envelope);
+                case INPUT_COMPLETE -> complete(grant, envelope);
                 default -> terminate(1003);
             };
         } catch (IllegalArgumentException invalid) {
@@ -162,6 +178,11 @@ public final class RealtimeWssConnection implements AutoCloseable {
                 new RealtimeAudioIngress.VerifiedWriteSession(meetingId, grant), binding, frame);
         if (result instanceof RealtimeAudioIngress.DurableAckCursor cursor) {
             var transcript = transcriptSession == null ? null : transcriptSession.acceptStored(frame);
+            // 只有末帧和字幕持久发布均成功才进入收口；重复帧的事件已在数据库中，
+            // acceptStored 返回 null 仍可幂等重试。普通帧不扫描整场音频。
+            if (cursor.atCompletionEndpoint() && transcriptSession != null) {
+                triggerInputClosure();
+            }
             Instant emittedAt = Objects.requireNonNull(clock.instant(), "clock.instant()");
             byte[] ack = codec.encodeServer(
                     RealtimeAudioWireMapper.durableAck(meetingId, cursor, emittedAt));
@@ -170,6 +191,33 @@ public final class RealtimeWssConnection implements AutoCloseable {
             return new SendPair(ack, event);
         }
         return terminate(result instanceof RealtimeAudioIngress.AppendRejected ? 1008 : 1011);
+    }
+
+    private Result complete(RealtimeCredentialVerifier.Granted grant, ClientEnvelope envelope) {
+        if (binding == null) return terminate(1008);
+        if (!clock.instant().isBefore(grant.expiresAt())) return terminate(1008);
+        var declaration = RealtimeAudioWireMapper.inputCompletion(envelope);
+        DurableAudioInputPort.WriteResult result = ingress.complete(
+                new RealtimeAudioIngress.VerifiedWriteSession(meetingId, grant),
+                binding, declaration);
+        if (result instanceof DurableAudioInputPort.Stored) {
+            // 声明可先于末帧；本次触发可能返回待音频，不能据此发送 ACK/receipt。
+            triggerInputClosure();
+            return new NoReply();
+        }
+        return terminate(result instanceof DurableAudioInputPort.Rejected ? 1008 : 1011);
+    }
+
+    private void triggerInputClosure() {
+        if (inputReconciler == null) return;
+        MeetingInputReconciler.Result result = inputReconciler.reconcile(meetingId);
+        if (result instanceof MeetingInputReconciler.Failure failure) {
+            LOGGER.log(Level.WARNING, "meeting WSS 收口未完成 reason={0}", failure.reason());
+        } else if (result instanceof MeetingInputReconciler.Pending pending) {
+            LOGGER.log(Level.FINE, "meeting WSS 收口待事实 reason={0}", pending.reason());
+        } else {
+            LOGGER.log(Level.FINE, "meeting WSS 收口已接管");
+        }
     }
 
     private Terminate terminate(int code) {

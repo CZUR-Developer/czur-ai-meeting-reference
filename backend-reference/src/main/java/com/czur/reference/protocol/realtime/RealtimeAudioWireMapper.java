@@ -5,6 +5,7 @@ import com.czur.aimeeting.contract.realtime.v1.AudioFrameFlag;
 import com.czur.aimeeting.contract.realtime.v1.ClientEnvelope;
 import com.czur.aimeeting.contract.realtime.v1.ServerEnvelope;
 import com.czur.reference.application.port.RealtimeCredentialVerifier;
+import com.czur.reference.application.port.DurableAudioInputPort;
 import com.czur.reference.application.port.model.MeetingAudioFrame;
 import com.czur.reference.application.realtime.RealtimeAudioIngress;
 
@@ -62,6 +63,22 @@ public final class RealtimeAudioWireMapper {
                 source.getChecksum().isEmpty() ? null : source.getChecksum(),
                 source.getSourceGeneration(), source.getFormatRevision(),
                 source.getGapDurationMsBefore(), flags);
+    }
+
+    /**
+     * 将已由本场可信 codec 校验的完成声明复制为持久端值对象；声明不代表
+     * 音频已经完整、模型已经处理或 receipt 已经生成。
+     */
+    public static DurableAudioInputPort.Completion inputCompletion(ClientEnvelope validated) {
+        Objects.requireNonNull(validated, "validated");
+        if (validated.getBodyCase() != ClientEnvelope.BodyCase.INPUT_COMPLETE) {
+            throw new IllegalArgumentException("input complete body required");
+        }
+        var source = validated.getInputComplete();
+        return new DurableAudioInputPort.Completion(
+                source.getLastStreamSequence(), source.getLastAudioPositionMs(),
+                source.getRecordingChecksum(), source.getRecordingSizeBytes(),
+                source.getRequestId());
     }
 
     /**

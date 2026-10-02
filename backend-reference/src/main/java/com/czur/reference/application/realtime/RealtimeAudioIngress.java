@@ -87,7 +87,8 @@ public final class RealtimeAudioIngress {
                 return new AppendRejected(DurableAudioInputPort.Rejection.FACT_INCONSISTENT);
             }
             return new DurableAckCursor(cursor.acceptedStreamSequence(),
-                    cursor.acceptedAudioPositionMs(), stored.replayed());
+                    cursor.acceptedAudioPositionMs(), stored.replayed(),
+                    atCompletionEndpoint(cursor, frame.streamSequence()));
         }
         if (written instanceof DurableAudioInputPort.Rejected rejected) {
             return new AppendRejected(rejected.reason());
@@ -96,6 +97,45 @@ public final class RealtimeAudioIngress {
             return new AppendUnavailable(unavailable.retryable());
         }
         return new AppendUnknown();
+    }
+
+    /**
+     * 用当前已验证会话和写者 epoch 持久保存完成声明。
+     *
+     * <p>仅原样返回持久端裁决；{@link DurableAudioInputPort.Stored} 不是帧 ACK，
+     * 也不是最终收口凭证。WSS 只在 Stored 后触发会议级 Reconciler。</p>
+     */
+    public DurableAudioInputPort.WriteResult complete(VerifiedWriteSession session,
+            DurableAudioInputPort.WriterBinding binding,
+            DurableAudioInputPort.Completion declaration) {
+        Objects.requireNonNull(session, "session");
+        Objects.requireNonNull(binding, "binding");
+        Objects.requireNonNull(declaration, "declaration");
+        if (!session.meetingId().equals(binding.meetingId())) {
+            return new DurableAudioInputPort.Rejected(
+                    DurableAudioInputPort.Rejection.INVALID_INPUT);
+        }
+        DurableAudioInputPort.WriteResult result = audio.complete(binding, declaration);
+        if (result instanceof DurableAudioInputPort.Stored stored
+                && !declaration.equals(stored.cursor().completion())) {
+            return new DurableAudioInputPort.Rejected(
+                    DurableAudioInputPort.Rejection.FACT_INCONSISTENT);
+        }
+        return result;
+    }
+
+    /**
+     * 只在本次写入的是声明末帧且 V015 游标已到终点时触发收口。
+     * 重放旧帧也会返回当前最高游标，不能只凭游标相等就逐帧触发；末帧重放
+     * 仍保留触发机会，以补救先前字幕发布或收口失败。
+     */
+    private static boolean atCompletionEndpoint(DurableAudioInputPort.Cursor cursor,
+            long frameSequence) {
+        DurableAudioInputPort.Completion completion = cursor.completion();
+        return completion != null
+                && frameSequence == completion.lastStreamSequence()
+                && cursor.acceptedStreamSequence() == completion.lastStreamSequence()
+                && cursor.acceptedAudioPositionMs() == completion.lastAudioPositionMs();
     }
 
     /**
@@ -151,12 +191,19 @@ public final class RealtimeAudioIngress {
             AppendUnavailable, AppendUnknown { }
 
     public record DurableAckCursor(long acceptedStreamSequence,
-                                   long acceptedAudioPositionMs, boolean replayed)
+                                   long acceptedAudioPositionMs, boolean replayed,
+                                   boolean atCompletionEndpoint)
             implements AppendResult {
         public DurableAckCursor {
             if (acceptedStreamSequence <= 0 || acceptedAudioPositionMs < 0) {
                 throw new IllegalArgumentException("invalid durable audio cursor");
             }
+        }
+
+        /** 兼容既有 ACK 编码调用者；没有持久完成声明时终点默认为 false。 */
+        public DurableAckCursor(long acceptedStreamSequence,
+                long acceptedAudioPositionMs, boolean replayed) {
+            this(acceptedStreamSequence, acceptedAudioPositionMs, replayed, false);
         }
     }
 

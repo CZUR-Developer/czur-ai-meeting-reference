@@ -1,6 +1,7 @@
 package com.czur.reference.application.wss;
 
 import com.czur.reference.application.command.CreateMeetingResponseFact;
+import com.czur.reference.application.finalization.MeetingInputReconciler;
 import com.czur.reference.application.port.RealtimeCredentialVerifier;
 import com.czur.reference.application.port.identity.SecretCredential;
 import com.czur.reference.application.realtime.RealtimeAudioIngress;
@@ -57,6 +58,7 @@ public final class MeetingRealtimeWssServer extends WebSocketServer implements A
     private final RealtimeCredentialVerifier verifier;
     private final RealtimeAudioIngress ingress;
     private final RealtimeTranscriptSessions transcriptSessions;
+    private final MeetingInputReconciler inputReconciler;
     private final Clock clock;
     private final ScheduledExecutorService expiryScanner = Executors.newSingleThreadScheduledExecutor(
             task -> {
@@ -82,6 +84,14 @@ public final class MeetingRealtimeWssServer extends WebSocketServer implements A
     public MeetingRealtimeWssServer(InetSocketAddress address, SSLContext tls,
             RealtimeCredentialVerifier verifier, RealtimeAudioIngress ingress,
             RealtimeTranscriptSessions transcriptSessions, Clock clock) {
+        this(address, tls, verifier, ingress, transcriptSessions, null, clock);
+    }
+
+    /** 正式装配复用 REST Stop 的会议输入收口编排器。 */
+    public MeetingRealtimeWssServer(InetSocketAddress address, SSLContext tls,
+            RealtimeCredentialVerifier verifier, RealtimeAudioIngress ingress,
+            RealtimeTranscriptSessions transcriptSessions,
+            MeetingInputReconciler inputReconciler, Clock clock) {
         super(Objects.requireNonNull(address, "address"), 2,
                 List.of(new Draft_6455(List.of(new DefaultExtension()), List.of(
                         new Protocol(CreateMeetingResponseFact.REALTIME_SUBPROTOCOL)),
@@ -89,6 +99,7 @@ public final class MeetingRealtimeWssServer extends WebSocketServer implements A
         this.verifier = Objects.requireNonNull(verifier, "verifier");
         this.ingress = Objects.requireNonNull(ingress, "ingress");
         this.transcriptSessions = transcriptSessions;
+        this.inputReconciler = inputReconciler;
         this.clock = Objects.requireNonNull(clock, "clock");
         setWebSocketFactory(new DefaultSSLWebSocketServerFactory(
                 Objects.requireNonNull(tls, "tls")));
@@ -164,7 +175,8 @@ public final class MeetingRealtimeWssServer extends WebSocketServer implements A
         }
         try {
             RealtimeWssConnection session = RealtimeWssConnection.open(
-                    meetingId, credential, verifier, ingress, transcriptSessions, clock);
+                    meetingId, credential, verifier, ingress, transcriptSessions,
+                    inputReconciler, clock);
             try {
                 connection.setAttachment(session);
             } catch (RuntimeException failure) {

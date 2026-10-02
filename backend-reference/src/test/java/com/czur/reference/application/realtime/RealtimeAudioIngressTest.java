@@ -25,8 +25,10 @@ import java.util.Optional;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** 应用边界只把已确认持久帧转成可发送的音频 ACK 游标。 */
 class RealtimeAudioIngressTest {
@@ -98,6 +100,29 @@ class RealtimeAudioIngressTest {
         assertEquals(20, ack.acceptedAudioPositionMs());
         assertEquals(false, ack.replayed());
         assertEquals(1, audio.appendCalls);
+    }
+
+    @Test
+    void completionEndpointOnlyTriggersForTheDeclaredLastFrameEvenOnReplay() {
+        var audio = new FakeAudio();
+        var completion = new DurableAudioInputPort.Completion(3, 60, "", 0, "finish-1");
+        // V015 对旧帧重放返回当前最高游标，而不是该帧当时的历史游标。
+        audio.writeResult = new DurableAudioInputPort.Stored(
+                new DurableAudioInputPort.Cursor(3, 60, completion), true);
+        var ingress = ingress(startSuccess(MEETING), audio, null);
+
+        var oldFrame = assertInstanceOf(RealtimeAudioIngress.DurableAckCursor.class,
+                ingress.append(writeSession(MEETING), binding(MEETING), frame(1)));
+        assertTrue(oldFrame.replayed());
+        assertFalse(oldFrame.atCompletionEndpoint(),
+                "旧帧重放不能因当前游标已到终点而重复触发收口");
+
+        var lastFrame = assertInstanceOf(RealtimeAudioIngress.DurableAckCursor.class,
+                ingress.append(writeSession(MEETING), binding(MEETING), frame(3)));
+        assertTrue(lastFrame.replayed());
+        assertTrue(lastFrame.atCompletionEndpoint(),
+                "末帧重放仍需补救先前失败的字幕发布或收口");
+        assertEquals(2, audio.appendCalls);
     }
 
     @Test

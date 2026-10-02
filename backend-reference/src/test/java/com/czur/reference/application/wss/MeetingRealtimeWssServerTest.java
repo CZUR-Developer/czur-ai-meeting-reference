@@ -3,13 +3,17 @@ package com.czur.reference.application.wss;
 import com.czur.aimeeting.contract.realtime.v1.AudioEncoding;
 import com.czur.aimeeting.contract.realtime.v1.AudioProfile;
 import com.czur.aimeeting.contract.realtime.v1.ClientEnvelope;
+import com.czur.aimeeting.contract.realtime.v1.InputComplete;
 import com.czur.aimeeting.contract.realtime.v1.MeetingAudioFrame;
 import com.czur.aimeeting.contract.realtime.v1.ServerEnvelope;
 import com.czur.aimeeting.contract.realtime.v1.StreamStart;
 import com.czur.reference.application.command.CreateMeetingResponseFact;
 import com.czur.reference.application.finalization.FinalizationExecutionFact;
+import com.czur.reference.application.finalization.MeetingInputReconciler;
 import com.czur.reference.application.port.DurableAudioInputPort;
+import com.czur.reference.application.port.FinalizationAdmissionUnitOfWork;
 import com.czur.reference.application.port.MeetingStartExecutionUnitOfWork;
+import com.czur.reference.application.port.MeetingInputClosureContextPort;
 import com.czur.reference.application.port.RealtimeCredentialVerifier;
 import com.czur.reference.application.port.RealtimeStartFactsLookup;
 import com.czur.reference.application.port.identity.SecretCredential;
@@ -145,6 +149,83 @@ class MeetingRealtimeWssServerTest {
             listener.closed.orTimeout(5, TimeUnit.SECONDS).join();
             assertEquals(1, audio.appendCalls.get(), "audio may already be durable");
             assertEquals(0, listener.ackCount.get(), "no ACK before transcript publication");
+        }
+    }
+
+    @Test
+    void declarationBeforeLastFrameTriggersClosureOnlyAfterStoredTranscript() throws Exception {
+        TestTls tls = TestTls.create(temporaryDirectory);
+        FakeAudio audio = new FakeAudio();
+        AtomicInteger published = new AtomicInteger();
+        AtomicInteger reconciled = new AtomicInteger();
+        AtomicInteger publishedAtSecondReconcile = new AtomicInteger(-1);
+        RealtimeTranscriptSessions transcripts = meetingId ->
+                new RealtimeTranscriptSessions.Session() {
+                    @Override public com.czur.reference.application.port.EventLog acceptStored(
+                            com.czur.reference.application.port.model.MeetingAudioFrame frame) {
+                        published.incrementAndGet();
+                        return null;
+                    }
+                    @Override public void close() { }
+                };
+        MeetingInputReconciler reconciler = waitingForStopReconciler(
+                reconciled, published, publishedAtSecondReconcile);
+        try (Fixture fixture = new Fixture(tls, new FakeVerifier(), audio,
+                     transcripts, reconciler);
+             HttpClient client = HttpClient.newBuilder().sslContext(tls.trusted()).build()) {
+            fixture.start();
+            Listener listener = new Listener();
+            var socket = connect(client, fixture.uri(MEETING), TOKEN,
+                    CreateMeetingResponseFact.REALTIME_SUBPROTOCOL, listener);
+            socket.sendBinary(ByteBuffer.wrap(start().toByteArray()), true).join();
+            awaitBindCount(audio, 1);
+
+            // 完成声明先于两帧持久保存：只触发一次会议级检查，不产生帧 ACK。
+            socket.sendBinary(ByteBuffer.wrap(complete(2).toByteArray()), true).join();
+            awaitCount(audio.completeCalls, 1);
+            awaitCount(reconciled, 1);
+            assertEquals(0, listener.ackCount.get());
+
+            socket.sendBinary(ByteBuffer.wrap(frame(1).toByteArray()), true).join();
+            awaitCount(listener.ackCount, 1);
+            assertEquals(1, reconciled.get(), "普通帧不得触发会议收口");
+
+            socket.sendBinary(ByteBuffer.wrap(frame(2).toByteArray()), true).join();
+            awaitCount(listener.ackCount, 2);
+            awaitCount(reconciled, 2);
+            assertEquals(2, publishedAtSecondReconcile.get(),
+                    "末帧字幕处理完成后才能尝试收口");
+            assertEquals(2, audio.appendCalls.get());
+            assertEquals(2, published.get());
+            socket.sendClose(java.net.http.WebSocket.NORMAL_CLOSURE, "done").join();
+            listener.closed.orTimeout(5, TimeUnit.SECONDS).join();
+        }
+    }
+
+    @Test
+    void rejectedOrUnknownCompletionClosesWithoutAckOrClosure() throws Exception {
+        TestTls tls = TestTls.create(temporaryDirectory);
+        FakeAudio audio = new FakeAudio();
+        AtomicInteger reconciled = new AtomicInteger();
+        MeetingInputReconciler reconciler = waitingForStopReconciler(
+                reconciled, new AtomicInteger(), new AtomicInteger(-1));
+        try (Fixture fixture = new Fixture(tls, new FakeVerifier(), audio,
+                     null, reconciler);
+             HttpClient client = HttpClient.newBuilder().sslContext(tls.trusted()).build()) {
+            fixture.start();
+            for (FakeAudio.Mode mode : List.of(FakeAudio.Mode.UNKNOWN_COMPLETE,
+                    FakeAudio.Mode.FENCED_COMPLETE)) {
+                audio.completeMode = mode;
+                Listener listener = new Listener();
+                var socket = connect(client, fixture.uri(MEETING), TOKEN,
+                        CreateMeetingResponseFact.REALTIME_SUBPROTOCOL, listener);
+                socket.sendBinary(ByteBuffer.wrap(start().toByteArray()), true).join();
+                sendForExpectedClose(socket, complete(1).toByteArray());
+                listener.closed.orTimeout(5, TimeUnit.SECONDS).join();
+                assertEquals(0, listener.ackCount.get());
+                assertEquals(0, reconciled.get());
+            }
+            assertEquals(2, audio.completeCalls.get());
         }
     }
 
@@ -403,11 +484,26 @@ class MeetingRealtimeWssServerTest {
     }
 
     private static ClientEnvelope frame() {
+        return frame(1);
+    }
+
+    private static ClientEnvelope frame(long sequence) {
         return ClientEnvelope.newBuilder().setSpecVersion(RealtimeWireCodec.SPEC_VERSION)
-                .setMeetingId(MEETING).setStreamId(MEETING).setClientMessageId("frame-1")
-                .setAudioFrame(MeetingAudioFrame.newBuilder().setStreamSequence(1)
-                        .setStartPositionMs(0).setDurationMs(20)
+                .setMeetingId(MEETING).setStreamId(MEETING)
+                .setClientMessageId("frame-" + sequence)
+                .setAudioFrame(MeetingAudioFrame.newBuilder().setStreamSequence(sequence)
+                        .setStartPositionMs((sequence - 1) * 20).setDurationMs(20)
                         .setAudio(ByteString.copyFrom(new byte[640])))
+                .build();
+    }
+
+    private static ClientEnvelope complete(long lastSequence) {
+        return ClientEnvelope.newBuilder().setSpecVersion(RealtimeWireCodec.SPEC_VERSION)
+                .setMeetingId(MEETING).setStreamId(MEETING).setClientMessageId("complete-1")
+                .setInputComplete(InputComplete.newBuilder()
+                        .setLastStreamSequence(lastSequence)
+                        .setLastAudioPositionMs(lastSequence * 20)
+                        .setRequestId("complete-1"))
                 .build();
     }
 
@@ -430,6 +526,41 @@ class MeetingRealtimeWssServerTest {
             Thread.sleep(5);
         }
         assertEquals(expected, audio.bindCalls.get(), "start must bind before revocation");
+    }
+
+    private static void awaitCount(AtomicInteger counter, int expected)
+            throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (counter.get() < expected && System.nanoTime() < deadline) {
+            Thread.sleep(5);
+        }
+        assertEquals(expected, counter.get());
+    }
+
+    /** 仅观察网络入口何时触发收口；Stop 未提交时不进入其它领域端口。 */
+    private static MeetingInputReconciler waitingForStopReconciler(
+            AtomicInteger calls, AtomicInteger published,
+            AtomicInteger publishedAtSecondReconcile) {
+        FinalizationAdmissionUnitOfWork unusedAdmission =
+                new FinalizationAdmissionUnitOfWork() {
+                    @Override public Result admit(AdmissionRequest request) {
+                        throw new AssertionError("admission must wait for Stop");
+                    }
+                    @Override public Result recover(AdmissionRequest request) {
+                        throw new AssertionError("recovery must wait for Stop");
+                    }
+                };
+        return new MeetingInputReconciler(meetingId -> {
+            if (!MEETING.equals(meetingId)) {
+                throw new IllegalArgumentException("wrong meeting");
+            }
+            if (calls.incrementAndGet() == 2) {
+                publishedAtSecondReconcile.set(published.get());
+            }
+            return new MeetingInputClosureContextPort.WaitingForStop();
+        }, meetingId -> { throw new AssertionError("unexpected input lookup"); },
+                meetingId -> { throw new AssertionError("unexpected audio readiness"); },
+                unusedAdmission, Clock.fixed(NOW, ZoneOffset.UTC));
     }
 
     private static org.java_websocket.WebSocket awaitServerConnection(Fixture fixture)
@@ -491,11 +622,15 @@ class MeetingRealtimeWssServerTest {
     }
 
     private static final class FakeAudio implements DurableAudioInputPort {
-        private enum Mode { STORED, UNKNOWN_BIND, UNKNOWN_APPEND, FENCED_APPEND }
+        private enum Mode { STORED, UNKNOWN_BIND, UNKNOWN_APPEND, FENCED_APPEND,
+            UNKNOWN_COMPLETE, FENCED_COMPLETE }
         private final AtomicInteger bindCalls = new AtomicInteger();
         private final AtomicInteger appendCalls = new AtomicInteger();
+        private final AtomicInteger completeCalls = new AtomicInteger();
         private volatile Mode bindMode = Mode.STORED;
         private volatile Mode appendMode = Mode.STORED;
+        private volatile Mode completeMode = Mode.STORED;
+        private volatile Completion completion;
 
         @Override public BindResult bindWriter(String meetingId, WriterConnectionId id) {
             bindCalls.incrementAndGet();
@@ -511,7 +646,7 @@ class MeetingRealtimeWssServerTest {
                 case UNKNOWN_APPEND -> new Unknown();
                 case FENCED_APPEND -> new Rejected(Rejection.FENCED);
                 default -> new Stored(new Cursor(frame.streamSequence(),
-                        frame.startPositionMs() + frame.durationMs(), null), false);
+                        frame.startPositionMs() + frame.durationMs(), completion), false);
             };
         }
 
@@ -522,7 +657,15 @@ class MeetingRealtimeWssServerTest {
             throw new AssertionError("unexpected replay");
         }
         @Override public WriteResult complete(WriterBinding binding, Completion completion) {
-            throw new AssertionError("unexpected complete");
+            completeCalls.incrementAndGet();
+            return switch (completeMode) {
+                case UNKNOWN_COMPLETE -> new Unknown();
+                case FENCED_COMPLETE -> new Rejected(Rejection.FENCED);
+                default -> {
+                    this.completion = completion;
+                    yield new Stored(new Cursor(0, 0, completion), false);
+                }
+            };
         }
     }
 
@@ -575,9 +718,16 @@ class MeetingRealtimeWssServerTest {
 
         private Fixture(TestTls tls, FakeVerifier verifier, FakeAudio audio,
                 RealtimeTranscriptSessions transcripts) throws Exception {
+            this(tls, verifier, audio, transcripts, null);
+        }
+
+        private Fixture(TestTls tls, FakeVerifier verifier, FakeAudio audio,
+                RealtimeTranscriptSessions transcripts,
+                MeetingInputReconciler inputReconciler) throws Exception {
             server = new MeetingRealtimeWssServer(
                     new InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0),
-                    tls.server(), verifier, ingress(audio), transcripts, clock);
+                    tls.server(), verifier, ingress(audio), transcripts,
+                    inputReconciler, clock);
         }
 
         private void start() throws Exception {
