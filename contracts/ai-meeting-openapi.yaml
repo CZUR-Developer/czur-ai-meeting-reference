@@ -447,7 +447,7 @@ paths:
             text/markdown: {}
             text/html: {}
             application/octet-stream: {}
-        "410":
+        "403":
           $ref: "#/components/responses/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
