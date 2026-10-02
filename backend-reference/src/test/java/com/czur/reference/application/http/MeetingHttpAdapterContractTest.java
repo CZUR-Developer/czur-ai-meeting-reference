@@ -13,6 +13,7 @@ import com.czur.reference.application.port.FinalizationFact;
 import com.czur.reference.application.port.InputState;
 import com.czur.reference.application.port.ManifestStatus;
 import com.czur.reference.application.port.MeetingDeletionPort;
+import com.czur.reference.application.port.MeetingArtifactContentPort;
 import com.czur.reference.application.port.MeetingQueryPort;
 import com.czur.reference.application.port.MeetingStatus;
 import com.czur.reference.application.port.MeetingSummary;
@@ -41,6 +42,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -365,6 +367,38 @@ class MeetingHttpAdapterContractTest {
 
         assertEquals(501, create.status());
         assertEquals(400, delete.status());
+    }
+
+    @Test
+    void anonymousArtifactRouteUsesExactGenTimeAndMapsVerifiedBytes() {
+        List<MeetingArtifactContentPort.Request> calls = new java.util.ArrayList<>();
+        MeetingArtifactContentPort content = request -> {
+            calls.add(request);
+            return new MeetingArtifactContentPort.Found(
+                    "{\"text\":\"【模拟】\"}\n".getBytes(StandardCharsets.UTF_8));
+        };
+        adapter = new MeetingHttpAdapter(query, deletion, decoder,
+                new HttpErrorMapper(() -> "adapter-diagnostic"), stopService(),
+                null, null, false, null, null, content);
+
+        HttpResponse response = adapter.handle(new HttpRequest(
+                "GET", "/v1/artifacts/art_transcript", Map.of(),
+                Map.of("genTime", "-1"), ""), null);
+        assertEquals(200, response.status());
+        assertEquals("{\"text\":\"【模拟】\"}\n", response.body());
+        assertEquals("application/json", response.headers().get("content-type"));
+        assertEquals(List.of(new MeetingArtifactContentPort.Request("art_transcript", -1)),
+                calls);
+
+        for (String invalid : List.of("", "-2", "01", "9223372036854775808")) {
+            assertEquals(400, adapter.handle(new HttpRequest(
+                    "GET", "/v1/artifacts/art_transcript", Map.of(),
+                    Map.of("genTime", invalid), ""), null).status());
+        }
+        assertEquals(1, calls.size(), "非法 genTime 不进入内容端口");
+        assertEquals(501, new MeetingHttpAdapter(query, deletion, decoder).handle(
+                new HttpRequest("GET", "/v1/artifacts/art_transcript", Map.of(),
+                        Map.of("genTime", "invalid"), ""), null).status());
     }
 
     @Test

@@ -10,6 +10,7 @@ import com.czur.reference.application.error.MeetingNotFoundException;
 import com.czur.reference.application.port.DeleteResult;
 import com.czur.reference.application.port.MeetingQueryPort;
 import com.czur.reference.application.port.MeetingManifestPort;
+import com.czur.reference.application.port.MeetingArtifactContentPort;
 import com.czur.reference.application.port.OwnedMeetingStopUnitOfWork;
 import com.czur.reference.application.port.RenewRealtimeTokenUnitOfWork;
 import com.czur.reference.protocol.json.MeetingManifestJson;
@@ -19,6 +20,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.Locale;
+import java.nio.charset.StandardCharsets;
 import java.util.function.Supplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -97,6 +99,35 @@ public final class HttpErrorMapper {
                     unavailable.retryable() ? HttpErrorEnvelope.UserAction.RETRY
                             : HttpErrorEnvelope.UserAction.CONTACT_ADMIN,
                     "ai_meeting.storage.manifest_unavailable");
+        };
+    }
+
+    /** 仅输出已经核对的 canonical Mock JSON；状态语义与匿名 Manifest 一致。 */
+    public HttpResponse artifact(MeetingArtifactContentPort.Result result) {
+        Objects.requireNonNull(result, "result");
+        return switch (result) {
+            case MeetingArtifactContentPort.Found found ->
+                    HttpResponse.json(200, new String(found.content(), StandardCharsets.UTF_8));
+            case MeetingArtifactContentPort.Pending pending ->
+                    success(202, meetingStatus(pending.meetingStatus()));
+            case MeetingArtifactContentPort.NotFound ignored -> error(404,
+                    HttpErrorEnvelope.Domain.SESSION, "ARTIFACT_NOT_FOUND", false,
+                    HttpErrorEnvelope.UserAction.NONE, "ai_meeting.session.artifact_not_found");
+            case MeetingArtifactContentPort.Conflict ignored -> error(409,
+                    HttpErrorEnvelope.Domain.CONTRACT, "ARTIFACT_INCONSISTENT", false,
+                    HttpErrorEnvelope.UserAction.NONE, "ai_meeting.contract.artifact_conflict");
+            case MeetingArtifactContentPort.AccessDenied ignored -> error(403,
+                    HttpErrorEnvelope.Domain.IDENTITY, "ACCESS_DENIED", false,
+                    HttpErrorEnvelope.UserAction.CONTACT_ADMIN,
+                    "ai_meeting.identity.access_denied");
+            case MeetingArtifactContentPort.Unavailable unavailable -> error(
+                    unavailable.retryable() ? 503 : 500,
+                    unavailable.retryable()
+                            ? HttpErrorEnvelope.Domain.STORAGE : HttpErrorEnvelope.Domain.INTERNAL,
+                    "ARTIFACT_UNAVAILABLE", unavailable.retryable(),
+                    unavailable.retryable() ? HttpErrorEnvelope.UserAction.RETRY
+                            : HttpErrorEnvelope.UserAction.CONTACT_ADMIN,
+                    "ai_meeting.storage.artifact_unavailable");
         };
     }
 

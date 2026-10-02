@@ -6,6 +6,7 @@ import com.czur.reference.application.command.AuthenticatedRealtimeTokenRenewApp
 import com.czur.reference.application.port.MeetingDeletionPort;
 import com.czur.reference.application.port.MeetingQueryPort;
 import com.czur.reference.application.port.MeetingManifestPort;
+import com.czur.reference.application.port.MeetingArtifactContentPort;
 import com.czur.reference.application.command.MeetingCommandContext;
 
 import java.util.Objects;
@@ -113,8 +114,26 @@ public final class MeetingHttpRuntime implements AutoCloseable {
             boolean createEnabled,
             MeetingManifestPort manifestPort,
             AuthenticatedRealtimeTokenRenewApplicationService renewService) {
+        this(queryPort, deletionPort, decoder, errors, stopService, createService,
+                createDecoder, createEnabled, manifestPort, renewService, null);
+    }
+
+    /** 显式接入 Mock 最终转写正文；旧装配的 Artifact 路由仍为 501。 */
+    public MeetingHttpRuntime(
+            MeetingQueryPort queryPort,
+            MeetingDeletionPort deletionPort,
+            MeetingHttpAdapter.RequestDecoder decoder,
+            HttpErrorMapper errors,
+            AuthenticatedMeetingStopApplicationService stopService,
+            AuthenticatedCompleteMeetingApplicationService createService,
+            CreateMeetingHttpRequestDecoder createDecoder,
+            boolean createEnabled,
+            MeetingManifestPort manifestPort,
+            AuthenticatedRealtimeTokenRenewApplicationService renewService,
+            MeetingArtifactContentPort artifactPort) {
         this(new MeetingHttpAdapter(queryPort, deletionPort, decoder, errors, stopService,
-                createService, createDecoder, createEnabled, manifestPort, renewService), errors);
+                createService, createDecoder, createEnabled, manifestPort, renewService,
+                artifactPort), errors);
     }
 
     /** 使用默认错误映射器创建已认证 Stop 运行时。 */

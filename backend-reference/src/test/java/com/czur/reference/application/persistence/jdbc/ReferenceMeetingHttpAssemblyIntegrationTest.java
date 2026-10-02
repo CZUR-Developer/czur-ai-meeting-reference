@@ -960,6 +960,9 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
                 assertNetworkError(exchange(defaultNetwork.address().getPort(), "GET",
                         "/v1/meetings/mtg_missing/manifest?genTime=invalid", "", ""),
                         501, "ROUTE_NOT_IMPLEMENTED");
+                assertNetworkError(exchange(defaultNetwork.address().getPort(), "GET",
+                        "/v1/artifacts/art_missing?genTime=invalid", "", ""),
+                        501, "ROUTE_NOT_IMPLEMENTED");
                 assertTrue(defaultNetwork.shutdown(Duration.ofSeconds(3)).clean());
             }
         }
@@ -986,7 +989,7 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
         };
         Logger root = Logger.getLogger("");
         root.addHandler(capture);
-        try (var assembly = ReferenceMeetingHttpAssembly.start(enabled, httpClock);
+        try (var assembly = ReferenceMeetingHttpAssembly.start(enabled, httpClock, artifacts);
              var network = assembly.newJdkHttpServer(new InetSocketAddress("127.0.0.1", 0))) {
             network.start();
             int port = network.address().getPort();
@@ -994,6 +997,15 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
             if (manifestEnabled) {
                 assertNetworkError(exchange(port, "GET", invalidManifestPath
                         + "?genTime=-1", "", ""), 404, "MANIFEST_NOT_FOUND");
+                String missingArtifact = "/v1/artifacts/art_missing";
+                assertNetworkError(exchange(port, "GET", missingArtifact
+                        + "?genTime=-1", "", ""), 404, "ARTIFACT_NOT_FOUND");
+                for (String query : List.of("", "?genTime=", "?genTime=-2",
+                        "?genTime=01", "?genTime=9223372036854775808",
+                        "?genTime=-1&extra=1")) {
+                    assertNetworkError(exchange(port, "GET", missingArtifact + query,
+                            "", ""), 400, "INVALID_REQUEST");
+                }
                 for (String query : List.of("", "?genTime=", "?genTime=-2",
                         "?genTime=01", "?genTime=9223372036854775808",
                         "?genTime=-1&extra=1", "?genTime=-1&genTime=0")) {
@@ -1193,6 +1205,17 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
             assertTrue(physical.length > 0, "published Artifact must contain physical bytes");
             assertEquals(reference.size(), physical.length);
             assertEquals(reference.checksum(), sha256Bytes(physical));
+            String artifactPath = "/v1/artifacts/" + reference.artifactId();
+            if (manifestEnabled) {
+                String content = exchange(port, "GET", artifactPath + "?genTime=-1", "", "");
+                assertEquals(200, status(content));
+                assertEquals(new String(physical, StandardCharsets.UTF_8),
+                        responseBody(content));
+                assertTrue(responseBody(content).contains("【模拟最终转写】"));
+                assertNetworkError(exchange(port, "GET", artifactPath + "?genTime="
+                        + NOW.minusSeconds(61).toEpochMilli(), "", ""),
+                        403, "ACCESS_DENIED");
+            }
             assertEquals(1, count("artifact"));
             assertEquals(1, count("meeting_manifest_revision"));
             assertEquals(2, count("usage_operation"));
@@ -1298,6 +1321,8 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
                     manifestQuery.get(new MeetingManifestPort.Request(meetingId, -1)));
             if (manifestEnabled) {
                 assertNetworkError(exchange(port, "GET", manifestPath + "?genTime=-1",
+                        "", ""), 403, "ACCESS_DENIED");
+                assertNetworkError(exchange(port, "GET", artifactPath + "?genTime=-1",
                         "", ""), 403, "ACCESS_DENIED");
                 assertNetworkError(exchange(port, "GET", manifestPath + "?genTime="
                         + NOW.toEpochMilli(), "", ""), 403, "ACCESS_DENIED");

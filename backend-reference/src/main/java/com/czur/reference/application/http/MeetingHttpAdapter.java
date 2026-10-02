@@ -8,6 +8,7 @@ import com.czur.reference.application.command.StopMeetingIntent;
 import com.czur.reference.application.port.DeleteRequest;
 import com.czur.reference.application.port.MeetingDeletionPort;
 import com.czur.reference.application.port.MeetingManifestPort;
+import com.czur.reference.application.port.MeetingArtifactContentPort;
 import com.czur.reference.application.port.MeetingQueryPort;
 import com.czur.reference.application.port.identity.IdentityVerificationRequest;
 import com.czur.reference.domain.meeting.MeetingIdPolicy;
@@ -53,6 +54,8 @@ public final class MeetingHttpAdapter {
             "^/v1/meetings/(mtg_[A-Za-z0-9_-]+):renewRealtimeToken$");
     private static final Pattern MANIFEST_PATH = Pattern.compile(
             "^/v1/meetings/(mtg_[A-Za-z0-9_-]+)/manifest$");
+    private static final Pattern ARTIFACT_PATH = Pattern.compile(
+            "^/v1/artifacts/(art_[A-Za-z0-9_-]+)$");
     private static final Pattern GEN_TIME = Pattern.compile("(?:-1|0|[1-9][0-9]*)");
     private static final int DEFAULT_PAGE_SIZE = 20;
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -66,6 +69,7 @@ public final class MeetingHttpAdapter {
     private final CreateMeetingHttpRequestDecoder createDecoder;
     private final boolean createEnabled;
     private final MeetingManifestPort manifestPort;
+    private final MeetingArtifactContentPort artifactPort;
     private final AuthenticatedRealtimeTokenRenewApplicationService renewService;
 
     /** 使用随机 opaque diagnosticId 的默认错误映射器。 */
@@ -91,6 +95,7 @@ public final class MeetingHttpAdapter {
         this.createDecoder = null;
         this.createEnabled = false;
         this.manifestPort = null;
+        this.artifactPort = null;
         this.renewService = null;
     }
 
@@ -110,6 +115,7 @@ public final class MeetingHttpAdapter {
         this.createDecoder = null;
         this.createEnabled = false;
         this.manifestPort = null;
+        this.artifactPort = null;
         this.renewService = null;
     }
 
@@ -163,6 +169,23 @@ public final class MeetingHttpAdapter {
             boolean createEnabled,
             MeetingManifestPort manifestPort,
             AuthenticatedRealtimeTokenRenewApplicationService renewService) {
+        this(queryPort, deletionPort, decoder, errors, stopService, createService,
+                createDecoder, createEnabled, manifestPort, renewService, null);
+    }
+
+    /** 显式接入匿名 Artifact 正文端口；null 保持旧 501 关态。 */
+    public MeetingHttpAdapter(
+            MeetingQueryPort queryPort,
+            MeetingDeletionPort deletionPort,
+            RequestDecoder decoder,
+            HttpErrorMapper errors,
+            AuthenticatedMeetingStopApplicationService stopService,
+            AuthenticatedCompleteMeetingApplicationService createService,
+            CreateMeetingHttpRequestDecoder createDecoder,
+            boolean createEnabled,
+            MeetingManifestPort manifestPort,
+            AuthenticatedRealtimeTokenRenewApplicationService renewService,
+            MeetingArtifactContentPort artifactPort) {
         this.queryPort = Objects.requireNonNull(queryPort, "queryPort");
         this.deletionPort = Objects.requireNonNull(deletionPort, "deletionPort");
         this.decoder = Objects.requireNonNull(decoder, "decoder");
@@ -176,6 +199,7 @@ public final class MeetingHttpAdapter {
         this.createDecoder = createDecoder;
         this.createEnabled = createEnabled;
         this.manifestPort = manifestPort;
+        this.artifactPort = artifactPort;
         this.renewService = renewService;
     }
 
@@ -260,6 +284,18 @@ public final class MeetingHttpAdapter {
         String method = request.method();
         String path = request.path();
 
+        Matcher artifact = ARTIFACT_PATH.matcher(path);
+        if ("GET".equals(method) && artifact.matches()) {
+            if (artifactPort == null) {
+                return errors.notImplemented();
+            }
+            if (!request.body().isEmpty() || request.query().size() != 1) {
+                throw new IllegalArgumentException("artifact request is invalid");
+            }
+            return errors.artifact(artifactPort.get(new MeetingArtifactContentPort.Request(
+                    artifact.group(1), parseGenTime(request.query().get("genTime")))));
+        }
+
         Matcher manifest = MANIFEST_PATH.matcher(path);
         if ("GET".equals(method) && manifest.matches()) {
             if (manifestPort == null) {
@@ -268,18 +304,9 @@ public final class MeetingHttpAdapter {
             if (!request.body().isEmpty() || request.query().size() != 1) {
                 throw new IllegalArgumentException("manifest request is invalid");
             }
-            String raw = request.query().get("genTime");
-            if (raw == null || !GEN_TIME.matcher(raw).matches()) {
-                throw new IllegalArgumentException("genTime is invalid");
-            }
-            long genTime;
-            try {
-                genTime = Long.parseLong(raw);
-            } catch (NumberFormatException failure) {
-                throw new IllegalArgumentException("genTime is invalid");
-            }
             return errors.manifest(manifestPort.get(
-                    new MeetingManifestPort.Request(manifest.group(1), genTime)));
+                    new MeetingManifestPort.Request(
+                            manifest.group(1), parseGenTime(request.query().get("genTime")))));
         }
 
         if ("POST".equals(method) && MEETINGS_PATH.equals(path)) {
@@ -441,6 +468,10 @@ public final class MeetingHttpAdapter {
 
     private static String operationOf(HttpRequest request) {
         if ("GET".equals(request.method())
+                && ARTIFACT_PATH.matcher(request.path()).matches()) {
+            return "artifact";
+        }
+        if ("GET".equals(request.method())
                 && MANIFEST_PATH.matcher(request.path()).matches()) {
             return "manifest";
         }
@@ -464,6 +495,18 @@ public final class MeetingHttpAdapter {
             };
         }
         return "route";
+    }
+
+    /** 两个匿名结果路由共享严格的十进制 genTime 表示。 */
+    private static long parseGenTime(String raw) {
+        if (raw == null || !GEN_TIME.matcher(raw).matches()) {
+            throw new IllegalArgumentException("genTime is invalid");
+        }
+        try {
+            return Long.parseLong(raw);
+        } catch (NumberFormatException failure) {
+            throw new IllegalArgumentException("genTime is invalid");
+        }
     }
 
     /**

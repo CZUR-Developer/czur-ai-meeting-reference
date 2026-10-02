@@ -20,6 +20,7 @@ import com.czur.reference.application.persistence.jdbc.JdbcCompleteMeetingCreati
 import com.czur.reference.application.persistence.jdbc.JdbcMeetingDeletionAdmissionUnitOfWork;
 import com.czur.reference.application.persistence.jdbc.JdbcMeetingQueryPort;
 import com.czur.reference.application.persistence.jdbc.JdbcMeetingManifestQueryPort;
+import com.czur.reference.application.persistence.jdbc.JdbcMeetingArtifactContentQueryPort;
 import com.czur.reference.application.persistence.jdbc.JdbcOwnedMeetingStopUnitOfWork;
 import com.czur.reference.application.persistence.jdbc.JdbcRenewRealtimeTokenUnitOfWork;
 import com.czur.reference.application.persistence.jdbc.DatabaseReadiness;
@@ -28,6 +29,8 @@ import com.czur.reference.application.persistence.jdbc.JdbcReferenceDevEntitleme
 import com.czur.reference.application.persistence.jdbc.JdbcUsageReserveLookup;
 import com.czur.reference.application.port.MeetingIdGenerator;
 import com.czur.reference.application.port.MeetingManifestPort;
+import com.czur.reference.application.port.MeetingArtifactContentPort;
+import com.czur.reference.application.port.artifact.ArtifactStore;
 import com.czur.reference.application.port.ProductProfileCatalog;
 import com.czur.reference.application.port.entitlement.EntitlementIdGenerator;
 import com.czur.reference.domain.capability.CapabilityPlanner;
@@ -96,9 +99,23 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
         return start(ReferenceMeetingDeploymentConfig.fromEnvironment(environment), clock);
     }
 
+    /** 使用 Worker 已持有的同一持久 Store 显式开放最终转写读取；不创建第二份存储。 */
+    public static ReferenceMeetingHttpAssembly start(
+            Map<String, String> environment, Clock clock, ArtifactStore artifactStore) {
+        return start(ReferenceMeetingDeploymentConfig.fromEnvironment(environment),
+                clock, artifactStore);
+    }
+
     /** 复用调用方已冻结的配置；显式 Create 开关决定是否构造创建依赖。 */
     public static ReferenceMeetingHttpAssembly start(
             ReferenceMeetingDeploymentConfig config, Clock clock) {
+        return start(config, clock, null);
+    }
+
+    /** Artifact 端口只有在结果 TTL 和持久 Store 均显式提供时才接入。 */
+    public static ReferenceMeetingHttpAssembly start(
+            ReferenceMeetingDeploymentConfig config, Clock clock,
+            ArtifactStore artifactStore) {
         Objects.requireNonNull(config, "config");
         Objects.requireNonNull(clock, "clock");
         JdbcDatabaseRuntime database = JdbcDatabaseRuntime.start(config.database());
@@ -139,6 +156,9 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                     .<MeetingManifestPort>map(ttl -> new JdbcMeetingManifestQueryPort(
                             dataSource, new ManifestResultAccessPolicy(clock, ttl)))
                     .orElse(null);
+            MeetingArtifactContentPort artifact = manifest != null && artifactStore != null
+                    ? new JdbcMeetingArtifactContentQueryPort(
+                            dataSource, manifest, artifactStore) : null;
             if (config.createEnabled()) {
                 // 与查询、Stop、Delete 共用唯一连接池、身份 Provider、Clock 和错误映射。
                 // ID 仅由服务端安全随机源生成；首次公开响应由 V013 持久化。
@@ -166,10 +186,10 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                 runtime = new MeetingHttpRuntime(query, deletion, decoder, errors, stopService,
                         create, new CreateMeetingHttpRequestDecoder(
                                 config.audience(), config.clientId()), true, manifest,
-                        renewService);
+                        renewService, artifact);
             } else {
                 runtime = new MeetingHttpRuntime(query, deletion, decoder, errors, stopService,
-                        null, null, false, manifest, renewService);
+                        null, null, false, manifest, renewService, artifact);
             }
             LOGGER.log(Level.INFO,
                     "reference meeting HTTP 装配完成 createEnabled={0} realtimeRenewEnabled={1}",
