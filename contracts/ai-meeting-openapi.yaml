@@ -449,6 +449,8 @@ paths:
             application/octet-stream: {}
         "403":
           $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/artifacts/{artifactId}:issueAccess:
