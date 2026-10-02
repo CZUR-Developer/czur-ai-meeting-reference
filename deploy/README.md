@@ -1,6 +1,6 @@
 # 参考后端 Docker 部署
 
-本目录部署 P2 的 ASR-only Mock 参考后端：一个应用进程同时提供 HTTP、WSS 和周期收口 Worker。PostgreSQL 是必需的；可使用 Compose 演示数据库或部署方已有的 PostgreSQL。两种模式都运行同一份 `migrate.sh` 和 `migrations/V*.sql`，应用不会自动建表。此处没有真实模型、后台管理或 Web 容器。
+本目录部署 P2 的 ASR-only Mock 参考后端：一个应用进程同时提供 HTTP、WSS 和周期收口 Worker。PostgreSQL 是必需的；可使用 Compose 演示数据库或部署方已有的 PostgreSQL。两种模式都运行 `migrate.sh` 与唯一的 `migrations/V001__initial_schema.sql`，应用不会自动建表。此处没有真实模型、后台管理或 Web 容器。
 
 ## 准备配置
 

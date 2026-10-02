@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# P2-T14-11 third slice: fresh V001..V012 deploy chain, one real PostgreSQL
+# P2-T14-11 third slice: fresh V001 baseline, one real PostgreSQL
 # stop/start, production Outbox/expired-Reservation workers, and active-lease
 # reclaim with stale-owner fencing across two JVMs, including formal finalization
 # and ArtifactDeletionWorker workflow recovery.
@@ -188,15 +188,15 @@ MOUNT_RW="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/opt
 refresh_binding
 wait_for_loopback || fail "宿主 loopback 未就绪"
 
-log INFO "使用仓库 deploy/migrate.sh 应用完整 V001-V012 链"
+log INFO "使用仓库 deploy/migrate.sh 应用唯一 V001 基线"
 docker exec --env "DATABASE_URL=postgresql://127.0.0.1:5432/${DB_NAME}" \
   --env "DATABASE_USER=${DB_USER}" --env "DATABASE_PASSWORD=${DB_PASSWORD}" \
   --env "LOG_LEVEL=${LOG_LEVEL}" "${CONTAINER_NAME}" /opt/czur-deploy/migrate.sh
 MIGRATIONS="$(docker exec --env "PGPASSWORD=${DB_PASSWORD}" "${CONTAINER_NAME}" \
   psql --username "${DB_USER}" --dbname "${DB_NAME}" --tuples-only --no-align \
   --command "SELECT string_agg(version, ',' ORDER BY version) FROM schema_migrations;")"
-EXPECTED="V001__initial_schema,V002__outbox_lease_fencing,V003__identity_entitlement,V004__meeting_event_envelope,V005__meeting_finalization_fact,V006__meeting_read_model,V007__meeting_manifest_revision,V008__durable_input_fact,V009__final_usage_fact,V010__workflow_step_fencing,V011__finalization_execution_artifact_ready,V012__artifact_deletion_plan"
-[[ "${MIGRATIONS}" == "${EXPECTED}" ]] || fail "迁移登记不是精确 V001-V012 集合"
+EXPECTED="V001__initial_schema"
+[[ "${MIGRATIONS}" == "${EXPECTED}" ]] || fail "迁移登记不是精确 V001 集合"
 
 export REFERENCE_TEST_DATABASE_URL="${JDBC_URL}"
 export REFERENCE_TEST_DATABASE_USER="${DB_USER}"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# 04-04 两 JVM 门禁：本次随机 PG16/卷/Artifact 目录，V001–V013 只迁移一次。
+# 04-04 两 JVM 门禁：本次随机 PG16/卷/Artifact 目录，V001 基线只初始化一次。
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM}"
@@ -226,11 +226,11 @@ STAGE='migrate'
 docker exec --env "DATABASE_URL=postgresql://127.0.0.1:5432/${DB_NAME}" \
   --env "DATABASE_USER=${DB_USER}" --env "DATABASE_PASSWORD=${DB_PASSWORD}" \
   "${CONTAINER_ID}" /opt/czur-deploy/migrate.sh >"${STATE_DIR}/migrate.log" 2>&1 \
-  || fail 'V001–V013 一次性迁移失败'
+  || fail 'V001 基线初始化失败'
 migration_count="$(docker exec --env "PGPASSWORD=${DB_PASSWORD}" "${CONTAINER_ID}" \
   psql --username "${DB_USER}" --dbname "${DB_NAME}" --tuples-only --no-align \
   --command 'SELECT count(*) FROM schema_migrations;' | tr -d '[:space:]')"
-[[ "${migration_count}" == 13 ]] || fail '迁移登记数量不是 V001–V013'
+[[ "${migration_count}" == 1 ]] || fail '迁移登记数量不是唯一 V001'
 
 STAGE='phase-a'
 mvn -B --no-transfer-progress -f "${REPO_ROOT}/backend-reference/pom.xml" \
@@ -276,7 +276,7 @@ done
 export REFERENCE_TEST_DATABASE_URL="jdbc:postgresql://${binding}/${DB_NAME}"
 [[ "$(docker exec --env "PGPASSWORD=${DB_PASSWORD}" "${CONTAINER_ID}" \
   psql --username "${DB_USER}" --dbname "${DB_NAME}" --tuples-only --no-align \
-  --command 'SELECT count(*) FROM schema_migrations;' | tr -d '[:space:]')" == 13 ]] \
+  --command 'SELECT count(*) FROM schema_migrations;' | tr -d '[:space:]')" == 1 ]] \
   || fail '重启后迁移登记不完整'
 
 STAGE='phase-b'

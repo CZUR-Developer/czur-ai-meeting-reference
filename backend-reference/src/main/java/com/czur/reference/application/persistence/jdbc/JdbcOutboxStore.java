@@ -39,7 +39,7 @@ import static com.czur.reference.application.port.OutboxStore.RenewStatus;
  * {@link LeaseToken} 保留不透明 token，数据库版本用于防止同一 owner 重用
  * 旧请求。事件载荷只作为 JSONB 不透明文本传递，日志不会输出载荷正文。</p>
  *
- * <p>该类不负责消息发布，也不负责创建表；部署前必须执行 V001、V002 迁移。
+ * <p>该类不负责消息发布，也不负责创建表；部署前必须执行唯一 V001 基线。
  * 会议快照和 Outbox 的同事务写入由 {@link JdbcMeetingUnitOfWork} 负责。</p>
  */
 public final class JdbcOutboxStore implements OutboxStore {

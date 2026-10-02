@@ -3,11 +3,11 @@
 Contract validators, fixture runners, and acceptance scripts are kept here.
 Tools must be deterministic and must not require production credentials.
 
-`check-outbox-migration.py` 检查 Outbox 租约栅栏迁移是否包含字段、非负约束、
-幂等 DDL 和过期租约索引，并拒绝在迁移中写入或删除业务数据：
+首次正式发版前，数据库交付目录只允许一份 `V001__initial_schema.sql`。
+用默认 Maven 测试和独立 PostgreSQL 门禁核对当前基线，不再测试未发布的中间迁移：
 
 ```bash
-python3 tools/check-outbox-migration.py
+mvn -B -f backend-reference/pom.xml test
 ```
 
 ## P2-T13 PostgreSQL 真重启门禁
@@ -15,7 +15,7 @@ python3 tools/check-outbox-migration.py
 `test-t13-postgres-restart.sh` 使用本次专属的 `postgres:16` Debian 容器和
 named volume，执行仓库 `deploy/migrate.sh`，再分别在两个 Maven/JVM 中运行
 `prepareBeforeRestart` 与 `verifyAfterRestart`。中间会真实 stop/start 同一
-PostgreSQL 容器，验证 V001～V007 readiness、V007 原生 Manifest 文本/JSONB/摘要、
+PostgreSQL 容器，验证 V001 readiness、Manifest 文本/JSONB/摘要、
 会议状态与 receipt、旧 HMAC 分页 token、meeting-global 事件分页，以及删除幂等和
 Outbox 不会因重放增加：
 
@@ -50,7 +50,7 @@ rm -rf -- <日志中的精确-state-directory>
 
 `test-t14-manifest-restart.sh` 使用本次随机命名、带 T14 专属 ownership label 的
 `postgres:16` Debian 容器和 named volume，并把仓库 `deploy/` 只读挂载后运行
-真实 `deploy/migrate.sh` 登记 V001～V007。脚本在三个相互独立的 Maven/JVM 中
+真实 `deploy/migrate.sh` 登记唯一 V001。脚本在三个相互独立的 Maven/JVM 中
 执行三个阶段，并在阶段之间对同一容器做两次真实 `docker stop`/`docker start`：
 
 1. 阶段 A 经正式 owned 建会、领域推进、Stop、输入接管、Manifest begin/publish
@@ -96,7 +96,7 @@ rm -rf -- <日志中的精确-state-directory>
 
 `test-t14-outbox-fence.sh` 使用本次随机命名、带 T14 Outbox 专属 ownership
 label 的 `postgres:16` Debian 容器和 named volume。脚本把仓库 `deploy/`
-只读挂载后执行真实 `deploy/migrate.sh`，精确确认 V001～V007，再在三个相互
+只读挂载后执行真实 `deploy/migrate.sh`，精确确认唯一 V001，再在三个相互
 独立的 Maven/JVM 中依次完成以下验证：
 
 1. 空或未知类型白名单不领取，已注册类型在排序和 limit 前过滤，未知类型保持

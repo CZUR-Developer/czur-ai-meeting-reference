@@ -281,7 +281,7 @@ wait_for_loopback_port() {
 refresh_loopback_binding
 wait_for_loopback_port || fail "数据库宿主 loopback 端口在限定时间内未就绪"
 
-log INFO "使用仓库 deploy/migrate.sh 应用并登记 V001-V007（连接信息已隐藏）"
+log INFO "使用仓库 deploy/migrate.sh 应用唯一 V001 基线（连接信息已隐藏）"
 docker exec \
   --env "DATABASE_URL=postgresql://127.0.0.1:5432/${DB_NAME}" \
   --env "DATABASE_USER=${DB_USER}" \
@@ -293,9 +293,9 @@ MIGRATION_VERSIONS="$(docker exec --env "PGPASSWORD=${DB_PASSWORD}" \
   "${CONTAINER_NAME}" psql --username "${DB_USER}" --dbname "${DB_NAME}" \
   --tuples-only --no-align --command \
   "SELECT string_agg(version, ',' ORDER BY version) FROM schema_migrations;")"
-EXPECTED_MIGRATION_VERSIONS="V001__initial_schema,V002__outbox_lease_fencing,V003__identity_entitlement,V004__meeting_event_envelope,V005__meeting_finalization_fact,V006__meeting_read_model,V007__meeting_manifest_revision"
+EXPECTED_MIGRATION_VERSIONS="V001__initial_schema"
 [[ "${MIGRATION_VERSIONS}" == "${EXPECTED_MIGRATION_VERSIONS}" ]] \
-  || fail "迁移登记不是精确的 V001-V007 集合"
+  || fail "迁移登记不是精确的 V001 集合"
 
 postmaster_start_time() {
   docker exec --env "PGPASSWORD=${DB_PASSWORD}" \
