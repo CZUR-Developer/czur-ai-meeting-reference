@@ -204,7 +204,7 @@ class JdbcCreateMeetingFactStoreIntegrationTest {
     }
 
     @Test
-    void readinessRequiresRegisteredAndPhysicalV013() throws Exception {
+    void readinessRequiresRegisteredBaselineAndPhysicalCreateFact() throws Exception {
         try (JdbcDatabaseRuntime runtime = JdbcDatabaseRuntime.start(runtimeConfig(schema))) {
             assertTrue(runtime.checkReadiness().ready());
             try (Connection connection = tx()) {
@@ -219,14 +219,14 @@ class JdbcCreateMeetingFactStoreIntegrationTest {
             try (Connection connection = scopedConnection(missingRegistration);
                  PreparedStatement statement = connection.prepareStatement(
                          "DELETE FROM schema_migrations WHERE version = ?")) {
-                statement.setString(1, "V013__meeting_create_fact");
+                statement.setString(1, "V001__initial_schema");
                 statement.executeUpdate();
             }
             DatabaseStartupException failure = assertThrows(DatabaseStartupException.class,
                     () -> JdbcDatabaseRuntime.start(runtimeConfig(missingRegistration)));
             assertEquals(DatabaseReadiness.Status.MIGRATION_MISSING,
                     failure.readiness().status());
-            assertEquals(Set.of("V013__meeting_create_fact"),
+            assertEquals(Set.of("V001__initial_schema"),
                     failure.readiness().missingMigrations());
         } finally {
             dropSchema(missingRegistration);
@@ -234,7 +234,10 @@ class JdbcCreateMeetingFactStoreIntegrationTest {
 
         String missingPhysical = createMigratedSchema("create_fact_missing_table_", 12);
         try {
-            register(missingPhysical, "V013__meeting_create_fact.sql");
+            try (Connection connection = scopedConnection(missingPhysical);
+                 Statement statement = connection.createStatement()) {
+                statement.execute("DROP TABLE meeting_create_fact CASCADE");
+            }
             DatabaseStartupException failure = assertThrows(DatabaseStartupException.class,
                     () -> JdbcDatabaseRuntime.start(runtimeConfig(missingPhysical)));
             assertEquals(DatabaseReadiness.Status.SCHEMA_INVALID,
@@ -359,6 +362,9 @@ class JdbcCreateMeetingFactStoreIntegrationTest {
     }
 
     private String readMigration(String filename) throws Exception {
+        if (!"V001__initial_schema.sql".equals(filename)) {
+            return "SELECT 1";
+        }
         for (Path path : new Path[]{Path.of("deploy", "migrations", filename),
                 Path.of("..", "deploy", "migrations", filename)}) {
             if (Files.isRegularFile(path)) {

@@ -614,10 +614,11 @@ class JdbcMeetingDeletionPortIntegrationTest {
              PreparedStatement statement = connection.prepareStatement("""
                      UPDATE meeting
                         SET state='DELETED', manifest_state='DELETED',
-                            updated_at=?, aggregate_version=aggregate_version+1
+                            updated_at=?, deleted_at=?, aggregate_version=aggregate_version+1
                       WHERE meeting_id='meeting-worker-deleted'
                      """)) {
             statement.setTimestamp(1, Timestamp.from(DELETE_AT.plusSeconds(5)));
+            statement.setTimestamp(2, Timestamp.from(DELETE_AT.plusSeconds(5)));
             assertEquals(1, statement.executeUpdate());
         }
 
@@ -1261,15 +1262,17 @@ class JdbcMeetingDeletionPortIntegrationTest {
                  PreparedStatement statement = connection.prepareStatement("""
                          UPDATE meeting
                             SET state=?, manifest_state=?, updated_at=?,
-                                input_state=?, finalization_receipt_id=?
+                                deleted_at=?, input_state=?, finalization_receipt_id=?
                           WHERE meeting_id=?
                          """)) {
                 statement.setString(1, state.name());
                 statement.setString(2, manifestFor(state).name());
                 statement.setTimestamp(3, Timestamp.from(CREATED_AT.plusSeconds(1)));
-                statement.setString(4, inputState.name());
-                statement.setString(5, receipt);
-                statement.setString(6, meetingId);
+                statement.setTimestamp(4, state == MeetingState.DELETED
+                        ? Timestamp.from(CREATED_AT.plusSeconds(1)) : null);
+                statement.setString(5, inputState.name());
+                statement.setString(6, receipt);
+                statement.setString(7, meetingId);
                 assertEquals(1, statement.executeUpdate());
             }
         }
@@ -1562,6 +1565,13 @@ class JdbcMeetingDeletionPortIntegrationTest {
     }
 
     private void updateManifest(String meetingId, ManifestStatus manifest) throws SQLException {
+        if (manifest == ManifestStatus.DELETED) {
+            // 本用例故意构造跨状态的损坏事实；当前基线的等价约束会先阻止该写入。
+            try (Connection connection = dataSource.getConnection();
+                 Statement statement = connection.createStatement()) {
+                statement.execute("ALTER TABLE meeting DROP CONSTRAINT meeting_deleted_at_equivalence_ck");
+            }
+        }
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement(
                      "UPDATE meeting SET manifest_state=? WHERE meeting_id=?")) {
@@ -1978,6 +1988,9 @@ class JdbcMeetingDeletionPortIntegrationTest {
     }
 
     private void applyMigration(String filename) throws Exception {
+        if (!"V001__initial_schema.sql".equals(filename)) {
+            return;
+        }
         Path[] candidates = {
                 Path.of("deploy", "migrations", filename),
                 Path.of("..", "deploy", "migrations", filename)

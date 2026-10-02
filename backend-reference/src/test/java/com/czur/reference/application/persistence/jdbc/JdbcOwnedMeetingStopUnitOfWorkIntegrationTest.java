@@ -175,7 +175,6 @@ class JdbcOwnedMeetingStopUnitOfWorkIntegrationTest {
     @Test
     void allOtherStatesAreRejectedWithoutIdempotencyOrOutboxFacts() throws Exception {
         List<MeetingState> rejected = List.of(
-                MeetingState.UNKNOWN,
                 MeetingState.CREATED,
                 MeetingState.AUTHORIZED,
                 MeetingState.READY,
@@ -709,16 +708,21 @@ class JdbcOwnedMeetingStopUnitOfWorkIntegrationTest {
                  PreparedStatement statement = connection.prepareStatement("""
                          UPDATE meeting
                             SET state = ?, updated_at = ?,
+                                manifest_state = ?, deleted_at = ?,
                                 input_state = ?, finalization_receipt_id = ?
                           WHERE meeting_id = ?
                          """)) {
                 statement.setString(1, state.name());
                 statement.setTimestamp(2, Timestamp.from(CREATED_AT.plusSeconds(1)));
+                statement.setString(3, state == MeetingState.DELETED
+                        ? "DELETED" : "NOT_STARTED");
+                statement.setTimestamp(4, state == MeetingState.DELETED
+                        ? Timestamp.from(CREATED_AT.plusSeconds(1)) : null);
                 boolean accepted = state == MeetingState.FINALIZING;
-                statement.setString(3, accepted
+                statement.setString(5, accepted
                         ? InputState.INPUT_ACCEPTED.name() : InputState.INPUT_OPEN.name());
-                statement.setString(4, accepted ? "setup-receipt-" + suffix : null);
-                statement.setString(5, meetingId);
+                statement.setString(6, accepted ? "setup-receipt-" + suffix : null);
+                statement.setString(7, meetingId);
                 assertEquals(1, statement.executeUpdate());
             }
         }
@@ -993,6 +997,9 @@ class JdbcOwnedMeetingStopUnitOfWorkIntegrationTest {
     }
 
     private void applyMigration(String filename) throws Exception {
+        if (!"V001__initial_schema.sql".equals(filename)) {
+            return;
+        }
         Path[] candidates = {
                 Path.of("deploy", "migrations", filename),
                 Path.of("..", "deploy", "migrations", filename)

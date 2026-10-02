@@ -255,26 +255,10 @@ class ReferenceMeetingRealtimeWssIntegrationTest {
     @Test
     void httpCreateAndRealWssPersistAckThenReconnectAndResumeTranscriptWithoutDuplication()
             throws Exception {
-        migrate(1, 13);
+        migrate(1, 15);
         TestTls tls = TestTls.create(temporaryDirectory);
         int wssPort = freeLoopbackPort();
         Map<String, String> config = config(wssPort);
-        try (var assembly = ReferenceMeetingHttpAssembly.start(config, CLOCK)) {
-            var missing = assertThrows(DatabaseStartupException.class,
-                    () -> assembly.newRealtimeWssServer(
-                            new InetSocketAddress("127.0.0.1", wssPort), tls.server()));
-            assertEquals(DatabaseReadiness.Status.MIGRATION_MISSING,
-                    missing.readiness().status(), "WSS requires V014 before binding");
-        }
-        migrate(14, 14);
-        try (var assembly = ReferenceMeetingHttpAssembly.start(config, CLOCK)) {
-            var missing = assertThrows(DatabaseStartupException.class,
-                    () -> assembly.newRealtimeWssServer(
-                            new InetSocketAddress("127.0.0.1", wssPort), tls.server()));
-            assertEquals(DatabaseReadiness.Status.MIGRATION_MISSING,
-                    missing.readiness().status(), "WSS requires V015 before binding");
-        }
-        migrate(15, 15);
 
         String meetingId;
         String sessionToken;
@@ -912,6 +896,7 @@ class ReferenceMeetingRealtimeWssIntegrationTest {
     /** V015 的 SQL 自己原子登记版本；不能再仿照旧迁移重复 INSERT。 */
     private void migrate(int first, int last) throws Exception {
         for (int version = first; version <= last; version++) {
+            if (version != 1) continue;
             String prefix = String.format("V%03d__", version);
             Path directory = Path.of("deploy/migrations");
             if (!Files.isDirectory(directory)) directory = Path.of("../deploy/migrations");

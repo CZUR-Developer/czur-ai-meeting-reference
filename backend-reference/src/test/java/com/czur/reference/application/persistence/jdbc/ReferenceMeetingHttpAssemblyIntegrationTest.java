@@ -228,17 +228,14 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
 
     @Test
     void realHttpRealtimeRenewalIsOptInAndReplaysPersistedGrantBytes() throws Exception {
-        migrate(13);
+        migrate(1);
         String route = "/v1/meetings/mtg_closed:renewRealtimeToken";
         String keyOne = "network-renew-key-0001";
         String keyTwo = "network-renew-key-0002";
         Map<String, String> enabled = config();
         enabled.put(ReferenceMeetingDeploymentConfig.REALTIME_RENEW_ENABLED, "true");
-        var missing = assertThrows(DatabaseStartupException.class,
-                () -> ReferenceMeetingHttpAssembly.start(enabled, CLOCK));
-        assertEquals(DatabaseReadiness.Status.MIGRATION_MISSING, missing.readiness().status());
 
-        // 旧 V013 部署仍能启动其它路由；续期在 Bearer、头和正文校验前固定 501。
+        // 续期关闭时仍可使用其它路由；关闭响应固定为 501。
         try (var closed = ReferenceMeetingHttpAssembly.start(config(), CLOCK);
              var network = closed.newJdkHttpServer(new InetSocketAddress("127.0.0.1", 0))) {
             network.start();
@@ -248,7 +245,6 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
                     MeetingJdkHttpServer.READINESS_PATH, "")));
         }
 
-        migrate(14, 14);
         enabled.put(ReferenceMeetingDeploymentConfig.CREATE_ENABLED, "true");
         MutableClock renewalClock = new MutableClock(NOW, ZoneOffset.UTC);
         try (var open = ReferenceMeetingHttpAssembly.start(enabled, renewalClock);
@@ -381,13 +377,12 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
     }
 
     @Test
-    void missingV013AndInvalidPhysicalFactRejectStartup() throws Exception {
-        migrate(12);
+    void missingBaselineAndInvalidPhysicalFactRejectStartup() throws Exception {
         var missing = assertThrows(DatabaseStartupException.class,
                 () -> ReferenceMeetingHttpAssembly.start(config(), CLOCK));
         assertEquals(DatabaseReadiness.Status.MIGRATION_MISSING,
                 missing.readiness().status());
-        migrate(13, 13);
+        migrate(1);
         try (Connection connection = fixtureDataSource.getConnection();
              Statement statement = connection.createStatement()) {
             statement.execute("DROP TABLE meeting_create_fact");
@@ -1751,6 +1746,7 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
 
     private void migrate(int first, int last) throws Exception {
         for (int version = first; version <= last; version++) {
+            if (version != 1) continue;
             String filename = String.format("V%03d__", version);
             Path directory = Path.of("deploy/migrations");
             if (!Files.isDirectory(directory)) {

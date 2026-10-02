@@ -99,8 +99,13 @@ class JdbcMeetingRecoveryLookupIntegrationTest {
             if (state == MeetingState.UNKNOWN) {
                 continue;
             }
-            update("UPDATE meeting SET state=?, updated_at=? WHERE meeting_id=?",
+            update("UPDATE meeting SET state=?, updated_at=?, "
+                            + "manifest_state=CASE WHEN ?='DELETED' THEN 'DELETED' "
+                            + "ELSE 'NOT_STARTED' END, "
+                            + "deleted_at=CASE WHEN ?='DELETED' THEN ?::timestamptz ELSE NULL END "
+                            + "WHERE meeting_id=?",
                     state.name(), CREATE_AT.plusSeconds(state.ordinal() + 1),
+                    state.name(), state.name(), CREATE_AT.plusSeconds(state.ordinal() + 1),
                     scenario.request().meetingId());
             TableCounts before = tableCounts();
 
@@ -116,7 +121,11 @@ class JdbcMeetingRecoveryLookupIntegrationTest {
             assertEquals(before, tableCounts());
         }
 
-        update("UPDATE meeting SET state=?, updated_at=? WHERE meeting_id=?",
+        // 故意构造损坏的旧状态；当前 V001 物理约束会先拒绝，需要显式移除。
+        execute("ALTER TABLE meeting DROP CONSTRAINT meeting_state_ck");
+        execute("ALTER TABLE meeting DROP CONSTRAINT meeting_deleted_at_equivalence_ck");
+        update("UPDATE meeting SET state=?, updated_at=?, "
+                        + "manifest_state='NOT_STARTED', deleted_at=NULL WHERE meeting_id=?",
                 MeetingState.UNKNOWN.name(), CREATE_AT.plusSeconds(120),
                 scenario.request().meetingId());
         TableCounts before = tableCounts();
@@ -800,6 +809,9 @@ class JdbcMeetingRecoveryLookupIntegrationTest {
     }
 
     private void applyMigration(String filename) throws Exception {
+        if (!"V001__initial_schema.sql".equals(filename)) {
+            return;
+        }
         Path[] candidates = {
                 Path.of("deploy", "migrations", filename),
                 Path.of("..", "deploy", "migrations", filename)

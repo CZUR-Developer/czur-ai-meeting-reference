@@ -44,7 +44,6 @@ class JdbcCompletedAudioReadinessPortIntegrationTest {
             statement.execute("CREATE SCHEMA " + quote(schema));
         }
         execute(migration("V001__initial_schema.sql"));
-        execute(migration("V015__durable_audio_input.sql"));
         execute("""
                 INSERT INTO meeting (meeting_id, deployment_scope, client_session_id,
                     subject_scope, profile_id, profile_revision, state, created_at, updated_at)
@@ -259,6 +258,7 @@ class JdbcCompletedAudioReadinessPortIntegrationTest {
     }
 
     private static String migration(String filename) throws Exception {
+        if (!filename.equals("V001__initial_schema.sql")) return "SELECT 1";
         for (Path path : new Path[]{Path.of("deploy", "migrations", filename),
                 Path.of("..", "deploy", "migrations", filename)}) {
             if (Files.isRegularFile(path)) return Files.readString(path, StandardCharsets.UTF_8);

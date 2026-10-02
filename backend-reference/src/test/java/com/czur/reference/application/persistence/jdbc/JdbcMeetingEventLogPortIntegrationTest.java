@@ -442,9 +442,15 @@ class JdbcMeetingEventLogPortIntegrationTest {
     private void setMeetingState(String meetingId, String state) throws Exception {
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement(
-                     "UPDATE meeting SET state = ? WHERE meeting_id = ?")) {
+                     "UPDATE meeting SET state = ?, "
+                             + "manifest_state = CASE WHEN ? = 'DELETED' THEN 'DELETED' "
+                             + "ELSE manifest_state END, "
+                             + "deleted_at = CASE WHEN ? = 'DELETED' THEN updated_at "
+                             + "ELSE NULL END WHERE meeting_id = ?")) {
             statement.setString(1, state);
-            statement.setString(2, meetingId);
+            statement.setString(2, state);
+            statement.setString(3, state);
+            statement.setString(4, meetingId);
             assertEquals(1, statement.executeUpdate());
         }
     }
@@ -466,6 +472,9 @@ class JdbcMeetingEventLogPortIntegrationTest {
     }
 
     private void applyMigration(String filename) throws Exception {
+        if (!"V001__initial_schema.sql".equals(filename)) {
+            return;
+        }
         Path[] candidates = {
                 Path.of("deploy", "migrations", filename),
                 Path.of("..", "deploy", "migrations", filename)
