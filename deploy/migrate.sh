@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# 参考数据库迁移入口。脚本只执行仓库中的版本化 SQL，不创建账号、不写入
+# 参考数据库初始化入口。首次发布前只接受唯一的 V001 当前基线，不保留
+# 开发过程的增量迁移链；正式发版后的升级再另行设计。脚本不创建账号、
 # 默认用户，也不会把 DATABASE_URL、密码或其他 Secret 输出到日志。
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -51,6 +52,12 @@ if [[ -n "${DATABASE_USER}" ]]; then
   PSQL_ARGS+=(--username="${DATABASE_USER}")
 fi
 
+shopt -s nullglob
+files=("${MIGRATION_DIR}"/*.sql)
+(( ${#files[@]} == 1 )) || fail "首次发布基线阶段必须且只能存在一份 V001 SQL"
+[[ "$(basename -- "${files[0]}")" == "V001__initial_schema.sql" ]] \
+  || fail "首次发布基线文件必须是 V001__initial_schema.sql"
+
 log INFO "开始数据库迁移（目标地址已隐藏）"
 psql "${PSQL_ARGS[@]}" <<'SQL'
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -58,10 +65,6 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
     applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 SQL
-
-shopt -s nullglob
-files=("${MIGRATION_DIR}"/V*.sql)
-(( ${#files[@]} > 0 )) || fail "迁移目录中没有 V*.sql 文件"
 
 for file in "${files[@]}"; do
   version="$(basename -- "${file}" .sql)"
@@ -72,9 +75,9 @@ for file in "${files[@]}"; do
   fi
 
   log INFO "执行迁移 ${version}"
-  psql "${PSQL_ARGS[@]}" -f "${file}"
-  psql "${PSQL_ARGS[@]}" -c \
-    "INSERT INTO schema_migrations(version) VALUES ('${version}') ON CONFLICT (version) DO NOTHING"
+  # 一次 psql 会话内提交建表和版本登记；失败时均回滚，重试仍从空基线开始。
+  psql "${PSQL_ARGS[@]}" --single-transaction --file="${file}" --command \
+    "INSERT INTO schema_migrations(version) VALUES ('${version}')"
 done
 
 unset PGPASSWORD

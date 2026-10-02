@@ -24,9 +24,9 @@ import java.util.logging.Logger;
  * PostgreSQL 数据库运行时边界。
  *
  * <p>启动时创建唯一的 HikariCP 连接池，执行只读 {@code SELECT 1} 探针并检查
- * {@code schema_migrations} 中的 V001～V013，再以只读 catalog 查询核对 V007
- * Manifest revision、V008 durable input fact、V009 final usage fact 与 V010
- * workflow step，以及 V011 execution fact/READY artifact 表的精确物理契约。
+ * {@code schema_migrations} 中唯一的首次交付基线 V001，再以只读 catalog 查询核对
+ * Manifest、durable input、final usage、workflow、execution fact 和 READY artifact
+ * 等当前结构的物理契约。
  * 任一检查失败都会关闭已经创建的池并抛出
  * {@link DatabaseStartupException}；本类没有 InMemory fallback，也不会自动执行
  * 迁移或修补半成品表。成功启动后，所有 JDBC Repository、会议工作单元和提交后的
@@ -38,25 +38,9 @@ import java.util.logging.Logger;
  */
 public final class JdbcDatabaseRuntime implements AutoCloseable {
     private static final Logger LOGGER = Logger.getLogger(JdbcDatabaseRuntime.class.getName());
-    private static final String MIGRATION_QUERY = """
-            SELECT version
-              FROM schema_migrations
-              WHERE version IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """;
-    private static final Set<String> REQUIRED_MIGRATIONS = Set.of(
-            "V001__initial_schema",
-            "V002__outbox_lease_fencing",
-            "V003__identity_entitlement",
-            "V004__meeting_event_envelope",
-            "V005__meeting_finalization_fact",
-            "V006__meeting_read_model",
-            "V007__meeting_manifest_revision",
-            "V008__durable_input_fact",
-            "V009__final_usage_fact",
-            "V010__workflow_step_fencing",
-            "V011__finalization_execution_artifact_ready",
-            "V012__artifact_deletion_plan",
-            "V013__meeting_create_fact");
+    private static final String MIGRATION_QUERY =
+            "SELECT version FROM schema_migrations WHERE version = ?";
+    private static final Set<String> REQUIRED_MIGRATIONS = Set.of("V001__initial_schema");
     private static final List<ColumnContract> CREATE_FACT_COLUMNS = List.of(
             new ColumnContract("scope", "text", true, null),
             new ColumnContract("idempotency_key", "text", true, null),
@@ -442,43 +426,14 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
                     return DatabaseReadiness.unavailable("只读数据库探针返回异常结果");
                 }
             }
-            Set<String> present = new HashSet<>();
             try (PreparedStatement migrations = connection.prepareStatement(MIGRATION_QUERY)) {
                 migrations.setString(1, "V001__initial_schema");
-                migrations.setString(2, "V002__outbox_lease_fencing");
-                migrations.setString(3, "V003__identity_entitlement");
-                migrations.setString(4, "V004__meeting_event_envelope");
-                migrations.setString(5, "V005__meeting_finalization_fact");
-                migrations.setString(6, "V006__meeting_read_model");
-                migrations.setString(7, "V007__meeting_manifest_revision");
-                // P2-T09 以前的开发脚本可能只把 V001/V002 登记为短版本；继续
-                // 识别这两个已存在别名，但新迁移只接受完整不可歧义的文件名。
-                migrations.setString(8, "V001");
-                migrations.setString(9, "V002");
-                migrations.setString(10, "V008__durable_input_fact");
-                migrations.setString(11, "V009__final_usage_fact");
-                migrations.setString(12, "V010__workflow_step_fencing");
-                migrations.setString(13, "V011__finalization_execution_artifact_ready");
-                migrations.setString(14, "V012__artifact_deletion_plan");
-                migrations.setString(15, "V013__meeting_create_fact");
                 try (ResultSet rows = migrations.executeQuery()) {
-                    while (rows.next()) {
-                        String version = rows.getString(1);
-                        if ("V001".equals(version)) {
-                            present.add("V001__initial_schema");
-                        } else if ("V002".equals(version)) {
-                            present.add("V002__outbox_lease_fencing");
-                        } else {
-                            present.add(version);
-                        }
+                    if (!rows.next()) {
+                        LOGGER.log(Level.WARNING, "数据库 readiness 缺少首次建库基线登记");
+                        return DatabaseReadiness.migrationMissing(REQUIRED_MIGRATIONS);
                     }
                 }
-            }
-            Set<String> missing = new HashSet<>(REQUIRED_MIGRATIONS);
-            missing.removeAll(present);
-            if (!missing.isEmpty()) {
-                LOGGER.log(Level.WARNING, "数据库 readiness 缺少迁移登记 count={0}", missing.size());
-                return DatabaseReadiness.migrationMissing(missing);
             }
             if (!hasExactMeetingIdentitySchema(connection)) {
                 DatabaseReadiness invalid = DatabaseReadiness.schemaInvalid(
@@ -562,11 +517,8 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
     /**
      * 新实时凭据功能的显式可选数据库门禁。
      *
-     * <p>默认关闭的续期 REST 和显式创建的 WSS 入口按需检查 V014，不把它变成旧
-     * HTTP/T14 Worker 的全局启动前提。调用方必须先通过
-     * {@link #start(DatabaseRuntimeConfig)} 的 V001～V013 基线，再在启用新入口时
-     * 调用本方法；只有同时存在完整 V014 版本
-     * 登记与精确物理契约才可开放。该方法只读，不执行迁移或修补半表。</p>
+     * <p>调用方先通过 {@link #start(DatabaseRuntimeConfig)} 验证 V001 当前基线，
+     * 再检查实时凭据表的物理契约。该方法只读，不执行迁移或修补表。</p>
      *
      * @return READY、缺迁移、结构无效、数据库不可用或运行时已关闭的脱敏状态
      */
@@ -576,49 +528,31 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
         }
         try (Connection connection = dataSource.getConnection()) {
             connection.setReadOnly(true);
-            try (PreparedStatement statement = connection.prepareStatement("""
-                    SELECT version FROM schema_migrations WHERE version = ?
-                    """)) {
-                statement.setString(1, "V014__realtime_token_grant");
-                try (ResultSet rows = statement.executeQuery()) {
-                    if (!rows.next()) {
-                        return DatabaseReadiness.migrationMissing(
-                                Set.of("V014__realtime_token_grant"));
-                    }
-                    if (!"V014__realtime_token_grant".equals(rows.getString(1))
-                            || rows.next()) {
-                        return DatabaseReadiness.schemaInvalid("V014 registration inconsistent");
-                    }
-                }
-            }
             if (!JdbcRealtimeCredentialSchema.matches(connection)) {
                 LOGGER.log(Level.WARNING,
                         "实时凭据 readiness 物理契约校验失败 status=SCHEMA_INVALID");
-                return DatabaseReadiness.schemaInvalid("V014 catalog mismatch");
+                return DatabaseReadiness.schemaInvalid("realtime credential catalog mismatch");
             }
             LOGGER.log(Level.FINE, "实时凭据 readiness 检查通过");
             return DatabaseReadiness.success();
         } catch (SQLException failure) {
-            if (isMissingMigrationTable(failure)) {
-                return DatabaseReadiness.migrationMissing(Set.of("V014__realtime_token_grant"));
-            }
             LOGGER.log(Level.WARNING,
                     "实时凭据 readiness 数据库不可用 exception={0}",
                     failure.getClass().getSimpleName());
-            return DatabaseReadiness.unavailable("V014 database probe unavailable");
+            return DatabaseReadiness.unavailable("realtime credential database probe unavailable");
         } catch (RuntimeException failure) {
             LOGGER.log(Level.WARNING,
                     "实时凭据 readiness 异常 exception={0}",
                     failure.getClass().getSimpleName());
-            return DatabaseReadiness.schemaInvalid("V014 catalog probe failed");
+            return DatabaseReadiness.schemaInvalid("realtime credential catalog probe failed");
         }
     }
 
     /**
-     * 新实时音频入口启用时的 V015 按需只读门禁。
+     * 新实时音频入口启用时的按需只读门禁。
      *
-     * <p>调用方先经 {@link #start(DatabaseRuntimeConfig)} 验证旧版基线，
-     * 再在开放音频入口前调用本方法。旧 HTTP 和 Worker 不依赖 V015；
+     * <p>调用方先经 {@link #start(DatabaseRuntimeConfig)} 验证当前 V001 基线，
+     * 再在开放音频入口前调用本方法；
      * 本方法不执行迁移或修补表，也不读取音频业务行。</p>
      *
      * @return READY、缺迁移、结构无效、数据库不可用或已关闭的脱敏状态
@@ -629,34 +563,21 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
         }
         try (Connection connection = dataSource.getConnection()) {
             connection.setReadOnly(true);
-            try (PreparedStatement statement = connection.prepareStatement(
-                    "SELECT version FROM schema_migrations WHERE version = ?")) {
-                statement.setString(1, "V015__durable_audio_input");
-                try (ResultSet rows = statement.executeQuery()) {
-                    if (!rows.next()) {
-                        return DatabaseReadiness.migrationMissing(
-                                Set.of("V015__durable_audio_input"));
-                    }
-                }
-            }
             if (!JdbcDurableAudioSchema.matches(connection)) {
                 LOGGER.log(Level.WARNING,
                         "持久音频 readiness 物理契约校验失败 status=SCHEMA_INVALID");
-                return DatabaseReadiness.schemaInvalid("V015 catalog mismatch");
+                return DatabaseReadiness.schemaInvalid("durable audio catalog mismatch");
             }
             LOGGER.log(Level.FINE, "持久音频 readiness 检查通过");
             return DatabaseReadiness.success();
         } catch (SQLException failure) {
-            if (isMissingMigrationTable(failure)) {
-                return DatabaseReadiness.migrationMissing(Set.of("V015__durable_audio_input"));
-            }
             LOGGER.log(Level.WARNING, "持久音频 readiness 数据库不可用 exception={0}",
                     failure.getClass().getSimpleName());
-            return DatabaseReadiness.unavailable("V015 database probe unavailable");
+            return DatabaseReadiness.unavailable("durable audio database probe unavailable");
         } catch (RuntimeException failure) {
             LOGGER.log(Level.WARNING, "持久音频 readiness 异常 exception={0}",
                     failure.getClass().getSimpleName());
-            return DatabaseReadiness.schemaInvalid("V015 catalog probe failed");
+            return DatabaseReadiness.schemaInvalid("durable audio catalog probe failed");
         }
     }
 
