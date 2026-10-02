@@ -5,16 +5,21 @@ import com.czur.aimeeting.contract.realtime.v1.AudioProfile;
 import com.czur.aimeeting.contract.realtime.v1.ClientEnvelope;
 import com.czur.aimeeting.contract.realtime.v1.InputComplete;
 import com.czur.aimeeting.contract.realtime.v1.MeetingAudioFrame;
+import com.czur.aimeeting.contract.realtime.v1.ResumeRequest;
 import com.czur.aimeeting.contract.realtime.v1.ServerEnvelope;
 import com.czur.aimeeting.contract.realtime.v1.StreamStart;
 import com.czur.reference.application.command.CreateMeetingResponseFact;
 import com.czur.reference.application.finalization.FinalizationExecutionFact;
 import com.czur.reference.application.finalization.MeetingInputReconciler;
 import com.czur.reference.application.port.DurableAudioInputPort;
+import com.czur.reference.application.port.EventLog;
 import com.czur.reference.application.port.FinalizationAdmissionUnitOfWork;
+import com.czur.reference.application.port.MeetingEventLogPort;
+import com.czur.reference.application.port.MeetingEventPage;
 import com.czur.reference.application.port.MeetingStartExecutionUnitOfWork;
 import com.czur.reference.application.port.MeetingInputClosureContextPort;
 import com.czur.reference.application.port.RealtimeCredentialVerifier;
+import com.czur.reference.application.port.RealtimeEventLogPort;
 import com.czur.reference.application.port.RealtimeStartFactsLookup;
 import com.czur.reference.application.port.identity.SecretCredential;
 import com.czur.reference.application.realtime.RealtimeAudioIngress;
@@ -26,8 +31,10 @@ import com.czur.reference.domain.capability.DeploymentLimits;
 import com.czur.reference.domain.capability.ProductProfile;
 import com.czur.reference.domain.meeting.MeetingAggregate;
 import com.czur.reference.domain.meeting.MeetingEvent;
+import com.czur.reference.application.port.model.CanonicalTranscriptEvent;
 import com.czur.reference.protocol.realtime.RealtimeAudioWireMapper;
 import com.czur.reference.protocol.realtime.RealtimeWireCodec;
+import com.czur.reference.protocol.realtime.RealtimeTranscriptEventMapper;
 import com.google.protobuf.ByteString;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -52,6 +59,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -89,6 +97,94 @@ class MeetingRealtimeWssServerTest {
             "profile", 1, Set.of("asr"), Set.of(), Map.of(), Map.of(), Map.of());
 
     @TempDir Path temporaryDirectory;
+
+    @Test
+    void readOnlyAndWriteCanResumeWithoutStartingAudioAndReceiveBoundedPages() throws Exception {
+        TestTls tls = TestTls.create(temporaryDirectory);
+        FakeVerifier verifier = new FakeVerifier();
+        FakeAudio audio = new FakeAudio();
+        EventLog first = transcriptEvent(1);
+        EventLog second = transcriptEvent(2);
+        EventLog third = transcriptEvent(3);
+        AtomicInteger reads = new AtomicInteger();
+        RealtimeEventLogPort events = request -> {
+            reads.incrementAndGet();
+            assertEquals(32, request.limit());
+            assertEquals(MEETING, request.grant().readOwnership().meetingId());
+            return request.afterSequence() == 0
+                    ? new MeetingEventLogPort.Page(new MeetingEventPage(
+                            List.of(first, second), 2, true))
+                    : request.afterSequence() == 2
+                            ? new MeetingEventLogPort.Page(new MeetingEventPage(
+                                    List.of(third), 3, false))
+                            : new MeetingEventLogPort.Page(MeetingEventPage.empty(3));
+        };
+        try (Fixture fixture = new Fixture(tls, verifier, audio, null, null, events);
+             HttpClient client = HttpClient.newBuilder().sslContext(tls.trusted()).build()) {
+            fixture.start();
+            for (RealtimeCredentialVerifier.AccessMode mode : List.of(
+                    RealtimeCredentialVerifier.AccessMode.READ_ONLY,
+                    RealtimeCredentialVerifier.AccessMode.WRITE)) {
+                verifier.access = mode;
+                Listener listener = new Listener();
+                var socket = connect(client, fixture.uri(MEETING), TOKEN,
+                        CreateMeetingResponseFact.REALTIME_SUBPROTOCOL, listener);
+                socket.sendBinary(ByteBuffer.wrap(resume(0).toByteArray()), true).join();
+                awaitCount(listener.ackCount, 3);
+                List<ServerEnvelope> received = listener.messages();
+                assertEquals(List.of(1L, 2L, 0L), received.stream()
+                        .map(ServerEnvelope::getEventSequence).toList());
+                assertTrue(received.get(0).hasTranscriptUpsert());
+                assertTrue(received.get(1).hasTranscriptUpsert());
+                assertTrue(received.get(2).hasResumePageEnd());
+                assertEquals(2, received.get(2).getResumePageEnd().getLastEventSequence());
+                assertTrue(received.get(2).getResumePageEnd().getHasMore());
+
+                socket.sendBinary(ByteBuffer.wrap(resume(2).toByteArray()), true).join();
+                awaitCount(listener.ackCount, 5);
+                received = listener.messages();
+                assertEquals(3, received.get(3).getEventSequence());
+                assertTrue(received.get(4).hasResumePageEnd());
+                assertEquals(3, received.get(4).getResumePageEnd().getLastEventSequence());
+                assertFalse(received.get(4).getResumePageEnd().getHasMore());
+
+                socket.sendBinary(ByteBuffer.wrap(resume(3).toByteArray()), true).join();
+                awaitCount(listener.ackCount, 6);
+                received = listener.messages();
+                assertTrue(received.get(5).hasResumePageEnd());
+                assertEquals(3, received.get(5).getResumePageEnd().getLastEventSequence());
+                assertFalse(received.get(5).getResumePageEnd().getHasMore());
+                socket.sendClose(java.net.http.WebSocket.NORMAL_CLOSURE, "done").join();
+                listener.closed.orTimeout(5, TimeUnit.SECONDS).join();
+            }
+            assertEquals(6, reads.get());
+            assertEquals(0, audio.bindCalls.get());
+            assertEquals(0, audio.appendCalls.get());
+        }
+    }
+
+    @Test
+    void badStoredEventRejectsWholeResumePageBeforeSendingAnyEvent() throws Exception {
+        TestTls tls = TestTls.create(temporaryDirectory);
+        EventLog good = transcriptEvent(1);
+        EventLog second = transcriptEvent(2);
+        EventLog bad = new EventLog(second.specVersion(), second.meetingId(),
+                second.streamId(), second.eventId(), second.eventSequence(),
+                second.emittedAt(), "unknownEvent", second.canonicalPayloadJson());
+        RealtimeEventLogPort events = request -> new MeetingEventLogPort.Page(
+                new MeetingEventPage(List.of(good, bad), 2, false));
+        try (Fixture fixture = new Fixture(tls, new FakeVerifier(), new FakeAudio(),
+                     null, null, events);
+             HttpClient client = HttpClient.newBuilder().sslContext(tls.trusted()).build()) {
+            fixture.start();
+            Listener listener = new Listener();
+            var socket = connect(client, fixture.uri(MEETING), TOKEN,
+                    CreateMeetingResponseFact.REALTIME_SUBPROTOCOL, listener);
+            sendForExpectedClose(socket, resume(0).toByteArray());
+            assertEquals(1011, listener.closed.orTimeout(5, TimeUnit.SECONDS).join());
+            assertEquals(0, listener.ackCount.get());
+        }
+    }
 
     @Test
     void trustedHandshakeStartAndStoredFrameProduceOneTransientDurableAck() throws Exception {
@@ -507,6 +603,22 @@ class MeetingRealtimeWssServerTest {
                 .build();
     }
 
+    private static ClientEnvelope resume(long afterSequence) {
+        return ClientEnvelope.newBuilder().setSpecVersion(RealtimeWireCodec.SPEC_VERSION)
+                .setMeetingId(MEETING).setStreamId(MEETING)
+                .setClientMessageId("resume-" + afterSequence)
+                .setResumeRequest(ResumeRequest.newBuilder()
+                        .setAfterEventSequence(afterSequence)).build();
+    }
+
+    private static EventLog transcriptEvent(long sequence) {
+        return RealtimeTranscriptEventMapper.event(MEETING, "evt-resume-" + sequence,
+                sequence, NOW, new CanonicalTranscriptEvent("segment-" + sequence, 1,
+                        CanonicalTranscriptEvent.Operation.UPSERT, 0, 20,
+                        "zh-CN", "模拟字幕 " + sequence, true, null, 1.0,
+                        List.of(), List.of()));
+    }
+
     private static java.net.http.WebSocket connect(HttpClient client, URI uri, String token,
             String protocol, Listener listener) {
         return client.newWebSocketBuilder().connectTimeout(Duration.ofSeconds(3))
@@ -577,6 +689,12 @@ class MeetingRealtimeWssServerTest {
         private final CompletableFuture<ServerEnvelope> ack = new CompletableFuture<>();
         private final CompletableFuture<Integer> closed = new CompletableFuture<>();
         private final AtomicInteger ackCount = new AtomicInteger();
+        private final List<ServerEnvelope> received = java.util.Collections.synchronizedList(
+                new ArrayList<>());
+
+        private List<ServerEnvelope> messages() {
+            synchronized (received) { return List.copyOf(received); }
+        }
 
         @Override public void onOpen(java.net.http.WebSocket socket) { socket.request(1); }
 
@@ -586,8 +704,10 @@ class MeetingRealtimeWssServerTest {
             if (last) {
                 byte[] bytes = new byte[data.remaining()];
                 data.get(bytes);
+                ServerEnvelope decoded = CODEC.decodeServer(bytes);
+                received.add(decoded);
                 ackCount.incrementAndGet();
-                ack.complete(CODEC.decodeServer(bytes));
+                ack.complete(decoded);
             }
             socket.request(1);
             return null;
@@ -608,6 +728,7 @@ class MeetingRealtimeWssServerTest {
     private static final class FakeVerifier implements RealtimeCredentialVerifier {
         private final AtomicInteger calls = new AtomicInteger();
         private volatile boolean enabled = true;
+        private volatile AccessMode access = AccessMode.WRITE;
 
         @Override public Result verify(Request request) {
             calls.incrementAndGet();
@@ -616,7 +737,7 @@ class MeetingRealtimeWssServerTest {
                     MessageDigest.isEqual(bytes, expected));
             return enabled && matched && MEETING.equals(request.meetingId())
                     && MEETING.equals(request.streamId())
-                    ? new Granted(AccessMode.WRITE, NOW.plusSeconds(120), AUDIO,
+                    ? new Granted(access, NOW.plusSeconds(120), AUDIO,
                             new ReadOwnership(MEETING, "deployment", "subject"))
                     : new Denied();
         }
@@ -725,10 +846,17 @@ class MeetingRealtimeWssServerTest {
         private Fixture(TestTls tls, FakeVerifier verifier, FakeAudio audio,
                 RealtimeTranscriptSessions transcripts,
                 MeetingInputReconciler inputReconciler) throws Exception {
+            this(tls, verifier, audio, transcripts, inputReconciler, null);
+        }
+
+        private Fixture(TestTls tls, FakeVerifier verifier, FakeAudio audio,
+                RealtimeTranscriptSessions transcripts,
+                MeetingInputReconciler inputReconciler,
+                RealtimeEventLogPort eventLog) throws Exception {
             server = new MeetingRealtimeWssServer(
                     new InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0),
                     tls.server(), verifier, ingress(audio), transcripts,
-                    inputReconciler, clock);
+                    inputReconciler, eventLog, clock);
         }
 
         private void start() throws Exception {

@@ -95,6 +95,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
     private final RealtimeAudioIngress realtimeAudioIngress;
     private final RealtimeTranscriptSessions realtimeTranscriptSessions;
     private final MeetingInputReconciler inputReconciler;
+    private final JdbcMeetingEventLogPort eventLog;
     private final Clock clock;
     private final AtomicBoolean closed = new AtomicBoolean();
 
@@ -105,7 +106,8 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
             JdbcRealtimeCredentialVerifier realtimeVerifier,
             RealtimeAudioIngress realtimeAudioIngress,
             RealtimeTranscriptSessions realtimeTranscriptSessions,
-            MeetingInputReconciler inputReconciler, Clock clock) {
+            MeetingInputReconciler inputReconciler,
+            JdbcMeetingEventLogPort eventLog, Clock clock) {
         this.database = database;
         this.runtime = runtime;
         this.contextResolver = contextResolver;
@@ -115,6 +117,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
         this.realtimeAudioIngress = realtimeAudioIngress;
         this.realtimeTranscriptSessions = realtimeTranscriptSessions;
         this.inputReconciler = Objects.requireNonNull(inputReconciler, "inputReconciler");
+        this.eventLog = Objects.requireNonNull(eventLog, "eventLog");
         this.clock = clock;
     }
 
@@ -259,7 +262,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                     new Object[]{config.createEnabled(), config.realtimeRenewEnabled()});
             return new ReferenceMeetingHttpAssembly(database, runtime, resolver, errors,
                     config.realtimeRenewEnabled(), realtimeVerifier, realtimeIngress,
-                    realtimeTranscripts, inputReconciler, clock);
+                    realtimeTranscripts, inputReconciler, events, clock);
         } catch (RuntimeException | Error failure) {
             try {
                 if (runtime != null) {
@@ -326,7 +329,8 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
         DatabaseReadiness audio = database.checkDurableAudioReadiness();
         if (!audio.ready()) throw new DatabaseStartupException(audio);
         return new MeetingRealtimeWssServer(address, tls, realtimeVerifier,
-                realtimeAudioIngress, realtimeTranscriptSessions, inputReconciler, clock);
+                realtimeAudioIngress, realtimeTranscriptSessions, inputReconciler,
+                eventLog, clock);
     }
 
     /** 幂等地先关闭请求入口，再关闭唯一 JDBC 池；不删除任何数据库事实。 */

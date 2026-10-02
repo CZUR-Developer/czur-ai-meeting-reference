@@ -3,6 +3,7 @@ package com.czur.reference.application.wss;
 import com.czur.reference.application.command.CreateMeetingResponseFact;
 import com.czur.reference.application.finalization.MeetingInputReconciler;
 import com.czur.reference.application.port.RealtimeCredentialVerifier;
+import com.czur.reference.application.port.RealtimeEventLogPort;
 import com.czur.reference.application.port.identity.SecretCredential;
 import com.czur.reference.application.realtime.RealtimeAudioIngress;
 import com.czur.reference.application.realtime.RealtimeTranscriptSessions;
@@ -59,6 +60,7 @@ public final class MeetingRealtimeWssServer extends WebSocketServer implements A
     private final RealtimeAudioIngress ingress;
     private final RealtimeTranscriptSessions transcriptSessions;
     private final MeetingInputReconciler inputReconciler;
+    private final RealtimeEventLogPort eventLog;
     private final Clock clock;
     private final ScheduledExecutorService expiryScanner = Executors.newSingleThreadScheduledExecutor(
             task -> {
@@ -92,6 +94,14 @@ public final class MeetingRealtimeWssServer extends WebSocketServer implements A
             RealtimeCredentialVerifier verifier, RealtimeAudioIngress ingress,
             RealtimeTranscriptSessions transcriptSessions,
             MeetingInputReconciler inputReconciler, Clock clock) {
+        this(address, tls, verifier, ingress, transcriptSessions, inputReconciler, null, clock);
+    }
+
+    /** 正式入口使用与 REST 相同的持久事件读取实现。 */
+    public MeetingRealtimeWssServer(InetSocketAddress address, SSLContext tls,
+            RealtimeCredentialVerifier verifier, RealtimeAudioIngress ingress,
+            RealtimeTranscriptSessions transcriptSessions,
+            MeetingInputReconciler inputReconciler, RealtimeEventLogPort eventLog, Clock clock) {
         super(Objects.requireNonNull(address, "address"), 2,
                 List.of(new Draft_6455(List.of(new DefaultExtension()), List.of(
                         new Protocol(CreateMeetingResponseFact.REALTIME_SUBPROTOCOL)),
@@ -100,6 +110,7 @@ public final class MeetingRealtimeWssServer extends WebSocketServer implements A
         this.ingress = Objects.requireNonNull(ingress, "ingress");
         this.transcriptSessions = transcriptSessions;
         this.inputReconciler = inputReconciler;
+        this.eventLog = eventLog;
         this.clock = Objects.requireNonNull(clock, "clock");
         setWebSocketFactory(new DefaultSSLWebSocketServerFactory(
                 Objects.requireNonNull(tls, "tls")));
@@ -176,7 +187,7 @@ public final class MeetingRealtimeWssServer extends WebSocketServer implements A
         try {
             RealtimeWssConnection session = RealtimeWssConnection.open(
                     meetingId, credential, verifier, ingress, transcriptSessions,
-                    inputReconciler, clock);
+                    inputReconciler, eventLog, clock);
             try {
                 connection.setAttachment(session);
             } catch (RuntimeException failure) {
@@ -229,8 +240,8 @@ public final class MeetingRealtimeWssServer extends WebSocketServer implements A
             return;
         }
         if (!connection.isOpen() || connection.hasBufferedData()) {
-            // 在处理本次帧之前守单帧窗口；本次最多 ACK+字幕两条发送，不在第一
-            // 条 send 后再用 hasBufferedData 误判第二条为背压。
+            // 入站前检查旧输出是否仍堆积；本次至多发送固定大小的一页补拉结果，
+            // 不在同页第一条 send 后误把本页后续事件判作背压。
             closeSession(connection);
             connection.close(1013, "realtime reconnect required");
             return;
@@ -244,6 +255,8 @@ public final class MeetingRealtimeWssServer extends WebSocketServer implements A
             } else if (result instanceof RealtimeWssConnection.SendPair pair) {
                 connection.send(pair.first());
                 connection.send(pair.second());
+            } else if (result instanceof RealtimeWssConnection.SendBatch batch) {
+                for (byte[] message : batch.messages()) connection.send(message);
             } else if (result instanceof RealtimeWssConnection.Terminate terminate) {
                 connection.close(terminate.code(), "realtime rejected");
             }

@@ -1,9 +1,13 @@
 package com.czur.reference.application.wss;
 
 import com.czur.aimeeting.contract.realtime.v1.ClientEnvelope;
+import com.czur.aimeeting.contract.realtime.v1.ResumePageEnd;
+import com.czur.aimeeting.contract.realtime.v1.ServerEnvelope;
 import com.czur.reference.application.finalization.MeetingInputReconciler;
 import com.czur.reference.application.port.DurableAudioInputPort;
+import com.czur.reference.application.port.MeetingEventLogPort;
 import com.czur.reference.application.port.RealtimeCredentialVerifier;
+import com.czur.reference.application.port.RealtimeEventLogPort;
 import com.czur.reference.application.port.identity.SecretCredential;
 import com.czur.reference.application.realtime.RealtimeAudioIngress;
 import com.czur.reference.application.realtime.RealtimeTranscriptSessions;
@@ -15,6 +19,8 @@ import com.czur.reference.protocol.realtime.RealtimeTranscriptEventMapper;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Arrays;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -29,20 +35,23 @@ import java.util.logging.Logger;
  * 只有其 {@link RealtimeAudioIngress.DurableAckCursor} 可以产生 ACK；未知提交、
  * 旧 epoch、拒绝及存储故障都关闭连接，不回退到内存游标。</p>
  *
- * <p>本切片支持 stream_start、audio_frame 和 input_complete；Stop 仍走认证
- * REST，事件补拉留给后续切片。Mock 字幕由应用层从 V015 帧恢复并
+ * <p>支持 stream_start、audio_frame、input_complete 和 resume_request；Stop 仍走认证
+ * REST。Mock 字幕由应用层从 V015 帧恢复并
  * 持久发布；本层只把已存事件编码成 ACK 之后的第二条消息。关闭连接必须调用
  * {@link #close()} 销毁凭据与本连接 Mock 会话；
  * 对象按连接串行处理，同步方法也防止库回调并发时重复绑定。</p>
  */
 public final class RealtimeWssConnection implements AutoCloseable {
     private static final Logger LOGGER = Logger.getLogger(RealtimeWssConnection.class.getName());
+    /** 一次请求固定读取一小页；更多事件由客户端以上一页游标再次请求。 */
+    private static final int RESUME_PAGE_SIZE = 32;
     private final String meetingId;
     private final SecretCredential credential;
     private final RealtimeCredentialVerifier verifier;
     private final RealtimeAudioIngress ingress;
     private final RealtimeTranscriptSessions transcriptSessions;
     private final MeetingInputReconciler inputReconciler;
+    private final RealtimeEventLogPort eventLog;
     private final Clock clock;
     private final Instant initialExpiresAt;
     private final RealtimeCredentialVerifier.AudioContract audioContract;
@@ -56,7 +65,7 @@ public final class RealtimeWssConnection implements AutoCloseable {
     private RealtimeWssConnection(String meetingId, SecretCredential credential,
             RealtimeCredentialVerifier verifier, RealtimeAudioIngress ingress,
             RealtimeTranscriptSessions transcriptSessions,
-            MeetingInputReconciler inputReconciler, Clock clock,
+            MeetingInputReconciler inputReconciler, RealtimeEventLogPort eventLog, Clock clock,
             RealtimeCredentialVerifier.AudioContract audioContract, Instant initialExpiresAt) {
         this.meetingId = meetingId;
         this.credential = credential;
@@ -64,6 +73,7 @@ public final class RealtimeWssConnection implements AutoCloseable {
         this.ingress = ingress;
         this.transcriptSessions = transcriptSessions;
         this.inputReconciler = inputReconciler;
+        this.eventLog = eventLog;
         this.clock = clock;
         this.initialExpiresAt = Objects.requireNonNull(initialExpiresAt, "initialExpiresAt");
         this.audioContract = audioContract;
@@ -92,6 +102,15 @@ public final class RealtimeWssConnection implements AutoCloseable {
             RealtimeCredentialVerifier verifier, RealtimeAudioIngress ingress,
             RealtimeTranscriptSessions transcriptSessions,
             MeetingInputReconciler inputReconciler, Clock clock) {
+        return open(meetingId, credential, verifier, ingress, transcriptSessions,
+                inputReconciler, null, clock);
+    }
+
+    /** 正式装配再传入与 REST 共用事实源的事件读取端口。 */
+    public static RealtimeWssConnection open(String meetingId, SecretCredential credential,
+            RealtimeCredentialVerifier verifier, RealtimeAudioIngress ingress,
+            RealtimeTranscriptSessions transcriptSessions,
+            MeetingInputReconciler inputReconciler, RealtimeEventLogPort eventLog, Clock clock) {
         Objects.requireNonNull(credential, "credential");
         try {
             MeetingIdPolicy.requireValid(meetingId);
@@ -105,7 +124,7 @@ public final class RealtimeWssConnection implements AutoCloseable {
                 throw new SessionRejected();
             }
             return new RealtimeWssConnection(meetingId, credential, verifier, ingress,
-                    transcriptSessions, inputReconciler, clock,
+                    transcriptSessions, inputReconciler, eventLog, clock,
                     granted.audioContract(), granted.expiresAt());
         } catch (RuntimeException failure) {
             credential.close();
@@ -127,6 +146,9 @@ public final class RealtimeWssConnection implements AutoCloseable {
             if (!meetingId.equals(envelope.getMeetingId())
                     || !meetingId.equals(envelope.getStreamId())) {
                 return terminate(1008);
+            }
+            if (envelope.getBodyCase() == ClientEnvelope.BodyCase.RESUME_REQUEST) {
+                return resume(grant, envelope);
             }
             if (grant.access() != RealtimeCredentialVerifier.AccessMode.WRITE) {
                 return terminate(1008);
@@ -208,6 +230,39 @@ public final class RealtimeWssConnection implements AutoCloseable {
         return terminate(result instanceof DurableAudioInputPort.Rejected ? 1008 : 1011);
     }
 
+    /**
+     * 从与 REST 相同的持久事件页补拉。先将整页（含结束帧）全部验证、编码，
+     * 任意坏事实都不能导致客户端收到一半页面；读权限不依赖 stream_start。
+     */
+    private Result resume(RealtimeCredentialVerifier.Granted grant, ClientEnvelope envelope) {
+        if (eventLog == null) return terminate(1011);
+        long after = envelope.getResumeRequest().getAfterEventSequence();
+        MeetingEventLogPort.Result read = eventLog.read(
+                new RealtimeEventLogPort.Request(grant, after, RESUME_PAGE_SIZE));
+        if (read instanceof MeetingEventLogPort.Unavailable) return terminate(1011);
+        if (!(read instanceof MeetingEventLogPort.Page found)) return terminate(1008);
+        var page = found.page();
+        try {
+            List<byte[]> encoded = new ArrayList<>(page.items().size() + 1);
+            for (var event : page.items()) {
+                encoded.add(codec.encodeServer(RealtimeTranscriptEventMapper.fromStored(event)));
+            }
+            ServerEnvelope end = ServerEnvelope.newBuilder()
+                    .setSpecVersion(RealtimeWireCodec.SPEC_VERSION)
+                    .setMeetingId(meetingId).setStreamId(meetingId)
+                    .setEmittedAt(clock.instant().toString())
+                    .setResumePageEnd(ResumePageEnd.newBuilder()
+                            .setLastEventSequence(page.lastSequence())
+                            .setHasMore(page.hasMore()))
+                    .build();
+            encoded.add(codec.encodeServer(end));
+            LOGGER.log(Level.FINE, "meeting WSS 事件补拉页已编码 count={0}", page.items().size());
+            return new SendBatch(encoded);
+        } catch (RuntimeException invalidFact) {
+            return terminate(1011);
+        }
+    }
+
     private void triggerInputClosure() {
         if (inputReconciler == null) return;
         MeetingInputReconciler.Result result = inputReconciler.reconcile(meetingId);
@@ -250,8 +305,8 @@ public final class RealtimeWssConnection implements AutoCloseable {
         private SessionRejected() { super("realtime session rejected"); }
     }
 
-    /** 一条入站消息仅有三种网络结果：静默成功、持久 ACK 或关闭。 */
-    public sealed interface Result permits NoReply, SendBinary, SendPair, Terminate { }
+    /** 一条入站消息产生静默成功、固定输出、事件页或关闭。 */
+    public sealed interface Result permits NoReply, SendBinary, SendPair, SendBatch, Terminate { }
 
     public record NoReply() implements Result { }
 
@@ -268,6 +323,17 @@ public final class RealtimeWssConnection implements AutoCloseable {
         }
         @Override public byte[] first() { return Arrays.copyOf(first, first.length); }
         @Override public byte[] second() { return Arrays.copyOf(second, second.length); }
+    }
+
+    /** 一页已预编码的有序事件，最后一条必为瞬时 resumePageEnd。 */
+    public record SendBatch(List<byte[]> messages) implements Result {
+        public SendBatch {
+            messages = messages.stream().map(bytes -> Arrays.copyOf(bytes, bytes.length))
+                    .toList();
+        }
+        @Override public List<byte[]> messages() {
+            return messages.stream().map(bytes -> Arrays.copyOf(bytes, bytes.length)).toList();
+        }
     }
 
     /** 使用 WebSocket 标准 close code；不带可能泄露事实的原因正文。 */
