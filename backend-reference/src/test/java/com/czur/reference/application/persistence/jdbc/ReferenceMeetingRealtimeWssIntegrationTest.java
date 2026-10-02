@@ -4,6 +4,7 @@ import com.czur.aimeeting.contract.realtime.v1.AudioEncoding;
 import com.czur.aimeeting.contract.realtime.v1.AudioProfile;
 import com.czur.aimeeting.contract.realtime.v1.ClientEnvelope;
 import com.czur.aimeeting.contract.realtime.v1.InputComplete;
+import com.czur.aimeeting.contract.realtime.v1.ResumeRequest;
 import com.czur.aimeeting.contract.realtime.v1.ServerEnvelope;
 import com.czur.aimeeting.contract.realtime.v1.StreamStart;
 import com.czur.reference.application.bootstrap.ReferenceMeetingDeploymentConfig;
@@ -113,7 +114,7 @@ class ReferenceMeetingRealtimeWssIntegrationTest {
     }
 
     @Test
-    void httpCreateAndRealWssPersistAckThenMockTranscriptWithoutReplayDuplication()
+    void httpCreateAndRealWssPersistAckThenReconnectAndResumeTranscriptWithoutDuplication()
             throws Exception {
         migrate(1, 13);
         TestTls tls = TestTls.create(temporaryDirectory);
@@ -138,6 +139,7 @@ class ReferenceMeetingRealtimeWssIntegrationTest {
 
         String meetingId;
         String sessionToken;
+        ServerEnvelope transcript;
         byte[] pcm = new byte[3_200];
         Arrays.fill(pcm, (byte) 0x5a);
         try (var assembly = ReferenceMeetingHttpAssembly.start(config, CLOCK);
@@ -188,7 +190,7 @@ class ReferenceMeetingRealtimeWssIntegrationTest {
             assertTrue(ack.getAudioAck().getDurable());
             assertEquals(1, ack.getAudioAck().getAcceptedStreamSequence());
             assertEquals(100, ack.getAudioAck().getAcceptedAudioPositionMs());
-            ServerEnvelope transcript = listener.transcript.orTimeout(5, TimeUnit.SECONDS).join();
+            transcript = listener.transcript.orTimeout(5, TimeUnit.SECONDS).join();
             assertEquals(meetingId, transcript.getMeetingId());
             assertEquals(meetingId, transcript.getStreamId());
             assertEquals(1, transcript.getEventSequence());
@@ -290,13 +292,26 @@ class ReferenceMeetingRealtimeWssIntegrationTest {
                     .header("Authorization", "Bearer " + sessionToken)
                     .subprotocols(CreateMeetingResponseFact.REALTIME_SUBPROTOCOL)
                     .buildAsync(reconnectUrl, listener).orTimeout(5, TimeUnit.SECONDS).join();
+            // 新进程的连接尚未 stream_start：同一 V011 事件事实即可按全局游标补拉。
+            socket.sendBinary(ByteBuffer.wrap(resume(meetingId, 0).toByteArray()), true).join();
+            ServerEnvelope replayed = listener.transcript.orTimeout(5, TimeUnit.SECONDS).join();
+            assertEquals(transcript.getEventId(), replayed.getEventId());
+            assertEquals(transcript.getEventSequence(), replayed.getEventSequence());
+            assertEquals(transcript.getTranscriptUpsert(), replayed.getTranscriptUpsert());
+            ServerEnvelope pageEnd = listener.pageEnd.orTimeout(5, TimeUnit.SECONDS).join();
+            assertEquals(0, pageEnd.getEventSequence());
+            assertEquals("", pageEnd.getEventId());
+            assertEquals(1, pageEnd.getResumePageEnd().getLastEventSequence());
+            assertFalse(pageEnd.getResumePageEnd().getHasMore());
+            assertEquals(List.of("TRANSCRIPT", "PAGE_END"), listener.order);
+
             socket.sendBinary(ByteBuffer.wrap(start(meetingId).toByteArray()), true).join();
             socket.sendBinary(ByteBuffer.wrap(frame(meetingId, pcm).toByteArray()), true).join();
             ServerEnvelope ack = listener.firstAck.orTimeout(5, TimeUnit.SECONDS).join();
             assertEquals(1, ack.getAudioAck().getAcceptedStreamSequence());
             socket.sendClose(java.net.http.WebSocket.NORMAL_CLOSURE, "done").join();
             listener.closed.orTimeout(5, TimeUnit.SECONDS).join();
-            assertEquals(List.of("ACK"), listener.order);
+            assertEquals(List.of("TRANSCRIPT", "PAGE_END", "ACK"), listener.order);
             try (Connection readback = fixtureDataSource.getConnection()) {
                 assertEquals("1", scalar(readback,
                         "SELECT count(*) FROM meeting_event WHERE meeting_id=?", meetingId));
@@ -614,6 +629,14 @@ class ReferenceMeetingRealtimeWssIntegrationTest {
                 .build();
     }
 
+    private static ClientEnvelope resume(String meetingId, long afterEventSequence) {
+        return ClientEnvelope.newBuilder().setSpecVersion(RealtimeWireCodec.SPEC_VERSION)
+                .setMeetingId(meetingId).setStreamId(meetingId)
+                .setClientMessageId("network-resume-" + afterEventSequence)
+                .setResumeRequest(ResumeRequest.newBuilder()
+                        .setAfterEventSequence(afterEventSequence)).build();
+    }
+
     private static String createBody() {
         return """
                 {"clientSessionId":"wss-network-session-1",
@@ -715,6 +738,7 @@ class ReferenceMeetingRealtimeWssIntegrationTest {
         private final CompletableFuture<ServerEnvelope> firstAck = new CompletableFuture<>();
         private final CompletableFuture<ServerEnvelope> secondAck = new CompletableFuture<>();
         private final CompletableFuture<ServerEnvelope> transcript = new CompletableFuture<>();
+        private final CompletableFuture<ServerEnvelope> pageEnd = new CompletableFuture<>();
         private final CompletableFuture<Integer> closed = new CompletableFuture<>();
         private final AtomicInteger ackCount = new AtomicInteger();
         private final List<String> order = new CopyOnWriteArrayList<>();
@@ -737,6 +761,10 @@ class ReferenceMeetingRealtimeWssIntegrationTest {
                         order.add("TRANSCRIPT");
                         transcript.complete(envelope);
                     }
+                    case RESUME_PAGE_END -> {
+                        order.add("PAGE_END");
+                        pageEnd.complete(envelope);
+                    }
                     default -> closed.completeExceptionally(
                             new AssertionError("unexpected WSS event body"));
                 }
@@ -756,6 +784,7 @@ class ReferenceMeetingRealtimeWssIntegrationTest {
             firstAck.completeExceptionally(error);
             secondAck.completeExceptionally(error);
             transcript.completeExceptionally(error);
+            pageEnd.completeExceptionally(error);
         }
     }
 
