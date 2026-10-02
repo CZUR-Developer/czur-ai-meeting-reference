@@ -1,112 +1,41 @@
-# 参考后端部署与数据库
+# 参考后端 Docker 部署
 
-本目录提供参考后端的 Docker Compose 拓扑和 PostgreSQL 迁移示例。数据库容器
-只用于本地演示、契约测试和快速验证；CZUR 生产环境及合作伙伴环境可以继续
-使用已经管理的外部 PostgreSQL，不能把数据库 Docker 化当作接入前提。
+本目录部署 P2 的 ASR-only Mock 参考后端：一个应用进程同时提供 HTTP、WSS 和周期收口 Worker。PostgreSQL 是必需的；可使用 Compose 演示数据库或部署方已有的 PostgreSQL。两种模式都运行同一份 `migrate.sh` 和 `migrations/V*.sql`，应用不会自动建表。此处没有真实模型、后台管理或 Web 容器。
 
-示例命令使用 Docker Compose V2（建议 `docker compose version` 不低于
-2.20）。Compose 只负责启动参考服务和可选的 PostgreSQL 容器；数据库迁移仍由
-仓库中的 `migrations/` 版本文件负责，不能用“容器启动即建表”的隐式行为代替。
+## 准备配置
 
-## 选择数据库来源
+在本目录执行 `cp ../.env.example .env`，然后编辑 `.env`。至少填写：
 
-| 模式 | 数据库来源 | Compose 行为 | 适用场景 |
-| --- | --- | --- | --- |
-| `reference-db` | Compose 中的 PostgreSQL 16 | 仅启用 `database` Profile 时启动 `db` | 本地开发、演示、契约测试 |
-| `external-db` | CZUR 或合作伙伴管理的 PostgreSQL | 不启用 `database` Profile；通过 `DATABASE_URL` 注入 | 生产、私有云、局域网部署 |
+| 配置 | 应填写什么 |
+| --- | --- |
+| `REFERENCE_DEV_IDENTITY_ENABLED`、`AI_MEETING_CREATE_ENABLED` | 演示时都设为 `true`。 |
+| `REFERENCE_DEV_IDENTITY_BEARER_TOKEN` | 自行指定不少于 32 字节的演示登录 Token；调用会议接口时作为 Bearer Token。 |
+| `AI_MEETING_PAGE_TOKEN_SECRET` | 自行指定不少于 32 字节的分页密钥。 |
+| `AI_MEETING_TLS_KEYSTORE_FILE`、`AI_MEETING_TLS_KEYSTORE_PASSWORD` | 可读取的 PKCS#12 文件路径及其密码；Compose 将文件只读挂载给 WSS。 |
+| `AI_MEETING_WSS_ORIGIN` | App 可访问的 `wss://主机:端口`；端口须与 `WSS_PORT` 一致。 |
 
-`api` 和 `worker` 不再声明对 `db` 的强依赖，因此默认执行
-`docker compose up` 不会启动数据库。应用镜像仍需要一个可用的数据库地址；
-未配置外部地址时，Compose 的占位默认值指向 `db`，只有在启用
-`database` Profile 后才可用。
+示例已经给出 24 小时的结果链接有效期；如需调整，修改 `AI_MEETING_RESULT_LINK_TTL_MS`。保持该项为正数，才能读取结果页使用的 Manifest。
 
-## Compose 快速启动（参考数据库）
+本地演示证书可用 `keytool -genkeypair -alias meeting -keyalg RSA -storetype PKCS12 -keystore local-meeting.p12 -validity 30 -dname CN=localhost -ext SAN=dns:localhost,ip:127.0.0.1` 生成，按提示输入密码，再填入 `.env`。使用自签名证书的客户端需要信任该证书。`.env` 和证书不入库。
 
-```bash
-cp ../.env.example .env
-docker compose --profile database up -d db
-docker compose --profile database run --rm migrate
-docker compose up -d api worker
-docker compose ps
-```
+## Compose 演示数据库
 
-`db` 具有 `pg_isready` 健康检查；`migrate` 等待健康状态后按文件名顺序执行
-`migrations/V*.sql`。迁移任务执行完成后会退出，这是正常现象。迁移版本记录在
-`schema_migrations` 中，重复运行只会跳过已登记版本。
-
-## 使用外部数据库
-
-复制 `.env.example` 后设置真实连接信息（不要提交 `.env`）：
+在 `deploy/` 目录执行：
 
 ```bash
-DATABASE_URL='jdbc:postgresql://db.example.invalid:5432/meeting' \
-DATABASE_USER='meeting_app' \
-DATABASE_PASSWORD='<从 Secret Manager 注入>' \
-docker compose up -d api worker
+docker compose --profile database up --build
 ```
 
-应用支持 `jdbc:postgresql://` 地址；执行仓库迁移脚本时也支持
-`postgresql://`/`postgres://` 地址：
+Compose 先等待 PostgreSQL 健康，再运行一次迁移；迁移成功后启动应用。验证 `curl http://localhost:8080/internal/health/readiness` 返回成功。Artifact 使用 `meeting-artifacts` 卷，数据库使用 `meeting-db` 卷；`docker compose --profile database down` 停止服务但保留数据卷。
+
+## 外部 PostgreSQL
+
+仍在同一个 `.env` 中把 `DATABASE_URL`、`DATABASE_USER`、`DATABASE_PASSWORD` 改成容器可访问的外部数据库地址和凭据，例如 `jdbc:postgresql://db.example.invalid:5432/meeting`。然后在 `deploy/` 执行：
 
 ```bash
-DATABASE_URL='postgresql://db.example.invalid:5432/meeting' \
-DATABASE_USER='meeting_migrator' \
-DATABASE_PASSWORD='<从 Secret Manager 注入>' \
-./migrate.sh
+docker compose up --build
 ```
 
-参考后端的 `DATABASE_SOCKET_TIMEOUT_SECONDS` 默认是 `5`，只接受正整数秒。
-它作为 pgjdbc 的 `socketTimeout` 注入同一个 Hikari 连接池，既限制健康探针的
-单次 socket 读，也限制同池业务查询的单次读；不能当作整个 readiness/catalog
-检查的绝对总截止时间。为防止 URL 覆盖受控值，应用拒绝 `DATABASE_URL` 中的
-原样 `socketTimeout` 查询键（含无等号形式；pgjdbc 42.6.2 的键大小写敏感且
-不解码）。请按业务查询耗时选择该值，
-不要在连接 URL 中另设同名参数。
+此命令不启动 `db`，但仍由同一个 `migrate` 服务执行 `migrate.sh`，成功后才启动应用。外部数据库必须已创建目标空库且可连接；迁移用户需有建表权限。App 与迁移使用 `.env` 中相同的数据库地址和凭据。
 
-匿名 `GET /v1/meetings/{meetingId}/manifest` 只有在显式配置正数毫秒的
-`AI_MEETING_RESULT_LINK_TTL_MS` 后开放；旧配置缺项仍可启动，其它会议路由
-保持不变，新路由返回 501。`.env.example` 中的 24 小时只是格式示例，具体
-产品时长待定。查询要求唯一的 `genTime` 参数：`-1` 永不过期，非负整数按此
-TTL 判过期。客户端可以修改 `genTime`，故 TTL 并非防篡改授权或可靠撤权；
-会议进入删除待处理后，服务端查询策略会立即拒绝结果访问。本切片没有公开
-Artifact 下载路由、结果签名或 Web 登录。
-
-迁移账号只需要迁移期间的建表权限；应用账号应按部署方策略限制为运行所需的
-最小权限。脚本日志只输出迁移版本和结果，不输出完整连接串、密码、Token、
-音频或会议正文。
-
-外部数据库可以用只读检查确认连通性和凭据：
-
-```bash
-DATABASE_URL='postgresql://db.example.invalid:5432/meeting' \
-DATABASE_USER='meeting_app' \
-DATABASE_PASSWORD='<从 Secret Manager 注入>' \
-./healthcheck-db.sh
-```
-
-## 迁移和备份规则
-
-- `migrations/` 是公开、版本化的数据库事实源；文件只追加，不修改已经在生产
-  执行过的版本。新版本使用例如 `V002__add_result_index.sql` 的命名。
-- 每个迁移文件必须在 PostgreSQL 16 和外部 PostgreSQL 上通过 `ON_ERROR_STOP`
-  验证，并保持可重复执行或由 `schema_migrations` 明确跳过。
-- Outbox Worker 的 `claim`、`markPublished`、`markFailed` 必须在同一个条件
-  更新中校验 `lease_owner`、`lease_token`、`lease_version` 和仍有效的
-  `lease_until`。`V002__outbox_lease_fencing.sql` 提供这些字段和过期租约扫描
-  索引；内存适配器继续只用于单进程测试，不代表生产持久化语义。
-- 数据库保存会议状态、事件、幂等记录、工作流租约、产物元数据和 Outbox；音频
-  及大文件仍在对象/文件存储，必须独立备份。
-- 备份、恢复、恢复后的契约测试和对象存储校验见
-  [`backup-and-restore.md`](backup-and-restore.md)。
-
-## Gateway 边界
-
-Compose 只描述容器拓扑。Gateway（如果部署方已有）负责 TLS、路由、基础认证
-上下文和限流；会议状态、幂等、模型能力、计费、存储、Outbox 和 Worker 逻辑
-集中在参考后端，不需要为了切换数据库修改 Gateway 业务代码。
-
-## 配置与安全
-
-示例中的数据库用户、密码、模型地址都是占位值。生产部署必须通过环境变量、
-Docker Secret 或外部 Secret Manager 注入真实值，不得把填充后的 `.env`、备份、
-证书或连接串提交到仓库。
+`API_PORT`、`WSS_PORT` 控制宿主机映射端口；容器内固定监听 8080/8443。后端运行失败时先检查迁移服务退出状态、readiness 和应用日志。结果读取仍遵循本仓的统一 HTTP 协议；本期只交付 Mock 字幕及模拟最终转写，不代表已接入合作伙伴真实模型。
