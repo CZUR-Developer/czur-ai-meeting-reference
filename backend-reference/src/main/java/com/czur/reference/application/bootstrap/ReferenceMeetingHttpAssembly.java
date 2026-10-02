@@ -8,6 +8,7 @@ import com.czur.reference.application.command.ReferenceCreateRealtimeSessionAllo
 import com.czur.reference.application.entitlement.referencedev.ReferenceDevEntitlementPolicy;
 import com.czur.reference.application.finalization.DeterministicMockFinalizationPlanner;
 import com.czur.reference.application.finalization.MeetingInputReconciler;
+import com.czur.reference.application.finalization.MeetingInputReconciliationScan;
 import com.czur.reference.application.http.AuthenticatedMeetingHttpContextResolver;
 import com.czur.reference.application.http.CreateMeetingHttpRequestDecoder;
 import com.czur.reference.application.http.HttpErrorMapper;
@@ -33,6 +34,7 @@ import com.czur.reference.application.persistence.jdbc.JdbcRealtimeTranscriptEve
 import com.czur.reference.application.persistence.jdbc.JdbcMeetingStartExecutionUnitOfWork;
 import com.czur.reference.application.persistence.jdbc.JdbcDurableAudioInputPort;
 import com.czur.reference.application.persistence.jdbc.JdbcMeetingInputClosureContextPort;
+import com.czur.reference.application.persistence.jdbc.JdbcPendingMeetingInputPort;
 import com.czur.reference.application.persistence.jdbc.JdbcAcceptedInputFactLookup;
 import com.czur.reference.application.persistence.jdbc.JdbcCompletedAudioReadinessPort;
 import com.czur.reference.application.persistence.jdbc.JdbcFinalizationAdmissionUnitOfWork;
@@ -87,6 +89,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
             ReferenceMeetingHttpAssembly.class.getName());
 
     private final JdbcDatabaseRuntime database;
+    private final String deploymentScope;
     private final MeetingHttpRuntime runtime;
     private final AuthenticatedMeetingHttpContextResolver contextResolver;
     private final HttpErrorMapper errors;
@@ -100,7 +103,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
     private final AtomicBoolean closed = new AtomicBoolean();
 
     private ReferenceMeetingHttpAssembly(
-            JdbcDatabaseRuntime database, MeetingHttpRuntime runtime,
+            JdbcDatabaseRuntime database, String deploymentScope, MeetingHttpRuntime runtime,
             AuthenticatedMeetingHttpContextResolver contextResolver,
             HttpErrorMapper errors, boolean realtimeRenewEnabled,
             JdbcRealtimeCredentialVerifier realtimeVerifier,
@@ -109,6 +112,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
             MeetingInputReconciler inputReconciler,
             JdbcMeetingEventLogPort eventLog, Clock clock) {
         this.database = database;
+        this.deploymentScope = deploymentScope;
         this.runtime = runtime;
         this.contextResolver = contextResolver;
         this.errors = errors;
@@ -260,7 +264,8 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
             LOGGER.log(Level.INFO,
                     "reference meeting HTTP 装配完成 createEnabled={0} realtimeRenewEnabled={1}",
                     new Object[]{config.createEnabled(), config.realtimeRenewEnabled()});
-            return new ReferenceMeetingHttpAssembly(database, runtime, resolver, errors,
+            return new ReferenceMeetingHttpAssembly(database, config.deploymentScope(),
+                    runtime, resolver, errors,
                     config.realtimeRenewEnabled(), realtimeVerifier, realtimeIngress,
                     realtimeTranscripts, inputReconciler, events, clock);
         } catch (RuntimeException | Error failure) {
@@ -295,6 +300,20 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
 
     /** 返回已通过启动 readiness 的数据库运行时；调用方不得单独关闭。 */
     public JdbcDatabaseRuntime databaseRuntime() { return database; }
+
+    /**
+     * 用本装配根的同一连接池和 Reconciler 创建待收口扫描器。
+     * 调用方负责串行、周期性地调用 {@code runOnce()}；扫描器不创建线程，
+     * 且必须在本装配根关闭之前停止调用。
+     */
+    public MeetingInputReconciliationScan newInputReconciliationScan(int pageSize) {
+        if (closed.get()) {
+            throw new IllegalStateException("reference meeting HTTP assembly is closed");
+        }
+        return new MeetingInputReconciliationScan(
+                new JdbcPendingMeetingInputPort(database.dataSource(),
+                        deploymentScope), inputReconciler, pageSize);
+    }
 
     /**
      * 为本装配根创建尚未启动的 JDK HTTP 入口，健康探针读取同一唯一 JDBC 池。

@@ -11,11 +11,15 @@ import com.czur.reference.application.bootstrap.ReferenceMeetingDeploymentConfig
 import com.czur.reference.application.bootstrap.ReferenceMeetingHttpAssembly;
 import com.czur.reference.application.artifact.filesystem.PersistentFileSystemMockArtifactStore;
 import com.czur.reference.application.command.CreateMeetingResponseFact;
+import com.czur.reference.application.command.MeetingCommandContext;
 import com.czur.reference.application.command.MeetingPermissions;
+import com.czur.reference.application.port.identity.Subject;
+import com.czur.reference.application.port.identity.VerifiedIdentity;
 import com.czur.reference.application.entitlement.referencedev.ReferenceDevEntitlementPolicy;
 import com.czur.reference.application.finalization.MockFinalizationWorker;
 import com.czur.reference.application.identity.referencedev.ReferenceDevIdentityConfig;
 import com.czur.reference.application.port.entitlement.EntitlementIdGenerator;
+import com.czur.reference.application.port.OwnedMeetingStopUnitOfWork;
 import com.czur.reference.application.port.model.MeetingAudioFrame;
 import com.czur.reference.application.realtime.AudioFrameContentDigest;
 import com.czur.reference.application.wss.MeetingRealtimeWssServer;
@@ -457,6 +461,87 @@ class ReferenceMeetingRealtimeWssIntegrationTest {
             assertEquals(403, request(client, port, "GET",
                     path + "/manifest?genTime=-1", "", null).statusCode());
             assertEquals(403, request(client, port, "GET", artifactPath, "", null).statusCode());
+        }
+    }
+
+    @Test
+    void restartedAssemblyScansCommittedStopAndCompletedAudioIntoOneReceipt()
+            throws Exception {
+        migrate(1, 15);
+        TestTls tls = TestTls.create(temporaryDirectory);
+        int wssPort = freeLoopbackPort();
+        Map<String, String> values = config(wssPort);
+        byte[] pcm = new byte[3_200];
+        Arrays.fill(pcm, (byte) 0x5a);
+        String meetingId;
+
+        // 先完整提交 V015 音频和完成声明，但此时未 Stop，正常入口不会签发 receipt。
+        try (var first = ReferenceMeetingHttpAssembly.start(values, CLOCK);
+             var http = first.newJdkHttpServer(new InetSocketAddress("127.0.0.1", 0));
+             MeetingRealtimeWssServer wss = first.newRealtimeWssServer(
+                     new InetSocketAddress("127.0.0.1", wssPort), tls.server());
+             HttpClient client = HttpClient.newBuilder().sslContext(tls.trusted()).build()) {
+            http.start();
+            wss.start();
+            wss.awaitStarted(Duration.ofSeconds(5));
+            HttpResponse<String> created = request(client, http.address().getPort(), "POST",
+                    "/v1/meetings", createBody(), "restart-scan-create-key-0001");
+            assertEquals(201, created.statusCode());
+            JsonNode create = JSON.readTree(created.body());
+            meetingId = create.path("meetingId").asText();
+            EventListener listener = new EventListener();
+            java.net.http.WebSocket socket = client.newWebSocketBuilder()
+                    .connectTimeout(Duration.ofSeconds(5))
+                    .header("Authorization", "Bearer "
+                            + create.path("realtime").path("sessionToken").asText())
+                    .subprotocols(CreateMeetingResponseFact.REALTIME_SUBPROTOCOL)
+                    .buildAsync(URI.create(create.path("realtime").path("url").asText()),
+                            listener).orTimeout(5, TimeUnit.SECONDS).join();
+            socket.sendBinary(ByteBuffer.wrap(start(meetingId).toByteArray()), true).join();
+            socket.sendBinary(ByteBuffer.wrap(frame(meetingId, pcm).toByteArray()), true).join();
+            assertTrue(listener.firstAck.orTimeout(5, TimeUnit.SECONDS).join()
+                    .getAudioAck().getDurable());
+            socket.sendBinary(ByteBuffer.wrap(inputComplete(meetingId).toByteArray()), true)
+                    .join();
+            awaitMeetingCount("SELECT count(*) FROM meeting_audio_input"
+                    + " WHERE meeting_id=? AND complete_last_stream_sequence=1", meetingId, 1);
+            socket.sendClose(java.net.http.WebSocket.NORMAL_CLOSURE, "done").join();
+            listener.closed.orTimeout(5, TimeUnit.SECONDS).join();
+        }
+
+        // 仅调用 Stop 的已验收数据库事务，模拟“Stop 提交后、入口触发
+        // Reconciler 之前”进程退出；不能直接把会议状态用 SQL 改到 STOPPING。
+        var identity = new VerifiedIdentity(new Subject(SUBJECT), Set.of("ROLE_USER"),
+                Set.of(MeetingPermissions.STOP), NOW.minusSeconds(60),
+                NOW.plusSeconds(600), "restart-scan-credential");
+        var stop = new JdbcOwnedMeetingStopUnitOfWork(fixtureDataSource, CLOCK).stop(
+                new OwnedMeetingStopUnitOfWork.StopRequest(
+                        new MeetingCommandContext(SCOPE, identity), meetingId,
+                        "restart-scan-stop-key-0001", "restart-scan-stop-digest"));
+        assertTrue(stop instanceof OwnedMeetingStopUnitOfWork.Success);
+        assertEquals("0", scalarForMeeting(
+                "SELECT count(*) FROM durable_input_fact WHERE meeting_id=?", meetingId));
+        assertNull(scalarForMeeting(
+                "SELECT finalization_receipt_id FROM meeting WHERE meeting_id=?", meetingId));
+        assertEquals(List.of(), new JdbcPendingMeetingInputPort(
+                fixtureDataSource, "another-deployment").listAfter(null, 1));
+        assertEquals(List.of(meetingId), new JdbcPendingMeetingInputPort(
+                fixtureDataSource, SCOPE).listAfter(null, 1));
+
+        try (var restarted = ReferenceMeetingHttpAssembly.start(values, CLOCK)) {
+            var scan = restarted.newInputReconciliationScan(1);
+            assertEquals(1, scan.runOnce().accepted());
+            assertEquals("1", scalarForMeeting(
+                    "SELECT count(*) FROM durable_input_fact WHERE meeting_id=?", meetingId));
+            assertEquals("1", scalarForMeeting(
+                    "SELECT count(*) FROM workflow_step WHERE meeting_id=?", meetingId));
+            String receipt = scalarForMeeting(
+                    "SELECT finalization_receipt_id FROM meeting WHERE meeting_id=?", meetingId);
+            assertTrue(receipt.startsWith("receipt_"));
+            assertEquals(0, scan.runOnce().candidates());
+            assertEquals(0, scan.runOnce().candidates());
+            assertEquals(receipt, scalarForMeeting(
+                    "SELECT finalization_receipt_id FROM meeting WHERE meeting_id=?", meetingId));
         }
     }
 
