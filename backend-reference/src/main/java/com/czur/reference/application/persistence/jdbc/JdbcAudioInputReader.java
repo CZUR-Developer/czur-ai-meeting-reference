@@ -123,7 +123,8 @@ final class JdbcAudioInputReader {
         }
     }
 
-    private Connection openReadSnapshot() throws SQLException {
+    /** 供同一 V015 事实域的完整输入核验复用，避免出现不同的快照初始化规则。 */
+    Connection openReadSnapshot() throws SQLException {
         Connection connection = dataSource.getConnection();
         boolean ready = false;
         try {
