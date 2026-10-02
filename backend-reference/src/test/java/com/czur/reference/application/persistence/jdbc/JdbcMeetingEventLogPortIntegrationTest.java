@@ -4,8 +4,11 @@ import com.czur.reference.application.command.MeetingCommandContext;
 import com.czur.reference.application.port.EventLog;
 import com.czur.reference.application.port.MeetingEventLogPort;
 import com.czur.reference.application.port.MeetingEventPage;
+import com.czur.reference.application.port.RealtimeCredentialVerifier;
+import com.czur.reference.application.port.RealtimeEventLogPort;
 import com.czur.reference.application.port.identity.Subject;
 import com.czur.reference.application.port.identity.VerifiedIdentity;
+import com.czur.reference.application.port.model.AudioProfile;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -119,6 +122,40 @@ class JdbcMeetingEventLogPortIntegrationTest {
                 MeetingEventLogPort.Conflict.class,
                 port.read(request(owner, "meeting-events", 99, 10)));
         assertEquals(MeetingEventLogPort.ConflictReason.INVALID_CURSOR, ahead.reason());
+    }
+
+    @Test
+    void realtimeGrantReadsTheSameEventPageAndSharesDeletionRevocation() throws Exception {
+        String meetingId = "meeting-realtime-events";
+        insertMeeting(meetingId, DEPLOYMENT, SUBJECT);
+        JdbcMeetingEventLogStore store = new JdbcMeetingEventLogStore(dataSource);
+        store.append(event(meetingId, 1, "stream-a", "event-1"));
+        store.append(event(meetingId, 2, "stream-b", "event-2"));
+        JdbcMeetingEventLogPort port = new JdbcMeetingEventLogPort(dataSource);
+        var grant = realtimeGrant(meetingId, DEPLOYMENT, SUBJECT);
+
+        MeetingEventPage rest = assertInstanceOf(MeetingEventLogPort.Page.class,
+                port.read(request(context(DEPLOYMENT, SUBJECT), meetingId, 0, 1))).page();
+        MeetingEventPage realtime = assertInstanceOf(MeetingEventLogPort.Page.class,
+                port.read(new RealtimeEventLogPort.Request(grant, 0, 1))).page();
+        assertEquals(rest, realtime);
+        assertTrue(realtime.hasMore());
+        assertEquals(1, realtime.lastSequence());
+
+        assertInstanceOf(MeetingEventLogPort.AccessDenied.class,
+                port.read(new RealtimeEventLogPort.Request(
+                        realtimeGrant(meetingId, DEPLOYMENT, "other-subject"), 0, 1)));
+        setMeetingState(meetingId, "DELETION_PENDING");
+        assertInstanceOf(MeetingEventLogPort.AccessDenied.class,
+                port.read(new RealtimeEventLogPort.Request(grant, 0, 1)));
+    }
+
+    private static RealtimeCredentialVerifier.Granted realtimeGrant(
+            String meetingId, String deployment, String subject) {
+        return new RealtimeCredentialVerifier.Granted(
+                RealtimeCredentialVerifier.AccessMode.READ_ONLY, BASE.plusSeconds(300),
+                new RealtimeCredentialVerifier.AudioContract(AudioProfile.pcm16kMono(20), 640),
+                new RealtimeCredentialVerifier.ReadOwnership(meetingId, deployment, subject));
     }
 
     @Test

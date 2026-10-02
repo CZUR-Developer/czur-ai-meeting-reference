@@ -616,7 +616,8 @@ class MeetingRealtimeWssServerTest {
                     MessageDigest.isEqual(bytes, expected));
             return enabled && matched && MEETING.equals(request.meetingId())
                     && MEETING.equals(request.streamId())
-                    ? new Granted(AccessMode.WRITE, NOW.plusSeconds(120), AUDIO)
+                    ? new Granted(AccessMode.WRITE, NOW.plusSeconds(120), AUDIO,
+                            new ReadOwnership(MEETING, "deployment", "subject"))
                     : new Denied();
         }
     }

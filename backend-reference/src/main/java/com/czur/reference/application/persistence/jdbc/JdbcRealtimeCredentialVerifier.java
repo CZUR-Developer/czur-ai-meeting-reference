@@ -153,6 +153,8 @@ public final class JdbcRealtimeCredentialVerifier implements RealtimeCredentialV
         }
         MeetingState state = parseState(meeting.state());
         InputState inputState = parseInputState(meeting.inputState());
+        ReadOwnership readOwnership = new ReadOwnership(request.meetingId(),
+                meeting.deploymentScope(), meeting.subjectScope());
 
         Instant now = Objects.requireNonNull(clock.instant(), "clock.instant()");
         byte[] requestedDigest = request.credential().useBytes(
@@ -176,8 +178,10 @@ public final class JdbcRealtimeCredentialVerifier implements RealtimeCredentialV
                 return new Denied();
             }
             return switch (RealtimeAccessPolicy.classify(state, inputState)) {
-                case WRITE -> new Granted(AccessMode.WRITE, matchedExpiry, audioContract);
-                case READ_ONLY -> new Granted(AccessMode.READ_ONLY, matchedExpiry, audioContract);
+                case WRITE -> new Granted(AccessMode.WRITE, matchedExpiry,
+                        audioContract, readOwnership);
+                case READ_ONLY -> new Granted(AccessMode.READ_ONLY, matchedExpiry,
+                        audioContract, readOwnership);
                 case DENY -> new Denied();
                 case FACT_INCONSISTENT -> factInconsistent();
             };

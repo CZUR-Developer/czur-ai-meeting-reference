@@ -58,10 +58,23 @@ public final class MeetingAccessGuard {
             String storedDeploymentScope,
             String storedSubjectScope) {
         Objects.requireNonNull(context, "context");
+        return evaluate(context.deploymentScope(),
+                context.identity().subject().subjectScope(),
+                storedDeploymentScope, storedSubjectScope);
+    }
 
-        if (!context.deploymentScope().equals(storedDeploymentScope)
+    /**
+     * 对用户登录和实时凭据两种已验证来源使用同一持久会议归属规则。
+     * 传入的前两个范围必须来自对应的服务端核验结果，不能取自请求正文。
+     */
+    public static Decision evaluate(String verifiedDeploymentScope,
+            String verifiedSubjectScope, String storedDeploymentScope,
+            String storedSubjectScope) {
+        Objects.requireNonNull(verifiedDeploymentScope, "verifiedDeploymentScope");
+        Objects.requireNonNull(verifiedSubjectScope, "verifiedSubjectScope");
+        if (!verifiedDeploymentScope.equals(storedDeploymentScope)
                 || MeetingOwnership.LEGACY_UNOWNED_SUBJECT_SCOPE.equals(storedSubjectScope)
-                || !context.identity().subject().subjectScope().equals(storedSubjectScope)) {
+                || !verifiedSubjectScope.equals(storedSubjectScope)) {
             return Decision.ACCESS_DENIED;
         }
         return Decision.ALLOWED;

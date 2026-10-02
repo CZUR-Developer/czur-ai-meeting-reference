@@ -4,6 +4,7 @@ import com.czur.reference.application.command.MeetingAccessGuard;
 import com.czur.reference.application.port.EventLog;
 import com.czur.reference.application.port.MeetingEventLogPort;
 import com.czur.reference.application.port.MeetingEventPage;
+import com.czur.reference.application.port.RealtimeEventLogPort;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
@@ -40,7 +41,7 @@ import java.util.logging.Logger;
  * <p>日志只记录稳定状态、分页计数、游标和白名单 SQLState，不记录会议标识、
  * 部署范围、主体、事件正文、Token、receipt、数据库地址或异常正文。</p>
  */
-public final class JdbcMeetingEventLogPort implements MeetingEventLogPort {
+public final class JdbcMeetingEventLogPort implements MeetingEventLogPort, RealtimeEventLogPort {
     private static final Logger LOGGER = Logger.getLogger(JdbcMeetingEventLogPort.class.getName());
 
     /**
@@ -169,23 +170,40 @@ public final class JdbcMeetingEventLogPort implements MeetingEventLogPort {
      * 调用方仍应在进入端口前校验当前身份是否具备会议读取权限。</p>
      */
     @Override
-    public Result read(Request request) {
+    public Result read(MeetingEventLogPort.Request request) {
         Objects.requireNonNull(request, "request");
+        return readOwned(request.meetingId(), request.afterSequence(), request.limit(),
+                request.context().deploymentScope(),
+                request.context().identity().subject().subjectScope());
+    }
+
+    /** 实时凭据已在当前消息前核验；只用其中绑定的会议和归属读同一事件页。 */
+    @Override
+    public Result read(RealtimeEventLogPort.Request request) {
+        Objects.requireNonNull(request, "request");
+        var ownership = request.grant().readOwnership();
+        return readOwned(ownership.meetingId(), request.afterSequence(), request.limit(),
+                ownership.deploymentScope(), ownership.subjectScope());
+    }
+
+    private Result readOwned(String meetingId, long afterSequence, int limit,
+            String deploymentScope, String subjectScope) {
         Connection connection = null;
         try {
             connection = dataSource.getConnection();
-            return logged(readSnapshot(connection, request), request.afterSequence());
+            return logged(readSnapshot(connection, meetingId, afterSequence, limit,
+                    deploymentScope, subjectScope), afterSequence);
         } catch (JdbcMeetingEventLogStore.InvalidStoredEvent
                  | CorruptEventPage failure) {
             return logged(new Unavailable(UnavailableReason.STORAGE_FAILURE, false),
-                    request.afterSequence());
+                    afterSequence);
         } catch (SQLException failure) {
-            return fromSqlFailure(failure, request.afterSequence());
+            return fromSqlFailure(failure, afterSequence);
         } catch (RuntimeException failure) {
             // DataSource、JDBC 代理或日志 Provider 的无类型运行时故障不能携带
             // 动态正文进入结果，也不能无依据承诺重试一定成功。
             return logged(new Unavailable(UnavailableReason.STORAGE_FAILURE, false),
-                    request.afterSequence());
+                    afterSequence);
         } finally {
             closeQuietly(connection);
         }
@@ -197,12 +215,13 @@ public final class JdbcMeetingEventLogPort implements MeetingEventLogPort {
      * <p>即使 SQL 已经返回事件列，也必须先读取两个原始 scope 并调用访问守卫；
      * 守卫放行后先判断删除撤权，再解释坏事实、游标和事件正文。</p>
      */
-    private static Result readSnapshot(Connection connection, Request request)
+    private static Result readSnapshot(Connection connection, String meetingId,
+            long afterSequence, int limit, String deploymentScope, String subjectScope)
             throws SQLException {
-        int queryLimit = Math.addExact(request.limit(), 1);
+        int queryLimit = Math.addExact(limit, 1);
         try (PreparedStatement statement = connection.prepareStatement(READ_SQL)) {
-            statement.setString(1, request.meetingId());
-            statement.setLong(2, request.afterSequence());
+            statement.setString(1, meetingId);
+            statement.setLong(2, afterSequence);
             statement.setInt(3, queryLimit);
             try (ResultSet rows = statement.executeQuery()) {
                 if (!rows.next()) {
@@ -211,8 +230,8 @@ public final class JdbcMeetingEventLogPort implements MeetingEventLogPort {
 
                 String storedDeploymentScope = rows.getString("deployment_scope");
                 String storedSubjectScope = rows.getString("subject_scope");
-                if (MeetingAccessGuard.evaluate(
-                        request.context(), storedDeploymentScope, storedSubjectScope)
+                if (MeetingAccessGuard.evaluate(deploymentScope, subjectScope,
+                        storedDeploymentScope, storedSubjectScope)
                         != MeetingAccessGuard.Decision.ALLOWED) {
                     return new AccessDenied();
                 }
@@ -227,7 +246,7 @@ public final class JdbcMeetingEventLogPort implements MeetingEventLogPort {
                 if (rows.getBoolean("has_invalid_event")) {
                     return new Unavailable(UnavailableReason.STORAGE_FAILURE, false);
                 }
-                if (request.afterSequence() > rows.getLong("max_event_sequence")) {
+                if (afterSequence > rows.getLong("max_event_sequence")) {
                     return new Conflict(ConflictReason.INVALID_CURSOR);
                 }
 
@@ -238,14 +257,14 @@ public final class JdbcMeetingEventLogPort implements MeetingEventLogPort {
                     }
                 } while (rows.next());
 
-                boolean hasMore = events.size() > request.limit();
-                int returnedCount = hasMore ? request.limit() : events.size();
+                boolean hasMore = events.size() > limit;
+                int returnedCount = hasMore ? limit : events.size();
                 List<EventLog> returnedEvents = new ArrayList<>(
                         events.subList(0, returnedCount));
                 MeetingEventPage page;
                 try {
                     page = returnedEvents.isEmpty()
-                            ? MeetingEventPage.empty(request.afterSequence())
+                            ? MeetingEventPage.empty(afterSequence)
                             : new MeetingEventPage(
                                     returnedEvents,
                                     returnedEvents.getLast().eventSequence(),

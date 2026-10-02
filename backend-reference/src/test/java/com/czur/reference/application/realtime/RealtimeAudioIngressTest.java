@@ -226,7 +226,9 @@ class RealtimeAudioIngressTest {
     private static RealtimeCredentialVerifier.Granted grant(
             RealtimeCredentialVerifier.AccessMode access) {
         return new RealtimeCredentialVerifier.Granted(access, STARTED.plusSeconds(3_600),
-                new RealtimeCredentialVerifier.AudioContract(AudioProfile.pcm16kMono(20), 640));
+                new RealtimeCredentialVerifier.AudioContract(AudioProfile.pcm16kMono(20), 640),
+                new RealtimeCredentialVerifier.ReadOwnership(MEETING,
+                        "deployment", "subject"));
     }
 
     private static DurableAudioInputPort.WriterBinding binding(String meetingId) {

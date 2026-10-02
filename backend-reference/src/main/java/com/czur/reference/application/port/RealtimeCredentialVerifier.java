@@ -3,6 +3,7 @@ package com.czur.reference.application.port;
 import com.czur.reference.application.port.identity.SecretCredential;
 import com.czur.reference.application.port.model.AudioProfile;
 import com.czur.reference.domain.meeting.MeetingIdPolicy;
+import com.czur.reference.domain.meeting.MeetingOwnership;
 
 import java.time.Instant;
 import java.util.Objects;
@@ -48,12 +49,40 @@ public interface RealtimeCredentialVerifier {
      * 仅由有效凭据和一致持久快照产生；期限为独占截止时刻，音频合同来自
      * 同一份 V013 首次 Create 响应，不能用客户端声称的格式或当前部署配置替代。
      */
-    record Granted(AccessMode access, Instant expiresAt, AudioContract audioContract)
+    record Granted(AccessMode access, Instant expiresAt, AudioContract audioContract,
+                   ReadOwnership readOwnership)
             implements Result {
         public Granted {
             Objects.requireNonNull(access, "access");
             Objects.requireNonNull(expiresAt, "expiresAt");
             Objects.requireNonNull(audioContract, "audioContract");
+            Objects.requireNonNull(readOwnership, "readOwnership");
+        }
+
+        /** 不把部署和主体写进日志或异常正文。 */
+        @Override
+        public String toString() {
+            return "RealtimeCredentialVerifier.Granted[access=" + access
+                    + ", expiresAt=" + expiresAt + ", readOwnership=REDACTED]";
+        }
+    }
+
+    /**
+     * 与有效实时凭据在同一持久快照中核对过的事件读取归属。
+     * 只供实时事件端口使用，不伪造用户登录身份或会议命令上下文。
+     */
+    record ReadOwnership(String meetingId, String deploymentScope, String subjectScope) {
+        public ReadOwnership {
+            MeetingIdPolicy.requireValid(meetingId);
+            if (deploymentScope == null || deploymentScope.isBlank()) {
+                throw new IllegalArgumentException("deploymentScope is required");
+            }
+            MeetingOwnership.requireOwnedSubjectScope(subjectScope);
+        }
+
+        @Override
+        public String toString() {
+            return "RealtimeCredentialVerifier.ReadOwnership[REDACTED]";
         }
     }
 

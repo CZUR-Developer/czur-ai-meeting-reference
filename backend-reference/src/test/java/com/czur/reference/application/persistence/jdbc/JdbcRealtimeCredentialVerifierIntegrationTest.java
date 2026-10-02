@@ -403,6 +403,11 @@ class JdbcRealtimeCredentialVerifierIntegrationTest {
         var granted = assertInstanceOf(RealtimeCredentialVerifier.Granted.class,
                 verify(T15CreateRecoveryFixtures.DEPLOYMENT, token, meetingId, now));
         assertEquals(expected, granted.access());
+        assertEquals(meetingId, granted.readOwnership().meetingId());
+        assertEquals(T15CreateRecoveryFixtures.DEPLOYMENT,
+                granted.readOwnership().deploymentScope());
+        assertEquals(T15CreateRecoveryFixtures.SUBJECT,
+                granted.readOwnership().subjectScope());
         assertEquals(AudioProfile.pcm16kMono(100), granted.audioContract().audioProfile());
         assertEquals(64_000, granted.audioContract().maxAudioFrameBytes());
     }

@@ -57,11 +57,24 @@ class RealtimeCredentialContractsTest {
                 () -> new RealtimeCredentialVerifier.Granted(
                         null, Instant.parse("2030-01-01T00:05:00Z"),
                         new RealtimeCredentialVerifier.AudioContract(
-                                AudioProfile.pcm16kMono(100), 3_200)));
+                                AudioProfile.pcm16kMono(100), 3_200),
+                        new RealtimeCredentialVerifier.ReadOwnership(MEETING_ID,
+                                "deployment-contract", "subject-contract")));
         assertThrows(NullPointerException.class,
                 () -> new RealtimeCredentialVerifier.Granted(
                         RealtimeCredentialVerifier.AccessMode.WRITE,
-                        Instant.parse("2030-01-01T00:05:00Z"), null));
+                        Instant.parse("2030-01-01T00:05:00Z"), null,
+                        new RealtimeCredentialVerifier.ReadOwnership(MEETING_ID,
+                                "deployment-contract", "subject-contract")));
+        var ownership = new RealtimeCredentialVerifier.ReadOwnership(MEETING_ID,
+                "deployment-contract", "subject-contract");
+        var realtimeGrant = new RealtimeCredentialVerifier.Granted(
+                RealtimeCredentialVerifier.AccessMode.READ_ONLY,
+                Instant.parse("2030-01-01T00:05:00Z"),
+                new RealtimeCredentialVerifier.AudioContract(
+                        AudioProfile.pcm16kMono(100), 3_200), ownership);
+        assertFalse(realtimeGrant.toString().contains("subject-contract"));
+        assertFalse(ownership.toString().contains(MEETING_ID));
         assertEquals(persistedJson, success.persistedGrantJson());
     }
 
