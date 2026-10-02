@@ -1,7 +1,10 @@
 package com.czur.reference.application.command;
 
 import com.czur.reference.application.port.FinalizationFact;
+import com.czur.reference.application.finalization.MeetingInputReconciler;
+import com.czur.reference.application.port.FinalizationAdmissionUnitOfWork;
 import com.czur.reference.application.port.InputState;
+import com.czur.reference.application.port.MeetingInputClosureContextPort;
 import com.czur.reference.application.port.ManifestStatus;
 import com.czur.reference.application.port.MeetingQueryPort;
 import com.czur.reference.application.port.MeetingStatus;
@@ -17,9 +20,11 @@ import com.czur.reference.domain.meeting.MeetingAggregate;
 import com.czur.reference.domain.meeting.MeetingState;
 import org.junit.jupiter.api.Test;
 
+import java.time.Clock;
 import java.time.Instant;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -144,6 +149,85 @@ class AuthenticatedMeetingStopApplicationServiceTest {
             assertEquals(stop.request.context(), query.request.context());
             assertTrue(credential.isDestroyed());
         }
+    }
+
+    @Test
+    void committedStopTriggersClosureBeforeQueryButFailureCannotReplaceDatabaseReceipt() {
+        AtomicBoolean committed = new AtomicBoolean();
+        AtomicBoolean triggered = new AtomicBoolean();
+        RecordingQuery query = new RecordingQuery();
+        query.result = new MeetingQueryPort.Found(status(MeetingState.STOPPING,
+                FinalizationFact.pending(InputState.INPUT_COMPLETE_PENDING)));
+        OwnedMeetingStopUnitOfWork stop = request -> {
+            committed.set(true);
+            return success(OwnedMeetingStopUnitOfWork.SuccessCode.ACCEPTED);
+        };
+        MeetingInputReconciler reconciler = unavailableReconciler(() -> {
+            assertTrue(committed.get(), "closure must run after Stop commit");
+            assertNull(query.request, "query must run after closure trigger");
+            triggered.set(true);
+            // 另一收口调用已持久提交时，响应必须取查询事实，不取本次触发失败。
+            query.result = new MeetingQueryPort.Found(status(MeetingState.READY,
+                    FinalizationFact.accepted("database-receipt")));
+        });
+        var result = assertInstanceOf(AuthenticatedMeetingStopResult.Success.class,
+                new AuthenticatedMeetingStopApplicationService(
+                        "deployment", authorized(), stop, query, reconciler)
+                        .stop(request(credential()), INTENT));
+        assertTrue(triggered.get());
+        assertEquals(InputState.INPUT_ACCEPTED, result.meeting().inputState());
+        assertEquals("database-receipt", result.meeting().finalizationReceipt());
+    }
+
+    @Test
+    void rejectedStopDoesNotTriggerClosure() {
+        AtomicBoolean triggered = new AtomicBoolean();
+        RecordingStop stop = new RecordingStop();
+        RecordingQuery query = new RecordingQuery();
+        var result = new AuthenticatedMeetingStopApplicationService(
+                "deployment", authorized(), stop, query,
+                unavailableReconciler(() -> triggered.set(true)))
+                .stop(request(credential()), INTENT);
+        assertInstanceOf(AuthenticatedMeetingStopResult.StopFailure.class, result);
+        assertTrue(!triggered.get());
+        assertNull(query.request);
+    }
+
+    @Test
+    void unavailableClosureLeavesPendingStopAndNullReceipt() {
+        RecordingStop stop = new RecordingStop();
+        stop.result = success(OwnedMeetingStopUnitOfWork.SuccessCode.ACCEPTED);
+        RecordingQuery query = new RecordingQuery();
+        query.result = new MeetingQueryPort.Found(status(MeetingState.STOPPING,
+                FinalizationFact.pending(InputState.INPUT_COMPLETE_PENDING)));
+        var result = assertInstanceOf(AuthenticatedMeetingStopResult.Success.class,
+                new AuthenticatedMeetingStopApplicationService(
+                        "deployment", authorized(), stop, query,
+                        unavailableReconciler(() -> { }))
+                        .stop(request(credential()), INTENT));
+        assertEquals(InputState.INPUT_COMPLETE_PENDING, result.meeting().inputState());
+        assertNull(result.meeting().finalizationReceipt());
+        assertEquals(202, new com.czur.reference.application.http.HttpErrorMapper()
+                .stop(result).status());
+    }
+
+    /** 只让上下文端口返回固定失败，证明 Stop 对触发结果与数据库查询的边界。 */
+    private static MeetingInputReconciler unavailableReconciler(Runnable onTrigger) {
+        return new MeetingInputReconciler(meetingId -> {
+            onTrigger.run();
+            return new MeetingInputClosureContextPort.Unavailable();
+        }, meetingId -> {
+            throw new AssertionError("winner lookup must not run");
+        }, meetingId -> {
+            throw new AssertionError("audio lookup must not run");
+        }, new FinalizationAdmissionUnitOfWork() {
+            @Override public Result admit(AdmissionRequest request) {
+                throw new AssertionError("Admission must not run");
+            }
+            @Override public Result recover(AdmissionRequest request) {
+                throw new AssertionError("Admission recovery must not run");
+            }
+        }, Clock.systemUTC());
     }
 
     @Test

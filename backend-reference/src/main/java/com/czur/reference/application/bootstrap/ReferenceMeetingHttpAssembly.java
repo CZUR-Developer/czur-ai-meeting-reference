@@ -6,6 +6,8 @@ import com.czur.reference.application.command.AuthenticatedRealtimeTokenRenewApp
 import com.czur.reference.application.command.CompleteMeetingResponseAssembler;
 import com.czur.reference.application.command.ReferenceCreateRealtimeSessionAllocator;
 import com.czur.reference.application.entitlement.referencedev.ReferenceDevEntitlementPolicy;
+import com.czur.reference.application.finalization.DeterministicMockFinalizationPlanner;
+import com.czur.reference.application.finalization.MeetingInputReconciler;
 import com.czur.reference.application.http.AuthenticatedMeetingHttpContextResolver;
 import com.czur.reference.application.http.CreateMeetingHttpRequestDecoder;
 import com.czur.reference.application.http.HttpErrorMapper;
@@ -30,6 +32,10 @@ import com.czur.reference.application.persistence.jdbc.JdbcRealtimeMockSessionSp
 import com.czur.reference.application.persistence.jdbc.JdbcRealtimeTranscriptEventPublisher;
 import com.czur.reference.application.persistence.jdbc.JdbcMeetingStartExecutionUnitOfWork;
 import com.czur.reference.application.persistence.jdbc.JdbcDurableAudioInputPort;
+import com.czur.reference.application.persistence.jdbc.JdbcMeetingInputClosureContextPort;
+import com.czur.reference.application.persistence.jdbc.JdbcAcceptedInputFactLookup;
+import com.czur.reference.application.persistence.jdbc.JdbcCompletedAudioReadinessPort;
+import com.czur.reference.application.persistence.jdbc.JdbcFinalizationAdmissionUnitOfWork;
 import com.czur.reference.application.persistence.jdbc.DatabaseReadiness;
 import com.czur.reference.application.persistence.jdbc.DatabaseStartupException;
 import com.czur.reference.application.persistence.jdbc.JdbcReferenceDevEntitlementProvider;
@@ -153,6 +159,8 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                 }
             }
             DataSource dataSource = database.dataSource();
+            SecureRandom random = new SecureRandom();
+            RandomIds ids = new RandomIds(random);
             byte[] pageSecret = config.pageTokenSecretCopy();
             JdbcMeetingQueryPort query;
             try {
@@ -169,8 +177,19 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
             var resolver = new AuthenticatedMeetingHttpContextResolver(
                     config.deploymentScope(), config.audience(), config.clientId(),
                     identity, errors);
+            // Create 开关只控制新建；关闭后仍可能有先前创建的 V013/V015 会议
+            // 等待 Stop 收口，因此同一 Reconciler 独立于该开关。旧 v1 会议没有
+            // 完整输入事实，触发结果不会改写已提交 Stop 或权威查询响应。
+            MeetingInputReconciler inputReconciler = new MeetingInputReconciler(
+                    new JdbcMeetingInputClosureContextPort(
+                            dataSource, config.deploymentScope()),
+                    new JdbcAcceptedInputFactLookup(dataSource),
+                    new JdbcCompletedAudioReadinessPort(dataSource),
+                    new JdbcFinalizationAdmissionUnitOfWork(dataSource,
+                            ids::newReceipt, new DeterministicMockFinalizationPlanner()),
+                    clock);
             var stopService = new AuthenticatedMeetingStopApplicationService(
-                    config.deploymentScope(), identity, stop, query);
+                    config.deploymentScope(), identity, stop, query, inputReconciler);
             var renewService = config.realtimeRenewEnabled()
                     ? new AuthenticatedRealtimeTokenRenewApplicationService(
                             config.deploymentScope(), identity,
@@ -209,8 +228,6 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
             if (config.createEnabled()) {
                 // 与查询、Stop、Delete 共用唯一连接池、身份 Provider、Clock 和错误映射。
                 // ID 仅由服务端安全随机源生成；首次公开响应由 V013 持久化。
-                SecureRandom random = new SecureRandom();
-                RandomIds ids = new RandomIds(random);
                 var policy = new ReferenceDevEntitlementPolicy(
                         config.entitlement(), clock, ids);
                 var entitlement = new JdbcReferenceDevEntitlementProvider(
@@ -333,6 +350,9 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
         @Override public String newGrantId() { return next("grant_"); }
         @Override public String newReservationId() { return next("reservation_"); }
         @Override public String newLeaseToken() { return next("lease_"); }
+
+        /** 同一入库事务的 opaque 候选；重放时 Admission 从数据库读取原 receipt。 */
+        private String newReceipt() { return next("receipt_"); }
 
         private String next(String prefix) {
             byte[] bytes = new byte[24];
