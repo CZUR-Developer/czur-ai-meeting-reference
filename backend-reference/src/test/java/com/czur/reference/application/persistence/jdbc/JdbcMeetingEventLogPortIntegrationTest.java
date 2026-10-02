@@ -33,8 +33,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * {@link JdbcMeetingEventLogPort} 在全新 PostgreSQL 16 V001→V006 上的事实门禁。
  *
  * <p>每个用例创建独立 schema，顺序执行全部迁移并在结束后精确删除。测试覆盖
- * 会议存在性、归属隔离、历史/畸形事件关闭式失败、混合逻辑流全局分页、空页和
- * 超前游标。测试只使用显式传入的临时数据库地址，不创建或访问持久化数据卷。</p>
+ * 会议存在性、归属及删除撤权、历史/畸形事件关闭式失败、混合逻辑流全局分页、
+ * 空页和超前游标。测试只使用显式传入的临时数据库地址，不创建或访问持久化数据卷。</p>
  */
 @EnabledIfEnvironmentVariable(named = "REFERENCE_TEST_DATABASE_URL", matches = ".+")
 class JdbcMeetingEventLogPortIntegrationTest {
@@ -165,6 +165,60 @@ class JdbcMeetingEventLogPortIntegrationTest {
                 port.read(request(owner, "meeting-owned", 1, 10)));
         assertEquals(MeetingEventLogPort.ConflictReason.INVALID_CURSOR,
                 emptyMeetingAhead.reason());
+    }
+
+    @Test
+    void deletionPendingAndDeletedRevokeHistoryBeforeBadFactsAndAheadCursors()
+            throws Exception {
+        JdbcMeetingEventLogStore store = new JdbcMeetingEventLogStore(dataSource);
+        for (String state : List.of("DELETION_PENDING", "DELETED")) {
+            String validMeeting = "meeting-valid-" + state;
+            String damagedMeeting = "meeting-damaged-" + state;
+            insertMeeting(validMeeting, DEPLOYMENT, SUBJECT);
+            insertMeeting(damagedMeeting, DEPLOYMENT, SUBJECT);
+            store.append(event(validMeeting, 1, "stream-a", "valid-" + state));
+            insertHistoricalEvent(damagedMeeting, "damaged-" + state);
+            setMeetingState(validMeeting, state);
+            setMeetingState(damagedMeeting, state);
+        }
+
+        JdbcMeetingEventLogPort port = new JdbcMeetingEventLogPort(dataSource);
+        MeetingCommandContext owner = context(DEPLOYMENT, SUBJECT);
+        for (String state : List.of("DELETION_PENDING", "DELETED")) {
+            for (String kind : List.of("valid", "damaged")) {
+                String meetingId = "meeting-" + kind + '-' + state;
+                assertInstanceOf(MeetingEventLogPort.AccessDenied.class,
+                        port.read(request(owner, meetingId, 0, 10)),
+                        "删除开始后不得读取旧事件: " + meetingId);
+                assertInstanceOf(MeetingEventLogPort.AccessDenied.class,
+                        port.read(request(owner, meetingId, 99, 10)),
+                        "删除撤权优先于坏事实与超前游标: " + meetingId);
+            }
+        }
+    }
+
+    @Test
+    void manifestDeletionStateRevokesHistoryWhenMeetingStateHasNotChanged()
+            throws Exception {
+        String meetingId = "meeting-manifest-deletion-only";
+        insertMeeting(meetingId, DEPLOYMENT, SUBJECT);
+        insertHistoricalEvent(meetingId, "manifest-deletion-bad-event");
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "UPDATE meeting SET manifest_state = 'DELETION_PENDING' "
+                             + "WHERE meeting_id = ? AND state = 'RUNNING'")) {
+            statement.setString(1, meetingId);
+            assertEquals(1, statement.executeUpdate());
+        }
+
+        JdbcMeetingEventLogPort port = new JdbcMeetingEventLogPort(dataSource);
+        MeetingCommandContext owner = context(DEPLOYMENT, SUBJECT);
+        assertInstanceOf(MeetingEventLogPort.AccessDenied.class,
+                port.read(request(owner, meetingId, 0, 10)),
+                "Manifest 已开始删除时不得将旧坏事件暴露为存储故障");
+        assertInstanceOf(MeetingEventLogPort.AccessDenied.class,
+                port.read(request(owner, meetingId, 99, 10)),
+                "Manifest 删除撤权应优先于超前游标");
     }
 
     @Test
@@ -344,6 +398,16 @@ class JdbcMeetingEventLogPortIntegrationTest {
             statement.setString(1, meetingId);
             statement.setString(2, eventId);
             statement.setTimestamp(3, Timestamp.from(BASE.plusSeconds(1)));
+            assertEquals(1, statement.executeUpdate());
+        }
+    }
+
+    private void setMeetingState(String meetingId, String state) throws Exception {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "UPDATE meeting SET state = ? WHERE meeting_id = ?")) {
+            statement.setString(1, state);
+            statement.setString(2, meetingId);
             assertEquals(1, statement.executeUpdate());
         }
     }

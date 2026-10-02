@@ -19,12 +19,14 @@ import java.util.logging.Logger;
 /**
  * 基于 PostgreSQL 会议事实源的认证事件补拉适配器。
  *
- * <p>一次调用只执行一条 SELECT。会议存在性、原始归属、整场事件完整性、
+ * <p>一次调用只执行一条 SELECT。会议存在性、原始归属、会议与 Manifest 删除状态、整场事件完整性、
  * 最高已提交事件序号和 {@code afterSequence} 之后的事件页因此都来自同一个 statement
  * snapshot，不会出现先鉴权、后查询时读到两份数据库状态的竞态。结果行到达后
  * 必须先用 {@link MeetingAccessGuard} 判断原始归属；跨部署、跨主体和历史
  * {@code LEGACY_UNOWNED} 会议立即返回 {@link AccessDenied}，不会读取事件正文或
- * 暴露该行是否包含损坏事件。</p>
+ * 暴露该行是否包含损坏事件。已归属会议的 {@code state} 或
+ * {@code manifest_state} 任一进入 {@code DELETION_PENDING}/{@code DELETED}，
+ * 就不再允许读取历史事件；删除撤权优先于坏事件与超前游标的诊断。</p>
  *
  * <p>事件查询按会议全局 {@code event_sequence} 升序读取 {@code limit + 1} 条，
  * 不按 {@code stream_id} 过滤。额外一条只用于计算 {@code hasMore}；空页保留调用
@@ -43,7 +45,7 @@ public final class JdbcMeetingEventLogPort implements MeetingEventLogPort {
 
     /**
      * MATERIALIZED 单行 CTE 强制整场异常扫描每次请求只执行一次；随后
-     * LEFT JOIN LATERAL 让“存在但无新事件”的会议仍返回一行。归属、整场异常
+     * LEFT JOIN LATERAL 让“存在但无新事件”的会议仍返回一行。归属、两处删除状态、整场异常
      * 标记和分页事件仍由同一个 PostgreSQL statement snapshot 解释。
      *
      * <p>PostgreSQL 的 POSIX {@code [:space:]} 与 Java 21
@@ -57,6 +59,8 @@ public final class JdbcMeetingEventLogPort implements MeetingEventLogPort {
                 SELECT m.meeting_id,
                        m.deployment_scope,
                        m.subject_scope,
+                       m.state,
+                       m.manifest_state,
                        COALESCE((
                            SELECT MAX(committed.event_sequence)
                              FROM meeting_event committed
@@ -115,6 +119,8 @@ public final class JdbcMeetingEventLogPort implements MeetingEventLogPort {
             )
             SELECT m.deployment_scope,
                    m.subject_scope,
+                   m.state,
+                   m.manifest_state,
                    m.has_invalid_event,
                    m.max_event_sequence,
                    event_page.meeting_id,
@@ -189,7 +195,7 @@ public final class JdbcMeetingEventLogPort implements MeetingEventLogPort {
      * 执行唯一的数据库语句并按安全顺序解释 ResultSet。
      *
      * <p>即使 SQL 已经返回事件列，也必须先读取两个原始 scope 并调用访问守卫；
-     * 在守卫放行前禁止访问历史缺口和任何事件列。</p>
+     * 守卫放行后先判断删除撤权，再解释坏事实、游标和事件正文。</p>
      */
     private static Result readSnapshot(Connection connection, Request request)
             throws SQLException {
@@ -208,6 +214,13 @@ public final class JdbcMeetingEventLogPort implements MeetingEventLogPort {
                 if (MeetingAccessGuard.evaluate(
                         request.context(), storedDeploymentScope, storedSubjectScope)
                         != MeetingAccessGuard.Decision.ALLOWED) {
+                    return new AccessDenied();
+                }
+                String state = rows.getString("state");
+                String manifestState = rows.getString("manifest_state");
+                if ("DELETION_PENDING".equals(state) || "DELETED".equals(state)
+                        || "DELETION_PENDING".equals(manifestState)
+                        || "DELETED".equals(manifestState)) {
                     return new AccessDenied();
                 }
 
