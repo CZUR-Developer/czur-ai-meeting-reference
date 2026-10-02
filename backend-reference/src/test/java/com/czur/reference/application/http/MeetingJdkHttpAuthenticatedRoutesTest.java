@@ -5,6 +5,8 @@ import com.czur.reference.application.command.MeetingPermissions;
 import com.czur.reference.application.port.DeleteResult;
 import com.czur.reference.application.port.MeetingDeletionPort;
 import com.czur.reference.application.port.MeetingQueryPort;
+import com.czur.reference.application.port.MeetingEventLogPort;
+import com.czur.reference.application.port.MeetingEventPage;
 import com.czur.reference.application.port.OwnedMeetingStopUnitOfWork;
 import com.czur.reference.application.port.identity.IdentityProvider;
 import com.czur.reference.application.port.identity.IdentityProviderError;
@@ -64,6 +66,21 @@ class MeetingJdkHttpAuthenticatedRoutesTest {
             assertTrue(fixture.provider.allCredentialsClosed());
             assertEquals("trusted-audience", fixture.provider.lastRequest.audience());
             assertEquals("trusted-client", fixture.provider.lastRequest.clientId());
+        }
+    }
+
+    @Test
+    void eventsRouteUsesTheSameBearerResolverAndTrustedEventPort() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            String path = "/v1/meetings/mtg_owned/events?afterSequence=0&limit=2";
+            assertEquals(401, fixture.status("GET", path, "", ""));
+            assertEquals(401, fixture.status("GET", path, auth("invalid-token"), ""));
+            assertEquals(0, fixture.eventCalls.get());
+            assertEquals(200, fixture.status("GET", path, auth("read-only-token"), ""));
+            assertEquals(403, fixture.status("GET", path, auth("other-token"), ""));
+            assertEquals(2, fixture.eventCalls.get());
+            assertEquals("trusted-deployment", fixture.lastDeployment);
+            assertTrue(fixture.provider.allCredentialsClosed());
         }
     }
 
@@ -182,6 +199,7 @@ class MeetingJdkHttpAuthenticatedRoutesTest {
         private final AtomicInteger queryCalls = new AtomicInteger();
         private final AtomicInteger deleteCalls = new AtomicInteger();
         private final AtomicInteger stopCalls = new AtomicInteger();
+        private final AtomicInteger eventCalls = new AtomicInteger();
         private volatile String lastDeployment;
 
         private Fixture() throws Exception {
@@ -222,9 +240,20 @@ class MeetingJdkHttpAuthenticatedRoutesTest {
             };
             var stopService = new AuthenticatedMeetingStopApplicationService(
                     "trusted-deployment", provider, stop, query);
+            MeetingEventLogPort events = request -> {
+                eventCalls.incrementAndGet();
+                lastDeployment = request.context().deploymentScope();
+                if (!"trusted-deployment".equals(lastDeployment)
+                        || !"owner".equals(request.context().identity()
+                                .subject().subjectScope())) {
+                    return new MeetingEventLogPort.AccessDenied();
+                }
+                return new MeetingEventLogPort.Page(
+                        MeetingEventPage.empty(request.afterSequence()));
+            };
             runtime = new MeetingHttpRuntime(query, deletion,
                     new ReferenceMeetingHttpRequestDecoder("trusted-audience", "trusted-client"),
-                    errors, stopService);
+                    errors, stopService, null, null, false, null, null, null, events);
             var resolver = new AuthenticatedMeetingHttpContextResolver("trusted-deployment",
                     "trusted-audience", "trusted-client", provider, errors);
             server = new MeetingJdkHttpServer(new InetSocketAddress(

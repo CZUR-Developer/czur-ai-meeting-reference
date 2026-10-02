@@ -9,11 +9,18 @@ import com.czur.reference.application.error.MeetingAlreadyExistsException;
 import com.czur.reference.application.error.MeetingNotFoundException;
 import com.czur.reference.application.port.DeleteResult;
 import com.czur.reference.application.port.MeetingQueryPort;
+import com.czur.reference.application.port.MeetingEventLogPort;
 import com.czur.reference.application.port.MeetingManifestPort;
 import com.czur.reference.application.port.MeetingArtifactContentPort;
 import com.czur.reference.application.port.OwnedMeetingStopUnitOfWork;
 import com.czur.reference.application.port.RenewRealtimeTokenUnitOfWork;
 import com.czur.reference.protocol.json.MeetingManifestJson;
+import com.czur.reference.protocol.realtime.RealtimeTranscriptEventMapper;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -37,6 +44,7 @@ import java.util.logging.Logger;
 public final class HttpErrorMapper {
     public static final String SPEC_VERSION = "0.1";
     private static final Logger LOGGER = Logger.getLogger(HttpErrorMapper.class.getName());
+    private static final ObjectMapper EVENT_JSON = new ObjectMapper();
 
     private final Supplier<String> diagnosticIds;
 
@@ -152,6 +160,62 @@ public final class HttpErrorMapper {
                     HttpErrorEnvelope.UserAction.RETRY,
                     "ai_meeting.storage.list_unavailable");
         };
+    }
+
+    /**
+     * 将同一持久端口的认证事件页映射为公开 Protobuf JSON Mapping。
+     *
+     * <p>P2 仅发布 {@code transcriptUpsert}。每条事件先验证完整 Envelope 与
+     * 数据库列事实相同，才输出已保存的规范 JSON；坏事实或超出 HTTP 响应上限
+     * 关闭式返回 500，绝不伪装成保留窗口过期的 410。</p>
+     */
+    public HttpResponse events(MeetingEventLogPort.Result result) {
+        Objects.requireNonNull(result, "result");
+        return switch (result) {
+            case MeetingEventLogPort.Page page -> eventPage(page.page());
+            case MeetingEventLogPort.NotFound ignored -> error(404,
+                    HttpErrorEnvelope.Domain.SESSION, "MEETING_NOT_FOUND", false,
+                    HttpErrorEnvelope.UserAction.NONE, "ai_meeting.session.meeting_not_found");
+            case MeetingEventLogPort.AccessDenied ignored -> error(403,
+                    HttpErrorEnvelope.Domain.IDENTITY, "ACCESS_DENIED", false,
+                    HttpErrorEnvelope.UserAction.CONTACT_ADMIN,
+                    "ai_meeting.identity.access_denied");
+            case MeetingEventLogPort.Conflict conflict ->
+                    conflict.reason() == MeetingEventLogPort.ConflictReason.INVALID_CURSOR
+                            ? error(409, HttpErrorEnvelope.Domain.CONTRACT,
+                                    "INVALID_CURSOR", false, HttpErrorEnvelope.UserAction.NONE,
+                                    "ai_meeting.contract.invalid_cursor")
+                            : error(410, HttpErrorEnvelope.Domain.SESSION,
+                                    "EVENT_REPLAY_WINDOW_EXPIRED", false,
+                                    HttpErrorEnvelope.UserAction.NONE,
+                                    "ai_meeting.session.event_replay_window_expired");
+            case MeetingEventLogPort.Unavailable unavailable -> error(
+                    unavailable.retryable() ? 503 : 500,
+                    unavailable.retryable() ? HttpErrorEnvelope.Domain.STORAGE
+                            : HttpErrorEnvelope.Domain.INTERNAL,
+                    "EVENT_LOG_UNAVAILABLE", unavailable.retryable(),
+                    unavailable.retryable() ? HttpErrorEnvelope.UserAction.RETRY
+                            : HttpErrorEnvelope.UserAction.CONTACT_ADMIN,
+                    "ai_meeting.storage.event_log_unavailable");
+        };
+    }
+
+    private HttpResponse eventPage(com.czur.reference.application.port.MeetingEventPage page) {
+        try {
+            ObjectNode body = EVENT_JSON.createObjectNode();
+            ArrayNode items = body.putArray("items");
+            for (var event : page.items()) {
+                // 验证正文、oneof、序号、类型和外层列；只解析已验证的规范 JSON。
+                RealtimeTranscriptEventMapper.fromStored(event);
+                items.add(EVENT_JSON.readTree(event.canonicalPayloadJson()));
+            }
+            body.put("lastSequence", page.lastSequence());
+            body.put("hasMore", page.hasMore());
+            return HttpResponse.json(200, EVENT_JSON.writeValueAsString(body));
+        } catch (JsonProcessingException | RuntimeException invalidFact) {
+            // 禁止把不可信事件正文、解析异常或体积超限信息反射到客户端/日志。
+            return internalFailure();
+        }
     }
 
     public HttpResponse deletion(DeleteResult result) {

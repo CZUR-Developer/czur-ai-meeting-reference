@@ -21,6 +21,7 @@ import com.czur.reference.application.persistence.jdbc.JdbcMeetingDeletionAdmiss
 import com.czur.reference.application.persistence.jdbc.JdbcMeetingQueryPort;
 import com.czur.reference.application.persistence.jdbc.JdbcMeetingManifestQueryPort;
 import com.czur.reference.application.persistence.jdbc.JdbcMeetingArtifactContentQueryPort;
+import com.czur.reference.application.persistence.jdbc.JdbcMeetingEventLogPort;
 import com.czur.reference.application.persistence.jdbc.JdbcOwnedMeetingStopUnitOfWork;
 import com.czur.reference.application.persistence.jdbc.JdbcRenewRealtimeTokenUnitOfWork;
 import com.czur.reference.application.persistence.jdbc.JdbcRealtimeCredentialVerifier;
@@ -203,6 +204,8 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
             MeetingArtifactContentPort artifact = manifest != null && artifactStore != null
                     ? new JdbcMeetingArtifactContentQueryPort(
                             dataSource, manifest, artifactStore) : null;
+            // REST 补拉和后续 WSS 恢复共用 meeting_event；不建立第二套事件事实源。
+            var events = new JdbcMeetingEventLogPort(dataSource);
             if (config.createEnabled()) {
                 // 与查询、Stop、Delete 共用唯一连接池、身份 Provider、Clock 和错误映射。
                 // ID 仅由服务端安全随机源生成；首次公开响应由 V013 持久化。
@@ -226,10 +229,10 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                 runtime = new MeetingHttpRuntime(query, deletion, decoder, errors, stopService,
                         create, new CreateMeetingHttpRequestDecoder(
                                 config.audience(), config.clientId()), true, manifest,
-                        renewService, artifact);
+                        renewService, artifact, events);
             } else {
                 runtime = new MeetingHttpRuntime(query, deletion, decoder, errors, stopService,
-                        null, null, false, manifest, renewService, artifact);
+                        null, null, false, manifest, renewService, artifact, events);
             }
             LOGGER.log(Level.INFO,
                     "reference meeting HTTP 装配完成 createEnabled={0} realtimeRenewEnabled={1}",

@@ -15,6 +15,11 @@ import com.czur.reference.application.port.ManifestStatus;
 import com.czur.reference.application.port.MeetingDeletionPort;
 import com.czur.reference.application.port.MeetingArtifactContentPort;
 import com.czur.reference.application.port.MeetingQueryPort;
+import com.czur.reference.application.port.MeetingEventLogPort;
+import com.czur.reference.application.port.MeetingEventPage;
+import com.czur.reference.application.port.EventLog;
+import com.czur.reference.application.port.model.CanonicalTranscriptEvent;
+import com.czur.reference.protocol.realtime.RealtimeTranscriptEventMapper;
 import com.czur.reference.application.port.MeetingStatus;
 import com.czur.reference.application.port.MeetingSummary;
 import com.czur.reference.application.port.identity.Subject;
@@ -111,6 +116,106 @@ class MeetingHttpAdapterContractTest {
         assertNotNull(query.getRequest);
         assertEquals("mtg_detail", query.getRequest.meetingId());
         assertEquals(context(), query.getRequest.context());
+    }
+
+    @Test
+    void eventsRouteReadsCanonicalPageWithGlobalCursorAndRejectsInvalidInputs() {
+        RecordingEvents events = new RecordingEvents();
+        assertEquals(501, adapter.handle(new HttpRequest("GET",
+                "/v1/meetings/mtg_events/events", Map.of(), ""), context()).status());
+        adapter = withEvents(events);
+        EventLog event = transcriptEvent();
+        events.result = new MeetingEventLogPort.Page(
+                new MeetingEventPage(List.of(event), 1, true));
+        HttpRequest request = new HttpRequest("GET", "/v1/meetings/mtg_events/events",
+                Map.of(), Map.of("afterSequence", "0", "limit", "1"), "");
+        assertEquals(MeetingHttpAdapter.AuthenticationRoute.READ,
+                MeetingHttpAdapter.authenticationRoute(request));
+        HttpResponse response = adapter.handle(request, context());
+        assertEquals(200, response.status());
+        assertEquals(context(), events.request.context());
+        assertEquals("mtg_events", events.request.meetingId());
+        assertEquals(0, events.request.afterSequence());
+        assertEquals(1, events.request.limit());
+        assertTrue(response.body().contains("\"eventSequence\":\"1\""));
+        assertTrue(response.body().contains("模拟实时字幕"));
+        assertTrue(response.body().contains("\"hasMore\":true"));
+        assertTrue(response.body().contains("\"lastSequence\":1"));
+
+        events.request = null;
+        assertEquals(401, adapter.handle(request, null).status());
+        assertNull(events.request);
+        for (Map<String, String> invalid : List.of(
+                Map.of("afterSequence", "-1"), Map.of("afterSequence", "01"),
+                Map.of("afterSequence", "9223372036854775808"),
+                Map.of("limit", "0"), Map.of("limit", "1001"),
+                Map.of("unexpected", "value"))) {
+            assertEquals(400, adapter.handle(new HttpRequest("GET",
+                    "/v1/meetings/mtg_events/events", Map.of(), invalid, ""),
+                    context()).status());
+            assertNull(events.request);
+        }
+        assertEquals(400, adapter.handle(new HttpRequest("GET",
+                "/v1/meetings/mtg_events/events", Map.of(), "body"), context()).status());
+        assertNull(events.request);
+    }
+
+    @Test
+    void eventsRouteMapsOwnershipDeletionCursorAndBadFactsWithoutFalseGone() {
+        RecordingEvents events = new RecordingEvents();
+        adapter = withEvents(events);
+        HttpRequest request = new HttpRequest("GET", "/v1/meetings/mtg_events/events",
+                Map.of(), "");
+        events.result = new MeetingEventLogPort.AccessDenied();
+        assertEquals(403, adapter.handle(request, context()).status());
+        events.result = new MeetingEventLogPort.Conflict(
+                MeetingEventLogPort.ConflictReason.INVALID_CURSOR);
+        HttpResponse ahead = adapter.handle(request, context());
+        assertEquals(409, ahead.status());
+        assertTrue(ahead.body().contains("INVALID_CURSOR"));
+        events.result = new MeetingEventLogPort.Unavailable(
+                MeetingEventLogPort.UnavailableReason.STORAGE_FAILURE, false);
+        assertEquals(500, adapter.handle(request, context()).status());
+        events.result = new MeetingEventLogPort.Unavailable(
+                MeetingEventLogPort.UnavailableReason.TRANSIENT_STORAGE_FAILURE, true);
+        assertEquals(503, adapter.handle(request, context()).status());
+        events.result = new MeetingEventLogPort.NotFound();
+        assertEquals(404, adapter.handle(request, context()).status());
+
+        EventLog good = transcriptEvent();
+        EventLog bad = new EventLog(good.specVersion(), good.meetingId(), good.streamId(),
+                good.eventId(), 2, good.emittedAt(), good.eventType(),
+                good.canonicalPayloadJson());
+        events.result = new MeetingEventLogPort.Page(
+                new MeetingEventPage(List.of(bad), 2, false));
+        assertEquals(500, adapter.handle(request, context()).status());
+        assertFalse(adapter.handle(request, context()).body().contains("410"));
+
+        adapter = withEvents(ignored -> { throw new IllegalArgumentException("bad stored fact"); });
+        assertEquals(500, adapter.handle(request, context()).status());
+    }
+
+    private MeetingHttpAdapter withEvents(MeetingEventLogPort events) {
+        return new MeetingHttpAdapter(query, deletion, decoder,
+                new HttpErrorMapper(() -> "event-diagnostic"), stopService(),
+                null, null, false, null, null, null, events);
+    }
+
+    private static EventLog transcriptEvent() {
+        return RealtimeTranscriptEventMapper.event("mtg_events", "evt_events_1", 1, NOW,
+                new CanonicalTranscriptEvent("segment-1", 1,
+                        CanonicalTranscriptEvent.Operation.UPSERT, 0, 100, "zh-CN",
+                        "模拟实时字幕", false, null, 0.5, List.of(), List.of()));
+    }
+
+    private static final class RecordingEvents implements MeetingEventLogPort {
+        private Request request;
+        private Result result = new NotFound();
+
+        @Override public Result read(Request request) {
+            this.request = request;
+            return result;
+        }
     }
 
     @Test

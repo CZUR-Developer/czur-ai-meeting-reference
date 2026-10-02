@@ -10,6 +10,7 @@ import com.czur.reference.application.port.MeetingDeletionPort;
 import com.czur.reference.application.port.MeetingManifestPort;
 import com.czur.reference.application.port.MeetingArtifactContentPort;
 import com.czur.reference.application.port.MeetingQueryPort;
+import com.czur.reference.application.port.MeetingEventLogPort;
 import com.czur.reference.application.port.identity.IdentityVerificationRequest;
 import com.czur.reference.domain.meeting.MeetingIdPolicy;
 
@@ -54,6 +55,8 @@ public final class MeetingHttpAdapter {
             "^/v1/meetings/(mtg_[A-Za-z0-9_-]+):renewRealtimeToken$");
     private static final Pattern MANIFEST_PATH = Pattern.compile(
             "^/v1/meetings/(mtg_[A-Za-z0-9_-]+)/manifest$");
+    private static final Pattern EVENTS_PATH = Pattern.compile(
+            "^/v1/meetings/(mtg_[A-Za-z0-9_-]+)/events$");
     private static final Pattern ARTIFACT_PATH = Pattern.compile(
             "^/v1/artifacts/(art_[A-Za-z0-9_-]+)$");
     private static final Pattern GEN_TIME = Pattern.compile("(?:-1|0|[1-9][0-9]*)");
@@ -71,6 +74,7 @@ public final class MeetingHttpAdapter {
     private final MeetingManifestPort manifestPort;
     private final MeetingArtifactContentPort artifactPort;
     private final AuthenticatedRealtimeTokenRenewApplicationService renewService;
+    private final MeetingEventLogPort eventLogPort;
 
     /** 使用随机 opaque diagnosticId 的默认错误映射器。 */
     public MeetingHttpAdapter(
@@ -97,6 +101,7 @@ public final class MeetingHttpAdapter {
         this.manifestPort = null;
         this.artifactPort = null;
         this.renewService = null;
+        this.eventLogPort = null;
     }
 
     /** 装配完整认证 Stop application service 的构造器。 */
@@ -117,6 +122,7 @@ public final class MeetingHttpAdapter {
         this.manifestPort = null;
         this.artifactPort = null;
         this.renewService = null;
+        this.eventLogPort = null;
     }
 
     /**
@@ -186,6 +192,24 @@ public final class MeetingHttpAdapter {
             MeetingManifestPort manifestPort,
             AuthenticatedRealtimeTokenRenewApplicationService renewService,
             MeetingArtifactContentPort artifactPort) {
+        this(queryPort, deletionPort, decoder, errors, stopService, createService,
+                createDecoder, createEnabled, manifestPort, renewService, artifactPort, null);
+    }
+
+    /** 显式接入认证事件补拉；旧装配保持 501，事件仍只从既有持久端口读取。 */
+    public MeetingHttpAdapter(
+            MeetingQueryPort queryPort,
+            MeetingDeletionPort deletionPort,
+            RequestDecoder decoder,
+            HttpErrorMapper errors,
+            AuthenticatedMeetingStopApplicationService stopService,
+            AuthenticatedCompleteMeetingApplicationService createService,
+            CreateMeetingHttpRequestDecoder createDecoder,
+            boolean createEnabled,
+            MeetingManifestPort manifestPort,
+            AuthenticatedRealtimeTokenRenewApplicationService renewService,
+            MeetingArtifactContentPort artifactPort,
+            MeetingEventLogPort eventLogPort) {
         this.queryPort = Objects.requireNonNull(queryPort, "queryPort");
         this.deletionPort = Objects.requireNonNull(deletionPort, "deletionPort");
         this.decoder = Objects.requireNonNull(decoder, "decoder");
@@ -201,6 +225,7 @@ public final class MeetingHttpAdapter {
         this.manifestPort = manifestPort;
         this.artifactPort = artifactPort;
         this.renewService = renewService;
+        this.eventLogPort = eventLogPort;
     }
 
     /** 与 runtime 常见的 service-before-mapper 装配顺序兼容。 */
@@ -250,6 +275,10 @@ public final class MeetingHttpAdapter {
                 case "DELETE" -> AuthenticationRoute.DELETE;
                 default -> AuthenticationRoute.NONE;
             };
+        }
+        if ("GET".equals(request.method())
+                && EVENTS_PATH.matcher(request.path()).matches()) {
+            return AuthenticationRoute.READ;
         }
         return AuthenticationRoute.NONE;
     }
@@ -307,6 +336,32 @@ public final class MeetingHttpAdapter {
             return errors.manifest(manifestPort.get(
                     new MeetingManifestPort.Request(
                             manifest.group(1), parseGenTime(request.query().get("genTime")))));
+        }
+
+        Matcher events = EVENTS_PATH.matcher(path);
+        if ("GET".equals(method) && events.matches()) {
+            if (eventLogPort == null) {
+                return errors.notImplemented();
+            }
+            if (context == null) {
+                return errors.missingContext();
+            }
+            // 读取身份由网络入口验证；端口在同一持久快照下再次校验会议归属、
+            // 删除撤权与历史事实，HTTP 不复制授权或事件存储逻辑。
+            if (!request.body().isEmpty() || request.query().size() > 2
+                    || request.query().keySet().stream().anyMatch(
+                            key -> !"afterSequence".equals(key) && !"limit".equals(key))) {
+                throw new IllegalArgumentException("events request is invalid");
+            }
+            MeetingEventLogPort.Request eventRequest = new MeetingEventLogPort.Request(
+                    context, events.group(1), parseAfterSequence(request.query().get("afterSequence")),
+                    parseEventLimit(request.query().get("limit")));
+            try {
+                return errors.events(eventLogPort.read(eventRequest));
+            } catch (RuntimeException unexpected) {
+                // 参数已校验；此后异常来自持久端口或出站投影，不再解释为请求 400。
+                return errors.internalFailure();
+            }
         }
 
         if ("POST".equals(method) && MEETINGS_PATH.equals(path)) {
@@ -416,6 +471,34 @@ public final class MeetingHttpAdapter {
         }
     }
 
+    /** 只接受公开协议的无符号十进制游标，拒绝溢出及非规范表示。 */
+    private static long parseAfterSequence(String raw) {
+        if (raw == null) return 0;
+        if (!raw.matches("(?:0|[1-9][0-9]*)")) {
+            throw new IllegalArgumentException("afterSequence is invalid");
+        }
+        try {
+            return Long.parseLong(raw);
+        } catch (NumberFormatException failure) {
+            throw new IllegalArgumentException("afterSequence is invalid");
+        }
+    }
+
+    /** OpenAPI 默认 200、允许 1～1000；分页上限属于公开输入契约。 */
+    private static int parseEventLimit(String raw) {
+        if (raw == null) return 200;
+        if (!raw.matches("[1-9][0-9]*")) {
+            throw new IllegalArgumentException("limit is invalid");
+        }
+        try {
+            int value = Integer.parseInt(raw);
+            if (value >= 1 && value <= 1000) return value;
+        } catch (NumberFormatException ignored) {
+            // 超出 int 范围与超出公开上限均返回同一个稳定输入错误。
+        }
+        throw new IllegalArgumentException("limit is invalid");
+    }
+
     private static void requirePathMeetingId(String pathMeetingId, String commandMeetingId) {
         if (commandMeetingId == null || !pathMeetingId.equals(commandMeetingId)) {
             throw new IllegalArgumentException("path meetingId does not match command");
@@ -474,6 +557,10 @@ public final class MeetingHttpAdapter {
         if ("GET".equals(request.method())
                 && MANIFEST_PATH.matcher(request.path()).matches()) {
             return "manifest";
+        }
+        if ("GET".equals(request.method())
+                && EVENTS_PATH.matcher(request.path()).matches()) {
+            return "events";
         }
         if ("POST".equals(request.method()) && MEETINGS_PATH.equals(request.path())) {
             return "create";
