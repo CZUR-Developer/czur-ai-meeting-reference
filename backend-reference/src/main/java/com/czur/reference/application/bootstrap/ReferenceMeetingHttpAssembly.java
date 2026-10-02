@@ -23,6 +23,10 @@ import com.czur.reference.application.persistence.jdbc.JdbcMeetingManifestQueryP
 import com.czur.reference.application.persistence.jdbc.JdbcMeetingArtifactContentQueryPort;
 import com.czur.reference.application.persistence.jdbc.JdbcOwnedMeetingStopUnitOfWork;
 import com.czur.reference.application.persistence.jdbc.JdbcRenewRealtimeTokenUnitOfWork;
+import com.czur.reference.application.persistence.jdbc.JdbcRealtimeCredentialVerifier;
+import com.czur.reference.application.persistence.jdbc.JdbcRealtimeStartFactsLookup;
+import com.czur.reference.application.persistence.jdbc.JdbcMeetingStartExecutionUnitOfWork;
+import com.czur.reference.application.persistence.jdbc.JdbcDurableAudioInputPort;
 import com.czur.reference.application.persistence.jdbc.DatabaseReadiness;
 import com.czur.reference.application.persistence.jdbc.DatabaseStartupException;
 import com.czur.reference.application.persistence.jdbc.JdbcReferenceDevEntitlementProvider;
@@ -32,10 +36,14 @@ import com.czur.reference.application.port.MeetingManifestPort;
 import com.czur.reference.application.port.MeetingArtifactContentPort;
 import com.czur.reference.application.port.artifact.ArtifactStore;
 import com.czur.reference.application.port.ProductProfileCatalog;
+import com.czur.reference.application.realtime.RealtimeAudioIngress;
+import com.czur.reference.application.realtime.RealtimeMeetingStartCoordinator;
+import com.czur.reference.application.wss.MeetingRealtimeWssServer;
 import com.czur.reference.application.port.entitlement.EntitlementIdGenerator;
 import com.czur.reference.domain.capability.CapabilityPlanner;
 
 import javax.sql.DataSource;
+import javax.net.ssl.SSLContext;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.time.Clock;
@@ -57,9 +65,10 @@ import java.util.logging.Logger;
  * 内存端口。查询、认证 Stop 与 T14 删除受理从同一
  * DataSource 装配。只有可信配置显式开启 Create 才接入 V013 重放、权益与创建
  * 工作单元；关闭时请求在任何身份、权益、V013 写入或会话分配前返回 501。
- * 本对象不创建网络监听器、Worker、模型或存储适配器。</p>
+ * {@code start()} 不自动创建网络监听器；调用方可显式创建 HTTP/WSS listener。
+ * 本对象不启动 Worker、模型或存储适配器。</p>
  *
- * <p>调用方应先停止外层网络接收，再关闭本对象；关闭顺序为 HTTP 运行时、
+ * <p>调用方应先停止外层 HTTP/WSS 网络接收，再关闭本对象；关闭顺序为 HTTP 运行时、
  * JDBC 池，重复关闭安全。返回的组件供调用方接线，不转移资源所有权。</p>
  */
 public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
@@ -71,17 +80,25 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
     private final AuthenticatedMeetingHttpContextResolver contextResolver;
     private final HttpErrorMapper errors;
     private final boolean realtimeRenewEnabled;
+    private final JdbcRealtimeCredentialVerifier realtimeVerifier;
+    private final RealtimeAudioIngress realtimeAudioIngress;
+    private final Clock clock;
     private final AtomicBoolean closed = new AtomicBoolean();
 
     private ReferenceMeetingHttpAssembly(
             JdbcDatabaseRuntime database, MeetingHttpRuntime runtime,
             AuthenticatedMeetingHttpContextResolver contextResolver,
-            HttpErrorMapper errors, boolean realtimeRenewEnabled) {
+            HttpErrorMapper errors, boolean realtimeRenewEnabled,
+            JdbcRealtimeCredentialVerifier realtimeVerifier,
+            RealtimeAudioIngress realtimeAudioIngress, Clock clock) {
         this.database = database;
         this.runtime = runtime;
         this.contextResolver = contextResolver;
         this.errors = errors;
         this.realtimeRenewEnabled = realtimeRenewEnabled;
+        this.realtimeVerifier = realtimeVerifier;
+        this.realtimeAudioIngress = realtimeAudioIngress;
+        this.clock = clock;
     }
 
     /**
@@ -152,6 +169,19 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                             new JdbcRenewRealtimeTokenUnitOfWork(dataSource, clock,
                                     config.wssTokenTtl(), new SecureRandom()))
                     : null;
+            ProductProfileCatalog profiles = (id, revision) ->
+                    config.profile().id().equals(id)
+                            && config.profile().revision() == revision
+                            ? Optional.of(config.profile()) : Optional.empty();
+            var realtimeVerifier = new JdbcRealtimeCredentialVerifier(
+                    dataSource, config.deploymentScope(), clock);
+            var realtimeIngress = new RealtimeAudioIngress(
+                    new RealtimeMeetingStartCoordinator(config.deploymentScope(),
+                            new JdbcRealtimeStartFactsLookup(dataSource), profiles,
+                            config.mockCapabilities(), config.capabilityLimits(), clock,
+                            new JdbcMeetingStartExecutionUnitOfWork(
+                                    dataSource, new CapabilityPlanner())),
+                    new JdbcDurableAudioInputPort(dataSource, config.deploymentScope()));
             MeetingManifestPort manifest = config.resultLinkTtl()
                     .<MeetingManifestPort>map(ttl -> new JdbcMeetingManifestQueryPort(
                             dataSource, new ManifestResultAccessPolicy(clock, ttl)))
@@ -168,10 +198,6 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                         config.entitlement(), clock, ids);
                 var entitlement = new JdbcReferenceDevEntitlementProvider(
                         dataSource, policy, clock);
-                ProductProfileCatalog profiles = (id, revision) ->
-                        config.profile().id().equals(id)
-                                && config.profile().revision() == revision
-                                ? Optional.of(config.profile()) : Optional.empty();
                 var sessions = new ReferenceCreateRealtimeSessionAllocator(
                         config.wssOrigin(), config.wssTokenTtl(), clock, random);
                 var create = new AuthenticatedCompleteMeetingApplicationService(
@@ -195,7 +221,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                     "reference meeting HTTP 装配完成 createEnabled={0} realtimeRenewEnabled={1}",
                     new Object[]{config.createEnabled(), config.realtimeRenewEnabled()});
             return new ReferenceMeetingHttpAssembly(database, runtime, resolver, errors,
-                    config.realtimeRenewEnabled());
+                    config.realtimeRenewEnabled(), realtimeVerifier, realtimeIngress, clock);
         } catch (RuntimeException | Error failure) {
             try {
                 if (runtime != null) {
@@ -245,6 +271,24 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                 () -> database.checkReadiness().ready()
                         && (!realtimeRenewEnabled
                                 || database.checkRealtimeCredentialReadiness().ready()));
+    }
+
+    /**
+     * 从同一唯一 JDBC 池装配尚未启动的 TLS 实时入口。V014/V015 必须先完成按需
+     * readiness；仅创建未启动的 listener，不自动迁移、启动 Worker 或开放网络流量。
+     * 调用方先关闭返回的 WSS，再关闭本装配根及其连接池。
+     */
+    public MeetingRealtimeWssServer newRealtimeWssServer(
+            InetSocketAddress address, SSLContext tls) {
+        if (closed.get()) {
+            throw new IllegalStateException("reference meeting HTTP assembly is closed");
+        }
+        DatabaseReadiness credentials = database.checkRealtimeCredentialReadiness();
+        if (!credentials.ready()) throw new DatabaseStartupException(credentials);
+        DatabaseReadiness audio = database.checkDurableAudioReadiness();
+        if (!audio.ready()) throw new DatabaseStartupException(audio);
+        return new MeetingRealtimeWssServer(address, tls, realtimeVerifier,
+                realtimeAudioIngress, clock);
     }
 
     /** 幂等地先关闭请求入口，再关闭唯一 JDBC 池；不删除任何数据库事实。 */

@@ -280,7 +280,7 @@ public final class ReferenceMeetingDeploymentConfig {
     public TrustedCreateRuntimeLimits runtimeLimits() { return runtimeLimits; }
     /** 只供分页 HMAC 编解码器构造使用；返回私有密钥的副本。 */
     public byte[] pageTokenSecretCopy() { return pageTokenSecret.clone(); }
-    /** 目前仅用于首次会话描述；15-03/04 不提供可连接的 WSS 监听器。 */
+    /** 首次 Create 会话的公开 WSS origin；监听器由装配根的显式工厂另行创建。 */
     public URI wssOrigin() { return wssOrigin; }
     public Duration wssTokenTtl() { return wssTokenTtl; }
     /** 缺省严格为 false，只有显式字符串 true 才允许开放 Create。 */

@@ -562,9 +562,10 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
     /**
      * 新实时凭据功能的显式可选数据库门禁。
      *
-     * <p>默认关闭的续期 REST 和尚未接入的 WSS 不应把 V014 变成旧 HTTP/T14 Worker
-     * 的全局启动前提。调用方必须先通过 {@link #start(DatabaseRuntimeConfig)} 的
-     * V001～V013 基线，再在启用新入口时调用本方法；只有同时存在完整 V014 版本
+     * <p>默认关闭的续期 REST 和显式创建的 WSS 入口按需检查 V014，不把它变成旧
+     * HTTP/T14 Worker 的全局启动前提。调用方必须先通过
+     * {@link #start(DatabaseRuntimeConfig)} 的 V001～V013 基线，再在启用新入口时
+     * 调用本方法；只有同时存在完整 V014 版本
      * 登记与精确物理契约才可开放。该方法只读，不执行迁移或修补半表。</p>
      *
      * @return READY、缺迁移、结构无效、数据库不可用或运行时已关闭的脱敏状态
