@@ -3,12 +3,18 @@ package com.czur.reference.application.persistence.jdbc;
 import com.czur.aimeeting.contract.realtime.v1.AudioEncoding;
 import com.czur.aimeeting.contract.realtime.v1.AudioProfile;
 import com.czur.aimeeting.contract.realtime.v1.ClientEnvelope;
+import com.czur.aimeeting.contract.realtime.v1.InputComplete;
 import com.czur.aimeeting.contract.realtime.v1.ServerEnvelope;
 import com.czur.aimeeting.contract.realtime.v1.StreamStart;
 import com.czur.reference.application.bootstrap.ReferenceMeetingDeploymentConfig;
 import com.czur.reference.application.bootstrap.ReferenceMeetingHttpAssembly;
+import com.czur.reference.application.artifact.filesystem.PersistentFileSystemMockArtifactStore;
 import com.czur.reference.application.command.CreateMeetingResponseFact;
+import com.czur.reference.application.command.MeetingPermissions;
+import com.czur.reference.application.entitlement.referencedev.ReferenceDevEntitlementPolicy;
+import com.czur.reference.application.finalization.MockFinalizationWorker;
 import com.czur.reference.application.identity.referencedev.ReferenceDevIdentityConfig;
+import com.czur.reference.application.port.entitlement.EntitlementIdGenerator;
 import com.czur.reference.application.port.model.MeetingAudioFrame;
 import com.czur.reference.application.realtime.AudioFrameContentDigest;
 import com.czur.reference.application.wss.MeetingRealtimeWssServer;
@@ -45,6 +51,7 @@ import java.sql.Statement;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.Arrays;
 import java.util.List;
@@ -56,6 +63,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -298,6 +306,144 @@ class ReferenceMeetingRealtimeWssIntegrationTest {
         }
     }
 
+    @Test
+    void realShortMeetingClosesInputRunsWorkerAndRevokesResultsAfterDelete()
+            throws Exception {
+        migrate(1, 15);
+        TestTls tls = TestTls.create(temporaryDirectory);
+        int wssPort = freeLoopbackPort();
+        Map<String, String> values = config(wssPort);
+        values.put(ReferenceDevIdentityConfig.PERMISSIONS,
+                "meeting:create," + MeetingPermissions.STOP + "," + MeetingPermissions.DELETE);
+        values.put(ReferenceMeetingDeploymentConfig.RESULT_LINK_TTL_MS, "60000");
+        var trusted = ReferenceMeetingDeploymentConfig.fromEnvironment(values);
+        var clock = new MutableClock(NOW);
+        Path artifactRoot = Files.createDirectory(temporaryDirectory.resolve("short-meeting-artifacts"));
+        var artifacts = new PersistentFileSystemMockArtifactStore(artifactRoot, 4096);
+        byte[] pcm = new byte[3_200];
+        Arrays.fill(pcm, (byte) 0x5a);
+
+        try (var assembly = ReferenceMeetingHttpAssembly.start(values, clock, artifacts);
+             var http = assembly.newJdkHttpServer(new InetSocketAddress("127.0.0.1", 0));
+             MeetingRealtimeWssServer wss = assembly.newRealtimeWssServer(
+                     new InetSocketAddress("127.0.0.1", wssPort), tls.server());
+             HttpClient client = HttpClient.newBuilder().sslContext(tls.trusted()).build()) {
+            http.start();
+            wss.start();
+            wss.awaitStarted(Duration.ofSeconds(5));
+            int port = http.address().getPort();
+            HttpResponse<String> created = request(client, port, "POST", "/v1/meetings",
+                    createBody(), "short-meeting-create-key-0001");
+            assertEquals(201, created.statusCode());
+            JsonNode create = JSON.readTree(created.body());
+            String meetingId = create.path("meetingId").asText();
+            String path = "/v1/meetings/" + meetingId;
+            URI wssUrl = URI.create(create.path("realtime").path("url").asText());
+            String sessionToken = create.path("realtime").path("sessionToken").asText();
+            assertEquals(wssPort, wssUrl.getPort());
+
+            EventListener listener = new EventListener();
+            java.net.http.WebSocket socket = client.newWebSocketBuilder()
+                    .connectTimeout(Duration.ofSeconds(5))
+                    .header("Authorization", "Bearer " + sessionToken)
+                    .subprotocols(CreateMeetingResponseFact.REALTIME_SUBPROTOCOL)
+                    .buildAsync(wssUrl, listener).orTimeout(5, TimeUnit.SECONDS).join();
+            socket.sendBinary(ByteBuffer.wrap(start(meetingId).toByteArray()), true).join();
+            socket.sendBinary(ByteBuffer.wrap(frame(meetingId, pcm).toByteArray()), true).join();
+            ServerEnvelope ack = listener.firstAck.orTimeout(5, TimeUnit.SECONDS).join();
+            ServerEnvelope subtitle = listener.transcript.orTimeout(5, TimeUnit.SECONDS).join();
+            assertTrue(ack.getAudioAck().getDurable());
+            assertEquals(1, ack.getAudioAck().getAcceptedStreamSequence());
+            assertEquals(1, subtitle.getEventSequence());
+            assertEquals("模拟实时字幕（修订 1）", subtitle.getTranscriptUpsert().getText());
+
+            // Stop 先提交但没有完成声明：不得提前生成 V008、receipt 或 Workflow。
+            HttpResponse<String> pendingStop = request(client, port, "POST", path + ":stop",
+                    "", "short-meeting-stop-key-0001");
+            assertEquals(202, pendingStop.statusCode());
+            assertTrue(JSON.readTree(pendingStop.body()).path("finalizationReceipt").isNull());
+            assertEquals("0", scalarForMeeting(
+                    "SELECT count(*) FROM durable_input_fact WHERE meeting_id=?", meetingId));
+
+            socket.sendBinary(ByteBuffer.wrap(inputComplete(meetingId).toByteArray()), true)
+                    .join();
+            awaitMeetingCount("SELECT count(*) FROM durable_input_fact WHERE meeting_id=?",
+                    meetingId, 1);
+            assertEquals(1, listener.ackCount.get(), "完成声明不得冒充音频 ACK");
+            assertEquals("1", scalarForMeeting(
+                    "SELECT count(*) FROM final_usage_fact WHERE meeting_id=?", meetingId));
+            assertEquals("1", scalarForMeeting(
+                    "SELECT count(*) FROM workflow_step WHERE meeting_id=?", meetingId));
+            String receipt = scalarForMeeting(
+                    "SELECT finalization_receipt_id FROM meeting WHERE meeting_id=?", meetingId);
+            assertTrue(receipt.startsWith("receipt_"));
+            JsonNode accepted = JSON.readTree(request(client, port, "GET", path, "", null).body());
+            assertEquals("INPUT_ACCEPTED", accepted.path("inputState").asText());
+            assertEquals(receipt, accepted.path("finalizationReceipt").asText());
+            socket.sendClose(java.net.http.WebSocket.NORMAL_CLOSURE, "done").join();
+            listener.closed.orTimeout(5, TimeUnit.SECONDS).join();
+
+            Clock workerClock = Clock.fixed(NOW.plusSeconds(1), ZoneOffset.UTC);
+            EntitlementIdGenerator ids = new EntitlementIdGenerator() {
+                @Override public String newGrantId() { return "grant_" + UUID.randomUUID(); }
+                @Override public String newReservationId() {
+                    return "reservation_" + UUID.randomUUID();
+                }
+                @Override public String newLeaseToken() { return "lease_" + UUID.randomUUID(); }
+            };
+            var source = assembly.databaseRuntime().dataSource();
+            var entitlement = new JdbcReferenceDevEntitlementProvider(source,
+                    new ReferenceDevEntitlementPolicy(trusted.entitlement(), workerClock, ids),
+                    workerClock);
+            var worker = new MockFinalizationWorker(new JdbcWorkflowStepStore(source),
+                    artifacts, entitlement, new JdbcFinalizationCompletionUnitOfWork(source),
+                    new MockFinalizationWorker.Config("short-meeting-worker", workerClock,
+                            Duration.ofSeconds(30), Duration.ofSeconds(5), Duration.ZERO, 1, 3));
+            assertEquals(MockFinalizationWorker.ItemStatus.COMPLETED,
+                    worker.runOnce().items().getFirst().status());
+            assertTrue(worker.runOnce().idle());
+
+            HttpResponse<String> events = request(client, port, "GET",
+                    path + "/events?afterSequence=0&limit=10", "", null);
+            assertEquals(200, events.statusCode());
+            JsonNode eventPage = JSON.readTree(events.body());
+            assertEquals(1, eventPage.path("items").size());
+            assertEquals("模拟实时字幕（修订 1）", eventPage.path("items").get(0)
+                    .path("transcriptUpsert").path("text").asText());
+            HttpResponse<String> manifestResponse = request(client, port, "GET",
+                    path + "/manifest?genTime=-1", "", null);
+            assertEquals(200, manifestResponse.statusCode());
+            JsonNode manifest = JSON.readTree(manifestResponse.body());
+            assertEquals("READY", manifest.path("status").asText());
+            assertEquals(1, manifest.path("artifacts").size());
+            JsonNode artifact = manifest.path("artifacts").get(0);
+            assertEquals("transcript.final", artifact.path("type").asText());
+            String artifactPath = "/v1/artifacts/" + artifact.path("artifactId").asText()
+                    + "?genTime=-1";
+            HttpResponse<String> transcript = request(client, port, "GET", artifactPath, "", null);
+            assertEquals(200, transcript.statusCode());
+            assertTrue(transcript.body().contains("【模拟最终转写】"));
+            assertFalse(transcript.body().isBlank());
+
+            HttpResponse<String> replayStop = request(client, port, "POST", path + ":stop",
+                    "", "short-meeting-stop-key-0001");
+            assertEquals(200, replayStop.statusCode());
+            assertEquals(receipt, JSON.readTree(replayStop.body())
+                    .path("finalizationReceipt").asText());
+            assertEquals("1", scalarForMeeting(
+                    "SELECT count(*) FROM durable_input_fact WHERE meeting_id=?", meetingId));
+
+            clock.advanceTo(NOW.plusSeconds(2));
+            assertEquals(202, request(client, port, "DELETE", path, "",
+                    "short-meeting-delete-key-0001").statusCode());
+            assertEquals(403, request(client, port, "GET",
+                    path + "/events?afterSequence=0&limit=10", "", null).statusCode());
+            assertEquals(403, request(client, port, "GET",
+                    path + "/manifest?genTime=-1", "", null).statusCode());
+            assertEquals(403, request(client, port, "GET", artifactPath, "", null).statusCode());
+        }
+    }
+
     private static String scalar(Connection connection, String sql, String meetingId)
             throws Exception {
         try (PreparedStatement query = connection.prepareStatement(sql)) {
@@ -309,6 +455,55 @@ class ReferenceMeetingRealtimeWssIntegrationTest {
                 return value;
             }
         }
+    }
+
+    private String scalarForMeeting(String sql, String meetingId) throws Exception {
+        try (Connection connection = fixtureDataSource.getConnection()) {
+            return scalar(connection, sql, meetingId);
+        }
+    }
+
+    private void awaitMeetingCount(String sql, String meetingId, int expected)
+            throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (Integer.parseInt(scalarForMeeting(sql, meetingId)) < expected
+                && System.nanoTime() < deadline) {
+            Thread.sleep(5);
+        }
+        assertEquals(Integer.toString(expected), scalarForMeeting(sql, meetingId));
+    }
+
+    private static HttpResponse<String> request(HttpClient client, int port, String method,
+            String path, String body, String idempotencyKey) throws Exception {
+        HttpRequest.Builder builder = HttpRequest.newBuilder(
+                        URI.create("http://127.0.0.1:" + port + path))
+                .header("Authorization", "Bearer " + USER_TOKEN);
+        if (idempotencyKey != null) builder.header("Idempotency-Key", idempotencyKey);
+        if (!body.isEmpty()) builder.header("Content-Type", "application/json");
+        HttpRequest request = builder.method(method,
+                body.isEmpty() ? HttpRequest.BodyPublishers.noBody()
+                        : HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+                .build();
+        return client.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+    }
+
+    private static final class MutableClock extends Clock {
+        private final AtomicReference<Instant> now;
+
+        private MutableClock(Instant initial) { now = new AtomicReference<>(initial); }
+
+        private void advanceTo(Instant instant) {
+            now.updateAndGet(current -> {
+                if (instant.isBefore(current)) {
+                    throw new IllegalArgumentException("test clock cannot move backwards");
+                }
+                return instant;
+            });
+        }
+
+        @Override public ZoneId getZone() { return ZoneOffset.UTC; }
+        @Override public Clock withZone(ZoneId zone) { return this; }
+        @Override public Instant instant() { return now.get(); }
     }
 
     private static ClientEnvelope start(String meetingId) {
@@ -328,6 +523,16 @@ class ReferenceMeetingRealtimeWssIntegrationTest {
                 .setAudioFrame(com.czur.aimeeting.contract.realtime.v1.MeetingAudioFrame
                         .newBuilder().setStreamSequence(1).setStartPositionMs(0)
                         .setDurationMs(100).setAudio(ByteString.copyFrom(pcm)))
+                .build();
+    }
+
+    private static ClientEnvelope inputComplete(String meetingId) {
+        return ClientEnvelope.newBuilder().setSpecVersion(RealtimeWireCodec.SPEC_VERSION)
+                .setMeetingId(meetingId).setStreamId(meetingId)
+                .setClientMessageId("network-complete-1")
+                .setInputComplete(InputComplete.newBuilder()
+                        .setLastStreamSequence(1).setLastAudioPositionMs(100)
+                        .setRequestId("network-complete-1"))
                 .build();
     }
 
