@@ -5,9 +5,11 @@ import com.czur.reference.application.port.DurableAudioInputPort;
 import com.czur.reference.application.port.RealtimeCredentialVerifier;
 import com.czur.reference.application.port.identity.SecretCredential;
 import com.czur.reference.application.realtime.RealtimeAudioIngress;
+import com.czur.reference.application.realtime.RealtimeTranscriptSessions;
 import com.czur.reference.domain.meeting.MeetingIdPolicy;
 import com.czur.reference.protocol.realtime.RealtimeAudioWireMapper;
 import com.czur.reference.protocol.realtime.RealtimeWireCodec;
+import com.czur.reference.protocol.realtime.RealtimeTranscriptEventMapper;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -25,8 +27,9 @@ import java.util.Objects;
  * 旧 epoch、拒绝及存储故障都关闭连接，不回退到内存游标。</p>
  *
  * <p>本切片只支持 stream_start 与 audio_frame。其它 body 在后续短会切片接入前
- * 明确关闭，不在这里实现字幕、Stop、事件补拉或模型处理。网络监听器只转发字节
- * 与发送结果，不复制上述编排。关闭连接必须调用 {@link #close()} 销毁凭据；
+ * 明确关闭，不在这里实现 Stop 或事件补拉。Mock 字幕由应用层从 V015 帧恢复并
+ * 持久发布；本层只把已存事件编码成 ACK 之后的第二条消息。关闭连接必须调用
+ * {@link #close()} 销毁凭据与本连接 Mock 会话；
  * 对象按连接串行处理，同步方法也防止库回调并发时重复绑定。</p>
  */
 public final class RealtimeWssConnection implements AutoCloseable {
@@ -34,22 +37,26 @@ public final class RealtimeWssConnection implements AutoCloseable {
     private final SecretCredential credential;
     private final RealtimeCredentialVerifier verifier;
     private final RealtimeAudioIngress ingress;
+    private final RealtimeTranscriptSessions transcriptSessions;
     private final Clock clock;
     private final Instant initialExpiresAt;
     private final RealtimeCredentialVerifier.AudioContract audioContract;
     private final RealtimeWireCodec codec;
     private final DurableAudioInputPort.WriterConnectionId connectionId;
     private DurableAudioInputPort.WriterBinding binding;
+    private RealtimeTranscriptSessions.Session transcriptSession;
     private boolean startAttempted;
     private boolean closed;
 
     private RealtimeWssConnection(String meetingId, SecretCredential credential,
-            RealtimeCredentialVerifier verifier, RealtimeAudioIngress ingress, Clock clock,
+            RealtimeCredentialVerifier verifier, RealtimeAudioIngress ingress,
+            RealtimeTranscriptSessions transcriptSessions, Clock clock,
             RealtimeCredentialVerifier.AudioContract audioContract, Instant initialExpiresAt) {
         this.meetingId = meetingId;
         this.credential = credential;
         this.verifier = verifier;
         this.ingress = ingress;
+        this.transcriptSessions = transcriptSessions;
         this.clock = clock;
         this.initialExpiresAt = Objects.requireNonNull(initialExpiresAt, "initialExpiresAt");
         this.audioContract = audioContract;
@@ -63,6 +70,13 @@ public final class RealtimeWssConnection implements AutoCloseable {
      */
     public static RealtimeWssConnection open(String meetingId, SecretCredential credential,
             RealtimeCredentialVerifier verifier, RealtimeAudioIngress ingress, Clock clock) {
+        return open(meetingId, credential, verifier, ingress, null, clock);
+    }
+
+    /** 正式装配传入 Mock 运行时；旧定向传输测试可只验证音频 ACK。 */
+    public static RealtimeWssConnection open(String meetingId, SecretCredential credential,
+            RealtimeCredentialVerifier verifier, RealtimeAudioIngress ingress,
+            RealtimeTranscriptSessions transcriptSessions, Clock clock) {
         Objects.requireNonNull(credential, "credential");
         try {
             MeetingIdPolicy.requireValid(meetingId);
@@ -75,7 +89,8 @@ public final class RealtimeWssConnection implements AutoCloseable {
                     || !clock.instant().isBefore(granted.expiresAt())) {
                 throw new SessionRejected();
             }
-            return new RealtimeWssConnection(meetingId, credential, verifier, ingress, clock,
+            return new RealtimeWssConnection(meetingId, credential, verifier, ingress,
+                    transcriptSessions, clock,
                     granted.audioContract(), granted.expiresAt());
         } catch (RuntimeException failure) {
             credential.close();
@@ -132,6 +147,7 @@ public final class RealtimeWssConnection implements AutoCloseable {
                 new RealtimeAudioIngress.VerifiedWriteSession(meetingId, grant), connectionId);
         if (result instanceof RealtimeAudioIngress.Ready ready) {
             binding = ready.binding();
+            if (transcriptSessions != null) transcriptSession = transcriptSessions.open(meetingId);
             return new NoReply();
         }
         return terminate(result instanceof RealtimeAudioIngress.BindRejected
@@ -145,9 +161,13 @@ public final class RealtimeWssConnection implements AutoCloseable {
         var result = ingress.append(
                 new RealtimeAudioIngress.VerifiedWriteSession(meetingId, grant), binding, frame);
         if (result instanceof RealtimeAudioIngress.DurableAckCursor cursor) {
+            var transcript = transcriptSession == null ? null : transcriptSession.acceptStored(frame);
             Instant emittedAt = Objects.requireNonNull(clock.instant(), "clock.instant()");
-            return new SendBinary(codec.encodeServer(
-                    RealtimeAudioWireMapper.durableAck(meetingId, cursor, emittedAt)));
+            byte[] ack = codec.encodeServer(
+                    RealtimeAudioWireMapper.durableAck(meetingId, cursor, emittedAt));
+            if (transcript == null) return new SendBinary(ack);
+            byte[] event = codec.encodeServer(RealtimeTranscriptEventMapper.fromStored(transcript));
+            return new SendPair(ack, event);
         }
         return terminate(result instanceof RealtimeAudioIngress.AppendRejected ? 1008 : 1011);
     }
@@ -169,7 +189,11 @@ public final class RealtimeWssConnection implements AutoCloseable {
     public synchronized void close() {
         if (!closed) {
             closed = true;
-            credential.close();
+            try {
+                if (transcriptSession != null) transcriptSession.close();
+            } finally {
+                credential.close();
+            }
         }
     }
 
@@ -179,13 +203,23 @@ public final class RealtimeWssConnection implements AutoCloseable {
     }
 
     /** 一条入站消息仅有三种网络结果：静默成功、持久 ACK 或关闭。 */
-    public sealed interface Result permits NoReply, SendBinary, Terminate { }
+    public sealed interface Result permits NoReply, SendBinary, SendPair, Terminate { }
 
     public record NoReply() implements Result { }
 
     public record SendBinary(byte[] bytes) implements Result {
         public SendBinary { bytes = Arrays.copyOf(bytes, bytes.length); }
         @Override public byte[] bytes() { return Arrays.copyOf(bytes, bytes.length); }
+    }
+
+    /** 同一入站帧至多两条固定顺序输出：持久 ACK，然后已落库字幕。 */
+    public record SendPair(byte[] first, byte[] second) implements Result {
+        public SendPair {
+            first = Arrays.copyOf(first, first.length);
+            second = Arrays.copyOf(second, second.length);
+        }
+        @Override public byte[] first() { return Arrays.copyOf(first, first.length); }
+        @Override public byte[] second() { return Arrays.copyOf(second, second.length); }
     }
 
     /** 使用 WebSocket 标准 close code；不带可能泄露事实的原因正文。 */

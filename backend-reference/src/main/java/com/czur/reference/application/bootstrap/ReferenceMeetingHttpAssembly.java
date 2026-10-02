@@ -25,6 +25,8 @@ import com.czur.reference.application.persistence.jdbc.JdbcOwnedMeetingStopUnitO
 import com.czur.reference.application.persistence.jdbc.JdbcRenewRealtimeTokenUnitOfWork;
 import com.czur.reference.application.persistence.jdbc.JdbcRealtimeCredentialVerifier;
 import com.czur.reference.application.persistence.jdbc.JdbcRealtimeStartFactsLookup;
+import com.czur.reference.application.persistence.jdbc.JdbcRealtimeMockSessionSpecLookup;
+import com.czur.reference.application.persistence.jdbc.JdbcRealtimeTranscriptEventPublisher;
 import com.czur.reference.application.persistence.jdbc.JdbcMeetingStartExecutionUnitOfWork;
 import com.czur.reference.application.persistence.jdbc.JdbcDurableAudioInputPort;
 import com.czur.reference.application.persistence.jdbc.DatabaseReadiness;
@@ -37,6 +39,8 @@ import com.czur.reference.application.port.MeetingArtifactContentPort;
 import com.czur.reference.application.port.artifact.ArtifactStore;
 import com.czur.reference.application.port.ProductProfileCatalog;
 import com.czur.reference.application.realtime.RealtimeAudioIngress;
+import com.czur.reference.application.realtime.RealtimeMockTranscriptRuntime;
+import com.czur.reference.application.realtime.RealtimeTranscriptSessions;
 import com.czur.reference.application.realtime.RealtimeMeetingStartCoordinator;
 import com.czur.reference.application.wss.MeetingRealtimeWssServer;
 import com.czur.reference.application.port.entitlement.EntitlementIdGenerator;
@@ -82,6 +86,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
     private final boolean realtimeRenewEnabled;
     private final JdbcRealtimeCredentialVerifier realtimeVerifier;
     private final RealtimeAudioIngress realtimeAudioIngress;
+    private final RealtimeTranscriptSessions realtimeTranscriptSessions;
     private final Clock clock;
     private final AtomicBoolean closed = new AtomicBoolean();
 
@@ -90,7 +95,8 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
             AuthenticatedMeetingHttpContextResolver contextResolver,
             HttpErrorMapper errors, boolean realtimeRenewEnabled,
             JdbcRealtimeCredentialVerifier realtimeVerifier,
-            RealtimeAudioIngress realtimeAudioIngress, Clock clock) {
+            RealtimeAudioIngress realtimeAudioIngress,
+            RealtimeTranscriptSessions realtimeTranscriptSessions, Clock clock) {
         this.database = database;
         this.runtime = runtime;
         this.contextResolver = contextResolver;
@@ -98,6 +104,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
         this.realtimeRenewEnabled = realtimeRenewEnabled;
         this.realtimeVerifier = realtimeVerifier;
         this.realtimeAudioIngress = realtimeAudioIngress;
+        this.realtimeTranscriptSessions = realtimeTranscriptSessions;
         this.clock = clock;
     }
 
@@ -175,13 +182,20 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                             ? Optional.of(config.profile()) : Optional.empty();
             var realtimeVerifier = new JdbcRealtimeCredentialVerifier(
                     dataSource, config.deploymentScope(), clock);
+            var durableAudio = new JdbcDurableAudioInputPort(dataSource,
+                    config.deploymentScope());
             var realtimeIngress = new RealtimeAudioIngress(
                     new RealtimeMeetingStartCoordinator(config.deploymentScope(),
                             new JdbcRealtimeStartFactsLookup(dataSource), profiles,
                             config.mockCapabilities(), config.capabilityLimits(), clock,
                             new JdbcMeetingStartExecutionUnitOfWork(
                                     dataSource, new CapabilityPlanner())),
-                    new JdbcDurableAudioInputPort(dataSource, config.deploymentScope()));
+                    durableAudio);
+            var realtimeTranscripts = new RealtimeMockTranscriptRuntime(
+                    new JdbcRealtimeMockSessionSpecLookup(dataSource,
+                            config.deploymentScope()), durableAudio,
+                    new JdbcRealtimeTranscriptEventPublisher(dataSource, clock),
+                    config.mockCapabilities(), clock);
             MeetingManifestPort manifest = config.resultLinkTtl()
                     .<MeetingManifestPort>map(ttl -> new JdbcMeetingManifestQueryPort(
                             dataSource, new ManifestResultAccessPolicy(clock, ttl)))
@@ -221,7 +235,8 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                     "reference meeting HTTP 装配完成 createEnabled={0} realtimeRenewEnabled={1}",
                     new Object[]{config.createEnabled(), config.realtimeRenewEnabled()});
             return new ReferenceMeetingHttpAssembly(database, runtime, resolver, errors,
-                    config.realtimeRenewEnabled(), realtimeVerifier, realtimeIngress, clock);
+                    config.realtimeRenewEnabled(), realtimeVerifier, realtimeIngress,
+                    realtimeTranscripts, clock);
         } catch (RuntimeException | Error failure) {
             try {
                 if (runtime != null) {
@@ -288,7 +303,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
         DatabaseReadiness audio = database.checkDurableAudioReadiness();
         if (!audio.ready()) throw new DatabaseStartupException(audio);
         return new MeetingRealtimeWssServer(address, tls, realtimeVerifier,
-                realtimeAudioIngress, clock);
+                realtimeAudioIngress, realtimeTranscriptSessions, clock);
     }
 
     /** 幂等地先关闭请求入口，再关闭唯一 JDBC 池；不删除任何数据库事实。 */

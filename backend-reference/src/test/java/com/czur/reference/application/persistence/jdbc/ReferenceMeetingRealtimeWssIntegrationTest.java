@@ -47,6 +47,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.Arrays;
+import java.util.List;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
@@ -55,6 +56,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -63,7 +65,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** 专属 PostgreSQL 16 随机 schema：真实 HTTP Create 到正式 WSS 持久 ACK 的最短链。 */
+/** 专属 PostgreSQL 16 随机 schema：真实 Create、WSS ACK、Mock 字幕和重连去重。 */
 @EnabledIfEnvironmentVariable(named = "REFERENCE_TEST_DATABASE_URL", matches = ".+")
 class ReferenceMeetingRealtimeWssIntegrationTest {
     private static final Instant NOW = Instant.parse("2026-10-01T10:00:00Z");
@@ -102,7 +104,8 @@ class ReferenceMeetingRealtimeWssIntegrationTest {
     }
 
     @Test
-    void httpCreateUrlAndTokenReachRealWssStartStoredFrameAndDurableAck() throws Exception {
+    void httpCreateAndRealWssPersistAckThenMockTranscriptWithoutReplayDuplication()
+            throws Exception {
         migrate(1, 13);
         TestTls tls = TestTls.create(temporaryDirectory);
         int wssPort = freeLoopbackPort();
@@ -124,6 +127,10 @@ class ReferenceMeetingRealtimeWssIntegrationTest {
         }
         migrate(15, 15);
 
+        String meetingId;
+        String sessionToken;
+        byte[] pcm = new byte[3_200];
+        Arrays.fill(pcm, (byte) 0x5a);
         try (var assembly = ReferenceMeetingHttpAssembly.start(config, CLOCK);
              var http = assembly.newJdkHttpServer(new InetSocketAddress("127.0.0.1", 0));
              MeetingRealtimeWssServer wss = assembly.newRealtimeWssServer(
@@ -144,8 +151,8 @@ class ReferenceMeetingRealtimeWssIntegrationTest {
                     HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
             assertEquals(201, created.statusCode());
             JsonNode response = JSON.readTree(created.body());
-            String meetingId = response.path("meetingId").textValue();
-            String sessionToken = response.path("realtime").path("sessionToken").textValue();
+            meetingId = response.path("meetingId").textValue();
+            sessionToken = response.path("realtime").path("sessionToken").textValue();
             String subprotocol = response.path("realtime").path("subprotocol").textValue();
             URI wssUrl = URI.create(response.path("realtime").path("url").textValue());
             assertTrue(meetingId.startsWith("mtg_"));
@@ -154,7 +161,7 @@ class ReferenceMeetingRealtimeWssIntegrationTest {
             assertEquals(wssPort, wssUrl.getPort());
             assertEquals("/v1/realtime/" + meetingId, wssUrl.getPath());
 
-            AckListener listener = new AckListener();
+            EventListener listener = new EventListener();
             java.net.http.WebSocket socket = client.newWebSocketBuilder()
                     .connectTimeout(Duration.ofSeconds(5))
                     .header("Authorization", "Bearer " + sessionToken)
@@ -162,11 +169,9 @@ class ReferenceMeetingRealtimeWssIntegrationTest {
                     .buildAsync(wssUrl, listener).orTimeout(5, TimeUnit.SECONDS).join();
             assertEquals(subprotocol, socket.getSubprotocol());
             socket.sendBinary(ByteBuffer.wrap(start(meetingId).toByteArray()), true).join();
-            byte[] pcm = new byte[3_200];
-            Arrays.fill(pcm, (byte) 0x5a);
             socket.sendBinary(ByteBuffer.wrap(frame(meetingId, pcm).toByteArray()), true).join();
 
-            ServerEnvelope ack = listener.ack.orTimeout(5, TimeUnit.SECONDS).join();
+            ServerEnvelope ack = listener.firstAck.orTimeout(5, TimeUnit.SECONDS).join();
             assertEquals(meetingId, ack.getMeetingId());
             assertEquals(meetingId, ack.getStreamId());
             assertEquals(0, ack.getEventSequence());
@@ -174,7 +179,21 @@ class ReferenceMeetingRealtimeWssIntegrationTest {
             assertTrue(ack.getAudioAck().getDurable());
             assertEquals(1, ack.getAudioAck().getAcceptedStreamSequence());
             assertEquals(100, ack.getAudioAck().getAcceptedAudioPositionMs());
-            assertEquals(1, listener.ackCount.get());
+            ServerEnvelope transcript = listener.transcript.orTimeout(5, TimeUnit.SECONDS).join();
+            assertEquals(meetingId, transcript.getMeetingId());
+            assertEquals(meetingId, transcript.getStreamId());
+            assertEquals(1, transcript.getEventSequence());
+            assertTrue(transcript.getEventId().startsWith("evt_mock_"));
+            assertEquals("mock-segment-1", transcript.getTranscriptUpsert().getSegmentId());
+            assertEquals(1, transcript.getTranscriptUpsert().getRevision());
+            assertEquals("模拟实时字幕（修订 1）", transcript.getTranscriptUpsert().getText());
+            assertFalse(transcript.getTranscriptUpsert().getFinal());
+            assertEquals(List.of("ACK", "TRANSCRIPT"), listener.order);
+
+            // 同一写者重复 V015 帧只重发持久 ACK；不重复推送/落库事件。
+            socket.sendBinary(ByteBuffer.wrap(frame(meetingId, pcm).toByteArray()), true).join();
+            ServerEnvelope duplicateAck = listener.secondAck.orTimeout(5, TimeUnit.SECONDS).join();
+            assertEquals(1, duplicateAck.getAudioAck().getAcceptedStreamSequence());
 
             // 新 JDBC 连接独立读回 V011 Start、V015 写者/游标与完整帧；不能只信 ACK。
             try (Connection readback = fixtureDataSource.getConnection()) {
@@ -217,9 +236,65 @@ class ReferenceMeetingRealtimeWssIntegrationTest {
                         assertFalse(rows.next());
                     }
                 }
+                assertEquals("1", scalar(readback,
+                        "SELECT count(*) FROM meeting_event WHERE meeting_id=?", meetingId));
+                try (PreparedStatement query = readback.prepareStatement("""
+                        SELECT event_sequence, event_id, event_type, canonical_payload,
+                               spec_version, stream_id
+                          FROM meeting_event WHERE meeting_id=?
+                        """)) {
+                    query.setString(1, meetingId);
+                    try (var rows = query.executeQuery()) {
+                        assertTrue(rows.next());
+                        assertEquals(1, rows.getLong("event_sequence"));
+                        assertEquals(transcript.getEventId(), rows.getString("event_id"));
+                        assertEquals("transcriptUpsert", rows.getString("event_type"));
+                        assertEquals(RealtimeWireCodec.SPEC_VERSION,
+                                rows.getString("spec_version"));
+                        assertEquals(meetingId, rows.getString("stream_id"));
+                        JsonNode stored = JSON.readTree(rows.getString("canonical_payload"));
+                        assertEquals("模拟实时字幕（修订 1）",
+                                stored.path("transcriptUpsert").path("text").textValue());
+                        assertEquals(transcript.getEventId(), stored.path("eventId").textValue());
+                        assertFalse(rows.next());
+                    }
+                }
             }
             socket.sendClose(java.net.http.WebSocket.NORMAL_CLOSURE, "done").join();
             listener.closed.orTimeout(5, TimeUnit.SECONDS).join();
+            assertEquals(List.of("ACK", "TRANSCRIPT", "ACK"), listener.order);
+        }
+
+        // 新装配、新连接从 V015 重建 Mock 状态；已发布赢家不会再次推送或分配序号。
+        int reconnectPort = freeLoopbackPort();
+        try (var assembly = ReferenceMeetingHttpAssembly.start(config(reconnectPort), CLOCK);
+             MeetingRealtimeWssServer wss = assembly.newRealtimeWssServer(
+                     new InetSocketAddress("127.0.0.1", reconnectPort), tls.server());
+             HttpClient client = HttpClient.newBuilder().sslContext(tls.trusted()).build()) {
+            wss.start();
+            wss.awaitStarted(Duration.ofSeconds(5));
+            EventListener listener = new EventListener();
+            URI reconnectUrl = URI.create("wss://127.0.0.1:" + reconnectPort
+                    + "/v1/realtime/" + meetingId);
+            java.net.http.WebSocket socket = client.newWebSocketBuilder()
+                    .connectTimeout(Duration.ofSeconds(5))
+                    .header("Authorization", "Bearer " + sessionToken)
+                    .subprotocols(CreateMeetingResponseFact.REALTIME_SUBPROTOCOL)
+                    .buildAsync(reconnectUrl, listener).orTimeout(5, TimeUnit.SECONDS).join();
+            socket.sendBinary(ByteBuffer.wrap(start(meetingId).toByteArray()), true).join();
+            socket.sendBinary(ByteBuffer.wrap(frame(meetingId, pcm).toByteArray()), true).join();
+            ServerEnvelope ack = listener.firstAck.orTimeout(5, TimeUnit.SECONDS).join();
+            assertEquals(1, ack.getAudioAck().getAcceptedStreamSequence());
+            socket.sendClose(java.net.http.WebSocket.NORMAL_CLOSURE, "done").join();
+            listener.closed.orTimeout(5, TimeUnit.SECONDS).join();
+            assertEquals(List.of("ACK"), listener.order);
+            try (Connection readback = fixtureDataSource.getConnection()) {
+                assertEquals("1", scalar(readback,
+                        "SELECT count(*) FROM meeting_event WHERE meeting_id=?", meetingId));
+                assertEquals("1", scalar(readback,
+                        "SELECT max(event_sequence) FROM meeting_event WHERE meeting_id=?",
+                        meetingId));
+            }
         }
     }
 
@@ -353,10 +428,13 @@ class ReferenceMeetingRealtimeWssIntegrationTest {
     private static String user() { return System.getenv("REFERENCE_TEST_DATABASE_USER"); }
     private static String password() { return System.getenv("REFERENCE_TEST_DATABASE_PASSWORD"); }
 
-    private static final class AckListener implements java.net.http.WebSocket.Listener {
-        private final CompletableFuture<ServerEnvelope> ack = new CompletableFuture<>();
+    private static final class EventListener implements java.net.http.WebSocket.Listener {
+        private final CompletableFuture<ServerEnvelope> firstAck = new CompletableFuture<>();
+        private final CompletableFuture<ServerEnvelope> secondAck = new CompletableFuture<>();
+        private final CompletableFuture<ServerEnvelope> transcript = new CompletableFuture<>();
         private final CompletableFuture<Integer> closed = new CompletableFuture<>();
         private final AtomicInteger ackCount = new AtomicInteger();
+        private final List<String> order = new CopyOnWriteArrayList<>();
 
         @Override public void onOpen(java.net.http.WebSocket socket) { socket.request(1); }
 
@@ -365,8 +443,20 @@ class ReferenceMeetingRealtimeWssIntegrationTest {
             if (last) {
                 byte[] wire = new byte[bytes.remaining()];
                 bytes.get(wire);
-                ackCount.incrementAndGet();
-                ack.complete(CODEC.decodeServer(wire));
+                ServerEnvelope envelope = CODEC.decodeServer(wire);
+                switch (envelope.getBodyCase()) {
+                    case AUDIO_ACK -> {
+                        order.add("ACK");
+                        if (ackCount.incrementAndGet() == 1) firstAck.complete(envelope);
+                        else secondAck.complete(envelope);
+                    }
+                    case TRANSCRIPT_UPSERT -> {
+                        order.add("TRANSCRIPT");
+                        transcript.complete(envelope);
+                    }
+                    default -> closed.completeExceptionally(
+                            new AssertionError("unexpected WSS event body"));
+                }
             }
             socket.request(1);
             return null;
@@ -380,7 +470,9 @@ class ReferenceMeetingRealtimeWssIntegrationTest {
 
         @Override public void onError(java.net.http.WebSocket socket, Throwable error) {
             closed.completeExceptionally(error);
-            ack.completeExceptionally(error);
+            firstAck.completeExceptionally(error);
+            secondAck.completeExceptionally(error);
+            transcript.completeExceptionally(error);
         }
     }
 

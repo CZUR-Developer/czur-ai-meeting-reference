@@ -4,6 +4,7 @@ import com.czur.reference.application.command.CreateMeetingResponseFact;
 import com.czur.reference.application.port.RealtimeCredentialVerifier;
 import com.czur.reference.application.port.identity.SecretCredential;
 import com.czur.reference.application.realtime.RealtimeAudioIngress;
+import com.czur.reference.application.realtime.RealtimeTranscriptSessions;
 import com.czur.reference.domain.meeting.MeetingIdPolicy;
 import com.czur.reference.protocol.realtime.RealtimeWireCodec;
 import org.java_websocket.WebSocket;
@@ -55,6 +56,7 @@ public final class MeetingRealtimeWssServer extends WebSocketServer implements A
     private static final Duration DEFAULT_CLOSE_TIMEOUT = Duration.ofSeconds(5);
     private final RealtimeCredentialVerifier verifier;
     private final RealtimeAudioIngress ingress;
+    private final RealtimeTranscriptSessions transcriptSessions;
     private final Clock clock;
     private final ScheduledExecutorService expiryScanner = Executors.newSingleThreadScheduledExecutor(
             task -> {
@@ -73,12 +75,20 @@ public final class MeetingRealtimeWssServer extends WebSocketServer implements A
      */
     public MeetingRealtimeWssServer(InetSocketAddress address, SSLContext tls,
             RealtimeCredentialVerifier verifier, RealtimeAudioIngress ingress, Clock clock) {
+        this(address, tls, verifier, ingress, null, clock);
+    }
+
+    /** 正式装配另传 Mock 会话运行时；网络层仍只负责有界字节发送。 */
+    public MeetingRealtimeWssServer(InetSocketAddress address, SSLContext tls,
+            RealtimeCredentialVerifier verifier, RealtimeAudioIngress ingress,
+            RealtimeTranscriptSessions transcriptSessions, Clock clock) {
         super(Objects.requireNonNull(address, "address"), 2,
                 List.of(new Draft_6455(List.of(new DefaultExtension()), List.of(
                         new Protocol(CreateMeetingResponseFact.REALTIME_SUBPROTOCOL)),
                         RealtimeWireCodec.MAX_ENVELOPE_BYTES)));
         this.verifier = Objects.requireNonNull(verifier, "verifier");
         this.ingress = Objects.requireNonNull(ingress, "ingress");
+        this.transcriptSessions = transcriptSessions;
         this.clock = Objects.requireNonNull(clock, "clock");
         setWebSocketFactory(new DefaultSSLWebSocketServerFactory(
                 Objects.requireNonNull(tls, "tls")));
@@ -154,7 +164,7 @@ public final class MeetingRealtimeWssServer extends WebSocketServer implements A
         }
         try {
             RealtimeWssConnection session = RealtimeWssConnection.open(
-                    meetingId, credential, verifier, ingress, clock);
+                    meetingId, credential, verifier, ingress, transcriptSessions, clock);
             try {
                 connection.setAttachment(session);
             } catch (RuntimeException failure) {
@@ -206,19 +216,22 @@ public final class MeetingRealtimeWssServer extends WebSocketServer implements A
             connection.close(1009, "realtime message rejected");
             return;
         }
+        if (!connection.isOpen() || connection.hasBufferedData()) {
+            // 在处理本次帧之前守单帧窗口；本次最多 ACK+字幕两条发送，不在第一
+            // 条 send 后再用 hasBufferedData 误判第二条为背压。
+            closeSession(connection);
+            connection.close(1013, "realtime reconnect required");
+            return;
+        }
         byte[] wire = new byte[bytes.remaining()];
         bytes.get(wire);
         try {
             RealtimeWssConnection.Result result = session.receive(wire);
             if (result instanceof RealtimeWssConnection.SendBinary reply) {
-                if (!connection.isOpen() || connection.hasBufferedData()) {
-                    // Java-WebSocket 的 outQueue 无界；单帧窗口下已有待发字节就不
-                    // 再排 ACK。持久帧仍在 V015，客户端重连后按权威游标补发。
-                    closeSession(connection);
-                    connection.close(1013, "realtime reconnect required");
-                } else {
-                    connection.send(reply.bytes());
-                }
+                connection.send(reply.bytes());
+            } else if (result instanceof RealtimeWssConnection.SendPair pair) {
+                connection.send(pair.first());
+                connection.send(pair.second());
             } else if (result instanceof RealtimeWssConnection.Terminate terminate) {
                 connection.close(terminate.code(), "realtime rejected");
             }
@@ -239,8 +252,11 @@ public final class MeetingRealtimeWssServer extends WebSocketServer implements A
     private static void closeSession(WebSocket connection) {
         RealtimeWssConnection session = connection.getAttachment();
         if (session != null) {
-            session.close();
-            connection.setAttachment(null);
+            try {
+                session.close();
+            } finally {
+                connection.setAttachment(null);
+            }
         }
     }
 

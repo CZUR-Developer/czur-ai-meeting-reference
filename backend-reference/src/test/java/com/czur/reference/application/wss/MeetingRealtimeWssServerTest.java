@@ -15,6 +15,7 @@ import com.czur.reference.application.port.RealtimeStartFactsLookup;
 import com.czur.reference.application.port.identity.SecretCredential;
 import com.czur.reference.application.realtime.RealtimeAudioIngress;
 import com.czur.reference.application.realtime.RealtimeMeetingStartCoordinator;
+import com.czur.reference.application.realtime.RealtimeTranscriptSessions;
 import com.czur.reference.domain.capability.CapabilityDescriptor;
 import com.czur.reference.domain.capability.CapabilityPlanner;
 import com.czur.reference.domain.capability.DeploymentLimits;
@@ -119,6 +120,31 @@ class MeetingRealtimeWssServerTest {
 
             socket.sendClose(java.net.http.WebSocket.NORMAL_CLOSURE, "done").join();
             listener.closed.orTimeout(5, TimeUnit.SECONDS).join();
+        }
+    }
+
+    @Test
+    void transcriptPublicationFailureAfterStoredFrameClosesWithoutFakeAck() throws Exception {
+        TestTls tls = TestTls.create(temporaryDirectory);
+        FakeAudio audio = new FakeAudio();
+        RealtimeTranscriptSessions failing = meetingId -> new RealtimeTranscriptSessions.Session() {
+            @Override public com.czur.reference.application.port.EventLog acceptStored(
+                    com.czur.reference.application.port.model.MeetingAudioFrame frame) {
+                throw new IllegalStateException("publication unavailable");
+            }
+            @Override public void close() { }
+        };
+        try (Fixture fixture = new Fixture(tls, new FakeVerifier(), audio, failing);
+             HttpClient client = HttpClient.newBuilder().sslContext(tls.trusted()).build()) {
+            fixture.start();
+            Listener listener = new Listener();
+            var socket = connect(client, fixture.uri(MEETING), TOKEN,
+                    CreateMeetingResponseFact.REALTIME_SUBPROTOCOL, listener);
+            socket.sendBinary(ByteBuffer.wrap(start().toByteArray()), true).join();
+            sendForExpectedClose(socket, frame().toByteArray());
+            listener.closed.orTimeout(5, TimeUnit.SECONDS).join();
+            assertEquals(1, audio.appendCalls.get(), "audio may already be durable");
+            assertEquals(0, listener.ackCount.get(), "no ACK before transcript publication");
         }
     }
 
@@ -357,7 +383,8 @@ class MeetingRealtimeWssServerTest {
 
             fixture.server.onMessage(slowConnection, ByteBuffer.wrap(frame().toByteArray()));
 
-            assertEquals(1, audio.appendCalls.get(), "V015-like Stored precedes backpressure");
+            assertEquals(0, audio.appendCalls.get(),
+                    "pending bytes at onMessage entry reject before another append");
             assertEquals(0, sends.get(), "no ACK enters unbounded outQueue");
             assertEquals(1, closes.get());
             assertNull(attachment.get());
@@ -543,9 +570,14 @@ class MeetingRealtimeWssServerTest {
         private boolean closed;
 
         private Fixture(TestTls tls, FakeVerifier verifier, FakeAudio audio) throws Exception {
+            this(tls, verifier, audio, null);
+        }
+
+        private Fixture(TestTls tls, FakeVerifier verifier, FakeAudio audio,
+                RealtimeTranscriptSessions transcripts) throws Exception {
             server = new MeetingRealtimeWssServer(
                     new InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0),
-                    tls.server(), verifier, ingress(audio), clock);
+                    tls.server(), verifier, ingress(audio), transcripts, clock);
         }
 
         private void start() throws Exception {
