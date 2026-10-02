@@ -9,6 +9,7 @@ import com.czur.aimeeting.contract.realtime.v1.ServerEnvelope;
 import com.czur.aimeeting.contract.realtime.v1.StreamStart;
 import com.czur.reference.application.bootstrap.ReferenceMeetingDeploymentConfig;
 import com.czur.reference.application.bootstrap.ReferenceMeetingHttpAssembly;
+import com.czur.reference.application.bootstrap.ReferenceMeetingProcess;
 import com.czur.reference.application.artifact.filesystem.PersistentFileSystemMockArtifactStore;
 import com.czur.reference.application.command.CreateMeetingResponseFact;
 import com.czur.reference.application.command.MeetingCommandContext;
@@ -37,6 +38,7 @@ import org.postgresql.ds.PGSimpleDataSource;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManagerFactory;
+import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
@@ -114,6 +116,139 @@ class ReferenceMeetingRealtimeWssIntegrationTest {
             try (Connection connection = admin(); Statement statement = connection.createStatement()) {
                 statement.execute("DROP SCHEMA IF EXISTS \"" + schema + "\" CASCADE");
             }
+        }
+    }
+
+    @Test
+    void singleProcessRunsNetworkAndWorkerThenClosesWithoutSeparateWorkerProcess()
+            throws Exception {
+        migrate(1, 15);
+        TestTls tls = TestTls.create(temporaryDirectory);
+        int wssPort = freeLoopbackPort();
+        int httpPort = freeLoopbackPort();
+        Map<String, String> values = config(wssPort);
+        values.put(ReferenceDevIdentityConfig.PERMISSIONS,
+                "meeting:create," + MeetingPermissions.STOP);
+        values.put(ReferenceMeetingDeploymentConfig.RESULT_LINK_TTL_MS, "86400000");
+        values.put(ReferenceMeetingProcess.HTTP_BIND, "127.0.0.1:" + httpPort);
+        values.put(ReferenceMeetingProcess.WSS_BIND, "127.0.0.1:" + wssPort);
+        values.put(ReferenceMeetingProcess.TLS_KEYSTORE_PATH,
+                tls.keystore().toString());
+        values.put(ReferenceMeetingProcess.TLS_KEYSTORE_PASSWORD, tls.password());
+        values.put(ReferenceMeetingProcess.ARTIFACT_ROOT,
+                temporaryDirectory.resolve("process-artifacts").toString());
+        Map<String, String> missingBind = new HashMap<>(values);
+        missingBind.remove(ReferenceMeetingProcess.HTTP_BIND);
+        assertThrows(IllegalArgumentException.class,
+                () -> ReferenceMeetingProcess.start(missingBind, CLOCK));
+
+        Path processLog = temporaryDirectory.resolve("reference-process.log");
+        String javaCommand = Path.of(System.getProperty("java.home"), "bin", "java").toString();
+        String classpath = System.getProperty(
+                "surefire.test.class.path", System.getProperty("java.class.path"));
+        ProcessBuilder command = new ProcessBuilder(javaCommand, "-cp", classpath,
+                "com.czur.reference.application.bootstrap.ReferenceMeetingMain")
+                .redirectErrorStream(true).redirectOutput(processLog.toFile());
+        command.environment().putAll(values);
+        Process process = command.start();
+        String meetingId;
+        try (HttpClient client = HttpClient.newBuilder().sslContext(tls.trusted()).build()) {
+            long startupDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            boolean ready = false;
+            while (System.nanoTime() < startupDeadline && process.isAlive()) {
+                try {
+                    HttpResponse<String> health = client.send(HttpRequest.newBuilder(
+                            URI.create("http://127.0.0.1:" + httpPort
+                                    + "/internal/health/readiness")).GET().build(),
+                            HttpResponse.BodyHandlers.ofString());
+                    if (health.statusCode() == 200) {
+                        ready = true;
+                        break;
+                    }
+                } catch (IOException ignored) {
+                    // 子进程尚未绑定 HTTP，短暂等待即可。
+                }
+                Thread.sleep(50);
+            }
+            assertTrue(ready, "child process failed readiness: "
+                    + Files.readString(processLog));
+            HttpResponse<String> created = request(client, httpPort, "POST", "/v1/meetings",
+                    createBody(), "process-create-key-0001");
+            assertEquals(201, created.statusCode(), created.body() + "\n"
+                    + Files.readString(processLog));
+            JsonNode create = JSON.readTree(created.body());
+            meetingId = create.path("meetingId").asText();
+            String path = "/v1/meetings/" + meetingId;
+            EventListener listener = new EventListener();
+            java.net.http.WebSocket socket = client.newWebSocketBuilder()
+                    .connectTimeout(Duration.ofSeconds(5))
+                    .header("Authorization", "Bearer "
+                            + create.path("realtime").path("sessionToken").asText())
+                    .subprotocols(CreateMeetingResponseFact.REALTIME_SUBPROTOCOL)
+                    .buildAsync(URI.create(create.path("realtime").path("url").asText()), listener)
+                    .orTimeout(5, TimeUnit.SECONDS).join();
+            try {
+                byte[] pcm = new byte[3_200];
+                Arrays.fill(pcm, (byte) 0x5a);
+                socket.sendBinary(ByteBuffer.wrap(start(meetingId).toByteArray()), true).join();
+                socket.sendBinary(ByteBuffer.wrap(frame(meetingId, pcm).toByteArray()), true).join();
+                assertTrue(listener.firstAck.orTimeout(5, TimeUnit.SECONDS).join()
+                        .getAudioAck().getDurable());
+                assertEquals("模拟实时字幕（修订 1）", listener.transcript
+                        .orTimeout(5, TimeUnit.SECONDS).join().getTranscriptUpsert().getText());
+                assertEquals(202, request(client, httpPort, "POST", path + ":stop", "",
+                        "process-stop-key-0001").statusCode());
+                socket.sendBinary(ByteBuffer.wrap(inputComplete(meetingId).toByteArray()), true)
+                        .join();
+                awaitMeetingCount("SELECT count(*) FROM durable_input_fact WHERE meeting_id=?",
+                        meetingId, 1);
+                socket.sendClose(java.net.http.WebSocket.NORMAL_CLOSURE, "done").join();
+                listener.closed.orTimeout(5, TimeUnit.SECONDS).join();
+
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+                HttpResponse<String> manifest;
+                do {
+                    manifest = request(client, httpPort, "GET", path + "/manifest?genTime=-1",
+                            "", null);
+                    if (manifest.statusCode() == 200) break;
+                    Thread.sleep(50);
+                } while (System.nanoTime() < deadline);
+                assertEquals(200, manifest.statusCode(), "periodic Worker must finish the meeting");
+                JsonNode artifact = JSON.readTree(manifest.body()).path("artifacts").get(0);
+                assertEquals("transcript.final", artifact.path("type").asText());
+                HttpResponse<String> transcript = request(client, httpPort, "GET",
+                        "/v1/artifacts/" + artifact.path("artifactId").asText()
+                                + "?genTime=-1", "", null);
+                assertEquals(200, transcript.statusCode());
+                assertTrue(transcript.body().contains("【模拟最终转写】"));
+                assertEquals(200, request(client, httpPort, "GET",
+                        path + "/events?afterSequence=0&limit=10", "", null).statusCode());
+            } finally {
+                socket.abort();
+            }
+        } finally {
+            process.destroy();
+            if (!process.waitFor(10, TimeUnit.SECONDS)) {
+                process.destroyForcibly();
+                assertTrue(process.waitFor(5, TimeUnit.SECONDS), "child process did not exit");
+            }
+        }
+        // Unix SIGTERM 的 JVM 退出码通常为 143；短会必须在进程退出前已持久化。
+        assertTrue(process.exitValue() == 0 || process.exitValue() == 143,
+                Files.readString(processLog));
+        // 同配置重启可读回结果，并由显式 close 验证网络和数据库关闭顺序。
+        try (ReferenceMeetingProcess restarted = ReferenceMeetingProcess.start(
+                values, Clock.tickMillis(ZoneOffset.UTC));
+             HttpClient readClient = HttpClient.newBuilder().sslContext(tls.trusted()).build()) {
+            HttpResponse<String> manifest = request(readClient, httpPort, "GET",
+                    "/v1/meetings/" + meetingId + "/manifest?genTime=-1", "", null);
+            assertEquals(200, manifest.statusCode());
+            assertEquals("READY", JSON.readTree(manifest.body()).path("status").asText());
+        }
+        // 显式 close 后不能继续接收请求。
+        try (var socket = new java.net.Socket()) {
+            assertThrows(IOException.class, () -> socket.connect(
+                    new InetSocketAddress("127.0.0.1", httpPort), 500));
         }
     }
 
@@ -873,7 +1008,8 @@ class ReferenceMeetingRealtimeWssIntegrationTest {
         }
     }
 
-    private record TestTls(SSLContext server, SSLContext trusted) {
+    private record TestTls(SSLContext server, SSLContext trusted,
+                           Path keystore, String password) {
         private static TestTls create(Path directory) throws Exception {
             Path keystore = directory.resolve("wss-loopback-test.p12");
             char[] password = ("temporary-" + UUID.randomUUID()).toCharArray();
@@ -905,7 +1041,7 @@ class ReferenceMeetingRealtimeWssIntegrationTest {
                 server.init(managers.getKeyManagers(), null, null);
                 SSLContext client = SSLContext.getInstance("TLS");
                 client.init(null, trust.getTrustManagers(), null);
-                return new TestTls(server, client);
+                return new TestTls(server, client, keystore, new String(password));
             } finally {
                 Arrays.fill(password, '\0');
             }
