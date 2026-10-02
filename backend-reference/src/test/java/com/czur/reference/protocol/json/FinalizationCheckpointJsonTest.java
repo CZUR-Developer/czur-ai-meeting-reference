@@ -36,10 +36,10 @@ class FinalizationCheckpointJsonTest {
             + ",\"meetingId\":\"meeting-checkpoint-v1\""
             + ",\"artifactType\":\"transcript.final\""
             + ",\"mediaType\":\"application/json\",\"language\":\"zh-CN\""
-            + ",\"revision\":1,\"expectedSize\":296"
-            + ",\"expectedChecksum\":\"sha256:1e919e9500793f4aabe77efbcd339e842369c45020f22f1a68cce5e204c19a9e\"}"
-            + ",\"contentBase64\":\"eyJhcnRpZmFjdFR5cGUiOiJ0cmFuc2NyaXB0LmZpbmFsIiwiZXhlY3V0aW9uRmluZ2VycHJpbnQiOiIzMGFmM2VjN2I5ZmU4ZmMzZDk5NDIwMjZlMzBjMWE5YzRjNzdmNmE0ZDg0MDk0YWI2NDRhNDQ2ODlhYjM5NWE0IiwibGFuZ3VhZ2UiOiJ6aC1DTiIsIm1vY2siOnRydWUsInJldmlzaW9uIjoxLCJzY2hlbWFWZXJzaW9uIjoibW9jay1maW5hbGl6YXRpb24vdjEiLCJzb3VyY2VGaW5nZXJwcmludCI6IjE5OTc1NmUwMzg5NDYwOWYwZTE0NzI3OTZkOWEwYmU4ZjhiYzFjNDFjODdhMTQ3ODI1OTM4NjgzNTEwZDUwODQifQo=\""
-            + ",\"claim\":{\"size\":296,\"checksum\":\"sha256:1e919e9500793f4aabe77efbcd339e842369c45020f22f1a68cce5e204c19a9e\"}}]"
+            + ",\"revision\":1,\"expectedSize\":423"
+            + ",\"expectedChecksum\":\"sha256:db6832838e6540948c6aab42d2ef15ab579577bcd0862541d1d75ec71f04218d\"}"
+            + ",\"contentBase64\":\"eyJhcnRpZmFjdFR5cGUiOiJ0cmFuc2NyaXB0LmZpbmFsIiwiZXhlY3V0aW9uRmluZ2VycHJpbnQiOiIzMGFmM2VjN2I5ZmU4ZmMzZDk5NDIwMjZlMzBjMWE5YzRjNzdmNmE0ZDg0MDk0YWI2NDRhNDQ2ODlhYjM5NWE0IiwibGFuZ3VhZ2UiOiJ6aC1DTiIsIm1vY2siOnRydWUsInJldmlzaW9uIjoxLCJzY2hlbWFWZXJzaW9uIjoibW9jay1maW5hbGl6YXRpb24vdjEiLCJzb3VyY2VGaW5nZXJwcmludCI6IjE5OTc1NmUwMzg5NDYwOWYwZTE0NzI3OTZkOWEwYmU4ZjhiYzFjNDFjODdhMTQ3ODI1OTM4NjgzNTEwZDUwODQiLCJ0ZXh0Ijoi44CQ5qih5ouf5pyA57uI6L2s5YaZ44CR5aSn5a625aW977yM5Lya6K6u546w5Zyo5byA5aeL44CC6L+Z5q615paH5a2X5LuF5L6b5ryU56S677yM5bm26Z2e5a6e6ZmF6Z+z6aKR6K+G5Yir57uT5p6c44CCIn0K\""
+            + ",\"claim\":{\"size\":423,\"checksum\":\"sha256:db6832838e6540948c6aab42d2ef15ab579577bcd0862541d1d75ec71f04218d\"}}]"
             + ",\"commitPlan\":{\"meetingId\":\"meeting-checkpoint-v1\""
             + ",\"deploymentScope\":\"deployment-checkpoint\""
             + ",\"subjectScope\":\"subject-checkpoint\""
@@ -52,7 +52,7 @@ class FinalizationCheckpointJsonTest {
             + ",\"sourceInputDigest\":\"sha256:source-checkpoint\""
             + ",\"sourceAcceptedAt\":\"2026-09-28T08:09:10.123456Z\"}}";
     private static final String SHA256 =
-            "sha256:c6e0598f7e40b65ea274292d2d01407c641e4b2dda2b5bd75be36a0db5fc2e67";
+            "sha256:b5d5ce68239a6e4d9a2884444c51727b10b56b156ffbe65f76890e5ab2a6ac54";
 
     @Test
     void fixedFixtureFreezesCanonicalUtf8BytesAndSha256() {

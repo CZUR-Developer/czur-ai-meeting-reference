@@ -264,6 +264,8 @@ class ReferenceMeetingDeploymentConfigTest {
                 config.deploymentScope(), subject, input, execution, reservation);
         assertEquals(List.of("transcript.final"), mockPlan.artifacts().stream()
                 .map(item -> item.spec().artifactType()).toList());
+        assertTrue(mockPlan.artifacts().getFirst().canonicalContent()
+                .contains("\"text\":\"【模拟最终转写】"));
     }
 
     @Test

@@ -307,6 +307,44 @@ public class FinalizationCheckpointTest {
     }
 
     @Test
+    void transcriptContainsStableReadableMockTextAndRejectsRehashedTampering() {
+        FinalizationCheckpoint checkpoint =
+                plan(input("sha256:source-checkpoint"), reservation("reservation-a"))
+                        .checkpoint();
+        ArtifactMaterial transcript = checkpoint.artifacts().stream()
+                .filter(value -> "transcript.final".equals(value.spec().artifactType()))
+                .findFirst().orElseThrow();
+        ArtifactMaterial summary = checkpoint.artifacts().stream()
+                .filter(value -> "summary.structured".equals(value.spec().artifactType()))
+                .findFirst().orElseThrow();
+        String canonical = transcript.canonicalContent();
+
+        assertTrue(canonical.contains("\"text\":\"【模拟最终转写】大家好，会议现在开始。"
+                + "这段文字仅供演示，并非实际音频识别结果。\""));
+        assertFalse(summary.canonicalContent().contains("\"text\""),
+                "summary 的既有内容形状不随最终转写扩展");
+        assertEquals(transcript.canonicalContentBytes().length,
+                transcript.spec().expectedSize());
+        assertEquals(FinalizationOperationIdentity.checksum(
+                transcript.canonicalContentBytes()), transcript.claim().checksum());
+        assertEquals(transcript.content(), MockFinalizationArtifactContent.decodeCanonical(
+                transcript.canonicalContentBytes()));
+
+        for (String tampered : List.of(
+                canonical.replace("大家好", "早上好"),
+                canonical.replaceFirst(",\\\"text\\\":\\\"[^\\\"]+\\\"", ""),
+                canonical.replace("\"text\":", "\"extra\":true,\"text\":"))) {
+            byte[] bytes = tampered.getBytes(StandardCharsets.UTF_8);
+            ContentClaim claim = new ContentClaim(bytes.length,
+                    FinalizationOperationIdentity.checksum(bytes));
+            WriteIntentSpec spec = copySpec(
+                    transcript.spec(), bytes.length, claim.checksum());
+            assertThrows(IllegalArgumentException.class,
+                    () -> new ArtifactMaterial(spec, bytes, claim));
+        }
+    }
+
+    @Test
     void checkpointDiagnosticsDoNotExposeProtectedValues() {
         FinalizationCheckpoint checkpoint =
                 plan(input("sha256:source-checkpoint"), reservation("reservation-a"))

@@ -14,10 +14,12 @@ import java.util.regex.Pattern;
 /**
  * 确定性 Mock Artifact 的关闭式 canonical JSON 值。
  *
- * <p>内容只保存能够由 checkpoint 根摘要和 Artifact spec 独立交叉核对的字段，
- * 不保存自由文本、模型输出、会议正文或不可验证的 Profile/Plan 派生值。解码器为
- * 纯 Java 固定形状解析器，不依赖 Jackson；字段顺序、转义、数字表示、尾随换行和
- * UTF-8 字节必须与本类重新编码结果逐字节相同。</p>
+ * <p>除 transcript.final 中固定的模拟演示文本外，内容只保存能够由 checkpoint
+ * 根摘要和 Artifact spec 独立交叉核对的字段；不保存模型输出、真实会议正文或
+ * 不可验证的 Profile/Plan 派生值。模拟文本不是音频识别结果，解码时要求与固定
+ * 文本完全一致，避免仅重新计算 size/checksum 就能注入任意正文。解码器为纯 Java
+ * 固定形状解析器，不依赖 Jackson；字段顺序、转义、数字表示、尾随换行和 UTF-8
+ * 字节必须与本类重新编码结果逐字节相同。</p>
  */
 public final class MockFinalizationArtifactContent {
     public static final String SCHEMA_VERSION = "mock-finalization/v1";
@@ -29,6 +31,8 @@ public final class MockFinalizationArtifactContent {
     private static final String INVALID_CONTENT =
             "Mock finalization artifact content is invalid";
     private static final Pattern FINGERPRINT = Pattern.compile("^[0-9a-f]{64}$");
+    private static final String MOCK_TRANSCRIPT_TEXT =
+            "【模拟最终转写】大家好，会议现在开始。这段文字仅供演示，并非实际音频识别结果。";
 
     private final String artifactType;
     private final String executionFingerprint;
@@ -95,6 +99,8 @@ public final class MockFinalizationArtifactContent {
                 + ",\"revision\":" + revision
                 + ",\"schemaVersion\":" + quote(SCHEMA_VERSION)
                 + ",\"sourceFingerprint\":" + quote(sourceFingerprint)
+                + ("transcript.final".equals(artifactType)
+                        ? ",\"text\":" + quote(MOCK_TRANSCRIPT_TEXT) : "")
                 + "}\n";
         return json.getBytes(StandardCharsets.UTF_8);
     }
@@ -200,6 +206,12 @@ public final class MockFinalizationArtifactContent {
             String schemaVersion = string();
             expect(",\"sourceFingerprint\":");
             String sourceFingerprint = string();
+            if ("transcript.final".equals(artifactType)) {
+                expect(",\"text\":");
+                if (!MOCK_TRANSCRIPT_TEXT.equals(string())) {
+                    throw invalid();
+                }
+            }
             expect("}\n");
             if (offset != input.length() || !SCHEMA_VERSION.equals(schemaVersion)) {
                 throw invalid();
