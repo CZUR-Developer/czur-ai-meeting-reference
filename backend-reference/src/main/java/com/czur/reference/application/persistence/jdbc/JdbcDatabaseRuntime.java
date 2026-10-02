@@ -614,6 +614,52 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
     }
 
     /**
+     * 新实时音频入口启用时的 V015 按需只读门禁。
+     *
+     * <p>调用方先经 {@link #start(DatabaseRuntimeConfig)} 验证旧版基线，
+     * 再在开放音频入口前调用本方法。旧 HTTP 和 Worker 不依赖 V015；
+     * 本方法不执行迁移或修补表，也不读取音频业务行。</p>
+     *
+     * @return READY、缺迁移、结构无效、数据库不可用或已关闭的脱敏状态
+     */
+    public DatabaseReadiness checkDurableAudioReadiness() {
+        if (closed.get()) {
+            return DatabaseReadiness.closed();
+        }
+        try (Connection connection = dataSource.getConnection()) {
+            connection.setReadOnly(true);
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "SELECT version FROM schema_migrations WHERE version = ?")) {
+                statement.setString(1, "V015__durable_audio_input");
+                try (ResultSet rows = statement.executeQuery()) {
+                    if (!rows.next()) {
+                        return DatabaseReadiness.migrationMissing(
+                                Set.of("V015__durable_audio_input"));
+                    }
+                }
+            }
+            if (!JdbcDurableAudioSchema.matches(connection)) {
+                LOGGER.log(Level.WARNING,
+                        "持久音频 readiness 物理契约校验失败 status=SCHEMA_INVALID");
+                return DatabaseReadiness.schemaInvalid("V015 catalog mismatch");
+            }
+            LOGGER.log(Level.FINE, "持久音频 readiness 检查通过");
+            return DatabaseReadiness.success();
+        } catch (SQLException failure) {
+            if (isMissingMigrationTable(failure)) {
+                return DatabaseReadiness.migrationMissing(Set.of("V015__durable_audio_input"));
+            }
+            LOGGER.log(Level.WARNING, "持久音频 readiness 数据库不可用 exception={0}",
+                    failure.getClass().getSimpleName());
+            return DatabaseReadiness.unavailable("V015 database probe unavailable");
+        } catch (RuntimeException failure) {
+            LOGGER.log(Level.WARNING, "持久音频 readiness 异常 exception={0}",
+                    failure.getClass().getSimpleName());
+            return DatabaseReadiness.schemaInvalid("V015 catalog probe failed");
+        }
+    }
+
+    /**
      * liveness 只表示运行时对象尚未关闭，不代表数据库当前可连接。
      *
      * @return 未调用 close 前为 true；数据库临时不可用时仍可能为 true
