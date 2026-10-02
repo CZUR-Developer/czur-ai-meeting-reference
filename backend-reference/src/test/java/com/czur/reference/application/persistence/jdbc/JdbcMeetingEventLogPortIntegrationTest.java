@@ -115,12 +115,10 @@ class JdbcMeetingEventLogPortIntegrationTest {
         assertEquals(3, exactEnd.lastSequence());
         assertFalse(exactEnd.hasMore());
 
-        MeetingEventPage ahead = assertInstanceOf(
-                MeetingEventLogPort.Page.class,
-                port.read(request(owner, "meeting-events", 99, 10))).page();
-        assertTrue(ahead.items().isEmpty());
-        assertEquals(99, ahead.lastSequence());
-        assertFalse(ahead.hasMore());
+        MeetingEventLogPort.Conflict ahead = assertInstanceOf(
+                MeetingEventLogPort.Conflict.class,
+                port.read(request(owner, "meeting-events", 99, 10)));
+        assertEquals(MeetingEventLogPort.ConflictReason.INVALID_CURSOR, ahead.reason());
     }
 
     @Test
@@ -158,27 +156,34 @@ class JdbcMeetingEventLogPortIntegrationTest {
 
         MeetingEventPage ownedEmpty = assertInstanceOf(
                 MeetingEventLogPort.Page.class,
-                port.read(request(owner, "meeting-owned", 12, 10))).page();
+                port.read(request(owner, "meeting-owned", 0, 10))).page();
         assertTrue(ownedEmpty.items().isEmpty());
-        assertEquals(12, ownedEmpty.lastSequence());
+        assertEquals(0, ownedEmpty.lastSequence());
+
+        MeetingEventLogPort.Conflict emptyMeetingAhead = assertInstanceOf(
+                MeetingEventLogPort.Conflict.class,
+                port.read(request(owner, "meeting-owned", 1, 10)));
+        assertEquals(MeetingEventLogPort.ConflictReason.INVALID_CURSOR,
+                emptyMeetingAhead.reason());
     }
 
     @Test
-    void ownerHistoricalEnvelopeGapExpiresTheWholeReplayWindow() throws Exception {
+    void ownerHistoricalEnvelopeGapIsFactFailureNotExpiredHistory() throws Exception {
         insertMeeting("meeting-owner-history", DEPLOYMENT, SUBJECT);
         insertHistoricalEvent("meeting-owner-history", "historical-event");
 
-        MeetingEventLogPort.Conflict conflict = assertInstanceOf(
-                MeetingEventLogPort.Conflict.class,
+        MeetingEventLogPort.Unavailable unavailable = assertInstanceOf(
+                MeetingEventLogPort.Unavailable.class,
                 new JdbcMeetingEventLogPort(dataSource).read(request(
                         context(DEPLOYMENT, SUBJECT), "meeting-owner-history", 0, 10)));
 
-        assertEquals(MeetingEventLogPort.ConflictReason.EVENT_REPLAY_WINDOW_EXPIRED,
-                conflict.reason());
+        assertEquals(MeetingEventLogPort.UnavailableReason.STORAGE_FAILURE,
+                unavailable.reason());
+        assertFalse(unavailable.retryable());
     }
 
     @Test
-    void ownerMalformedEventsBeforeTheCursorExpireTheWholeReplayWindow() throws Exception {
+    void ownerMalformedEventsBeforeTheCursorFailWithoutClaimingExpiry() throws Exception {
         List<String> meetingIds = List.of(
                 "meeting-blank-canonical",
                 "meeting-blank-spec",
@@ -240,13 +245,14 @@ class JdbcMeetingEventLogPortIntegrationTest {
 
         JdbcMeetingEventLogPort port = new JdbcMeetingEventLogPort(dataSource);
         for (String meetingId : meetingIds) {
-            MeetingEventLogPort.Conflict conflict = assertInstanceOf(
-                    MeetingEventLogPort.Conflict.class,
+            MeetingEventLogPort.Unavailable unavailable = assertInstanceOf(
+                    MeetingEventLogPort.Unavailable.class,
                     port.read(request(
                             context(DEPLOYMENT, SUBJECT), meetingId, 1, 10)),
-                    "游标越过坏事件后仍必须关闭整场重放窗口: " + meetingId);
-            assertEquals(MeetingEventLogPort.ConflictReason.EVENT_REPLAY_WINDOW_EXPIRED,
-                    conflict.reason());
+                    "游标越过坏事件后仍必须关闭式失败: " + meetingId);
+            assertEquals(MeetingEventLogPort.UnavailableReason.STORAGE_FAILURE,
+                    unavailable.reason());
+            assertFalse(unavailable.retryable());
         }
     }
 

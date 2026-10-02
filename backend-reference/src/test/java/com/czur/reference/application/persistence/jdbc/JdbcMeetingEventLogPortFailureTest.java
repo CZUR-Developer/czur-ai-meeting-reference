@@ -53,11 +53,12 @@ class JdbcMeetingEventLogPortFailureTest {
                 recoverableFailure.reason());
         assertTrue(recoverableFailure.retryable());
 
-        MeetingEventLogPort.Conflict dataFailure = assertInstanceOf(
-                MeetingEventLogPort.Conflict.class,
+        MeetingEventLogPort.Unavailable dataFailure = assertInstanceOf(
+                MeetingEventLogPort.Unavailable.class,
                 port(sqlFailure(new SQLException(SENSITIVE, "22000"))).read(request()));
-        assertEquals(MeetingEventLogPort.ConflictReason.EVENT_REPLAY_WINDOW_EXPIRED,
+        assertEquals(MeetingEventLogPort.UnavailableReason.STORAGE_FAILURE,
                 dataFailure.reason());
+        assertFalse(dataFailure.retryable());
 
         MeetingEventLogPort.Unavailable storageFailure = assertInstanceOf(
                 MeetingEventLogPort.Unavailable.class,
@@ -103,17 +104,18 @@ class JdbcMeetingEventLogPortFailureTest {
     }
 
     @Test
-    void malformedOwnerEventClosesResourcesAndMapsToReplayWindowConflict() {
+    void malformedOwnerEventClosesResourcesWithoutClaimingReplayExpiry() {
         ResourceState resources = new ResourceState();
         Map<String, Object> row = validRow();
         row.put("canonical_payload", " ");
 
-        MeetingEventLogPort.Conflict conflict = assertInstanceOf(
-                MeetingEventLogPort.Conflict.class,
+        MeetingEventLogPort.Unavailable unavailable = assertInstanceOf(
+                MeetingEventLogPort.Unavailable.class,
                 port(oneRowDataSource(row, resources, ignored -> { })).read(request()));
 
-        assertEquals(MeetingEventLogPort.ConflictReason.EVENT_REPLAY_WINDOW_EXPIRED,
-                conflict.reason());
+        assertEquals(MeetingEventLogPort.UnavailableReason.STORAGE_FAILURE,
+                unavailable.reason());
+        assertFalse(unavailable.retryable());
         resources.assertAllClosed();
     }
 
@@ -177,6 +179,7 @@ class JdbcMeetingEventLogPortFailureTest {
         row.put("deployment_scope", "deployment-private");
         row.put("subject_scope", "subject-private");
         row.put("has_invalid_event", false);
+        row.put("max_event_sequence", 1L);
         row.put("event_present", true);
         row.put("meeting_id", "meeting-private");
         row.put("event_sequence", 1L);

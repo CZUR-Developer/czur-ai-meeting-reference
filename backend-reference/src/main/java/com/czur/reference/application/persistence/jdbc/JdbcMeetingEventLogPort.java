@@ -19,8 +19,8 @@ import java.util.logging.Logger;
 /**
  * 基于 PostgreSQL 会议事实源的认证事件补拉适配器。
  *
- * <p>一次调用只执行一条 SELECT。会议存在性、原始归属、V004 历史 envelope
- * 缺口和 {@code afterSequence} 之后的事件页因此都来自同一个 statement
+ * <p>一次调用只执行一条 SELECT。会议存在性、原始归属、整场事件完整性、
+ * 最高已提交事件序号和 {@code afterSequence} 之后的事件页因此都来自同一个 statement
  * snapshot，不会出现先鉴权、后查询时读到两份数据库状态的竞态。结果行到达后
  * 必须先用 {@link MeetingAccessGuard} 判断原始归属；跨部署、跨主体和历史
  * {@code LEGACY_UNOWNED} 会议立即返回 {@link AccessDenied}，不会读取事件正文或
@@ -30,8 +30,10 @@ import java.util.logging.Logger;
  * 不按 {@code stream_id} 过滤。额外一条只用于计算 {@code hasMore}；空页保留调用
  * 方的 {@code afterSequence}。所有者会议只要包含无法证明 envelope 的历史事件、
  * 任一无法构造 {@link EventLog} 的必需字段，或 canonical JSON 已损坏/与 JSONB
- * 事实不一致，就关闭式返回
- * {@link ConflictReason#EVENT_REPLAY_WINDOW_EXPIRED}，不返回部分页面。</p>
+ * 事实不一致，就关闭式返回不可用，不返回部分页面；这不代表历史已按保留策略
+ * 截断。只有游标高于最高已提交事件序号才返回
+ * {@link ConflictReason#INVALID_CURSOR}。当前参考实现保留全量事件，不主动返回
+ * {@link ConflictReason#EVENT_REPLAY_WINDOW_EXPIRED}。</p>
  *
  * <p>日志只记录稳定状态、分页计数、游标和白名单 SQLState，不记录会议标识、
  * 部署范围、主体、事件正文、Token、receipt、数据库地址或异常正文。</p>
@@ -55,6 +57,11 @@ public final class JdbcMeetingEventLogPort implements MeetingEventLogPort {
                 SELECT m.meeting_id,
                        m.deployment_scope,
                        m.subject_scope,
+                       COALESCE((
+                           SELECT MAX(committed.event_sequence)
+                             FROM meeting_event committed
+                            WHERE committed.meeting_id = m.meeting_id
+                       ), 0) AS max_event_sequence,
                        EXISTS (
                            SELECT 1
                              FROM meeting_event historical
@@ -109,6 +116,7 @@ public final class JdbcMeetingEventLogPort implements MeetingEventLogPort {
             SELECT m.deployment_scope,
                    m.subject_scope,
                    m.has_invalid_event,
+                   m.max_event_sequence,
                    event_page.meeting_id,
                    event_page.event_sequence,
                    event_page.event_id,
@@ -163,7 +171,7 @@ public final class JdbcMeetingEventLogPort implements MeetingEventLogPort {
             return logged(readSnapshot(connection, request), request.afterSequence());
         } catch (JdbcMeetingEventLogStore.InvalidStoredEvent
                  | CorruptEventPage failure) {
-            return logged(new Conflict(ConflictReason.EVENT_REPLAY_WINDOW_EXPIRED),
+            return logged(new Unavailable(UnavailableReason.STORAGE_FAILURE, false),
                     request.afterSequence());
         } catch (SQLException failure) {
             return fromSqlFailure(failure, request.afterSequence());
@@ -204,7 +212,10 @@ public final class JdbcMeetingEventLogPort implements MeetingEventLogPort {
                 }
 
                 if (rows.getBoolean("has_invalid_event")) {
-                    return new Conflict(ConflictReason.EVENT_REPLAY_WINDOW_EXPIRED);
+                    return new Unavailable(UnavailableReason.STORAGE_FAILURE, false);
+                }
+                if (request.afterSequence() > rows.getLong("max_event_sequence")) {
+                    return new Conflict(ConflictReason.INVALID_CURSOR);
                 }
 
                 List<EventLog> events = new ArrayList<>(queryLimit);
@@ -237,7 +248,7 @@ public final class JdbcMeetingEventLogPort implements MeetingEventLogPort {
     private static Result fromSqlFailure(SQLException failure, long afterSequence) {
         JdbcReadLookupSupport.FailureKind kind = JdbcReadLookupSupport.classify(failure);
         if (kind == JdbcReadLookupSupport.FailureKind.INCONSISTENT) {
-            return logged(new Conflict(ConflictReason.EVENT_REPLAY_WINDOW_EXPIRED),
+            return logged(new Unavailable(UnavailableReason.STORAGE_FAILURE, false),
                     afterSequence, failure);
         }
         boolean retryable = kind == JdbcReadLookupSupport.FailureKind.RETRYABLE_UNAVAILABLE;

@@ -79,7 +79,7 @@ public interface MeetingEventLogPort {
         }
     }
 
-    /** 事件游标不再可重放或请求与已存在事件事实冲突。 */
+    /** 请求游标高于已提交事件序号；保留窗口过期仅用于实际截断的实现。 */
     record Conflict(ConflictReason reason) implements Result {
         public Conflict {
             Objects.requireNonNull(reason, "reason");
@@ -109,7 +109,7 @@ public interface MeetingEventLogPort {
         }
     }
 
-    /** 持久化事实源不可用；只携带稳定原因和可重试标记。 */
+    /** 持久化事实源不可用或事实损坏；只携带稳定原因和可重试标记。 */
     record Unavailable(UnavailableReason reason, boolean retryable) implements Result {
         public Unavailable {
             Objects.requireNonNull(reason, "reason");
@@ -140,7 +140,9 @@ public interface MeetingEventLogPort {
     }
 
     enum ConflictReason {
+        /** 当前参考实现保留全量事件，不会主动返回此原因。 */
         EVENT_REPLAY_WINDOW_EXPIRED,
+        /** 请求游标高于该会议当前最高已提交的事件序号。 */
         INVALID_CURSOR
     }
 
