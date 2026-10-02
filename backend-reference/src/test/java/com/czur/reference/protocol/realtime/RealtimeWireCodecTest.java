@@ -11,6 +11,7 @@ import com.czur.aimeeting.contract.realtime.v1.InputComplete;
 import com.czur.aimeeting.contract.realtime.v1.MeetingAudioFrame;
 import com.czur.aimeeting.contract.realtime.v1.MeetingState;
 import com.czur.aimeeting.contract.realtime.v1.ResumeRequest;
+import com.czur.aimeeting.contract.realtime.v1.ResumePageEnd;
 import com.czur.aimeeting.contract.realtime.v1.ServerEnvelope;
 import com.czur.aimeeting.contract.realtime.v1.SessionStateEvent;
 import com.czur.aimeeting.contract.realtime.v1.StreamStart;
@@ -97,7 +98,7 @@ class RealtimeWireCodecTest {
             assertEquals(0, source.getEventSequence());
             transientCount++;
         }
-        assertEquals(2, transientCount);
+        assertEquals(3, transientCount);
     }
 
     @Test
@@ -204,6 +205,26 @@ class RealtimeWireCodecTest {
         expectServer(Code.INVALID_ENVELOPE, event.toBuilder().setEventSequence(0)
                 .setTranscriptUpsert(event.getTranscriptUpsert().toBuilder().setOperationValue(1))
                 .build());
+    }
+
+    @Test
+    void resumePageEndIsTransientAndCarriesOnlyThePageCursor() {
+        ServerEnvelope pageEnd = ServerEnvelope.newBuilder()
+                .setSpecVersion("0.1").setMeetingId("mtg").setStreamId("mtg")
+                .setEmittedAt("2026-10-02T00:00:00Z")
+                .setResumePageEnd(ResumePageEnd.newBuilder()
+                        .setLastEventSequence(3).setHasMore(true)).build();
+        byte[] wire = CODEC.encodeServer(pageEnd);
+        assertEquals(pageEnd, CODEC.decodeServer(wire));
+        ServerEnvelope emptyPage = pageEnd.toBuilder().setResumePageEnd(
+                ResumePageEnd.newBuilder().setLastEventSequence(0).setHasMore(false)).build();
+        assertEquals(emptyPage, CODEC.decodeServer(CODEC.encodeServer(emptyPage)));
+
+        expectServer(Code.INVALID_ENVELOPE, pageEnd.toBuilder().setEventId("evt").build());
+        expectServer(Code.INVALID_ENVELOPE, pageEnd.toBuilder().setEventSequence(1).build());
+        expectServer(Code.INVALID_FIELD, pageEnd.toBuilder().setResumePageEnd(
+                ResumePageEnd.newBuilder().setLastEventSequence(-1L)).build());
+        expectServerDecode(Code.INVALID_BODY, concat(wire, wire));
     }
 
     @Test

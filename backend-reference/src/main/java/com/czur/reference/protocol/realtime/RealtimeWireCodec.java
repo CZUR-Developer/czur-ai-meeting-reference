@@ -78,7 +78,8 @@ public final class RealtimeWireCodec {
 
     /**
      * 编码一条服务端消息；持久业务事件必须有会议全局正序号和 eventId，瞬时
-     * ACK/心跳必须使用零序号且不得有 eventId。此方法不产生或持久化事件事实。
+     * ACK/心跳/补拉分页结束必须使用零序号且不得有 eventId。
+     * 此方法不产生或持久化事件事实。
      *
      * @throws CodecException 字段不完整或编码后超出独立消息上限
      */
@@ -218,7 +219,7 @@ public final class RealtimeWireCodec {
             throw reject(Code.INVALID_ENVELOPE); // P2 参考单流
         }
         boolean transientBody = switch (envelope.getBodyCase()) {
-            case AUDIO_ACK, HEARTBEAT -> true;
+            case AUDIO_ACK, HEARTBEAT, RESUME_PAGE_END -> true;
             case BODY_NOT_SET -> throw reject(Code.INVALID_BODY);
             default -> false;
         };
@@ -226,17 +227,23 @@ public final class RealtimeWireCodec {
             if (!envelope.getEventId().isEmpty() || envelope.getEventSequence() != 0) {
                 throw reject(Code.INVALID_ENVELOPE);
             }
-            if (envelope.getBodyCase() == ServerEnvelope.BodyCase.AUDIO_ACK) {
-                var ack = envelope.getAudioAck();
-                requirePositive(ack.getAcceptedStreamSequence());
-                requireNonNegative(ack.getAcceptedAudioPositionMs());
-                if (!ack.getDurable() || ack.getSuggestedMaxInFlightFrames() < 0
-                        || ack.getRetryAfterMs() < 0) {
-                    throw reject(Code.INVALID_FIELD);
+            switch (envelope.getBodyCase()) {
+                case AUDIO_ACK -> {
+                    var ack = envelope.getAudioAck();
+                    requirePositive(ack.getAcceptedStreamSequence());
+                    requireNonNegative(ack.getAcceptedAudioPositionMs());
+                    if (!ack.getDurable() || ack.getSuggestedMaxInFlightFrames() < 0
+                            || ack.getRetryAfterMs() < 0) {
+                        throw reject(Code.INVALID_FIELD);
+                    }
                 }
-            } else {
-                requireText(envelope.getHeartbeat().getNonce());
-                requireInstant(envelope.getHeartbeat().getSentAt());
+                case HEARTBEAT -> {
+                    requireText(envelope.getHeartbeat().getNonce());
+                    requireInstant(envelope.getHeartbeat().getSentAt());
+                }
+                case RESUME_PAGE_END -> requireNonNegative(
+                        envelope.getResumePageEnd().getLastEventSequence());
+                default -> throw reject(Code.INVALID_BODY);
             }
         } else {
             requireText(envelope.getEventId());
@@ -339,7 +346,7 @@ public final class RealtimeWireCodec {
                 int tag = input.readTag();
                 int field = WireFormat.getTagFieldNumber(tag);
                 boolean knownBody = client ? field >= 10 && field <= 16
-                        : field >= 10 && field <= 19;
+                        : field >= 10 && field <= 20;
                 if (knownBody && ++bodyCount > 1) {
                     throw reject(Code.INVALID_BODY);
                 }

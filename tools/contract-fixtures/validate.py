@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 CONTRACTS = ROOT / "contracts"
 FIXTURES = CONTRACTS / "fixtures"
 DURABLE_BODIES = {"sessionState", "transcriptUpsert", "translationUpsert", "speakerUpdate", "capabilityChanged", "finalization", "error", "audioContinuity"}
-TRANSIENT_BODIES = {"audioAck", "heartbeat"}
+TRANSIENT_BODIES = {"audioAck", "heartbeat", "resumePageEnd"}
 BASE_FIELDS = {"specVersion", "meetingId", "streamId", "eventSequence", "emittedAt"}
 
 
@@ -57,8 +57,12 @@ def check_event(value: object, expected_sequence: int, enums: dict[str, set[str]
     name = next(iter(bodies)); body = value[name]
     if not isinstance(body, dict): fail("event body must be an object")
     if name == "audioAck" and body.get("durable") is not True: fail("audioAck.durable must be true")
+    if name == "resumePageEnd":
+        if set(body) != {"lastEventSequence", "hasMore"}: fail("resumePageEnd fields differ")
+        if not isinstance(body["hasMore"], bool): fail("resumePageEnd.hasMore must be boolean")
     uint64_fields = {
         "audioAck": ("acceptedStreamSequence", "acceptedAudioPositionMs"),
+        "resumePageEnd": ("lastEventSequence",),
         "transcriptUpsert": ("startMs", "endMs"),
         "audioContinuity": ("afterStreamSequence", "sourceGeneration", "gapDurationMs"),
     }
@@ -117,6 +121,7 @@ def main() -> None:
     expect_invalid("realtime-event-missing-stream-id.invalid.json", "event missing ['streamId']", enums)
     expect_invalid("transient-in-durable.invalid.json", "transient body in durable event", enums)
     expect_invalid("wss-positive-sequence.invalid.json", "transient eventSequence must be 0", enums, transient=True)
+    expect_invalid("wss-resume-page-end-negative.invalid.json", "resumePageEnd.lastEventSequence: uint64 must use a decimal string in Proto JSON Mapping", enums, transient=True)
     seen: dict[str, int] = {}
     for index, event in enumerate(rows("meeting-global-reset.invalid.jsonl"), 1):
         meeting_id = event.get("meetingId", "")
@@ -132,7 +137,7 @@ def main() -> None:
     except ValueError as exc:
         if str(exc) != "audio checksum mismatch": fail(f"invalid checksum fixture: unexpected reason {exc}")
     else: fail("expected audio checksum fixture to fail")
-    print(f"CONTRACT_FIXTURES_OK json={count} durable_events={durable_count} transient_messages={len(transient)} negatives=6")
+    print(f"CONTRACT_FIXTURES_OK json={count} durable_events={durable_count} transient_messages={len(transient)} negatives=7")
 
 
 if __name__ == "__main__":

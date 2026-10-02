@@ -30,7 +30,8 @@ message ServerEnvelope {
   string meeting_id = 2;
   string stream_id = 3;
   // 仅持久业务事件设置 event_id 和会议全局正序 event_sequence。
-  // audio_ack/heartbeat 是瞬时 WSS 消息：event_id 为空，event_sequence = 0，
+  // audio_ack/heartbeat/resume_page_end 是瞬时 WSS 消息：event_id 为空，
+  // event_sequence = 0，
   // 不进入会议事件日志，也不由 REST/resume_request 补拉。
   string event_id = 4;
   uint64 event_sequence = 5;
@@ -47,6 +48,7 @@ message ServerEnvelope {
     ErrorEvent error = 17;
     Heartbeat heartbeat = 18;
     AudioContinuityEvent audio_continuity = 19;
+    ResumePageEnd resume_page_end = 20;
   }
 }
 
@@ -139,8 +141,15 @@ message Cancel {
 }
 
 message ResumeRequest {
-  // 只补拉会议全局正序的持久业务事件，不补拉 audio_ack/heartbeat。
+  // 只补拉会议全局正序的持久业务事件，不补拉瞬时 WSS 控制消息。
   uint64 after_event_sequence = 1;
+}
+
+// 一次 resume_request 的瞬时分页结束标记；不写入 meeting_event。
+// 非空页取本页最后一条事件序号；空页沿用请求的 after_event_sequence。
+message ResumePageEnd {
+  uint64 last_event_sequence = 1;
+  bool has_more = 2;
 }
 
 message Heartbeat {

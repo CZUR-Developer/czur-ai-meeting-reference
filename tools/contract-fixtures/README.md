@@ -3,7 +3,8 @@
 `contracts/fixtures/` 的 `realtime-events.jsonl` 和 `capability-scenarios.jsonl`
 只包含八类会议级持久事件；P2 ASR-only 样例使用 `streamId = meetingId`，
 `eventSequence` 按会议连续从 1 开始。`realtime-wss-transient.jsonl` 单列
-ACK/heartbeat，使用 `eventSequence="0"` 且无 `eventId`，不属于 REST 补拉事件。
+ACK/heartbeat/resumePageEnd，使用 `eventSequence="0"` 且无 `eventId`，
+不属于 REST 补拉事件。`resumePageEnd` 只标识本次补拉页的末游标和后续页标志。
 `meeting-global-reset.invalid.jsonl` 是泛协议多流计数负例，不开放 P2 第二条流。
 
 `audio-frame-checksum.valid.json` 与 `.invalid.json` 只校验 `AAEC/w==` 原始
