@@ -26,14 +26,15 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * 锁定 P2 Fixture 的会议级持久事件与瞬时 WSS 消息边界；不声称服务端已实现 WSS。
+ * 锁定 P2 Fixture 的会议级持久事件与瞬时 WSS 消息边界。
  */
 class RealtimeFixtureContractTest {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Set<String> DURABLE_BODIES = Set.of(
             "sessionState", "transcriptUpsert", "translationUpsert", "speakerUpdate",
             "capabilityChanged", "finalization", "error", "audioContinuity");
-    private static final Set<String> TRANSIENT_BODIES = Set.of("audioAck", "heartbeat");
+    private static final Set<String> TRANSIENT_BODIES = Set.of(
+            "audioAck", "heartbeat", "resumePageEnd");
 
     @Test
     void durableAndTransientFixturesStaySeparated() throws Exception {
@@ -48,6 +49,7 @@ class RealtimeFixtureContractTest {
                 durableCoverage.add(onlyBody(event, DURABLE_BODIES));
                 assertFalse(event.has("audioAck"));
                 assertFalse(event.has("heartbeat"));
+                assertFalse(event.has("resumePageEnd"));
                 durableCount++;
             }
         }
@@ -55,7 +57,7 @@ class RealtimeFixtureContractTest {
         assertEquals(DURABLE_BODIES, durableCoverage);
 
         List<JsonNode> transientRows = rows("realtime-wss-transient.jsonl");
-        assertEquals(2, transientRows.size());
+        assertEquals(3, transientRows.size());
         Set<String> transientCoverage = new HashSet<>();
         for (JsonNode event : transientRows) {
             assertEquals(event.path("meetingId").asText(), event.path("streamId").asText());
