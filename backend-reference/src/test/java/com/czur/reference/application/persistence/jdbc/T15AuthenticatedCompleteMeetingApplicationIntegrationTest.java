@@ -38,6 +38,7 @@ import com.czur.reference.application.port.identity.SecretCredential;
 import com.czur.reference.application.port.identity.Subject;
 import com.czur.reference.application.port.identity.VerifiedIdentity;
 import com.czur.reference.application.port.model.AudioProfile;
+import com.czur.reference.application.realtime.RealtimeMeetingStartCoordinator;
 import com.czur.reference.domain.capability.CapabilityDescriptor;
 import com.czur.reference.domain.capability.CapabilityDecision;
 import com.czur.reference.domain.capability.CapabilityIds;
@@ -70,6 +71,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -309,6 +311,79 @@ class T15AuthenticatedCompleteMeetingApplicationIntegrationTest {
     }
 
     @Test
+    void realtimeStartUsesV013FirstAndV011FrozenReplayWithoutCurrentCatalog()
+            throws Exception {
+        var created = createForStart("realtime-start-first-12345", "realtime-start-first");
+        String meetingId = created.response().meetingId();
+        var first = assertInstanceOf(MeetingStartExecutionUnitOfWork.Success.class,
+                realtimeStarter(NOW.plusSeconds(11), true).start(meetingId));
+        assertEquals(MeetingStartExecutionUnitOfWork.SuccessCode.STARTED, first.code());
+        assertEquals(NOW.plusSeconds(11), first.executionFact().startedAt());
+
+        // V011 已有完整 Profile；旧 V013 损坏、目录失去旧版本和时钟变化均
+        // 不得改写历史。首次路径的坏 V013 另由缺事实用例关闭式验证。
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "UPDATE meeting_create_fact SET request_digest = repeat('a', 64) "
+                             + "WHERE meeting_id = ?")) {
+            statement.setString(1, meetingId);
+            statement.executeUpdate();
+        }
+        var replayResult = realtimeStarter(NOW.plusSeconds(25), false).start(meetingId);
+        var replay = assertInstanceOf(MeetingStartExecutionUnitOfWork.Success.class,
+                replayResult, replayResult.toString());
+        assertEquals(MeetingStartExecutionUnitOfWork.SuccessCode.REPLAYED, replay.code());
+        assertEquals(first.executionFact(), replay.executionFact());
+        assertEquals(1, count("SELECT count(*) FROM finalization_execution_fact"));
+    }
+
+    @Test
+    void concurrentRealtimeFirstStartsKeepOneV011WinnerAndReplayItsTime()
+            throws Exception {
+        var created = createForStart("realtime-start-race-12345", "realtime-start-race");
+        String meetingId = created.response().meetingId();
+        CountDownLatch begin = new CountDownLatch(1);
+        try (var pool = Executors.newFixedThreadPool(2)) {
+            Future<MeetingStartExecutionUnitOfWork.Result> earlier = pool.submit(() -> {
+                begin.await();
+                return realtimeStarter(NOW.plusSeconds(11), true).start(meetingId);
+            });
+            Future<MeetingStartExecutionUnitOfWork.Result> later = pool.submit(() -> {
+                begin.await();
+                return realtimeStarter(NOW.plusSeconds(12), true).start(meetingId);
+            });
+            begin.countDown();
+            var leftResult = earlier.get(20, TimeUnit.SECONDS);
+            var rightResult = later.get(20, TimeUnit.SECONDS);
+            var left = assertInstanceOf(MeetingStartExecutionUnitOfWork.Success.class,
+                    leftResult, leftResult.toString());
+            var right = assertInstanceOf(MeetingStartExecutionUnitOfWork.Success.class,
+                    rightResult, rightResult.toString());
+            assertNotEquals(left.code(), right.code());
+            assertEquals(left.executionFact(), right.executionFact());
+            assertEquals(1, count("SELECT count(*) FROM finalization_execution_fact"));
+        }
+    }
+
+    @Test
+    void realtimeFirstStartRejectsMissingV013WithoutCreatingExecutionFact()
+            throws Exception {
+        var created = createForStart("realtime-start-no-v013-12345", "realtime-no-v013");
+        String meetingId = created.response().meetingId();
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "DELETE FROM meeting_create_fact WHERE meeting_id = ?")) {
+            statement.setString(1, meetingId);
+            statement.executeUpdate();
+        }
+        var failure = assertInstanceOf(MeetingStartExecutionUnitOfWork.Failure.class,
+                realtimeStarter(NOW.plusSeconds(11), true).start(meetingId));
+        assertEquals(MeetingStartExecutionUnitOfWork.ErrorCode.CREATE_FACT_INCONSISTENT,
+                failure.code());
+        assertEquals(0, count("SELECT count(*) FROM finalization_execution_fact"));
+    }
+
+    @Test
     void completeCreateStartRejectsChangedModelAndDeploymentWithoutWritingV011()
             throws Exception {
         var modelMeeting = createForStart("create-start-model-change-12345", "model-change");
@@ -525,6 +600,18 @@ class T15AuthenticatedCompleteMeetingApplicationIntegrationTest {
 
     private JdbcMeetingStartExecutionUnitOfWork startUnitOfWork() {
         return new JdbcMeetingStartExecutionUnitOfWork(dataSource, new CapabilityPlanner());
+    }
+
+    private RealtimeMeetingStartCoordinator realtimeStarter(
+            Instant instant, boolean profileAvailable) {
+        return new RealtimeMeetingStartCoordinator(
+                DEPLOYMENT, new JdbcRealtimeStartFactsLookup(dataSource),
+                (id, revision) -> profileAvailable && id.equals("standard") && revision == 1
+                        ? java.util.Optional.of(new ProductProfile("standard", 1,
+                                Set.of(REALTIME), Set.of(), Map.of(), Map.of(), Map.of()))
+                        : java.util.Optional.empty(),
+                providerAll(), DeploymentLimits.NONE,
+                Clock.fixed(instant, ZoneOffset.UTC), startUnitOfWork());
     }
 
     private static MeetingStartExecutionUnitOfWork.StartRequest startRequest(
