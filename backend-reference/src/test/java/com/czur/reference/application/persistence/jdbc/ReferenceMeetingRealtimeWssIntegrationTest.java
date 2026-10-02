@@ -70,6 +70,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -441,6 +442,83 @@ class ReferenceMeetingRealtimeWssIntegrationTest {
             assertEquals(403, request(client, port, "GET",
                     path + "/manifest?genTime=-1", "", null).statusCode());
             assertEquals(403, request(client, port, "GET", artifactPath, "", null).statusCode());
+        }
+    }
+
+    @Test
+    void inputCompleteBeforeStopWaitsThenProducesOneReceipt() throws Exception {
+        migrate(1, 15);
+        TestTls tls = TestTls.create(temporaryDirectory);
+        int wssPort = freeLoopbackPort();
+        Map<String, String> values = config(wssPort);
+        values.put(ReferenceDevIdentityConfig.PERMISSIONS,
+                "meeting:create," + MeetingPermissions.STOP);
+        byte[] pcm = new byte[3_200];
+        Arrays.fill(pcm, (byte) 0x5a);
+
+        try (var assembly = ReferenceMeetingHttpAssembly.start(values, CLOCK);
+             var http = assembly.newJdkHttpServer(new InetSocketAddress("127.0.0.1", 0));
+             MeetingRealtimeWssServer wss = assembly.newRealtimeWssServer(
+                     new InetSocketAddress("127.0.0.1", wssPort), tls.server());
+             HttpClient client = HttpClient.newBuilder().sslContext(tls.trusted()).build()) {
+            http.start();
+            wss.start();
+            wss.awaitStarted(Duration.ofSeconds(5));
+            int port = http.address().getPort();
+            HttpResponse<String> created = request(client, port, "POST", "/v1/meetings",
+                    createBody(), "complete-first-create-key-0001");
+            assertEquals(201, created.statusCode());
+            JsonNode create = JSON.readTree(created.body());
+            String meetingId = create.path("meetingId").asText();
+            String path = "/v1/meetings/" + meetingId;
+            EventListener listener = new EventListener();
+            java.net.http.WebSocket socket = client.newWebSocketBuilder()
+                    .connectTimeout(Duration.ofSeconds(5))
+                    .header("Authorization", "Bearer "
+                            + create.path("realtime").path("sessionToken").asText())
+                    .subprotocols(CreateMeetingResponseFact.REALTIME_SUBPROTOCOL)
+                    .buildAsync(URI.create(create.path("realtime").path("url").asText()), listener)
+                    .orTimeout(5, TimeUnit.SECONDS).join();
+            socket.sendBinary(ByteBuffer.wrap(start(meetingId).toByteArray()), true).join();
+            socket.sendBinary(ByteBuffer.wrap(frame(meetingId, pcm).toByteArray()), true).join();
+            assertTrue(listener.firstAck.orTimeout(5, TimeUnit.SECONDS).join()
+                    .getAudioAck().getDurable());
+            listener.transcript.orTimeout(5, TimeUnit.SECONDS).join();
+
+            socket.sendBinary(ByteBuffer.wrap(inputComplete(meetingId).toByteArray()), true)
+                    .join();
+            awaitMeetingCount("SELECT count(*) FROM meeting_audio_input"
+                    + " WHERE meeting_id=? AND complete_last_stream_sequence=1", meetingId, 1);
+            assertEquals(1, listener.ackCount.get(), "完成声明不能产生第二条音频 ACK");
+            assertEquals("0", scalarForMeeting(
+                    "SELECT count(*) FROM durable_input_fact WHERE meeting_id=?", meetingId));
+            assertEquals("0", scalarForMeeting(
+                    "SELECT count(*) FROM workflow_step WHERE meeting_id=?", meetingId));
+            assertNull(scalarForMeeting(
+                    "SELECT finalization_receipt_id FROM meeting WHERE meeting_id=?", meetingId));
+
+            HttpResponse<String> stopped = request(client, port, "POST", path + ":stop",
+                    "", "complete-first-stop-key-0001");
+            assertEquals(200, stopped.statusCode());
+            String receipt = JSON.readTree(stopped.body()).path("finalizationReceipt").asText();
+            assertTrue(receipt.startsWith("receipt_"));
+            assertEquals(receipt, scalarForMeeting(
+                    "SELECT finalization_receipt_id FROM meeting WHERE meeting_id=?", meetingId));
+            assertEquals("1", scalarForMeeting(
+                    "SELECT count(*) FROM durable_input_fact WHERE meeting_id=?", meetingId));
+            assertEquals("1", scalarForMeeting(
+                    "SELECT count(*) FROM workflow_step WHERE meeting_id=?", meetingId));
+            HttpResponse<String> replay = request(client, port, "POST", path + ":stop",
+                    "", "complete-first-stop-key-0001");
+            assertEquals(200, replay.statusCode());
+            assertEquals(receipt, JSON.readTree(replay.body())
+                    .path("finalizationReceipt").asText());
+            assertEquals("1", scalarForMeeting(
+                    "SELECT count(*) FROM durable_input_fact WHERE meeting_id=?", meetingId));
+            assertEquals("1", scalarForMeeting(
+                    "SELECT count(*) FROM workflow_step WHERE meeting_id=?", meetingId));
+            socket.sendClose(java.net.http.WebSocket.NORMAL_CLOSURE, "done").join();
+            listener.closed.orTimeout(5, TimeUnit.SECONDS).join();
         }
     }
 
