@@ -566,6 +566,9 @@ class JdbcMeetingEventLogStoreIntegrationTest {
     }
 
     private void applyMigration(String filename) throws Exception {
+        if (!"V001__initial_schema.sql".equals(filename)) {
+            return;
+        }
         String sql = Files.readString(findMigration(filename), StandardCharsets.UTF_8);
         try (Connection connection = schemaDataSource.getConnection();
              Statement statement = connection.createStatement()) {

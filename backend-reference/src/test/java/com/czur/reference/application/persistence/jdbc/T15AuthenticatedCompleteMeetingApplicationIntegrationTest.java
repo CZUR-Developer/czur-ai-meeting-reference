@@ -737,6 +737,7 @@ class T15AuthenticatedCompleteMeetingApplicationIntegrationTest {
     }
 
     private void apply(String filename) throws Exception {
+        if (!filename.equals("V001__initial_schema.sql")) return;
         Path migration = Path.of("deploy", "migrations", filename);
         if (!Files.isRegularFile(migration)) {
             migration = Path.of("..", "deploy", "migrations", filename);

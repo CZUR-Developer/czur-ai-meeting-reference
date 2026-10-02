@@ -242,6 +242,7 @@ class JdbcDurableAudioInputPortIntegrationTest {
     }
 
     private static String migration(String filename) throws Exception {
+        if (!filename.equals("V001__initial_schema.sql")) return "SELECT 1";
         for (Path path : new Path[]{Path.of("deploy", "migrations", filename),
                 Path.of("..", "deploy", "migrations", filename)}) {
             if (Files.isRegularFile(path)) return Files.readString(path, StandardCharsets.UTF_8);

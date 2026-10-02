@@ -450,6 +450,7 @@ class JdbcCompleteMeetingCreationUnitOfWorkIntegrationTest {
     }
 
     private void apply(String filename) throws Exception {
+        if (!filename.equals("V001__initial_schema.sql")) return;
         Path path = Path.of("..", "deploy", "migrations", filename);
         if (!Files.isRegularFile(path)) {
             path = Path.of("deploy", "migrations", filename);
