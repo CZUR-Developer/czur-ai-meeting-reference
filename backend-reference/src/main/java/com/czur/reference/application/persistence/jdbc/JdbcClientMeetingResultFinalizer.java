@@ -95,9 +95,6 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
                 artifact.put("text", projection.text());
                 String artifactJson = artifact.toString();
                 byte[] content = artifactJson.getBytes(StandardCharsets.UTF_8);
-                if (content.length > 4096) {
-                    throw new IllegalStateException("P4 reference transcript exceeds artifact limit");
-                }
                 MeetingManifest manifest = new MeetingManifest(
                         "0.1", meetingId, 1,
                         new MeetingManifest.Profile(locked.snapshot().profileId(),

@@ -234,7 +234,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                     .<MeetingManifestPort>map(ttl -> new JdbcMeetingManifestQueryPort(
                             dataSource, new ManifestResultAccessPolicy(clock, ttl)))
                     .orElse(null);
-            MeetingArtifactContentPort artifact = manifest != null && artifactStore != null
+            MeetingArtifactContentPort artifact = manifest != null
                     ? new JdbcMeetingArtifactContentQueryPort(
                             dataSource, manifest, artifactStore) : null;
             // REST 补拉和后续 WSS 恢复共用 meeting_event；不建立第二套事件事实源。

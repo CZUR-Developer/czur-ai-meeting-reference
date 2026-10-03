@@ -36,11 +36,11 @@ public interface MeetingArtifactContentPort {
     sealed interface Result permits Found, Pending, NotFound, Conflict, AccessDenied,
             Unavailable { }
 
-    /** 已按 Manifest、READY metadata 和物理字节三方核对的 canonical Mock JSON。 */
+    /** 已按 Manifest 中的引用核对的最终转写 JSON 正文。 */
     record Found(byte[] content) implements Result {
         public Found {
             Objects.requireNonNull(content, "content");
-            if (content.length == 0 || content.length > 4096) {
+            if (content.length == 0) {
                 throw new IllegalArgumentException("artifact content is invalid");
             }
             content = content.clone();

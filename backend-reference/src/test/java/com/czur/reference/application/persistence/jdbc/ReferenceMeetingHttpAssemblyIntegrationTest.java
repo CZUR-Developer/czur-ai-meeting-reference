@@ -22,6 +22,7 @@ import com.czur.reference.application.port.FinalizationInputFact;
 import com.czur.reference.application.port.ManifestStatus;
 import com.czur.reference.application.port.MeetingManifest;
 import com.czur.reference.application.port.MeetingManifestPort;
+import com.czur.reference.application.port.model.CanonicalTranscriptEvent;
 import com.czur.reference.application.port.WorkflowStep;
 import com.czur.reference.application.port.artifact.ArtifactReadyMetadataStore;
 import com.czur.reference.application.port.artifact.ArtifactStore;
@@ -42,6 +43,7 @@ import com.czur.reference.domain.capability.CapabilityDecision;
 import com.czur.reference.protocol.json.FinalizationCheckpointJson;
 import com.czur.reference.protocol.json.FinalizationExecutionFactJson;
 import com.czur.reference.protocol.json.MeetingManifestJson;
+import com.czur.reference.protocol.realtime.RealtimeTranscriptEventMapper;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -155,6 +157,69 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
             try (Connection connection = admin(); Statement statement = connection.createStatement()) {
                 statement.execute("DROP SCHEMA IF EXISTS \"" + schema + "\" CASCADE");
             }
+        }
+    }
+
+    @Test
+    void clientEventsStopPublishesFinalTranscriptThroughUnifiedResultApi() throws Exception {
+        migrate(1);
+        createOwned("client_result");
+        startOwned("client_result");
+        String meetingId = "mtg_client_result";
+        try (Connection connection = fixtureDataSource.getConnection();
+             PreparedStatement marker = connection.prepareStatement("""
+                     INSERT INTO meeting_client_input(meeting_id, started_at) VALUES (?, ?)
+                     """)) {
+            marker.setString(1, meetingId);
+            marker.setTimestamp(2, java.sql.Timestamp.from(NOW.minusSeconds(60)));
+            marker.executeUpdate();
+        }
+        var events = new JdbcMeetingEventLogStore(fixtureDataSource);
+        for (int revision = 1; revision <= 2; revision++) {
+            var event = RealtimeTranscriptEventMapper.event(meetingId,
+                    "evt_client_result_" + revision, revision, NOW.minusSeconds(30),
+                    new CanonicalTranscriptEvent("segment-1", revision,
+                            CanonicalTranscriptEvent.Operation.UPSERT, 0, 1200, "zh-CN",
+                            revision == 1 ? "尚未完成的初稿" : "最终文字",
+                            revision == 2, null, 0, List.of(), List.of()));
+            events.append(event);
+            try (Connection connection = fixtureDataSource.getConnection();
+                 PreparedStatement identity = connection.prepareStatement("""
+                         INSERT INTO meeting_client_event
+                             (meeting_id, client_event_id, client_sequence, event_id)
+                         VALUES (?, ?, ?, ?)
+                         """)) {
+                identity.setString(1, meetingId);
+                identity.setString(2, "client-event-" + revision);
+                identity.setInt(3, revision);
+                identity.setString(4, event.eventId());
+                identity.executeUpdate();
+            }
+        }
+        Map<String, String> enabled = config();
+        enabled.put(ReferenceMeetingDeploymentConfig.RESULT_LINK_TTL_MS, "60000");
+        try (var assembly = ReferenceMeetingHttpAssembly.start(enabled, CLOCK)) {
+            var stopped = assembly.runtime().handle(new HttpRequest("POST",
+                    "/v1/meetings/" + meetingId + ":stop",
+                    headers("client-stop-key-123456789"), ""), null);
+            assertEquals(200, stopped.status());
+            assertEquals("READY", meetingState(meetingId));
+            assertEquals(1, count("meeting_client_result"));
+            assertEquals(0, count("meeting_manifest_revision"));
+
+            Map<String, String> query = Map.of("genTime", Long.toString(NOW.toEpochMilli()));
+            var manifestResponse = assembly.runtime().handle(new HttpRequest("GET",
+                    "/v1/meetings/" + meetingId + "/manifest",
+                    Map.of(), query, ""), null);
+            assertEquals(200, manifestResponse.status());
+            MeetingManifest manifest = MeetingManifestJson.decode(manifestResponse.body());
+            assertEquals("transcript.final", manifest.artifacts().getFirst().type());
+            String artifactId = manifest.artifacts().getFirst().artifactId();
+            var artifactResponse = assembly.runtime().handle(new HttpRequest("GET",
+                    "/v1/artifacts/" + artifactId, Map.of(), query, ""), null);
+            assertEquals(200, artifactResponse.status());
+            assertEquals("最终文字", ERROR_JSON.readTree(artifactResponse.body())
+                    .path("text").asText());
         }
     }
 

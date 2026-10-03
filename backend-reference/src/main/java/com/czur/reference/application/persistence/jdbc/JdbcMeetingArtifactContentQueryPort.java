@@ -57,13 +57,18 @@ public final class JdbcMeetingArtifactContentQueryPort
             ArtifactStore artifactStore) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
         this.manifestPort = Objects.requireNonNull(manifestPort, "manifestPort");
-        this.artifactStore = Objects.requireNonNull(artifactStore, "artifactStore");
+        // 客户端结果直接保存在数据库；只有旧音频 Mock 结果需要外部 ArtifactStore。
+        this.artifactStore = artifactStore;
     }
 
     @Override
     public Result get(Request request) {
         Objects.requireNonNull(request, "request");
         try {
+            if (request.artifactId().startsWith("art_client_")) {
+                return clientArtifact(request);
+            }
+            if (artifactStore == null) return new Unavailable(false);
             Optional<String> owner = findOwner(request.artifactId());
             if (owner.isEmpty()) {
                 return new NotFound();
@@ -149,6 +154,45 @@ public final class JdbcMeetingArtifactContentQueryPort
                     failure.getClass().getSimpleName());
             return new Unavailable(false);
         }
+    }
+
+    /** 客户端结果正文与 Manifest 在 Stop 后同事务冻结，不使用旧 Mock 存储绑定。 */
+    private Result clientArtifact(Request request) throws SQLException {
+        String meetingId;
+        String json;
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement("""
+                     SELECT meeting_id, artifact_json FROM meeting_client_result
+                     WHERE artifact_id=?
+                     """)) {
+            statement.setString(1, request.artifactId());
+            try (ResultSet rows = statement.executeQuery()) {
+                if (!rows.next()) return new NotFound();
+                meetingId = rows.getString(1);
+                json = rows.getString(2);
+            }
+        }
+        MeetingManifestPort.Result access = manifestPort.get(
+                new MeetingManifestPort.Request(meetingId, request.genTime()));
+        if (access instanceof MeetingManifestPort.AccessDenied) return new AccessDenied();
+        if (access instanceof MeetingManifestPort.Pending pending) {
+            return new Pending(pending.meetingStatus());
+        }
+        if (access instanceof MeetingManifestPort.Unavailable unavailable) {
+            return new Unavailable(unavailable.retryable());
+        }
+        if (!(access instanceof MeetingManifestPort.Found found)) return new Conflict();
+        byte[] bytes = json.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        MeetingManifest.ArtifactRef reference = found.manifest().artifacts().stream()
+                .filter(item -> request.artifactId().equals(item.artifactId()))
+                .findFirst().orElse(null);
+        if (reference == null || reference.status() != MeetingManifest.ArtifactStatus.READY
+                || !"transcript.final".equals(reference.type())
+                || reference.size() != bytes.length
+                || !reference.checksum().equals(checksum(bytes))) {
+            return new Conflict();
+        }
+        return new Found(bytes);
     }
 
     private Optional<String> findOwner(String artifactId) throws SQLException {

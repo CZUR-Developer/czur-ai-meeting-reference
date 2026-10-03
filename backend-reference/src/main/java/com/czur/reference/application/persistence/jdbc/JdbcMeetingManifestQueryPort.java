@@ -50,8 +50,13 @@ public final class JdbcMeetingManifestQueryPort implements MeetingManifestPort {
                    m.updated_at,
                    latest.manifest_revision, latest.previous_revision,
                    latest.canonical_json, latest.manifest_json_text,
-                   latest.content_sha256, latest.chain_valid
+                   latest.content_sha256, latest.chain_valid,
+                   ci.meeting_id AS client_meeting_id,
+                   client_result.manifest_json AS client_manifest_json
               FROM meeting AS m
+              LEFT JOIN meeting_client_input AS ci ON ci.meeting_id=m.meeting_id
+              LEFT JOIN meeting_client_result AS client_result
+                     ON client_result.meeting_id=ci.meeting_id
               LEFT JOIN LATERAL (
                    SELECT r.manifest_revision,
                           r.previous_revision,
@@ -137,6 +142,17 @@ public final class JdbcMeetingManifestQueryPort implements MeetingManifestPort {
                 if (preliminary.status() == Status.ACCESS_DENIED) {
                     return preliminary;
                 }
+                if (snapshot.clientInput()) {
+                    if (snapshot.latestRevision() != null) {
+                        return new Conflict(ConflictReason.SNAPSHOT_INCONSISTENT);
+                    }
+                    if (snapshot.clientManifestJson() == null) {
+                        return preliminary;
+                    }
+                    MeetingManifest clientManifest = decodeClientResult(snapshot);
+                    return accessPolicy.evaluate(
+                            request, snapshot.meeting(), Optional.of(clientManifest));
+                }
                 if (snapshot.latestRevision() == null) {
                     return preliminary;
                 }
@@ -186,6 +202,11 @@ public final class JdbcMeetingManifestQueryPort implements MeetingManifestPort {
             String manifestJsonText = rows.getString("manifest_json_text");
             byte[] contentSha256 = rows.getBytes("content_sha256");
             Boolean chainValid = nullableChainValid(rows);
+            boolean clientInput = rows.getString("client_meeting_id") != null;
+            String clientManifestJson = rows.getString("client_manifest_json");
+            if (!clientInput && clientManifestJson != null) {
+                throw new CorruptManifestSnapshot();
+            }
             if (latestRevision == null) {
                 // LEFT JOIN 的其余列必须全部为空；半行不是“没有结果”。
                 if (previousRevision != null
@@ -214,7 +235,9 @@ public final class JdbcMeetingManifestQueryPort implements MeetingManifestPort {
                     canonicalJson,
                     manifestJsonText,
                     contentSha256,
-                    chainValid);
+                    chainValid,
+                    clientInput,
+                    clientManifestJson);
         } catch (CorruptManifestSnapshot failure) {
             throw failure;
         } catch (IllegalArgumentException | NullPointerException failure) {
@@ -257,6 +280,22 @@ public final class JdbcMeetingManifestQueryPort implements MeetingManifestPort {
             // MeetingManifestJson 的公开边界会把坏 JSON、未知字段、时间和领域
             // 不变量统一映射为 IllegalArgumentException/IllegalStateException。
             // 这些是持久事实损坏，不是数据库暂时不可用，必须稳定返回 Conflict。
+            throw new CorruptManifestSnapshot();
+        }
+    }
+
+    /** 客户端参考结果已在 Stop 后冻结；与旧 Manifest revision 共享公开值对象。 */
+    private static MeetingManifest decodeClientResult(RawSnapshot snapshot) {
+        try {
+            MeetingManifest manifest = MeetingManifestJson.decode(snapshot.clientManifestJson());
+            if (!snapshot.clientManifestJson().equals(MeetingManifestJson.encode(manifest))
+                    || !snapshot.meeting().meetingId().equals(manifest.meetingId())
+                    || !snapshot.profileId().equals(manifest.profile().id())
+                    || snapshot.profileRevision() != manifest.profile().revision()) {
+                throw new CorruptManifestSnapshot();
+            }
+            return manifest;
+        } catch (IllegalArgumentException | IllegalStateException failure) {
             throw new CorruptManifestSnapshot();
         }
     }
@@ -338,7 +377,9 @@ public final class JdbcMeetingManifestQueryPort implements MeetingManifestPort {
             String canonicalJson,
             String manifestJsonText,
             byte[] contentSha256,
-            Boolean chainValid) {
+            Boolean chainValid,
+            boolean clientInput,
+            String clientManifestJson) {
         private RawSnapshot {
             Objects.requireNonNull(meeting, "meeting");
             Objects.requireNonNull(profileId, "profileId");
