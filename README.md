@@ -15,22 +15,28 @@
 | `docs/` | 接入、开发和部署说明 |
 | `deploy/` | 后端 Docker Compose 示例 |
 
-## 开发入口
+## 本机开发验证
 
 使用 IntelliJ IDEA 打开 `backend-reference/pom.xml`，使用 Android Studio 打开
 `android-reference-app/`。Android
 应用的系统音频实现和签名组件由设备厂商通过 SDK 提供，不在此仓库中实现。
 
+开发机安装 Java 21、Maven、Python 3 和 Node.js/npm 后，从仓库根目录运行：
+
 ```bash
-./gradlew checkStructure
-cd backend-reference && mvn test
-cd ../android-reference-app && ./gradlew :app:assembleDebug
-cd ..
-python3 tools/check-public-boundary.py
-cd web-reference && npm run check && npm run build
+bash tools/verify-local.sh
+cd android-reference-app && ./gradlew :app:assembleDebug
 ```
 
-参考后端的配置与启动命令见 [`deploy/README.md`](deploy/README.md)。在
+前一条命令检查工程结构、Java 测试、协议 Fixture 和 Web 静态构建；Android
+构建需要本机 Android SDK。数据库集成测试仅在显式提供隔离 PostgreSQL 连接时运行，
+配置方式见 [`backend-reference/README.md`](backend-reference/README.md)。日常开发验证
+不启动 Docker。公开发布前再单独执行 `python3 tools/check-public-boundary.py`。
+
+## 交付部署
+
+交付用的后端 Dockerfile 和 Compose 配置不参与上述开发验证。参考后端的配置与
+启动命令见 [`deploy/README.md`](deploy/README.md)。在
 `deploy/` 准备 `.env` 和 WSS 证书后，使用 `docker compose --profile database up --build`
 启动演示数据库；`docker compose up --build` 连接 `.env` 指定的外部
 PostgreSQL。两种模式复用同一迁移脚本，再启动单进程后端。

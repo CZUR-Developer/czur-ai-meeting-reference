@@ -7,9 +7,11 @@
 
 ## 开发与验证
 
-- 后端：在 `backend-reference/` 执行 `mvn test`。
-- Android：在 `android-reference-app/` 执行 `./gradlew :app:test`。
-- 契约：执行 `python3 tools/contract-fixtures/validate.py`（文件存在时）。
+- 从仓库根目录执行 `bash tools/verify-local.sh`，在本机检查后端、契约和 Web。
+- Android：在 `android-reference-app/` 执行 `./gradlew :app:testDebugUnitTest`；需要本机 Android SDK。
+- PostgreSQL 集成测试使用显式提供的隔离测试库，连接配置见 `backend-reference/README.md`。
+- 日常测试不启动 Docker；根目录 Dockerfile 和 `deploy/` Compose 仅用于后端交付部署。
+- GitHub 公开发布前再运行公开边界扫描；内部 Gitee 开发提交不以该扫描代替功能测试。
 - 修改协议时同步更新 Schema、Fixture 和说明文档。
 
 接口类应说明职责、生命周期、线程约束、错误和扩展边界。关键流程使用分级
