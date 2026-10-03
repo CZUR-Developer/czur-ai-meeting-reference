@@ -13,6 +13,16 @@ android {
         versionCode = 1
         versionName = "0.1.0"
     }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation(project(":model-runtime-contract"))
+    testImplementation("junit:junit:4.13.2")
 }
 
 // 参考应用通过 system-audio-contract 的公开接口获取音频；特权实现由
