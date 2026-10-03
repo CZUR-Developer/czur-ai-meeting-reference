@@ -8,6 +8,7 @@ import com.czur.reference.application.port.MeetingQueryPort;
 import com.czur.reference.application.port.MeetingManifestPort;
 import com.czur.reference.application.port.MeetingArtifactContentPort;
 import com.czur.reference.application.port.MeetingEventLogPort;
+import com.czur.reference.application.port.ClientMeetingInputPort;
 import com.czur.reference.application.command.MeetingCommandContext;
 
 import java.util.Objects;
@@ -153,6 +154,26 @@ public final class MeetingHttpRuntime implements AutoCloseable {
         this(new MeetingHttpAdapter(queryPort, deletionPort, decoder, errors, stopService,
                 createService, createDecoder, createEnabled, manifestPort, renewService,
                 artifactPort, eventLogPort), errors);
+    }
+
+    /** P4 显式接入客户端标准事件；既有构造器和旧 WSS 链路保持不变。 */
+    public MeetingHttpRuntime(
+            MeetingQueryPort queryPort,
+            MeetingDeletionPort deletionPort,
+            MeetingHttpAdapter.RequestDecoder decoder,
+            HttpErrorMapper errors,
+            AuthenticatedMeetingStopApplicationService stopService,
+            AuthenticatedCompleteMeetingApplicationService createService,
+            CreateMeetingHttpRequestDecoder createDecoder,
+            boolean createEnabled,
+            MeetingManifestPort manifestPort,
+            AuthenticatedRealtimeTokenRenewApplicationService renewService,
+            MeetingArtifactContentPort artifactPort,
+            MeetingEventLogPort eventLogPort,
+            ClientMeetingInputPort clientInputPort) {
+        this(new MeetingHttpAdapter(queryPort, deletionPort, decoder, errors, stopService,
+                createService, createDecoder, createEnabled, manifestPort, renewService,
+                artifactPort, eventLogPort, clientInputPort), errors);
     }
 
     /** 使用默认错误映射器创建已认证 Stop 运行时。 */

@@ -1,0 +1,13 @@
+{
+  "clientSequence": 1,
+  "transcriptUpsert": {
+    "segmentId": "mock-segment-1",
+    "revision": 1,
+    "operation": "UPSERT_OPERATION_UPSERT",
+    "startMs": 0,
+    "endMs": 0,
+    "language": "zh-CN",
+    "text": "今天我们讨论 AI",
+    "final": false
+  }
+}

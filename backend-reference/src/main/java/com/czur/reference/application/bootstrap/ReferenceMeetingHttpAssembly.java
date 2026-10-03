@@ -25,6 +25,7 @@ import com.czur.reference.application.persistence.jdbc.JdbcMeetingQueryPort;
 import com.czur.reference.application.persistence.jdbc.JdbcMeetingManifestQueryPort;
 import com.czur.reference.application.persistence.jdbc.JdbcMeetingArtifactContentQueryPort;
 import com.czur.reference.application.persistence.jdbc.JdbcMeetingEventLogPort;
+import com.czur.reference.application.persistence.jdbc.JdbcClientMeetingInputPort;
 import com.czur.reference.application.persistence.jdbc.JdbcOwnedMeetingStopUnitOfWork;
 import com.czur.reference.application.persistence.jdbc.JdbcRenewRealtimeTokenUnitOfWork;
 import com.czur.reference.application.persistence.jdbc.JdbcRealtimeCredentialVerifier;
@@ -214,13 +215,14 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                     dataSource, config.deploymentScope(), clock);
             var durableAudio = new JdbcDurableAudioInputPort(dataSource,
                     config.deploymentScope());
-            var realtimeIngress = new RealtimeAudioIngress(
-                    new RealtimeMeetingStartCoordinator(config.deploymentScope(),
-                            new JdbcRealtimeStartFactsLookup(dataSource), profiles,
-                            config.mockCapabilities(), config.capabilityLimits(), clock,
-                            new JdbcMeetingStartExecutionUnitOfWork(
-                                    dataSource, new CapabilityPlanner())),
-                    durableAudio);
+            var startCoordinator = new RealtimeMeetingStartCoordinator(
+                    config.deploymentScope(), new JdbcRealtimeStartFactsLookup(dataSource),
+                    profiles, config.mockCapabilities(), config.capabilityLimits(), clock,
+                    new JdbcMeetingStartExecutionUnitOfWork(
+                            dataSource, new CapabilityPlanner()));
+            var realtimeIngress = new RealtimeAudioIngress(startCoordinator, durableAudio);
+            var clientInput = new JdbcClientMeetingInputPort(dataSource,
+                    startCoordinator, clock);
             var realtimeTranscripts = new RealtimeMockTranscriptRuntime(
                     new JdbcRealtimeMockSessionSpecLookup(dataSource,
                             config.deploymentScope()), durableAudio,
@@ -256,10 +258,11 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                 runtime = new MeetingHttpRuntime(query, deletion, decoder, errors, stopService,
                         create, new CreateMeetingHttpRequestDecoder(
                                 config.audience(), config.clientId()), true, manifest,
-                        renewService, artifact, events);
+                        renewService, artifact, events, clientInput);
             } else {
                 runtime = new MeetingHttpRuntime(query, deletion, decoder, errors, stopService,
-                        null, null, false, manifest, renewService, artifact, events);
+                        null, null, false, manifest, renewService, artifact, events,
+                        clientInput);
             }
             LOGGER.log(Level.INFO,
                     "reference meeting HTTP 装配完成 createEnabled={0} realtimeRenewEnabled={1}",

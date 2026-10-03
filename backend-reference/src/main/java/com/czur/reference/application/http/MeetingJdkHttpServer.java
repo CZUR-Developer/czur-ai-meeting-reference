@@ -243,6 +243,7 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
         AuthenticatedMeetingHttpContextResolver.Resolution resolution = switch (route) {
             case READ -> contextResolver.forRead(request);
             case DELETE -> contextResolver.forDelete(request);
+            case CLIENT_WRITE -> contextResolver.forClientWrite(request);
             case NONE -> throw new IllegalStateException("unreachable authentication route");
         };
         if (resolution instanceof AuthenticatedMeetingHttpContextResolver.Rejected rejected) {

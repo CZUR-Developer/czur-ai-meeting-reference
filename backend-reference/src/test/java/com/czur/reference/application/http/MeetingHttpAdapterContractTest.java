@@ -18,6 +18,7 @@ import com.czur.reference.application.port.MeetingQueryPort;
 import com.czur.reference.application.port.MeetingEventLogPort;
 import com.czur.reference.application.port.MeetingEventPage;
 import com.czur.reference.application.port.EventLog;
+import com.czur.reference.application.port.ClientMeetingInputPort;
 import com.czur.reference.application.port.model.CanonicalTranscriptEvent;
 import com.czur.reference.protocol.realtime.RealtimeTranscriptEventMapper;
 import com.czur.reference.application.port.MeetingStatus;
@@ -193,6 +194,48 @@ class MeetingHttpAdapterContractTest {
 
         adapter = withEvents(ignored -> { throw new IllegalArgumentException("bad stored fact"); });
         assertEquals(500, adapter.handle(request, context()).status());
+    }
+
+    @Test
+    void clientStartAndAppendAcceptOnlyCanonicalTranscriptAndReturnServerEnvelope() {
+        RecordingClientInput client = new RecordingClientInput();
+        adapter = new MeetingHttpAdapter(query, deletion, decoder,
+                new HttpErrorMapper(() -> "client-diagnostic"), stopService(),
+                null, null, false, null, null, null, null, client);
+        HttpRequest start = new HttpRequest("POST",
+                "/v1/meetings/mtg_client:startClient", Map.of(), "");
+        assertEquals(MeetingHttpAdapter.AuthenticationRoute.CLIENT_WRITE,
+                MeetingHttpAdapter.authenticationRoute(start));
+        assertEquals(200, adapter.handle(start, context()).status());
+        assertEquals("mtg_client", client.meetingId);
+
+        String body = """
+                {"clientEventId":"mock-segment-1-r1","clientSequence":1,
+                 "transcriptUpsert":{"segmentId":"mock-segment-1","revision":1,
+                 "operation":"UPSERT_OPERATION_UPSERT","startMs":0,"endMs":0,
+                 "language":"zh-CN","text":"模拟字幕","final":false}}
+                """;
+        HttpRequest append = new HttpRequest("POST",
+                "/v1/meetings/mtg_client/events:append",
+                Map.of("content-type", "application/json"), body);
+        assertEquals(MeetingHttpAdapter.AuthenticationRoute.CLIENT_WRITE,
+                MeetingHttpAdapter.authenticationRoute(append));
+        HttpResponse created = adapter.handle(append, context());
+        assertEquals(201, created.status());
+        assertTrue(created.body().contains("\"eventSequence\":\"1\""));
+        assertEquals("mock-segment-1-r1", client.request.clientEventId());
+        assertEquals(1, client.request.clientSequence());
+        assertEquals("模拟字幕", client.request.transcript().text());
+        assertEquals(0, client.request.transcript().endMs());
+        client.created = false;
+        assertEquals(200, adapter.handle(append, context()).status());
+
+        assertEquals(401, adapter.handle(append, null).status());
+        assertEquals(400, adapter.handle(new HttpRequest("POST",
+                "/v1/meetings/mtg_client/events:append",
+                Map.of("content-type", "application/json"),
+                body.replace("\"clientSequence\":1", "\"clientSequence\":0")),
+                context()).status());
     }
 
     private MeetingHttpAdapter withEvents(MeetingEventLogPort events) {
@@ -670,6 +713,26 @@ class MeetingHttpAdapterContractTest {
         public DeleteResult delete(DeleteRequest request) {
             this.request = request;
             return result;
+        }
+    }
+
+    private static final class RecordingClientInput implements ClientMeetingInputPort {
+        private String meetingId;
+        private ClientTranscript request;
+        private boolean created = true;
+
+        @Override public StartResult start(MeetingCommandContext context, String meetingId) {
+            this.meetingId = meetingId;
+            return new Started(MeetingState.STARTING);
+        }
+
+        @Override public AppendResult append(MeetingCommandContext context, String meetingId,
+                ClientTranscript request) {
+            this.meetingId = meetingId;
+            this.request = request;
+            EventLog event = RealtimeTranscriptEventMapper.event(meetingId,
+                    "evt_client_test", 1, NOW, request.transcript());
+            return new Appended(event, created);
         }
     }
 }

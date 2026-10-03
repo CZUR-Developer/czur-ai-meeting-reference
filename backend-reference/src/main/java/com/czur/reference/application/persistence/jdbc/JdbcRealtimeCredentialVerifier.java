@@ -124,6 +124,11 @@ public final class JdbcRealtimeCredentialVerifier implements RealtimeCredentialV
                 || MeetingOwnership.LEGACY_UNOWNED_SUBJECT_SCOPE.equals(meeting.subjectScope())) {
             return new Denied();
         }
+        // App 直连模型的会议已经选定 CLIENT_EVENTS 输入来源；其 Create 响应虽仍
+        // 含旧实时 Token，但该 Token 不可再打开后端音频链路。无标记旧会议不变。
+        if (isClientEventInput(connection, request.meetingId())) {
+            return new Denied();
+        }
         if (!request.meetingId().equals(request.streamId())) {
             return new Denied();
         }
@@ -187,6 +192,17 @@ public final class JdbcRealtimeCredentialVerifier implements RealtimeCredentialV
             };
         } finally {
             Arrays.fill(requestedDigest, (byte) 0);
+        }
+    }
+
+    private static boolean isClientEventInput(Connection connection, String meetingId)
+            throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT 1 FROM meeting_client_input WHERE meeting_id=?")) {
+            statement.setString(1, meetingId);
+            try (ResultSet rows = statement.executeQuery()) {
+                return rows.next();
+            }
         }
     }
 

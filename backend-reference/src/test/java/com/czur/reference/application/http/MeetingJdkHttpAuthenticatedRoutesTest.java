@@ -85,6 +85,25 @@ class MeetingJdkHttpAuthenticatedRoutesTest {
     }
 
     @Test
+    void clientInputRoutesRequireBearerAndCreatePermissionBeforeReachingPort() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            String start = "/v1/meetings/mtg_owned:startClient";
+            String append = "/v1/meetings/mtg_owned/events:append";
+            assertEquals(401, fixture.status("POST", start, "", ""));
+            assertEquals(403, fixture.status("POST", start,
+                    auth("read-only-token"), ""));
+            assertEquals(501, fixture.status("POST", start,
+                    auth("owner-token"), ""));
+            assertEquals(401, fixture.status("POST", append, "", ""));
+            assertEquals(403, fixture.status("POST", append,
+                    auth("read-only-token"), ""));
+            assertEquals(501, fixture.status("POST", append,
+                    auth("owner-token"), ""));
+            assertTrue(fixture.provider.allCredentialsClosed());
+        }
+    }
+
+    @Test
     void deletePermissionAndBadInputStopBeforeDeletionPort() throws Exception {
         try (Fixture fixture = new Fixture()) {
             String target = "/v1/meetings/mtg_owned";
@@ -308,7 +327,8 @@ class MeetingJdkHttpAuthenticatedRoutesTest {
             }
             String subject = token.startsWith("other-") ? "other" : "owner";
             Set<String> permissions = token.startsWith("read-only-")
-                    ? Set.of() : Set.of(MeetingPermissions.DELETE, MeetingPermissions.STOP);
+                    ? Set.of() : Set.of(MeetingPermissions.DELETE,
+                            MeetingPermissions.STOP, MeetingPermissions.CREATE);
             return IdentityProviderResult.success(new VerifiedIdentity(
                     new Subject(subject), Set.of(), permissions,
                     Instant.parse("2026-10-01T00:00:00Z"),

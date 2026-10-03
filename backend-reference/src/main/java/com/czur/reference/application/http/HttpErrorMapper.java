@@ -10,6 +10,7 @@ import com.czur.reference.application.error.MeetingNotFoundException;
 import com.czur.reference.application.port.DeleteResult;
 import com.czur.reference.application.port.MeetingQueryPort;
 import com.czur.reference.application.port.MeetingEventLogPort;
+import com.czur.reference.application.port.ClientMeetingInputPort;
 import com.czur.reference.application.port.MeetingManifestPort;
 import com.czur.reference.application.port.MeetingArtifactContentPort;
 import com.czur.reference.application.port.OwnedMeetingStopUnitOfWork;
@@ -77,6 +78,43 @@ public final class HttpErrorMapper {
                     "QUERY_" + unavailable.reason().name(), unavailable.retryable(),
                     HttpErrorEnvelope.UserAction.RETRY,
                     "ai_meeting.storage.query_unavailable");
+        };
+    }
+
+    /** App 输入使用原有错误 envelope，成功事件正文直接来自持久 ServerEnvelope。 */
+    public HttpResponse clientStart(String meetingId, ClientMeetingInputPort.StartResult result) {
+        Objects.requireNonNull(result, "result");
+        if (result instanceof ClientMeetingInputPort.Started started) {
+            return HttpResponse.json(200, "{\"meetingId\":\"" + meetingId
+                    + "\",\"state\":\"" + started.state().name()
+                    + "\",\"inputSource\":\"CLIENT_EVENTS\"}");
+        }
+        return clientInputFailure(((ClientMeetingInputPort.Rejected) result).reason());
+    }
+
+    public HttpResponse clientAppend(ClientMeetingInputPort.AppendResult result) {
+        Objects.requireNonNull(result, "result");
+        if (result instanceof ClientMeetingInputPort.Appended appended) {
+            return HttpResponse.json(appended.created() ? 201 : 200,
+                    appended.event().canonicalPayloadJson());
+        }
+        return clientInputFailure(((ClientMeetingInputPort.Rejected) result).reason());
+    }
+
+    private HttpResponse clientInputFailure(ClientMeetingInputPort.Reason reason) {
+        return switch (reason) {
+            case NOT_FOUND -> error(404, HttpErrorEnvelope.Domain.SESSION,
+                    "MEETING_NOT_FOUND", false, HttpErrorEnvelope.UserAction.NONE,
+                    "ai_meeting.session.meeting_not_found");
+            case ACCESS_DENIED -> error(403, HttpErrorEnvelope.Domain.IDENTITY,
+                    "ACCESS_DENIED", false, HttpErrorEnvelope.UserAction.CONTACT_ADMIN,
+                    "ai_meeting.identity.access_denied");
+            case INVALID_STATE, INPUT_SOURCE_CONFLICT, EVENT_CONFLICT -> error(409,
+                    HttpErrorEnvelope.Domain.CONTRACT, reason.name(), false,
+                    HttpErrorEnvelope.UserAction.NONE, "ai_meeting.contract.input_conflict");
+            case STORAGE_UNAVAILABLE -> error(503, HttpErrorEnvelope.Domain.STORAGE,
+                    "CLIENT_INPUT_UNAVAILABLE", true, HttpErrorEnvelope.UserAction.RETRY,
+                    "ai_meeting.storage.input_unavailable");
         };
     }
 

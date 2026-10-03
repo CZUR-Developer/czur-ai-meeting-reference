@@ -50,12 +50,17 @@ public final class AuthenticatedMeetingHttpContextResolver {
 
     /** 验证 GET/list 凭据并返回可信上下文；无业务查询、会议归属或结果访问逻辑。 */
     public Resolution forRead(HttpRequest request) {
-        return resolve(request, "GET", false);
+        return resolve(request, "GET", null);
     }
 
     /** 验证 DELETE 凭据和 {@code meeting:delete} 权限；尚不调用删除端口。 */
     public Resolution forDelete(HttpRequest request) {
-        return resolve(request, "DELETE", true);
+        return resolve(request, "DELETE", MeetingPermissions.DELETE);
+    }
+
+    /** App 会议启动和标准事件提交复用创建会议权限。 */
+    public Resolution forClientWrite(HttpRequest request) {
+        return resolve(request, "POST", MeetingPermissions.CREATE);
     }
 
     /** 供同包网络入口确认拒绝响应与运行时使用同一个错误映射实例。 */
@@ -63,7 +68,7 @@ public final class AuthenticatedMeetingHttpContextResolver {
         return errors;
     }
 
-    private Resolution resolve(HttpRequest request, String method, boolean requireDelete) {
+    private Resolution resolve(HttpRequest request, String method, String requiredPermission) {
         Objects.requireNonNull(request, "request");
         if (!method.equals(request.method())) {
             return new Rejected(errors.exception(
@@ -86,7 +91,8 @@ public final class AuthenticatedMeetingHttpContextResolver {
                 }
                 VerifiedIdentity identity = Objects.requireNonNull(
                         result.valueOrThrow(), "verified identity");
-                if (requireDelete && !identity.hasPermission(MeetingPermissions.DELETE)) {
+                if (requiredPermission != null
+                        && !identity.hasPermission(requiredPermission)) {
                     return new Rejected(errors.identityVerificationFailure(
                             new IdentityProviderError(
                                     IdentityProviderError.Code.PERMISSION_DENIED, false)));

@@ -4,6 +4,16 @@ Versioned OpenAPI, JSON Schema, and realtime event definitions belong here.
 Every contract change must include positive and negative fixtures plus a
 backward-compatibility note.
 
+## App transcript append compatibility
+
+The new `POST /v1/meetings/{meetingId}:startClient` and
+`POST /v1/meetings/{meetingId}/events:append` routes apply only to meetings
+explicitly started with client event input. The first append version accepts
+one `transcriptUpsert` per request; the server assigns the canonical
+`ServerEnvelope` event ID, meeting-global sequence, and timestamp. Meetings
+without a client-input marker keep the existing WSS audio behavior. See the
+`client-transcript-append` valid and invalid fixtures.
+
 ## Meeting event replay compatibility
 
 `GET /v1/meetings/{meetingId}/events` uses one meeting-global

@@ -265,6 +265,22 @@ END))),
     CONSTRAINT meeting_event_event_sequence_check CHECK ((event_sequence > 0))
 );
 
+-- P4 Android 客户端事件链路。无记录的历史会议继续使用后端音频输入。
+-- 客户端身份/顺序与服务端 event_sequence 分开保存；统一事件正文仍只有 meeting_event 一份。
+CREATE TABLE meeting_client_input (
+    meeting_id text PRIMARY KEY,
+    started_at timestamp with time zone NOT NULL
+);
+
+CREATE TABLE meeting_client_event (
+    meeting_id text NOT NULL REFERENCES meeting_client_input(meeting_id),
+    client_event_id text NOT NULL,
+    client_sequence bigint NOT NULL CHECK (client_sequence > 0),
+    event_id text NOT NULL UNIQUE,
+    PRIMARY KEY (meeting_id, client_event_id),
+    UNIQUE (meeting_id, client_sequence)
+);
+
 
 --
 -- Name: meeting_manifest_revision; Type: TABLE; Schema: public; Owner: -
@@ -890,6 +906,12 @@ ALTER TABLE ONLY meeting_deletion_plan
 
 ALTER TABLE ONLY meeting_event
     ADD CONSTRAINT meeting_event_meeting_id_fkey FOREIGN KEY (meeting_id) REFERENCES meeting(meeting_id);
+
+ALTER TABLE ONLY meeting_client_input
+    ADD CONSTRAINT meeting_client_input_meeting_id_fkey FOREIGN KEY (meeting_id) REFERENCES meeting(meeting_id);
+
+ALTER TABLE ONLY meeting_client_event
+    ADD CONSTRAINT meeting_client_event_event_id_fkey FOREIGN KEY (event_id) REFERENCES meeting_event(event_id);
 
 
 --

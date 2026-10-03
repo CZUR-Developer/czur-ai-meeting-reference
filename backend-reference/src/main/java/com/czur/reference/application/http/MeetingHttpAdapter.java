@@ -11,6 +11,8 @@ import com.czur.reference.application.port.MeetingManifestPort;
 import com.czur.reference.application.port.MeetingArtifactContentPort;
 import com.czur.reference.application.port.MeetingQueryPort;
 import com.czur.reference.application.port.MeetingEventLogPort;
+import com.czur.reference.application.port.ClientMeetingInputPort;
+import com.czur.reference.application.port.model.CanonicalTranscriptEvent;
 import com.czur.reference.application.port.identity.IdentityVerificationRequest;
 import com.czur.reference.domain.meeting.MeetingIdPolicy;
 
@@ -20,6 +22,9 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.util.Objects;
+import java.util.Set;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Matcher;
@@ -51,6 +56,10 @@ public final class MeetingHttpAdapter {
             "^/v1/meetings/(mtg_[A-Za-z0-9_-]+)$");
     private static final Pattern STOP_PATH = Pattern.compile(
             "^/v1/meetings/(mtg_[A-Za-z0-9_-]+):stop$");
+    private static final Pattern CLIENT_START_PATH = Pattern.compile(
+            "^/v1/meetings/(mtg_[A-Za-z0-9_-]+):startClient$");
+    private static final Pattern CLIENT_APPEND_PATH = Pattern.compile(
+            "^/v1/meetings/(mtg_[A-Za-z0-9_-]+)/events:append$");
     private static final Pattern RENEW_PATH = Pattern.compile(
             "^/v1/meetings/(mtg_[A-Za-z0-9_-]+):renewRealtimeToken$");
     private static final Pattern MANIFEST_PATH = Pattern.compile(
@@ -75,6 +84,7 @@ public final class MeetingHttpAdapter {
     private final MeetingArtifactContentPort artifactPort;
     private final AuthenticatedRealtimeTokenRenewApplicationService renewService;
     private final MeetingEventLogPort eventLogPort;
+    private final ClientMeetingInputPort clientInputPort;
 
     /** 使用随机 opaque diagnosticId 的默认错误映射器。 */
     public MeetingHttpAdapter(
@@ -102,6 +112,7 @@ public final class MeetingHttpAdapter {
         this.artifactPort = null;
         this.renewService = null;
         this.eventLogPort = null;
+        this.clientInputPort = null;
     }
 
     /** 装配完整认证 Stop application service 的构造器。 */
@@ -123,6 +134,7 @@ public final class MeetingHttpAdapter {
         this.artifactPort = null;
         this.renewService = null;
         this.eventLogPort = null;
+        this.clientInputPort = null;
     }
 
     /**
@@ -210,6 +222,26 @@ public final class MeetingHttpAdapter {
             AuthenticatedRealtimeTokenRenewApplicationService renewService,
             MeetingArtifactContentPort artifactPort,
             MeetingEventLogPort eventLogPort) {
+        this(queryPort, deletionPort, decoder, errors, stopService, createService,
+                createDecoder, createEnabled, manifestPort, renewService, artifactPort,
+                eventLogPort, null);
+    }
+
+    /** 显式接入 App 直连模型后的标准事件输入；旧构造器不开放新路由。 */
+    public MeetingHttpAdapter(
+            MeetingQueryPort queryPort,
+            MeetingDeletionPort deletionPort,
+            RequestDecoder decoder,
+            HttpErrorMapper errors,
+            AuthenticatedMeetingStopApplicationService stopService,
+            AuthenticatedCompleteMeetingApplicationService createService,
+            CreateMeetingHttpRequestDecoder createDecoder,
+            boolean createEnabled,
+            MeetingManifestPort manifestPort,
+            AuthenticatedRealtimeTokenRenewApplicationService renewService,
+            MeetingArtifactContentPort artifactPort,
+            MeetingEventLogPort eventLogPort,
+            ClientMeetingInputPort clientInputPort) {
         this.queryPort = Objects.requireNonNull(queryPort, "queryPort");
         this.deletionPort = Objects.requireNonNull(deletionPort, "deletionPort");
         this.decoder = Objects.requireNonNull(decoder, "decoder");
@@ -226,6 +258,7 @@ public final class MeetingHttpAdapter {
         this.artifactPort = artifactPort;
         this.renewService = renewService;
         this.eventLogPort = eventLogPort;
+        this.clientInputPort = clientInputPort;
     }
 
     /** 与 runtime 常见的 service-before-mapper 装配顺序兼容。 */
@@ -280,11 +313,16 @@ public final class MeetingHttpAdapter {
                 && EVENTS_PATH.matcher(request.path()).matches()) {
             return AuthenticationRoute.READ;
         }
+        if ("POST".equals(request.method())
+                && (CLIENT_START_PATH.matcher(request.path()).matches()
+                || CLIENT_APPEND_PATH.matcher(request.path()).matches())) {
+            return AuthenticationRoute.CLIENT_WRITE;
+        }
         return AuthenticationRoute.NONE;
     }
 
     enum AuthenticationRoute {
-        READ, DELETE, NONE
+        READ, DELETE, CLIENT_WRITE, NONE
     }
 
     /**
@@ -362,6 +400,29 @@ public final class MeetingHttpAdapter {
                 // 参数已校验；此后异常来自持久端口或出站投影，不再解释为请求 400。
                 return errors.internalFailure();
             }
+        }
+
+        Matcher clientStart = CLIENT_START_PATH.matcher(path);
+        if ("POST".equals(method) && clientStart.matches()) {
+            if (clientInputPort == null) return errors.notImplemented();
+            if (context == null) return errors.missingContext();
+            if (!request.query().isEmpty() || !request.body().isEmpty()) {
+                throw new IllegalArgumentException("client start must have no body or query");
+            }
+            return errors.clientStart(clientStart.group(1),
+                    clientInputPort.start(context, clientStart.group(1)));
+        }
+
+        Matcher clientAppend = CLIENT_APPEND_PATH.matcher(path);
+        if ("POST".equals(method) && clientAppend.matches()) {
+            if (clientInputPort == null) return errors.notImplemented();
+            if (context == null) return errors.missingContext();
+            if (!request.query().isEmpty()) {
+                throw new IllegalArgumentException("client event query is invalid");
+            }
+            ClientMeetingInputPort.ClientTranscript transcript = decodeClientTranscript(request);
+            return errors.clientAppend(clientInputPort.append(
+                    context, clientAppend.group(1), transcript));
         }
 
         if ("POST".equals(method) && MEETINGS_PATH.equals(path)) {
@@ -549,6 +610,81 @@ public final class MeetingHttpAdapter {
         }
     }
 
+    /** P4 只接一条标准字幕；模型原始响应及服务端 envelope 字段均不在请求中。 */
+    private static ClientMeetingInputPort.ClientTranscript decodeClientTranscript(
+            HttpRequest request) {
+        String contentType = request.header("content-type");
+        if (contentType == null || !contentType.matches(
+                "(?i)application/json(?:[ \\t]*;[ \\t]*charset=utf-8)?")) {
+            throw new IllegalArgumentException("client event content-type is invalid");
+        }
+        try {
+            JsonNode root = JSON.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                    .readTree(request.body());
+            requireFields(root, Set.of("clientEventId", "clientSequence", "transcriptUpsert"));
+            JsonNode body = root.get("transcriptUpsert");
+            requireFields(body, Set.of("segmentId", "revision", "operation", "startMs",
+                    "endMs", "language", "text", "final"));
+            String operation = textField(body, "operation");
+            CanonicalTranscriptEvent.Operation mapped = switch (operation) {
+                case "UPSERT_OPERATION_UPSERT" -> CanonicalTranscriptEvent.Operation.UPSERT;
+                case "UPSERT_OPERATION_REPLACE" -> CanonicalTranscriptEvent.Operation.REPLACE;
+                default -> throw new IllegalArgumentException("client event operation is invalid");
+            };
+            JsonNode finalNode = body.get("final");
+            if (!finalNode.isBoolean()) {
+                throw new IllegalArgumentException("client event final is invalid");
+            }
+            CanonicalTranscriptEvent transcript = new CanonicalTranscriptEvent(
+                    textField(body, "segmentId"), intField(body, "revision"), mapped,
+                    longField(body, "startMs"), longField(body, "endMs"),
+                    textField(body, "language"), textField(body, "text"),
+                    finalNode.booleanValue(), null, 1.0, java.util.List.of(),
+                    java.util.List.of());
+            return new ClientMeetingInputPort.ClientTranscript(
+                    textField(root, "clientEventId"), longField(root, "clientSequence"),
+                    transcript);
+        } catch (JsonProcessingException failure) {
+            throw new IllegalArgumentException("client event JSON is invalid");
+        }
+    }
+
+    private static void requireFields(JsonNode node, Set<String> expected) {
+        if (node == null || !node.isObject() || node.size() != expected.size()) {
+            throw new IllegalArgumentException("client event fields are invalid");
+        }
+        Iterator<String> fields = node.fieldNames();
+        while (fields.hasNext()) {
+            if (!expected.contains(fields.next())) {
+                throw new IllegalArgumentException("client event fields are invalid");
+            }
+        }
+    }
+
+    private static String textField(JsonNode node, String name) {
+        JsonNode value = node.get(name);
+        if (value == null || !value.isTextual()) {
+            throw new IllegalArgumentException("client event text field is invalid");
+        }
+        return value.textValue();
+    }
+
+    private static long longField(JsonNode node, String name) {
+        JsonNode value = node.get(name);
+        if (value == null || !value.isIntegralNumber() || !value.canConvertToLong()) {
+            throw new IllegalArgumentException("client event number field is invalid");
+        }
+        return value.longValue();
+    }
+
+    private static int intField(JsonNode node, String name) {
+        long value = longField(node, name);
+        if (value < 1 || value > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("client event revision is invalid");
+        }
+        return (int) value;
+    }
+
     private static String operationOf(HttpRequest request) {
         if ("GET".equals(request.method())
                 && ARTIFACT_PATH.matcher(request.path()).matches()) {
@@ -562,6 +698,10 @@ public final class MeetingHttpAdapter {
                 && EVENTS_PATH.matcher(request.path()).matches()) {
             return "events";
         }
+        if ("POST".equals(request.method())
+                && CLIENT_START_PATH.matcher(request.path()).matches()) return "startClient";
+        if ("POST".equals(request.method())
+                && CLIENT_APPEND_PATH.matcher(request.path()).matches()) return "appendClientEvent";
         if ("POST".equals(request.method()) && MEETINGS_PATH.equals(request.path())) {
             return "create";
         }
