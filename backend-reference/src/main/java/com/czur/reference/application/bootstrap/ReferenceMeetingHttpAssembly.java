@@ -26,6 +26,7 @@ import com.czur.reference.application.persistence.jdbc.JdbcMeetingManifestQueryP
 import com.czur.reference.application.persistence.jdbc.JdbcMeetingArtifactContentQueryPort;
 import com.czur.reference.application.persistence.jdbc.JdbcMeetingEventLogPort;
 import com.czur.reference.application.persistence.jdbc.JdbcClientMeetingInputPort;
+import com.czur.reference.application.persistence.jdbc.JdbcClientMeetingResultFinalizer;
 import com.czur.reference.application.persistence.jdbc.JdbcOwnedMeetingStopUnitOfWork;
 import com.czur.reference.application.persistence.jdbc.JdbcRenewRealtimeTokenUnitOfWork;
 import com.czur.reference.application.persistence.jdbc.JdbcRealtimeCredentialVerifier;
@@ -200,7 +201,8 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                             ids::newReceipt, new DeterministicMockFinalizationPlanner()),
                     clock);
             var stopService = new AuthenticatedMeetingStopApplicationService(
-                    config.deploymentScope(), identity, stop, query, inputReconciler);
+                    config.deploymentScope(), identity, stop, query, inputReconciler,
+                    new JdbcClientMeetingResultFinalizer(dataSource, ids::newReceipt, clock));
             var renewService = config.realtimeRenewEnabled()
                     ? new AuthenticatedRealtimeTokenRenewApplicationService(
                             config.deploymentScope(), identity,

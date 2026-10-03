@@ -188,7 +188,8 @@ paths:
     post:
       tags: [Meetings]
       operationId: stopMeeting
-      summary: 幂等结束音频输入并启动最终收口
+      summary: 幂等结束会议输入并生成最终结果
+      description: 旧后端音频会议等待完整音频接管；客户端标准事件会议在最终字幕已经保存时同步生成参考结果。请求形状和鉴权保持一致。
       security:
         - bearerAuth: []
       parameters:
@@ -203,13 +204,13 @@ paths:
               $ref: "#/components/schemas/StopMeetingRequest"
       responses:
         "200":
-          description: 输入已被后端持久化接管；同键重试可从此前的 202 推进到此结果，最终 receipt 稳定
+          description: 输入已被后端持久化接管；客户端事件会议的参考结果同时已就绪。同键重试可从此前的 202 推进到此结果，最终 receipt 稳定
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/StopMeetingResponse"
         "202":
-          description: 首次 Stop 意图已持久记录，但输入尚未完成接管；此中间状态和正文不承诺同键固定重放，客户端不得清理本地恢复数据
+          description: Stop 意图已持久记录，但音频或最终字幕尚未完成接管；此中间状态和正文不承诺同键固定重放，客户端不得清理本地恢复数据
           content:
             application/json:
               schema:

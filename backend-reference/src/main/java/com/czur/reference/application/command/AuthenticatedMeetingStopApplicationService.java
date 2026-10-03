@@ -2,6 +2,7 @@ package com.czur.reference.application.command;
 
 import com.czur.reference.application.finalization.MeetingInputReconciler;
 import com.czur.reference.application.port.InputState;
+import com.czur.reference.application.port.ClientMeetingResultFinalizer;
 import com.czur.reference.application.port.MeetingQueryPort;
 import com.czur.reference.application.port.MeetingStatus;
 import com.czur.reference.application.port.OwnedMeetingStopUnitOfWork;
@@ -25,6 +26,7 @@ public final class AuthenticatedMeetingStopApplicationService {
     private final OwnedMeetingStopUnitOfWork stopUnitOfWork;
     private final MeetingQueryPort queryPort;
     private final MeetingInputReconciler inputReconciler;
+    private final ClientMeetingResultFinalizer clientResultFinalizer;
 
     /** 旧装配保持只提交 Stop 并查询状态；不隐式启用实时输入收口。 */
     public AuthenticatedMeetingStopApplicationService(
@@ -48,6 +50,18 @@ public final class AuthenticatedMeetingStopApplicationService {
             OwnedMeetingStopUnitOfWork stopUnitOfWork,
             MeetingQueryPort queryPort,
             MeetingInputReconciler inputReconciler) {
+        this(deploymentScope, identityProvider, stopUnitOfWork, queryPort,
+                inputReconciler, null);
+    }
+
+    /** 新客户端事件会议优先同步冻结字幕；旧音频会议沿用原收口器。 */
+    public AuthenticatedMeetingStopApplicationService(
+            String deploymentScope,
+            IdentityProvider identityProvider,
+            OwnedMeetingStopUnitOfWork stopUnitOfWork,
+            MeetingQueryPort queryPort,
+            MeetingInputReconciler inputReconciler,
+            ClientMeetingResultFinalizer clientResultFinalizer) {
         if (deploymentScope == null || deploymentScope.isBlank()) {
             throw new IllegalArgumentException("deploymentScope must not be blank");
         }
@@ -56,6 +70,7 @@ public final class AuthenticatedMeetingStopApplicationService {
         this.stopUnitOfWork = Objects.requireNonNull(stopUnitOfWork, "stopUnitOfWork");
         this.queryPort = Objects.requireNonNull(queryPort, "queryPort");
         this.inputReconciler = inputReconciler;
+        this.clientResultFinalizer = clientResultFinalizer;
     }
 
     public AuthenticatedMeetingStopResult stop(
@@ -141,6 +156,14 @@ public final class AuthenticatedMeetingStopApplicationService {
     }
 
     private void triggerInputClosure(String meetingId) {
+        if (clientResultFinalizer != null) {
+            try {
+                if (clientResultFinalizer.finalizeIfClient(meetingId)) return;
+            } catch (RuntimeException failure) {
+                LOGGER.log(Level.WARNING, "客户端结果同步收口暂未完成 category=INTERNAL");
+                return;
+            }
+        }
         if (inputReconciler == null) return;
         try {
             MeetingInputReconciler.Result result = inputReconciler.reconcile(meetingId);
