@@ -1,5 +1,6 @@
 package com.czur.aimeeting.reference.meeting;
 
+import com.czur.aimeeting.model.ModelSessionGrant;
 import com.czur.aimeeting.model.TranscriptEvent;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -7,6 +8,8 @@ import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.UUID;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -53,6 +56,30 @@ public final class HttpReferenceMeetingClient implements ReferenceMeetingClient 
             return new JSONObject(response).getString("meetingId");
         } catch (JSONException invalidResponse) {
             throw new IOException("创建会议响应格式错误", invalidResponse);
+        }
+    }
+
+    @Override
+    public ModelSessionGrant requestModelSession(String meetingId) throws IOException {
+        try {
+            String response = post("/v1/meetings/" + meetingId + ":modelSession",
+                    null, null, 200).body;
+            JSONObject model = new JSONObject(response);
+            Map<String, String> initParams = new HashMap<>();
+            JSONObject params = model.getJSONObject("initParams");
+            var keys = params.keys();
+            while (keys.hasNext()) {
+                String key = keys.next();
+                initParams.put(key, params.getString(key));
+            }
+            if (!meetingId.equals(model.getString("meetingId"))) {
+                throw new IOException("模型会话与会议 ID 不一致");
+            }
+            return new ModelSessionGrant(meetingId,
+                    model.getString("adapterId"), model.getString("endpoint"),
+                    model.getString("expiresAt"), model.optString("token", null), initParams);
+        } catch (JSONException invalidResponse) {
+            throw new IOException("模型会话响应格式错误", invalidResponse);
         }
     }
 

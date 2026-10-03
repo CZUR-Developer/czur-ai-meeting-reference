@@ -1,0 +1,156 @@
+package com.czur.aimeeting.reference.tingwu;
+
+import com.czur.aimeeting.model.ModelAdapter;
+import com.czur.aimeeting.model.ModelSessionGrant;
+import com.czur.aimeeting.model.ModelSignal;
+import com.czur.aimeeting.model.TranscriptEvent;
+import com.czur.aimeeting.model.TranscriptListener;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.UUID;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+/**
+ * 听悟实时转写的公开协议 Adapter。只负责启动/停止消息及字幕映射，不持有网络或 MIC。
+ *
+ * <p>一个实例只用于一场会议；听悟的 index 是该场字幕片段标识，partial 与 SentenceEnd
+ * 按同一片段递增修订号。模型原始消息和会话材料不进入日志或标准结果。
+ */
+public final class TingwuModelAdapter implements ModelAdapter {
+    public static final String ID = "tingwu-realtime";
+
+    private final Map<String, SegmentState> segments = new HashMap<>();
+    private final Map<Integer, Long> sentenceStarts = new HashMap<>();
+    private int fallbackIndex;
+
+    @Override
+    public String id() {
+        return ID;
+    }
+
+    @Override
+    public String startMessage(ModelSessionGrant grant) {
+        try {
+            return command("StartTranscription", taskId(grant))
+                    .put("payload", new JSONObject()
+                            .put("enable_intermediate_result", true)
+                            .put("enable_translate_result", false))
+                    .toString();
+        } catch (JSONException invalid) {
+            throw new IllegalStateException("无法构造听悟启动消息", invalid);
+        }
+    }
+
+    @Override
+    public String stopMessage(ModelSessionGrant grant) {
+        try {
+            return command("StopTranscription", taskId(grant)).toString();
+        } catch (JSONException invalid) {
+            throw new IllegalStateException("无法构造听悟停止消息", invalid);
+        }
+    }
+
+    @Override
+    public ModelSignal onServerMessage(String message, TranscriptListener listener) {
+        try {
+            JSONObject root = new JSONObject(message);
+            JSONObject header = root.optJSONObject("header");
+            String name = header == null ? "" : header.optString("name",
+                    header.optString("event", ""));
+            if ("TranscriptionStarted".equals(name)) return ModelSignal.AUDIO_READY;
+            if ("TaskFailed".equals(name) || "TranscriptionFailed".equals(name)) {
+                throw new IllegalStateException("听悟会话失败：" + name);
+            }
+
+            JSONObject payload = root.optJSONObject("payload");
+            if (payload != null) {
+                if ("SentenceBegin".equals(name) && payload.has("index")) {
+                    sentenceStarts.put(payload.optInt("index"),
+                            Math.max(0, payload.optLong("time", 0)));
+                }
+                String text = payload.optString("result", "").trim();
+                if (!text.isEmpty() && ("TranscriptionResultChanged".equals(name)
+                        || "SentenceEnd".equals(name))) {
+                    boolean isFinal = "SentenceEnd".equals(name);
+                    emit(payload, text, isFinal, listener);
+                }
+            }
+            if ("TranscriptionCompleted".equals(name) || "Completed".equals(name)) {
+                return ModelSignal.FINISHED;
+            }
+            return ModelSignal.NONE;
+        } catch (JSONException invalid) {
+            throw new IllegalArgumentException("听悟消息格式错误", invalid);
+        }
+    }
+
+    private void emit(JSONObject payload, String text, boolean isFinal,
+            TranscriptListener listener) {
+        int index = payload.optInt("index", -1);
+        long knownStart = index < 0 ? 0 : sentenceStarts.getOrDefault(index, 0L);
+        long startMs = Math.max(0, payload.optLong("begin_time",
+                payload.optLong("start_time", knownStart)));
+        long endMs = Math.max(startMs, payload.optLong("time",
+                payload.optLong("end_time", startMs)));
+        String segmentId;
+        if (index >= 0) {
+            segmentId = "tingwu-" + index;
+        } else if (startMs > 0) {
+            segmentId = "tingwu-at-" + startMs;
+        } else {
+            // 无 index/时间的模型消息沿用当前片段；final 后再开始下一片段。
+            segmentId = "tingwu-fallback-" + fallbackIndex;
+            if (isFinal) fallbackIndex++;
+        }
+        SegmentState previous = segments.get(segmentId);
+        if (previous != null) {
+            if (previous.isFinal) return;
+            if (!isFinal && previous.text.equals(text)) return;
+        }
+        int revision = previous == null ? 1 : previous.revision + 1;
+        String language = language(payload.optString("detected_source_lang",
+                payload.optString("source_language", "")));
+        listener.onTranscript(new TranscriptEvent(segmentId, revision, startMs, endMs,
+                language, text, isFinal));
+        segments.put(segmentId, new SegmentState(revision, text, isFinal));
+    }
+
+    private static String taskId(ModelSessionGrant grant) {
+        String taskId = grant.initParams().get("taskId");
+        if (taskId == null || taskId.trim().isEmpty()) {
+            throw new IllegalArgumentException("听悟会话缺少 taskId");
+        }
+        return taskId;
+    }
+
+    private static JSONObject command(String name, String taskId) throws JSONException {
+        JSONObject header = new JSONObject()
+                .put("message_id", UUID.randomUUID().toString().replace("-", ""))
+                .put("task_id", taskId)
+                .put("namespace", "SpeechTranscriber")
+                .put("name", name)
+                .put("appkey", "default");
+        return new JSONObject().put("header", header);
+    }
+
+    private static String language(String raw) {
+        return switch (raw.toUpperCase(java.util.Locale.ROOT)) {
+            case "CN", "ZH", "ZH-CN" -> "zh-CN";
+            case "EN", "EN-US" -> "en-US";
+            default -> raw.trim().isEmpty() ? "zh-CN" : raw;
+        };
+    }
+
+    private static final class SegmentState {
+        private final int revision;
+        private final String text;
+        private final boolean isFinal;
+
+        private SegmentState(int revision, String text, boolean isFinal) {
+            this.revision = revision;
+            this.text = text;
+            this.isFinal = isFinal;
+        }
+    }
+}

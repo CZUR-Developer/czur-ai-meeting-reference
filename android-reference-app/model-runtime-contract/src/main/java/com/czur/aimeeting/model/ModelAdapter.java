@@ -1,15 +1,24 @@
 package com.czur.aimeeting.model;
 
 /**
- * 模型接入端口。合作伙伴在自己的应用中实现并注册 Adapter，应用只消费标准事件。
+ * 模型 WebSocket 协议端口。实现者只处理模型消息；MIC、连接和二进制 PCM 由 SDK 管理。
  *
- * <p>本端口不规定模型供应商的原始数据格式或网络协议。Adapter 负责把其模型产生的
- * 字幕转换为 {@link TranscriptEvent}；SDK 后续可以在此端口外管理连接与音频传输。
+ * <p>一次 {@link ModelRuntime#open} 使用一个 Adapter 实例。实现者可在实例内保存本场片段修订号，
+ * 不应把临时访问材料写入日志或标准字幕事件。
  */
 public interface ModelAdapter {
-    /** 稳定的 Adapter 标识，供应用选择本次使用的实现。 */
+    /** 与后端 modelSession.adapterId 一致的构建期注册标识。 */
     String id();
 
-    /** 为一次会议打开独立会话。事件按模型产生的顺序交给监听器。 */
-    ModelSession open(TranscriptListener listener);
+    /** WebSocket 建立后发送的协议启动消息。音频须等到 AUDIO_READY 才可发送。 */
+    String startMessage(ModelSessionGrant grant);
+
+    /**
+     * 处理一条模型文本消息，先回调本消息中的标准字幕，再返回生命周期信号。
+     * FINISHED 表示本场模型输出已结束；返回后 SDK 才通知上层完成。
+     */
+    ModelSignal onServerMessage(String message, TranscriptListener listener);
+
+    /** 停止输入后的协议收尾消息；不需要文本收尾的协议可以返回 null。 */
+    default String stopMessage(ModelSessionGrant grant) { return null; }
 }

@@ -1,6 +1,5 @@
 package com.czur.aimeeting.reference.mock;
 
-import com.czur.aimeeting.model.ModelAdapter;
 import com.czur.aimeeting.model.ModelSession;
 import com.czur.aimeeting.model.TranscriptEvent;
 import com.czur.aimeeting.model.TranscriptListener;
@@ -9,13 +8,11 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /** P4 使用的固定模拟模型：同一个片段先出初稿、修订稿，再确认最终文字。 */
-public final class MockModelAdapter implements ModelAdapter {
-    @Override
+public final class MockModelAdapter {
     public String id() {
         return "reference-mock";
     }
 
-    @Override
     public ModelSession open(TranscriptListener listener) {
         return new MockSession(listener);
     }
@@ -45,6 +42,11 @@ public final class MockModelAdapter implements ModelAdapter {
         @Override
         public void close() {
             executor.shutdownNow();
+        }
+
+        @Override
+        public void stopInput() {
+            close();
         }
     }
 }

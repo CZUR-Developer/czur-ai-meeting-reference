@@ -1,5 +1,6 @@
 package com.czur.aimeeting.reference.meeting;
 
+import com.czur.aimeeting.model.ModelSessionGrant;
 import com.czur.aimeeting.model.TranscriptEvent;
 import java.io.IOException;
 
@@ -13,6 +14,9 @@ public interface ReferenceMeetingClient {
 
     /** 告知后端本场由 App 提交标准事件，并进入可接收字幕的状态。 */
     void startClient(String meetingId) throws IOException;
+
+    /** 单独领取本场模型直连材料；旧 Create 响应的 realtime 字段不属于模型。 */
+    ModelSessionGrant requestModelSession(String meetingId) throws IOException;
 
     /** 提交一次字幕修订；调用方负责按 clientSequence 顺序提交。 */
     void appendTranscript(String meetingId, int clientSequence, TranscriptEvent event)

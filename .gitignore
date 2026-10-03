@@ -25,6 +25,7 @@ target/
 # Android
 local.properties
 *.apk
+*.aar
 *.aab
 *.apks
 captures/

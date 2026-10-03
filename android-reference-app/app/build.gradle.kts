@@ -2,6 +2,17 @@ plugins {
     id("com.android.application")
 }
 
+val meetingRuntime = providers.gradleProperty("meetingRuntime").orElse("mock").get()
+require(meetingRuntime == "mock" || meetingRuntime == "sdk") {
+    "meetingRuntime must be mock or sdk"
+}
+val sdkAar = providers.gradleProperty("meetingSdkAar").orNull
+if (meetingRuntime == "sdk") {
+    require(!sdkAar.isNullOrBlank() && file(sdkAar).isFile) {
+        "sdk mode requires -PmeetingSdkAar=/absolute/path/ai-meeting-sdk-0.1.0-release.aar"
+    }
+}
+
 android {
     namespace = "com.czur.aimeeting.reference"
     compileSdk = 35
@@ -18,14 +29,18 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+
+    sourceSets.getByName("main").java.srcDir("src/$meetingRuntime/java")
 }
 
 dependencies {
     implementation(project(":model-runtime-contract"))
+    if (meetingRuntime == "sdk") {
+        implementation(files(sdkAar!!))
+        // 本地 AAR 文件不传递 POM 依赖；SDK 的 WebSocket 运行时需要 OkHttp。
+        implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    }
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }
-
-// 参考应用通过 system-audio-contract 的公开接口获取音频；特权实现由
-// 设备厂商以 SDK 依赖注入，不在此公开工程中携带签名二进制。

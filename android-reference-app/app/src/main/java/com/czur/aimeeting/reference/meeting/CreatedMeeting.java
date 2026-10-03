@@ -1,0 +1,17 @@
+package com.czur.aimeeting.reference.meeting;
+
+import com.czur.aimeeting.model.ModelSessionGrant;
+
+/** 创建会议的应用可用信息；modelSession 在 Mock 后端响应中可缺省。 */
+public final class CreatedMeeting {
+    private final String meetingId;
+    private final ModelSessionGrant modelSession;
+
+    public CreatedMeeting(String meetingId, ModelSessionGrant modelSession) {
+        this.meetingId = meetingId;
+        this.modelSession = modelSession;
+    }
+
+    public String meetingId() { return meetingId; }
+    public ModelSessionGrant modelSession() { return modelSession; }
+}
