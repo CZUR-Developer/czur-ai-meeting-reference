@@ -25,14 +25,15 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * 按同一匿名 Manifest 访问决定读取参考 Mock 最终转写的实际持久字节。
+ * 按同一匿名 Manifest 访问决定读取客户端或 Mock 最终转写的持久字节。
  *
  * <p>artifactId 只用于从 V011 READY metadata 找到所属会议，不当作存储路径。
  * 在任何内容读取前，先由既有 {@link MeetingManifestPort} 对该会议执行 genTime、
  * 删除撤权和最新 Manifest 完整性判断，再要求公开 ArtifactRef 与 READY descriptor
- * 完全相符。Store 仅接收数据库持有的不透明 binding；流受 4096 字节上限约束，
- * 实际字节还要通过 size、SHA-256 和 Mock canonical JSON 校验。本端口不拥有
- * DataSource 或 ArtifactStore 生命周期，也不把正文或底层异常写入日志。</p>
+ * 完全相符。Store 仅接收数据库持有的不透明 binding；旧 Mock 正文维持 4096 字节
+ * 上限，客户端字幕正文上限为 1 MiB。实际字节还要通过 size、SHA-256 校验；
+ * 旧 Mock 结果沿用 canonical JSON 校验。本端口不拥有 DataSource 或 ArtifactStore
+ * 生命周期，也不把正文或底层异常写入日志。</p>
  */
 public final class JdbcMeetingArtifactContentQueryPort
         implements MeetingArtifactContentPort {
@@ -44,7 +45,8 @@ public final class JdbcMeetingArtifactContentQueryPort
             SELECT set_config(
                 'search_path', format('%I, pg_temp', current_schema()), TRUE)
             """;
-    private static final int MAX_CONTENT_BYTES = 4096;
+    private static final int MAX_MOCK_CONTENT_BYTES = 4096;
+    private static final int MAX_CLIENT_CONTENT_BYTES = 1024 * 1024;
 
     private final DataSource dataSource;
     private final MeetingManifestPort manifestPort;
@@ -57,7 +59,6 @@ public final class JdbcMeetingArtifactContentQueryPort
             ArtifactStore artifactStore) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
         this.manifestPort = Objects.requireNonNull(manifestPort, "manifestPort");
-        // 客户端结果直接保存在数据库；只有旧音频 Mock 结果需要外部 ArtifactStore。
         this.artifactStore = artifactStore;
     }
 
@@ -65,9 +66,6 @@ public final class JdbcMeetingArtifactContentQueryPort
     public Result get(Request request) {
         Objects.requireNonNull(request, "request");
         try {
-            if (request.artifactId().startsWith("art_client_")) {
-                return clientArtifact(request);
-            }
             if (artifactStore == null) return new Unavailable(false);
             Optional<String> owner = findOwner(request.artifactId());
             if (owner.isEmpty()) {
@@ -109,16 +107,20 @@ public final class JdbcMeetingArtifactContentQueryPort
                 if (!expected.equals(read.artifact())) {
                     return new Conflict();
                 }
-                byte[] bytes = read.content().readNBytes(MAX_CONTENT_BYTES + 1);
+                int limit = request.artifactId().startsWith("art_client_")
+                        ? MAX_CLIENT_CONTENT_BYTES : MAX_MOCK_CONTENT_BYTES;
+                byte[] bytes = read.content().readNBytes(limit + 1);
                 if (bytes.length != expected.content().size()
                         || !expected.content().checksum().equals(checksum(bytes))) {
                     return new Conflict();
                 }
-                MockFinalizationArtifactContent decoded =
-                        MockFinalizationArtifactContent.decodeCanonical(bytes);
-                if (!"transcript.final".equals(decoded.artifactType())
-                        || !Objects.equals(reference.language(), decoded.language())) {
-                    return new Conflict();
+                if (!request.artifactId().startsWith("art_client_")) {
+                    MockFinalizationArtifactContent decoded =
+                            MockFinalizationArtifactContent.decodeCanonical(bytes);
+                    if (!"transcript.final".equals(decoded.artifactType())
+                            || !Objects.equals(reference.language(), decoded.language())) {
+                        return new Conflict();
+                    }
                 }
                 // Store 读取与数据库结果查询不是一个原子事务；返回前再读一次同一
                 // 访问端口，避免并发删除已受理后仍发送刚读取的正文。
@@ -154,45 +156,6 @@ public final class JdbcMeetingArtifactContentQueryPort
                     failure.getClass().getSimpleName());
             return new Unavailable(false);
         }
-    }
-
-    /** 客户端结果正文与 Manifest 在 Stop 后同事务冻结，不使用旧 Mock 存储绑定。 */
-    private Result clientArtifact(Request request) throws SQLException {
-        String meetingId;
-        String json;
-        try (Connection connection = dataSource.getConnection();
-             PreparedStatement statement = connection.prepareStatement("""
-                     SELECT meeting_id, artifact_json FROM meeting_client_result
-                     WHERE artifact_id=?
-                     """)) {
-            statement.setString(1, request.artifactId());
-            try (ResultSet rows = statement.executeQuery()) {
-                if (!rows.next()) return new NotFound();
-                meetingId = rows.getString(1);
-                json = rows.getString(2);
-            }
-        }
-        MeetingManifestPort.Result access = manifestPort.get(
-                new MeetingManifestPort.Request(meetingId, request.genTime()));
-        if (access instanceof MeetingManifestPort.AccessDenied) return new AccessDenied();
-        if (access instanceof MeetingManifestPort.Pending pending) {
-            return new Pending(pending.meetingStatus());
-        }
-        if (access instanceof MeetingManifestPort.Unavailable unavailable) {
-            return new Unavailable(unavailable.retryable());
-        }
-        if (!(access instanceof MeetingManifestPort.Found found)) return new Conflict();
-        byte[] bytes = json.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        MeetingManifest.ArtifactRef reference = found.manifest().artifacts().stream()
-                .filter(item -> request.artifactId().equals(item.artifactId()))
-                .findFirst().orElse(null);
-        if (reference == null || reference.status() != MeetingManifest.ArtifactStatus.READY
-                || !"transcript.final".equals(reference.type())
-                || reference.size() != bytes.length
-                || !reference.checksum().equals(checksum(bytes))) {
-            return new Conflict();
-        }
-        return new Found(bytes);
     }
 
     private Optional<String> findOwner(String artifactId) throws SQLException {
@@ -242,7 +205,7 @@ public final class JdbcMeetingArtifactContentQueryPort
         return meetingId.equals(spec.meetingId())
                 && reference.artifactId().equals(spec.artifactId())
                 && reference.type().equals(spec.artifactType())
-                && MockFinalizationArtifactContent.MEDIA_TYPE.equals(reference.mediaType())
+                && "application/json".equals(reference.mediaType())
                 && reference.mediaType().equals(spec.mediaType())
                 && Objects.equals(reference.language(), spec.language())
                 && reference.revision() == spec.revision()

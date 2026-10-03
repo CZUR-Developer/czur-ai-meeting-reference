@@ -281,13 +281,12 @@ CREATE TABLE meeting_client_event (
     UNIQUE (meeting_id, client_sequence)
 );
 
--- P4 参考 App 的最终字幕快照。与旧音频 Worker 的 artifact/manifest 表并行，
--- 但对外仍使用相同的 Manifest 和 Artifact 读取协议。
+-- 客户端会议只记录结果身份与 Manifest；正文由可替换 ArtifactStore 保存，
+-- READY binding 和内容摘要沿用 artifact 表。
 CREATE TABLE meeting_client_result (
     meeting_id text PRIMARY KEY REFERENCES meeting_client_input(meeting_id),
     artifact_id text NOT NULL UNIQUE,
-    manifest_json text NOT NULL,
-    artifact_json text NOT NULL
+    manifest_json text NOT NULL
 );
 
 

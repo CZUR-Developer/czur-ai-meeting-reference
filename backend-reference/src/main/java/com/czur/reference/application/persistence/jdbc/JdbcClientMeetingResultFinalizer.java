@@ -4,6 +4,13 @@ import com.czur.aimeeting.contract.realtime.v1.TranscriptUpsert;
 import com.czur.reference.application.port.ClientMeetingResultFinalizer;
 import com.czur.reference.application.port.FinalizationReceiptGenerator;
 import com.czur.reference.application.port.MeetingManifest;
+import com.czur.reference.application.port.artifact.ArtifactReadyMetadataStore;
+import com.czur.reference.application.port.artifact.ArtifactStore;
+import com.czur.reference.application.port.artifact.ArtifactStore.ArtifactDescriptor;
+import com.czur.reference.application.port.artifact.ArtifactStore.ContentClaim;
+import com.czur.reference.application.port.artifact.ArtifactStore.WriteIntent;
+import com.czur.reference.application.port.artifact.ArtifactStore.WriteIntentSpec;
+import com.czur.reference.application.port.artifact.ArtifactStoreException;
 import com.czur.reference.domain.meeting.MeetingAggregate;
 import com.czur.reference.domain.meeting.MeetingEvent;
 import com.czur.reference.domain.meeting.MeetingState;
@@ -13,6 +20,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import javax.sql.DataSource;
+import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -35,12 +43,13 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * 将 App 已保存的最终字幕直接冻结为参考结果，不接触原有音频 Worker。
+ * 将 App 已保存的最终字幕写入可替换存储，再冻结为参考结果。
  *
  * <p>Stop 命令先独立提交。此实现随后锁定同一会议，读取客户端标准事件，按
- * segmentId 采用最后修订，并在一个事务中保存最终正文和 READY 状态。若最后
+ * segmentId 采用最后修订，先通过 ArtifactStore 发布不可变正文，再在一个数据库事务
+ * 中保存 READY metadata、Manifest 和会议终态。若最后
  * 修订尚非 final，保持 Stop 的 202 等待状态；App 应先提交最终修订再停止。
- * P4 仅验证 Mock 字幕结果，演示预占的生产结算留待后续阶段。</p>
+ * 本类只处理客户端事件链，不改变旧音频 Worker 的收口流程。</p>
  */
 public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResultFinalizer {
     private static final Logger LOGGER = Logger.getLogger(
@@ -49,12 +58,15 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
     private final DataSource dataSource;
     private final FinalizationReceiptGenerator receipts;
     private final Clock clock;
+    private final ArtifactStore artifactStore;
 
     public JdbcClientMeetingResultFinalizer(DataSource dataSource,
-            FinalizationReceiptGenerator receipts, Clock clock) {
+            FinalizationReceiptGenerator receipts, Clock clock, ArtifactStore artifactStore) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
         this.receipts = Objects.requireNonNull(receipts, "receipts");
         this.clock = Objects.requireNonNull(clock, "clock");
+        // 无 Store 的旧装配仍可服务旧音频会议；客户端会议必须由完整进程装配提供 Store。
+        this.artifactStore = artifactStore;
     }
 
     @Override
@@ -82,6 +94,9 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
                     connection.rollback();
                     return true;
                 }
+                if (artifactStore == null) {
+                    throw new IllegalStateException("client result artifact store is unavailable");
+                }
                 Instant endedAt = clock.instant().truncatedTo(ChronoUnit.MICROS);
                 if (endedAt.isBefore(locked.snapshot().updatedAt())) {
                     endedAt = locked.snapshot().updatedAt();
@@ -95,6 +110,17 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
                 artifact.put("text", projection.text());
                 String artifactJson = artifact.toString();
                 byte[] content = artifactJson.getBytes(StandardCharsets.UTF_8);
+                String checksum = "sha256:" + sha256(content);
+                WriteIntentSpec spec = new WriteIntentSpec(artifactId, meetingId,
+                        "transcript.final", "application/json", projection.language(),
+                        1, content.length, checksum);
+                ArtifactDescriptor descriptor = publish(spec, content);
+                ArtifactReadyMetadataStore.PersistResult persisted =
+                        new JdbcArtifactReadyMetadataStore(connection).persistReady(descriptor);
+                if (persisted.status() == ArtifactReadyMetadataStore.PersistStatus.CONFLICT) {
+                    throw new IllegalStateException("client result artifact metadata conflict");
+                }
+                Instant recordedAt = persisted.metadata().recordedAt();
                 MeetingManifest manifest = new MeetingManifest(
                         "0.1", meetingId, 1,
                         new MeetingManifest.Profile(locked.snapshot().profileId(),
@@ -104,18 +130,17 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
                         new MeetingManifest.Languages(projection.language(), List.of()),
                         List.of(new MeetingManifest.ArtifactRef(artifactId,
                                 "transcript.final", "application/json", projection.language(),
-                                1, content.length, "sha256:" + sha256(content),
-                                MeetingManifest.ArtifactStatus.READY, endedAt, null, null)),
+                                1, content.length, checksum,
+                                MeetingManifest.ArtifactStatus.READY, recordedAt, null, null)),
                         List.of());
                 try (PreparedStatement statement = connection.prepareStatement("""
                         INSERT INTO meeting_client_result
-                            (meeting_id, artifact_id, manifest_json, artifact_json)
-                        VALUES (?, ?, ?, ?)
+                            (meeting_id, artifact_id, manifest_json)
+                        VALUES (?, ?, ?)
                         """)) {
                     statement.setString(1, meetingId);
                     statement.setString(2, artifactId);
                     statement.setString(3, MeetingManifestJson.encode(manifest));
-                    statement.setString(4, artifactJson);
                     statement.executeUpdate();
                 }
 
@@ -144,7 +169,7 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
                 LOGGER.log(Level.INFO, "客户端最终字幕已生成 segments={0}",
                         projection.segmentCount());
                 return true;
-            } catch (SQLException | RuntimeException failure) {
+            } catch (SQLException | ArtifactStoreException | RuntimeException failure) {
                 connection.rollback();
                 LOGGER.log(Level.WARNING, "客户端最终字幕生成暂未完成 reason={0}",
                         failure.getClass().getSimpleName());
@@ -153,6 +178,19 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
         } catch (SQLException failure) {
             throw new IllegalStateException("client result database unavailable");
         }
+    }
+
+    /** 稳定 artifactId 使 Stop 重试可以复用已发布内容，不依赖数据库与存储的跨资源事务。 */
+    private ArtifactDescriptor publish(WriteIntentSpec spec, byte[] content)
+            throws ArtifactStoreException {
+        var prepared = artifactStore.createWriteIntent(spec);
+        if (prepared.status() == ArtifactStore.PrepareStatus.CONFLICT) {
+            throw new IllegalStateException("client result artifact intent conflict");
+        }
+        WriteIntent intent = prepared.intent();
+        ContentClaim claim = new ContentClaim(content.length, spec.expectedChecksum());
+        artifactStore.writeContent(intent, new ByteArrayInputStream(content));
+        return artifactStore.completeWrite(intent, claim).artifact();
     }
 
     private static boolean isClient(Connection connection, String meetingId) throws SQLException {

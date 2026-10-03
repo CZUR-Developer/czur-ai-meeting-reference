@@ -52,6 +52,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.junit.jupiter.api.io.TempDir;
 import org.postgresql.ds.PGSimpleDataSource;
 
 import javax.sql.DataSource;
@@ -161,7 +162,8 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
     }
 
     @Test
-    void clientEventsStopPublishesFinalTranscriptThroughUnifiedResultApi() throws Exception {
+    void clientEventsStopPublishesFinalTranscriptThroughUnifiedResultApi(
+            @TempDir Path artifactRoot) throws Exception {
         migrate(1);
         createOwned("client_result");
         startOwned("client_result");
@@ -175,12 +177,14 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
             marker.executeUpdate();
         }
         var events = new JdbcMeetingEventLogStore(fixtureDataSource);
+        // 超过旧 Mock 的 4096 字节读取上限，证明客户端结果确实走独立正文额度。
+        String finalText = "最终文字".repeat(600);
         for (int revision = 1; revision <= 2; revision++) {
             var event = RealtimeTranscriptEventMapper.event(meetingId,
                     "evt_client_result_" + revision, revision, NOW.minusSeconds(30),
                     new CanonicalTranscriptEvent("segment-1", revision,
                             CanonicalTranscriptEvent.Operation.UPSERT, 0, 1200, "zh-CN",
-                            revision == 1 ? "尚未完成的初稿" : "最终文字",
+                            revision == 1 ? "尚未完成的初稿" : finalText,
                             revision == 2, null, 0, List.of(), List.of()));
             events.append(event);
             try (Connection connection = fixtureDataSource.getConnection();
@@ -198,13 +202,15 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
         }
         Map<String, String> enabled = config();
         enabled.put(ReferenceMeetingDeploymentConfig.RESULT_LINK_TTL_MS, "60000");
-        try (var assembly = ReferenceMeetingHttpAssembly.start(enabled, CLOCK)) {
+        var artifacts = new PersistentFileSystemMockArtifactStore(artifactRoot, 1024 * 1024);
+        try (var assembly = ReferenceMeetingHttpAssembly.start(enabled, CLOCK, artifacts)) {
             var stopped = assembly.runtime().handle(new HttpRequest("POST",
                     "/v1/meetings/" + meetingId + ":stop",
                     headers("client-stop-key-123456789"), ""), null);
             assertEquals(200, stopped.status());
             assertEquals("READY", meetingState(meetingId));
             assertEquals(1, count("meeting_client_result"));
+            assertEquals(1, count("artifact"));
             assertEquals(0, count("meeting_manifest_revision"));
 
             Map<String, String> query = Map.of("genTime", Long.toString(NOW.toEpochMilli()));
@@ -218,7 +224,7 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
             var artifactResponse = assembly.runtime().handle(new HttpRequest("GET",
                     "/v1/artifacts/" + artifactId, Map.of(), query, ""), null);
             assertEquals(200, artifactResponse.status());
-            assertEquals("最终文字", ERROR_JSON.readTree(artifactResponse.body())
+            assertEquals(finalText, ERROR_JSON.readTree(artifactResponse.body())
                     .path("text").asText());
         }
     }

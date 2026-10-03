@@ -205,7 +205,8 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                     clock);
             var stopService = new AuthenticatedMeetingStopApplicationService(
                     config.deploymentScope(), identity, stop, query, inputReconciler,
-                    new JdbcClientMeetingResultFinalizer(dataSource, ids::newReceipt, clock));
+                    new JdbcClientMeetingResultFinalizer(dataSource, ids::newReceipt,
+                            clock, artifactStore));
             var renewService = config.realtimeRenewEnabled()
                     ? new AuthenticatedRealtimeTokenRenewApplicationService(
                             config.deploymentScope(), identity,
