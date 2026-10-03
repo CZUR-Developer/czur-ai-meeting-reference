@@ -2,7 +2,11 @@
   "name": "czur-ai-meeting-reference-web",
   "version": "0.1.0",
   "private": true,
-  "description": "Capability-driven static result page reference",
-  "scripts": { "build": "node tools/build.mjs", "check": "node --check tools/build.mjs" },
+  "description": "Static final meeting result page reference",
+  "scripts": {
+    "build": "node tools/build.mjs",
+    "check": "node --check tools/build.mjs && node --check src/result.mjs",
+    "test": "node --test tools/result.test.mjs"
+  },
   "engines": { "node": ">=18" }
 }

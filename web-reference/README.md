@@ -1,13 +1,18 @@
 # Web reference client
 
-这是一个最小的静态结果页参考工程。页面根据后端能力清单动态显示模块，
-不包含独立登录，也不携带合作伙伴地址。部署使用合作伙伴已有的静态 Web
-服务器；本仓库不提供 Web Docker 镜像。
+这是一个最小的静态**会后结果页**。Android App 停止会议后打开
+`index.html?meetingId=<会议ID>&genTime=<链接生成时间毫秒>`。页面读取 Manifest，
+结果生成中时短暂等待；完成后只展示 Manifest 中存在的 `transcript.final`，
+不会预览会议中的字幕，也不要求 Web 单独登录。
+
+部署使用合作伙伴已有的静态 Web 服务器；本仓库不提供 Web Docker 镜像。
 
 ```bash
 npm run check
+npm test
 npm run build             # 生成 web-reference/dist/
 ```
 
-将 `config.example.json` 复制为部署目录中的 `config.json` 并填写后端地址；
-该配置由宿主服务器注入，不要把真实地址或令牌提交到 Git。
+将 `config.example.json` 复制为部署目录中的 `config.json` 并填写浏览器可访问的
+后端地址；同源部署可填空字符串。静态 Web 与后端不在同一来源时，需要部署侧
+允许结果接口跨域读取。该配置由宿主服务器注入，不要把真实地址或令牌提交到 Git。
