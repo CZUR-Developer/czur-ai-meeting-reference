@@ -8,6 +8,7 @@ import com.czur.reference.application.command.TrustedCreateRuntimeLimits;
 import com.czur.reference.application.command.MeetingCommandResult;
 import com.czur.reference.application.command.StopMeetingIntent;
 import com.czur.reference.application.model.ModelSessionIssuer;
+import com.czur.reference.application.model.SampleJsonWsModelSessionIssuer;
 import com.czur.reference.application.port.DeleteRequest;
 import com.czur.reference.application.port.DeleteResult;
 import com.czur.reference.application.port.FinalizationFact;
@@ -48,8 +49,11 @@ import com.czur.reference.domain.meeting.MeetingState;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.time.Instant;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -120,6 +124,22 @@ class MeetingHttpAdapterContractTest {
         assertTrue(response.body().contains("\"meetingId\":\"mtg_detail\""));
         assertTrue(response.body().contains("\"taskId\":\"task-123\""));
         assertFalse(response.body().contains("\"token\""));
+    }
+
+    @Test
+    void modelSessionRouteReturnsSecondFormatAdapterWithoutChangingCreateRealtime() {
+        var issuer = new SampleJsonWsModelSessionIssuer(
+                URI.create("ws://127.0.0.1:19091/model"), Clock.fixed(NOW, ZoneOffset.UTC));
+        adapter = new MeetingHttpAdapter(query, deletion, decoder,
+                new HttpErrorMapper(() -> "sample-diagnostic"), stopService(),
+                null, null, false, null, null, null, null, null, issuer);
+        query.getResult = new MeetingQueryPort.Found(status(MeetingState.CREATED));
+        var response = adapter.handle(new HttpRequest("POST",
+                "/v1/meetings/mtg_detail:modelSession", Map.of(), ""), context());
+        assertEquals(200, response.status());
+        assertTrue(response.body().contains("\"adapterId\":\"sample-json-ws\""));
+        assertTrue(response.body().contains("\"initParams\":{}"));
+        assertFalse(response.body().contains("\"realtime\""));
     }
 
     @Test

@@ -40,6 +40,37 @@ App 按公开 Adapter 接口直连听悟，后端继续只保存标准事件。�
 Create v1 的 `realtime` 响应或旧 WSS 路径。部署变量及启用窗口见
 `deploy/README.md`。
 
+## P5-2 模型能力与第二格式样例
+
+后端现有完整 Create 会把 Product Profile、终端本场请求、权益授权、
+`AI_MEETING_MODEL_CAPABILITIES` 声明的模型能力求交，并在
+`capabilityDecisions` 返回每项能力的 `availability` 和 `reasonCode`。
+未设置模型能力变量时仍沿用 `AI_MEETING_MOCK_CAPABILITIES`，保持 P4 默认
+Mock 的原有行为。可选翻译、总结需先列入 Profile；ASR-only 模型只声明
+`transcript.realtime`，这两项便返回 `UNAVAILABLE` 与
+`PROVIDER_CAPABILITY_MISSING`。未在本场请求的可选能力返回
+`NOT_REQUESTED`，App 也应关闭入口。
+
+最小配置示例（其余必填项沿用 `.env.example`）：
+
+```dotenv
+AI_MEETING_PROFILE_OPTIONAL_CAPABILITIES=translation.realtime,summary.structured
+AI_MEETING_ENTITLEMENT_SUPPORTED_CAPABILITIES=transcript.realtime,translation.realtime,summary.structured
+AI_MEETING_MODEL_CAPABILITIES=transcript.realtime
+```
+
+本场 Create 的 `requestedCapabilities` 显式传入上述三项时，后两项返回
+`UNAVAILABLE / PROVIDER_CAPABILITY_MISSING`；参考 App 默认只请求实时字幕，
+因此默认请求里的后两项是 `NOT_REQUESTED`。当前参考后端没有翻译、总结
+执行映射，不能把它们也声明为模型已支持，否则部署配置会拒绝假启用。
+
+设置 `AI_MEETING_MODEL_ADAPTER=sample-json-ws` 和
+`AI_MEETING_SAMPLE_JSON_WS_ENDPOINT=ws://...` 后，原 `:modelSession` 接口
+签发 `adapterId=sample-json-ws`、该 WebSocket 地址、五分钟使用窗口和空的
+`initParams`。这个接口只提供模型连接材料；部署方须另行提供遵循样例 JSON
+格式的 WebSocket 模型服务。参考 App 按 `adapterId` 选择已注册 Adapter，
+Create v1 的旧 `realtime` 字段与 P2 音频链路不变。
+
 ## P3-T05 会议应用切片
 
 会议应用切片同步自 `czur-cloud` 固定提交

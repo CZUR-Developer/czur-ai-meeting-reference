@@ -211,6 +211,38 @@ class ReferenceMeetingDeploymentConfigTest {
     }
 
     @Test
+    void secondAdapterConfigRegistersAsrOnlyModelAndKeepsOptionalFunctionsClosed() {
+        Map<String, String> values = valid();
+        values.put(ReferenceMeetingDeploymentConfig.PROFILE_OPTIONAL_CAPABILITIES,
+                CapabilityIds.TRANSLATION_REALTIME + "," + CapabilityIds.SUMMARY_STRUCTURED);
+        values.put(ReferenceMeetingDeploymentConfig.ENTITLEMENT_SUPPORTED_CAPABILITIES,
+                CapabilityIds.TRANSCRIPT_REALTIME + ","
+                        + CapabilityIds.TRANSLATION_REALTIME + ","
+                        + CapabilityIds.SUMMARY_STRUCTURED);
+        values.put(ReferenceMeetingDeploymentConfig.MODEL_CAPABILITIES,
+                CapabilityIds.TRANSCRIPT_REALTIME);
+        values.put(ReferenceMeetingDeploymentConfig.MODEL_ADAPTER, "sample-json-ws");
+        values.put(ReferenceMeetingDeploymentConfig.SAMPLE_JSON_WS_ENDPOINT,
+                "ws://127.0.0.1:19091/model");
+        var config = ReferenceMeetingDeploymentConfig.fromEnvironment(values);
+        assertEquals("reference-model", config.mockCapabilities().providerId());
+        assertEquals("ws://127.0.0.1:19091/model",
+                config.sampleJsonWsEndpoint().orElseThrow().toString());
+        assertTrue(config.tingwuModelSession().isEmpty());
+        var plan = new CapabilityPlanner().plan(config.mockCapabilities(), config.profile(),
+                config.profile().allCapabilities(),
+                config.entitlement().supportedCapabilities(), config.capabilityLimits());
+        assertEquals(CapabilityDecision.Action.ENABLE,
+                plan.decisionFor(CapabilityIds.TRANSCRIPT_REALTIME).action());
+        for (String capability : Set.of(CapabilityIds.TRANSLATION_REALTIME,
+                CapabilityIds.SUMMARY_STRUCTURED)) {
+            var decision = plan.decisionFor(capability);
+            assertEquals(CapabilityDecision.Action.DISABLE, decision.action());
+            assertEquals("PROVIDER_CAPABILITY_MISSING", decision.warningCode());
+        }
+    }
+
+    @Test
     void parsesAllFieldsFromOnePrivateMapSnapshot() {
         Map<String, String> changing = valid();
         Map<String, String> adversarial = new AbstractMap<>() {

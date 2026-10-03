@@ -1,5 +1,6 @@
 package com.czur.reference.application.command;
 
+import com.czur.reference.application.http.CreateMeetingPublicResponseJson;
 import com.czur.reference.application.port.CreateRealtimeSessionAllocator;
 import com.czur.reference.application.port.entitlement.AuthorizedProfileSnapshot;
 import com.czur.reference.application.port.entitlement.MeetingGrant;
@@ -15,6 +16,7 @@ import com.czur.reference.domain.capability.CapabilityPlanner;
 import com.czur.reference.domain.capability.DeploymentLimits;
 import com.czur.reference.domain.capability.ProductProfile;
 import com.czur.reference.protocol.json.CreateMeetingResponseFactJson;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
 import java.net.URI;
@@ -36,6 +38,7 @@ class CompleteMeetingResponseAssemblerTest {
     private static final String SUBJECT = "subject-secret";
     private static final String REALTIME = CapabilityIds.TRANSCRIPT_REALTIME;
     private static final String TRANSLATION = CapabilityIds.TRANSLATION_REALTIME;
+    private static final String SUMMARY = CapabilityIds.SUMMARY_STRUCTURED;
     private static final Instant NOW = Instant.parse("2030-01-01T00:00:00Z");
 
     @Test
@@ -72,6 +75,33 @@ class CompleteMeetingResponseAssemblerTest {
                                 CreateMeetingResponseFactJson.encode(response))));
         assertFalse(result.toString().contains("local-token-secret"));
         assertFalse(result.toString().contains("deployment-secret"));
+    }
+
+    @Test
+    void actualCreateProjectionClosesRequestedTranslationAndSummaryForAsrOnlyModel()
+            throws Exception {
+        Set<String> requested = Set.of(REALTIME, TRANSLATION, SUMMARY);
+        var fixture = fixture(requested, 60_000);
+        var result = assembler(new CountingAllocator(), 120_000, 3_200).assemble(input(
+                fixture, profile(Set.of(REALTIME), Set.of(TRANSLATION, SUMMARY)),
+                Set.of(REALTIME), DeploymentLimits.NONE));
+        var response = assertInstanceOf(CompleteMeetingResponseAssembler.Success.class,
+                result).response();
+        var json = new ObjectMapper().readTree(CreateMeetingPublicResponseJson.encode(response));
+        assertEquals(3, json.path("capabilityDecisions").size());
+        for (String capability : Set.of(TRANSLATION, SUMMARY)) {
+            var decision = java.util.stream.StreamSupport.stream(
+                    json.path("capabilityDecisions").spliterator(), false)
+                    .filter(item -> capability.equals(item.path("capability").asText()))
+                    .findFirst().orElseThrow();
+            assertEquals("UNAVAILABLE", decision.path("availability").asText());
+            assertEquals("PROVIDER_CAPABILITY_MISSING",
+                    decision.path("reasonCode").asText());
+        }
+        assertEquals("AVAILABLE", java.util.stream.StreamSupport.stream(
+                json.path("capabilityDecisions").spliterator(), false)
+                .filter(item -> REALTIME.equals(item.path("capability").asText()))
+                .findFirst().orElseThrow().path("availability").asText());
     }
 
     @Test

@@ -17,6 +17,8 @@ import com.czur.reference.application.http.MeetingHttpRuntime;
 import com.czur.reference.application.http.ReferenceMeetingHttpRequestDecoder;
 import com.czur.reference.application.identity.referencedev.ReferenceDevIdentityProvider;
 import com.czur.reference.application.manifest.ManifestResultAccessPolicy;
+import com.czur.reference.application.model.ModelSessionIssuer;
+import com.czur.reference.application.model.SampleJsonWsModelSessionIssuer;
 import com.czur.reference.application.model.TingwuModelSessionIssuer;
 import com.czur.reference.application.persistence.jdbc.JdbcDatabaseRuntime;
 import com.czur.reference.application.persistence.jdbc.JdbcCompleteMeetingCreateReplayLookup;
@@ -240,8 +242,14 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                             dataSource, manifest, artifactStore) : null;
             // REST 补拉和后续 WSS 恢复共用 meeting_event；不建立第二套事件事实源。
             var events = new JdbcMeetingEventLogPort(dataSource);
-            var modelSessions = config.tingwuModelSession()
-                    .map(model -> new TingwuModelSessionIssuer(model, clock)).orElse(null);
+            // 只替换模型会话材料签发端口。旧 Create.realtime 与 WSS Mock
+            // 继续保留既有语义，Android 直连模型的选择由 adapterId 驱动。
+            ModelSessionIssuer modelSessions = config.sampleJsonWsEndpoint()
+                    .<ModelSessionIssuer>map(endpoint ->
+                            new SampleJsonWsModelSessionIssuer(endpoint, clock))
+                    .orElseGet(() -> config.tingwuModelSession()
+                            .<ModelSessionIssuer>map(model ->
+                                    new TingwuModelSessionIssuer(model, clock)).orElse(null));
             if (config.createEnabled()) {
                 // 与查询、Stop、Delete 共用唯一连接池、身份 Provider、Clock 和错误映射。
                 // ID 仅由服务端安全随机源生成；首次公开响应由 V013 持久化。

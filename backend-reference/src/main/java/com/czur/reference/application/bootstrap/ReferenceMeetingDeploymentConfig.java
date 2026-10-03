@@ -5,6 +5,7 @@ import com.czur.reference.application.entitlement.referencedev.ReferenceDevEntit
 import com.czur.reference.application.finalization.MockFinalizationArtifactContent;
 import com.czur.reference.application.finalization.ProductProfileSnapshot;
 import com.czur.reference.application.identity.referencedev.ReferenceDevIdentityConfig;
+import com.czur.reference.application.model.SampleJsonWsModelSessionIssuer;
 import com.czur.reference.application.model.TingwuModelSessionConfig;
 import com.czur.reference.application.persistence.jdbc.DatabaseRuntimeConfig;
 import com.czur.reference.application.port.entitlement.UsageEstimate;
@@ -59,6 +60,12 @@ public final class ReferenceMeetingDeploymentConfig {
     public static final String ENTITLEMENT_RESERVATION_TTL_MS =
             "AI_MEETING_ENTITLEMENT_RESERVATION_TTL_MS";
     public static final String MOCK_CAPABILITIES = "AI_MEETING_MOCK_CAPABILITIES";
+    /** Android 直连模型的能力登记；未设置时沿用 P2 Mock 能力配置。 */
+    public static final String MODEL_CAPABILITIES = "AI_MEETING_MODEL_CAPABILITIES";
+    /** 本部署签发的 Android 模型 Adapter；未设置时沿用 P5-1 听悟开关。 */
+    public static final String MODEL_ADAPTER = "AI_MEETING_MODEL_ADAPTER";
+    public static final String SAMPLE_JSON_WS_ENDPOINT =
+            "AI_MEETING_SAMPLE_JSON_WS_ENDPOINT";
     public static final String DISABLED_CAPABILITIES = "AI_MEETING_DISABLED_CAPABILITIES";
     public static final String ESTIMATED_DURATION_MS = "AI_MEETING_ESTIMATED_DURATION_MS";
     public static final String MAX_MEETING_DURATION_MS = "AI_MEETING_MAX_MEETING_DURATION_MS";
@@ -90,6 +97,7 @@ public final class ReferenceMeetingDeploymentConfig {
     private final boolean realtimeRenewEnabled;
     private final Duration resultLinkTtl;
     private final TingwuModelSessionConfig tingwuModelSession;
+    private final URI sampleJsonWsEndpoint;
 
     private ReferenceMeetingDeploymentConfig(
             DatabaseRuntimeConfig database,
@@ -100,7 +108,7 @@ public final class ReferenceMeetingDeploymentConfig {
             UsageEstimate trustedEstimate, TrustedCreateRuntimeLimits runtimeLimits,
             byte[] pageTokenSecret, URI wssOrigin, Duration wssTokenTtl,
             boolean createEnabled, boolean realtimeRenewEnabled, Duration resultLinkTtl,
-            TingwuModelSessionConfig tingwuModelSession) {
+            TingwuModelSessionConfig tingwuModelSession, URI sampleJsonWsEndpoint) {
         this.database = database;
         this.identity = identity;
         this.deploymentScope = deploymentScope;
@@ -119,6 +127,7 @@ public final class ReferenceMeetingDeploymentConfig {
         this.realtimeRenewEnabled = realtimeRenewEnabled;
         this.resultLinkTtl = resultLinkTtl;
         this.tingwuModelSession = tingwuModelSession;
+        this.sampleJsonWsEndpoint = sampleJsonWsEndpoint;
     }
 
     /**
@@ -193,18 +202,23 @@ public final class ReferenceMeetingDeploymentConfig {
             throw invalid(ENTITLEMENT_SUPPORTED_CAPABILITIES);
         }
 
-        Set<String> mockDeclared = capabilities(environment, MOCK_CAPABILITIES, true);
+        String capabilityKey = environment.containsKey(MODEL_CAPABILITIES)
+                ? MODEL_CAPABILITIES : MOCK_CAPABILITIES;
+        Set<String> mockDeclared = capabilities(environment, capabilityKey, true);
         Set<String> disabled = capabilities(environment, DISABLED_CAPABILITIES, false);
         CapabilityDescriptor mock;
         DeploymentLimits limits;
         try {
-            mock = new CapabilityDescriptor("reference-mock", "1", 1, mockDeclared);
+            mock = new CapabilityDescriptor(
+                    environment.containsKey(MODEL_CAPABILITIES)
+                            ? "reference-model" : "reference-mock",
+                    "1", 1, mockDeclared);
             limits = new DeploymentLimits(disabled);
         } catch (RuntimeException malformed) {
-            throw invalid(MOCK_CAPABILITIES);
+            throw invalid(capabilityKey);
         }
         if (!mock.capabilities().containsAll(profile.requiredCapabilities())) {
-            throw invalid(MOCK_CAPABILITIES);
+            throw invalid(capabilityKey);
         }
         for (String capability : profile.requiredCapabilities()) {
             if (!limits.permits(capability)) {
@@ -260,11 +274,24 @@ public final class ReferenceMeetingDeploymentConfig {
             // 缺项保持旧部署行为：仅新 Manifest 路由关闭，不影响既有会议入口。
             Duration resultLinkTtl = environment.containsKey(RESULT_LINK_TTL_MS)
                     ? positiveDuration(environment, RESULT_LINK_TTL_MS) : null;
+            String adapter = environment.get(MODEL_ADAPTER);
+            TingwuModelSessionConfig tingwu = null;
+            URI sampleEndpoint = null;
+            if (SampleJsonWsModelSessionIssuer.ADAPTER_ID.equals(adapter)) {
+                sampleEndpoint = sampleJsonWsEndpoint(environment);
+            } else if (adapter == null || "tingwu-realtime".equals(adapter)) {
+                tingwu = TingwuModelSessionConfig.fromEnvironment(environment);
+                if ("tingwu-realtime".equals(adapter) && tingwu == null) {
+                    throw invalid(MODEL_ADAPTER);
+                }
+            } else {
+                throw invalid(MODEL_ADAPTER);
+            }
             return new ReferenceMeetingDeploymentConfig(database, identity, scope,
                     audience, clientId, profile, entitlement, mock, limits, estimate,
                     runtimeLimits, secret, wssOrigin, tokenTtl,
                     enabled, renewEnabled, resultLinkTtl,
-                    TingwuModelSessionConfig.fromEnvironment(environment));
+                    tingwu, sampleEndpoint);
         } finally {
             Arrays.fill(secret, (byte) 0);
         }
@@ -298,6 +325,10 @@ public final class ReferenceMeetingDeploymentConfig {
     public Optional<TingwuModelSessionConfig> tingwuModelSession() {
         return Optional.ofNullable(tingwuModelSession);
     }
+    /** 配置为第二格式样例时返回其 WebSocket 模型端点。 */
+    public Optional<URI> sampleJsonWsEndpoint() {
+        return Optional.ofNullable(sampleJsonWsEndpoint);
+    }
 
     @Override
     public String toString() {
@@ -312,6 +343,19 @@ public final class ReferenceMeetingDeploymentConfig {
             throw invalid(key);
         }
         return value;
+    }
+
+    private static URI sampleJsonWsEndpoint(Map<String, String> environment) {
+        try {
+            URI endpoint = URI.create(required(environment, SAMPLE_JSON_WS_ENDPOINT));
+            if (!("ws".equals(endpoint.getScheme())
+                    || "wss".equals(endpoint.getScheme())) || endpoint.getHost() == null) {
+                throw invalid(SAMPLE_JSON_WS_ENDPOINT);
+            }
+            return endpoint;
+        } catch (RuntimeException malformed) {
+            throw invalid(SAMPLE_JSON_WS_ENDPOINT);
+        }
     }
 
     private static int positiveInt(Map<String, String> environment, String key) {
