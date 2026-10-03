@@ -10,7 +10,11 @@ integration.
 `MockModelAdapter` 演示同一片段的初稿、修订稿、最终稿；点击“开始会议”后，
 未完成文字以 80% 透明度显示，最终文字以 100% 显示。
 
-当前 Mock 不采集 MIC、不连接后端；音频源、真实模型和后端会议接入分别在后续步骤完成。
+当前 Mock 不采集 MIC、不连接真实模型；音频源和真实模型在后续步骤接入。
+点击开始会先用后端地址和本地 `reference-dev` 演示 Token 创建会议，
+再把三次标准字幕修订异步送到后端。地址应填设备可达的局域网地址，不能在设备上
+填写开发机的 `localhost`；Token 取自后端部署时自行设置的
+`REFERENCE_DEV_IDENTITY_BEARER_TOKEN`，不写入 APK、日志或持久化配置。
 
 ```bash
 ./gradlew :app:assembleDebug

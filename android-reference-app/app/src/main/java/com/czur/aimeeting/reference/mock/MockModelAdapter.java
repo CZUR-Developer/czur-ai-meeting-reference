@@ -37,7 +37,8 @@ public final class MockModelAdapter implements ModelAdapter {
 
         private void emit(long delayMs, int revision, String text, boolean isFinal) {
             executor.schedule(() -> listener.onTranscript(
-                    new TranscriptEvent("mock-segment-1", revision, text, isFinal)),
+                    new TranscriptEvent("mock-segment-1", revision, 0, 0,
+                            "zh-CN", text, isFinal)),
                     delayMs, TimeUnit.MILLISECONDS);
         }
 

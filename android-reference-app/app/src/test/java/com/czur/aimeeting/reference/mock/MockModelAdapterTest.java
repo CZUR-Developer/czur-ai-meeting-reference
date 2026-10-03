@@ -35,6 +35,9 @@ public final class MockModelAdapterTest {
         assertEquals(1, events.get(0).revision());
         assertEquals(2, events.get(1).revision());
         assertEquals(3, events.get(2).revision());
+        assertEquals("zh-CN", events.get(2).language());
+        assertEquals(0, events.get(2).startMs());
+        assertEquals(0, events.get(2).endMs());
         assertFalse(events.get(0).isFinal());
         assertFalse(events.get(1).isFinal());
         assertTrue(events.get(2).isFinal());

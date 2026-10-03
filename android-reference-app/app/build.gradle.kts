@@ -23,6 +23,8 @@ android {
 dependencies {
     implementation(project(":model-runtime-contract"))
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }
 
 // 参考应用通过 system-audio-contract 的公开接口获取音频；特权实现由

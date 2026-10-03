@@ -4,12 +4,19 @@ package com.czur.aimeeting.model;
 public final class TranscriptEvent {
     private final String segmentId;
     private final int revision;
+    private final long startMs;
+    private final long endMs;
+    private final String language;
     private final String text;
     private final boolean isFinal;
 
-    public TranscriptEvent(String segmentId, int revision, String text, boolean isFinal) {
+    public TranscriptEvent(String segmentId, int revision, long startMs, long endMs,
+            String language, String text, boolean isFinal) {
         this.segmentId = segmentId;
         this.revision = revision;
+        this.startMs = startMs;
+        this.endMs = endMs;
+        this.language = language;
         this.text = text;
         this.isFinal = isFinal;
     }
@@ -19,6 +26,15 @@ public final class TranscriptEvent {
 
     /** 从 1 开始递增的片段修订号。 */
     public int revision() { return revision; }
+
+    /** 相对会议开始时间的片段起点，单位毫秒。 */
+    public long startMs() { return startMs; }
+
+    /** 相对会议开始时间的片段终点，单位毫秒。 */
+    public long endMs() { return endMs; }
+
+    /** 片段使用的语言代码。 */
+    public String language() { return language; }
 
     /** 当前修订的完整文字。 */
     public String text() { return text; }
