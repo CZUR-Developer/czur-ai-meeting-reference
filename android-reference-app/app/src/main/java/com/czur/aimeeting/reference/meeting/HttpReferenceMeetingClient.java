@@ -15,6 +15,7 @@ import org.json.JSONObject;
 public final class HttpReferenceMeetingClient implements ReferenceMeetingClient {
     private final String baseUrl;
     private final String bearerToken;
+    private final String stopKey = UUID.randomUUID().toString();
 
     public HttpReferenceMeetingClient(String baseUrl, String bearerToken) {
         this.baseUrl = baseUrl.endsWith("/")
@@ -48,7 +49,7 @@ public final class HttpReferenceMeetingClient implements ReferenceMeetingClient 
                             .put("retainAudio", false)
                             .put("presentationCapture", false));
             String response = post("/v1/meetings", body.toString(),
-                    UUID.randomUUID().toString(), 201);
+                    UUID.randomUUID().toString(), 201).body;
             return new JSONObject(response).getString("meetingId");
         } catch (JSONException invalidResponse) {
             throw new IOException("创建会议响应格式错误", invalidResponse);
@@ -83,7 +84,13 @@ public final class HttpReferenceMeetingClient implements ReferenceMeetingClient 
         }
     }
 
-    private String post(String path, String jsonBody, String idempotencyKey, int... accepted)
+    @Override
+    public boolean stopMeeting(String meetingId) throws IOException {
+        return post("/v1/meetings/" + meetingId + ":stop", null, stopKey,
+                200, 202).status == 200;
+    }
+
+    private Response post(String path, String jsonBody, String idempotencyKey, int... accepted)
             throws IOException {
         HttpURLConnection connection = (HttpURLConnection) new URL(baseUrl + path)
                 .openConnection();
@@ -111,7 +118,7 @@ public final class HttpReferenceMeetingClient implements ReferenceMeetingClient 
             for (int expected : accepted) {
                 if (status == expected) {
                     try (InputStream input = connection.getInputStream()) {
-                        return readUtf8(input);
+                        return new Response(status, readUtf8(input));
                     }
                 }
             }
@@ -129,5 +136,15 @@ public final class HttpReferenceMeetingClient implements ReferenceMeetingClient 
             output.write(buffer, 0, count);
         }
         return output.toString(StandardCharsets.UTF_8);
+    }
+
+    private static final class Response {
+        private final int status;
+        private final String body;
+
+        private Response(int status, String body) {
+            this.status = status;
+            this.body = body;
+        }
     }
 }

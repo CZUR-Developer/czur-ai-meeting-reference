@@ -20,6 +20,8 @@ public final class HttpReferenceMeetingClientTest {
                     .setBody("{\"meetingId\":\"mtg_test\"}"));
             server.enqueue(new MockResponse().setResponseCode(200).setBody("{}"));
             server.enqueue(new MockResponse().setResponseCode(201).setBody("{}"));
+            server.enqueue(new MockResponse().setResponseCode(200)
+                    .setBody("{\"inputState\":\"INPUT_ACCEPTED\"}"));
             server.start();
             ReferenceMeetingClient client = new HttpReferenceMeetingClient(
                     server.url("/").toString(), "local-demo-token");
@@ -28,10 +30,12 @@ public final class HttpReferenceMeetingClientTest {
             client.appendTranscript(meetingId, 1,
                     new TranscriptEvent("mock-segment-1", 1, 0, 0,
                             "zh-CN", "今天我们讨论 AI", false));
+            assertTrue(client.stopMeeting(meetingId));
 
             RecordedRequest createRequest = server.takeRequest();
             RecordedRequest startRequest = server.takeRequest();
             RecordedRequest appendRequest = server.takeRequest();
+            RecordedRequest stopRequest = server.takeRequest();
             assertEquals("mtg_test", meetingId);
             assertEquals(List.of("/v1/meetings", "/v1/meetings/mtg_test:startClient",
                     "/v1/meetings/mtg_test/events:append"),
@@ -52,6 +56,10 @@ public final class HttpReferenceMeetingClientTest {
                     append.getJSONObject("transcriptUpsert").getString("operation"));
             assertEquals("今天我们讨论 AI",
                     append.getJSONObject("transcriptUpsert").getString("text"));
+            assertEquals("/v1/meetings/mtg_test:stop", stopRequest.getPath());
+            assertEquals("Bearer local-demo-token", stopRequest.getHeader("Authorization"));
+            assertTrue(stopRequest.getBody().readUtf8().isEmpty());
+            assertTrue(stopRequest.getHeader("Idempotency-Key") != null);
         }
     }
 }

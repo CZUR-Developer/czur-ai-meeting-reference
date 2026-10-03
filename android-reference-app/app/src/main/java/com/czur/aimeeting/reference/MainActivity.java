@@ -1,10 +1,12 @@
 package com.czur.aimeeting.reference;
 
 import android.app.Activity;
+import android.content.Intent;
+import android.net.Uri;
 import android.os.Bundle;
+import android.text.InputType;
 import android.util.Log;
 import android.view.Gravity;
-import android.text.InputType;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -27,9 +29,11 @@ public final class MainActivity extends Activity {
     private ModelSession session;
     private EditText backendUrlView;
     private EditText tokenView;
+    private EditText resultWebUrlView;
     private TextView transcriptView;
     private TextView statusView;
     private Button startButton;
+    private Button stopButton;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -53,6 +57,13 @@ public final class MainActivity extends Activity {
         tokenView.setHint("reference-dev 演示 Token");
         layout.addView(tokenView);
 
+        resultWebUrlView = new EditText(this);
+        resultWebUrlView.setSingleLine(true);
+        resultWebUrlView.setInputType(InputType.TYPE_CLASS_TEXT
+                | InputType.TYPE_TEXT_VARIATION_URI);
+        resultWebUrlView.setHint("结果页地址，例如 http://192.168.1.10:8081/index.html");
+        layout.addView(resultWebUrlView);
+
         transcriptView = new TextView(this);
         transcriptView.setTextSize(28);
         transcriptView.setText("填写后端地址和演示 Token，再开始会议");
@@ -62,6 +73,11 @@ public final class MainActivity extends Activity {
         startButton.setText("开始会议");
         startButton.setOnClickListener(view -> createAndStartMeeting());
         layout.addView(startButton);
+
+        stopButton = new Button(this);
+        stopButton.setText("停止会议并查看结果");
+        stopButton.setEnabled(false);
+        layout.addView(stopButton);
 
         statusView = new TextView(this);
         statusView.setText("地址须由设备访问，设备上的 localhost 不是开发机");
@@ -104,28 +120,78 @@ public final class MainActivity extends Activity {
         transcriptView.setAlpha(0.8f);
         statusView.setText("会议 " + meetingId + " 已开始，正在接收模拟字幕");
         AtomicInteger sequence = new AtomicInteger();
+        AtomicInteger saved = new AtomicInteger();
+        stopButton.setEnabled(false);
+        stopButton.setOnClickListener(view -> stopMeeting(client, meetingId));
         Log.i(TAG, "开始模拟字幕 adapter=" + adapter.id() + " meetingId=" + meetingId);
         session = adapter.open(event -> {
             runOnUiThread(() -> showTranscript(event));
             int clientSequence = sequence.incrementAndGet();
-            network.execute(() -> appendTranscript(client, meetingId, clientSequence, event));
+            network.execute(() -> appendTranscript(
+                    client, meetingId, clientSequence, event, saved));
         });
         session.start();
     }
 
     private void appendTranscript(ReferenceMeetingClient client, String meetingId,
-            int clientSequence, TranscriptEvent event) {
+            int clientSequence, TranscriptEvent event, AtomicInteger saved) {
         try {
             client.appendTranscript(meetingId, clientSequence, event);
+            int savedCount = saved.incrementAndGet();
             Log.i(TAG, "标准字幕事件已保存 meetingId=" + meetingId + " clientSequence="
                     + clientSequence + " segmentId=" + event.segmentId()
                     + " revision=" + event.revision());
-            runOnUiThread(() -> statusView.setText("字幕已送达后端：" + clientSequence + "/3"));
+            runOnUiThread(() -> {
+                statusView.setText("字幕已送达后端：" + savedCount + "/3");
+                if (event.isFinal() && savedCount == 3) {
+                    stopButton.setEnabled(true);
+                }
+            });
         } catch (IOException failure) {
             Log.e(TAG, "字幕事件提交失败 meetingId=" + meetingId
                     + " clientSequence=" + clientSequence, failure);
             runOnUiThread(() -> statusView.setText("字幕提交失败：" + failure.getMessage()));
         }
+    }
+
+    private void stopMeeting(ReferenceMeetingClient client, String meetingId) {
+        String resultWebUrl = resultWebUrlView.getText().toString().trim();
+        if (resultWebUrl.isEmpty()) {
+            statusView.setText("请填写结果页地址");
+            return;
+        }
+        stopButton.setEnabled(false);
+        statusView.setText("正在结束会议…");
+        network.execute(() -> {
+            try {
+                boolean accepted = client.stopMeeting(meetingId);
+                if (!accepted) {
+                    runOnUiThread(() -> {
+                        statusView.setText("后端仍在收口，请稍后再点停止");
+                        stopButton.setEnabled(true);
+                    });
+                    return;
+                }
+                long genTime = System.currentTimeMillis();
+                Uri resultUri = Uri.parse(resultWebUrl).buildUpon()
+                        .appendQueryParameter("meetingId", meetingId)
+                        .appendQueryParameter("genTime", Long.toString(genTime))
+                        .build();
+                Log.i(TAG, "会议结束，打开会后结果 meetingId=" + meetingId);
+                runOnUiThread(() -> {
+                    statusView.setText("会议已结束，正在打开结果页");
+                    Intent intent = new Intent(this, ResultActivity.class);
+                    intent.putExtra(ResultActivity.EXTRA_RESULT_URL, resultUri.toString());
+                    startActivity(intent);
+                });
+            } catch (IOException failure) {
+                Log.e(TAG, "结束会议失败 meetingId=" + meetingId, failure);
+                runOnUiThread(() -> {
+                    statusView.setText("结束会议失败：" + failure.getMessage());
+                    stopButton.setEnabled(true);
+                });
+            }
+        });
     }
 
     private void showTranscript(TranscriptEvent event) {

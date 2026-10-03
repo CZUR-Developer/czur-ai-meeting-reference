@@ -15,6 +15,9 @@ integration.
 再把三次标准字幕修订异步送到后端。地址应填设备可达的局域网地址，不能在设备上
 填写开发机的 `localhost`；Token 取自后端部署时自行设置的
 `REFERENCE_DEV_IDENTITY_BEARER_TOKEN`，不写入 APK、日志或持久化配置。
+三次字幕都保存后，“停止会议并查看结果”按钮才可点击。结果页地址单独填写
+已部署的静态 Web `index.html` 地址；Stop 返回已受理后，App 在内置 WebView
+打开含 `meetingId` 与单次生成的 `genTime` 的结果链接。Starry 设备无需外部浏览器。
 
 ```bash
 ./gradlew :app:assembleDebug

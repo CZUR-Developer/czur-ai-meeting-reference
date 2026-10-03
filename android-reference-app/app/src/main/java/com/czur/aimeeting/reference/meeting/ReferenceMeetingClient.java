@@ -17,4 +17,10 @@ public interface ReferenceMeetingClient {
     /** 提交一次字幕修订；调用方负责按 clientSequence 顺序提交。 */
     void appendTranscript(String meetingId, int clientSequence, TranscriptEvent event)
             throws IOException;
+
+    /**
+     * 请求结束会议。返回 true 表示后端已受理完整输入（HTTP 200）；
+     * 返回 false 表示 Stop 已记录但仍在收口（HTTP 202）。
+     */
+    boolean stopMeeting(String meetingId) throws IOException;
 }
