@@ -226,6 +226,56 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/meetings/{meetingId}:startClient:
+    post:
+      tags: [Meetings]
+      operationId: startClientMeeting
+      summary: 启动由 Android App 提交标准事件的会议
+      description: 仅新客户端事件链路使用；旧 WSS 音频会议继续由 stream_start 启动。
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/MeetingId"
+      responses:
+        "200":
+          description: 会议已启动或同一客户端入口重放
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StartClientMeetingResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/meetings/{meetingId}/events:append:
+    post:
+      tags: [Meetings]
+      operationId: appendClientMeetingEvent
+      summary: App 提交一条已归一化的字幕事件
+      description: P4 首版仅接受 transcriptUpsert；App 提供稳定客户端事件 ID 和顺序，后端分配权威 eventId、eventSequence 和 emittedAt。模型原始响应不进入此接口。
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/MeetingId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppendClientTranscriptRequest"
+      responses:
+        "201":
+          description: 字幕事件已持久化
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MeetingEvent"
+        "200":
+          description: 相同客户端事件与正文的重放，返回首次提交的权威事件
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MeetingEvent"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/meetings/{meetingId}:renewRealtimeToken:
     post:
       tags: [Meetings]
@@ -818,6 +868,61 @@ components:
       type: object
       description: 请求体可省略；若提供 application/json，只允许空对象。流终点由实时 input_complete 提交。
       additionalProperties: false
+    StartClientMeetingResponse:
+      type: object
+      additionalProperties: false
+      required: [meetingId, state, inputSource]
+      properties:
+        meetingId:
+          type: string
+          pattern: "^mtg_[A-Za-z0-9_-]+$"
+        state:
+          enum: [STARTING, RUNNING]
+        inputSource:
+          const: CLIENT_EVENTS
+    AppendClientTranscriptRequest:
+      type: object
+      additionalProperties: false
+      required: [clientEventId, clientSequence, transcriptUpsert]
+      properties:
+        clientEventId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        clientSequence:
+          type: integer
+          format: int64
+          minimum: 1
+        transcriptUpsert:
+          $ref: "#/components/schemas/ClientTranscriptUpsert"
+    ClientTranscriptUpsert:
+      type: object
+      additionalProperties: false
+      required: [segmentId, revision, operation, startMs, endMs, language, text, final]
+      properties:
+        segmentId:
+          type: string
+          minLength: 1
+        revision:
+          type: integer
+          minimum: 1
+        operation:
+          enum: [UPSERT_OPERATION_UPSERT, UPSERT_OPERATION_REPLACE]
+        startMs:
+          type: integer
+          format: int64
+          minimum: 0
+        endMs:
+          type: integer
+          format: int64
+          minimum: 0
+        language:
+          type: string
+          minLength: 1
+        text:
+          type: string
+        final:
+          type: boolean
     StopMeetingResponse:
       type: object
       additionalProperties: false
