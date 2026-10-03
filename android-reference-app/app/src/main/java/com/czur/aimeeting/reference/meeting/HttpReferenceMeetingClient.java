@@ -27,7 +27,7 @@ public final class HttpReferenceMeetingClient implements ReferenceMeetingClient 
     }
 
     @Override
-    public String createMeeting() throws IOException {
+    public CreatedMeeting createMeeting() throws IOException {
         try {
             JSONObject body = new JSONObject()
                     .put("clientSessionId", UUID.randomUUID().toString())
@@ -37,7 +37,7 @@ public final class HttpReferenceMeetingClient implements ReferenceMeetingClient 
                             .put("appVersion", "0.1.0")
                             .put("contractVersion", "v1")
                             .put("deviceId", "reference-android"))
-                    .put("title", "参考模拟会议")
+                    .put("title", "参考会议")
                     .put("timezone", "Asia/Shanghai")
                     .put("languages", new JSONObject().put("source", "zh-CN")
                             .put("targets", new org.json.JSONArray()))
@@ -47,13 +47,15 @@ public final class HttpReferenceMeetingClient implements ReferenceMeetingClient 
                             .put("channelCount", 1)
                             .put("frameDurationMs", 100))
                     .put("requestedCapabilities", new org.json.JSONArray()
-                            .put("transcript.realtime"))
+                            .put(MeetingCapabilityState.TRANSCRIPT))
                     .put("artifactPolicy", new JSONObject()
                             .put("retainAudio", false)
                             .put("presentationCapture", false));
             String response = post("/v1/meetings", body.toString(),
                     UUID.randomUUID().toString(), 201).body;
-            return new JSONObject(response).getString("meetingId");
+            JSONObject created = new JSONObject(response);
+            return new CreatedMeeting(created.getString("meetingId"), null,
+                    MeetingCapabilityState.fromCreateResponse(created));
         } catch (JSONException invalidResponse) {
             throw new IOException("创建会议响应格式错误", invalidResponse);
         }

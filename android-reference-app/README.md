@@ -19,6 +19,14 @@ Android 麦克风和 WebSocket 直连模型；本仓公开的 `TingwuModelAdapte
 仍属于旧后端音频入口。`endpoint` 与
 `token` 不会写入日志或结果。SDK 模式首次开会会请求麦克风权限。
 
+P5-2 增加 `sample-json-ws` 第二格式样例：它的模型消息使用顶层
+`type/segment/revision`，与听悟的 `header/payload` 格式不同；两者在
+`ModelAdapterRegistry` 中构建期注册，后端 `modelSession.adapterId` 决定本场选用哪一个。
+伙伴适配其他格式时新增 Adapter 并在注册表登记其实时能力，通用会议页面和 SDK
+不用修改。参考 App 读取 Create 响应的 `capabilityDecisions`；未请求、模型不支持或
+本地 Adapter 未登记的翻译/总结能力会在本场功能提示中关闭。会前选择和对应功能入口
+在 P5-4～P5-6 完成；当前页面不会把能力提示伪装成可操作功能。
+
 不要将闭源 AAR、真实模型地址或会话材料提交到本仓。`sdk` 构建明确要求外部 AAR；
 缺失时配置阶段报错，不会退到 Mock。
 

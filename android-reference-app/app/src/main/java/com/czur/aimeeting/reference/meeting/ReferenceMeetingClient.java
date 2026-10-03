@@ -9,8 +9,8 @@ import java.io.IOException;
  * 后续 SDK 提供自己的实现时，可替换此端口而不修改字幕页面。
  */
 public interface ReferenceMeetingClient {
-    /** 鉴权并创建一场参考 ASR 会议，返回后端分配的会议 ID。 */
-    String createMeeting() throws IOException;
+    /** 鉴权并创建会议，返回会议 ID 与后端冻结的能力决策。 */
+    CreatedMeeting createMeeting() throws IOException;
 
     /** 告知后端本场由 App 提交标准事件，并进入可接收字幕的状态。 */
     void startClient(String meetingId) throws IOException;

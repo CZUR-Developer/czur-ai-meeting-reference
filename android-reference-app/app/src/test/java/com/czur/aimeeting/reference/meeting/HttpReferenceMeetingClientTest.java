@@ -17,7 +17,11 @@ public final class HttpReferenceMeetingClientTest {
     public void createsStartsAndAppendsOneCanonicalTranscript() throws Exception {
         try (MockWebServer server = new MockWebServer()) {
             server.enqueue(new MockResponse().setResponseCode(201)
-                    .setBody("{\"meetingId\":\"mtg_test\"}"));
+                    .setBody("{\"meetingId\":\"mtg_test\",\"capabilityDecisions\":["
+                            + "{\"capability\":\"transcript.realtime\",\"availability\":\"AVAILABLE\"},"
+                            + "{\"capability\":\"translation.realtime\",\"availability\":\"UNAVAILABLE\","
+                            + "\"reasonCode\":\"PROVIDER_CAPABILITY_MISSING\"},"
+                            + "{\"capability\":\"summary.structured\",\"availability\":\"UNAVAILABLE\"}]}"));
             server.enqueue(new MockResponse().setResponseCode(200).setBody("{}"));
             server.enqueue(new MockResponse().setResponseCode(201).setBody("{}"));
             server.enqueue(new MockResponse().setResponseCode(200)
@@ -25,7 +29,8 @@ public final class HttpReferenceMeetingClientTest {
             server.start();
             ReferenceMeetingClient client = new HttpReferenceMeetingClient(
                     server.url("/").toString(), "local-demo-token");
-            String meetingId = client.createMeeting();
+            CreatedMeeting created = client.createMeeting();
+            String meetingId = created.meetingId();
             client.startClient(meetingId);
             client.appendTranscript(meetingId, 1,
                     new TranscriptEvent("mock-segment-1", 1, 0, 0,
@@ -37,6 +42,12 @@ public final class HttpReferenceMeetingClientTest {
             RecordedRequest appendRequest = server.takeRequest();
             RecordedRequest stopRequest = server.takeRequest();
             assertEquals("mtg_test", meetingId);
+            assertTrue(created.capabilities().canUse(MeetingCapabilityState.TRANSCRIPT,
+                    java.util.Set.of(MeetingCapabilityState.TRANSCRIPT)));
+            assertTrue(!created.capabilities().canUse(MeetingCapabilityState.TRANSLATION,
+                    java.util.Set.of(MeetingCapabilityState.TRANSLATION)));
+            assertTrue(!created.capabilities().canUse(MeetingCapabilityState.SUMMARY,
+                    java.util.Set.of()));
             assertEquals(List.of("/v1/meetings", "/v1/meetings/mtg_test:startClient",
                     "/v1/meetings/mtg_test/events:append"),
                     List.of(createRequest.getPath(), startRequest.getPath(),
@@ -77,7 +88,7 @@ public final class HttpReferenceMeetingClientTest {
             server.start();
             HttpReferenceMeetingClient client = new HttpReferenceMeetingClient(
                     server.url("/").toString(), "local-demo-token");
-            String meetingId = client.createMeeting();
+            String meetingId = client.createMeeting().meetingId();
             var grant = client.requestModelSession(meetingId);
             assertEquals("mtg_real", meetingId);
             assertEquals("tingwu-realtime", grant.adapterId());

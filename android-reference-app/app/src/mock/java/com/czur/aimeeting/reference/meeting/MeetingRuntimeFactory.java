@@ -5,6 +5,7 @@ import com.czur.aimeeting.model.ModelSession;
 import com.czur.aimeeting.model.ModelSessionListener;
 import com.czur.aimeeting.model.TranscriptListener;
 import com.czur.aimeeting.reference.mock.MockModelAdapter;
+import java.util.Set;
 
 /** 无私有 AAR 时的演示装配。 */
 public final class MeetingRuntimeFactory {
@@ -23,6 +24,11 @@ public final class MeetingRuntimeFactory {
 
             @Override
             public String displayName() { return "Mock"; }
+
+            @Override
+            public Set<String> realtimeCapabilities(CreatedMeeting created) {
+                return Set.of(MeetingCapabilityState.TRANSCRIPT);
+            }
         };
     }
 }

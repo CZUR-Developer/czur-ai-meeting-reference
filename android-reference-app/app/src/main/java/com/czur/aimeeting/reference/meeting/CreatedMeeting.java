@@ -6,12 +6,20 @@ import com.czur.aimeeting.model.ModelSessionGrant;
 public final class CreatedMeeting {
     private final String meetingId;
     private final ModelSessionGrant modelSession;
+    private final MeetingCapabilityState capabilities;
 
-    public CreatedMeeting(String meetingId, ModelSessionGrant modelSession) {
+    public CreatedMeeting(String meetingId, ModelSessionGrant modelSession,
+            MeetingCapabilityState capabilities) {
         this.meetingId = meetingId;
         this.modelSession = modelSession;
+        this.capabilities = capabilities;
     }
 
     public String meetingId() { return meetingId; }
     public ModelSessionGrant modelSession() { return modelSession; }
+    public MeetingCapabilityState capabilities() { return capabilities; }
+
+    public CreatedMeeting withModelSession(ModelSessionGrant grant) {
+        return new CreatedMeeting(meetingId, grant, capabilities);
+    }
 }

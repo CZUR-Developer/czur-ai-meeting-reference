@@ -21,8 +21,10 @@ import com.czur.aimeeting.reference.meeting.HttpReferenceMeetingClient;
 import com.czur.aimeeting.reference.meeting.CreatedMeeting;
 import com.czur.aimeeting.reference.meeting.MeetingRuntimeBridge;
 import com.czur.aimeeting.reference.meeting.MeetingRuntimeFactory;
+import com.czur.aimeeting.reference.meeting.MeetingCapabilityState;
 import com.czur.aimeeting.reference.meeting.ReferenceMeetingClient;
 import java.io.IOException;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -43,6 +45,7 @@ public final class MainActivity extends Activity {
     private EditText resultWebUrlView;
     private TextView transcriptView;
     private TextView statusView;
+    private TextView capabilityView;
     private Button startButton;
     private Button stopButton;
 
@@ -103,6 +106,10 @@ public final class MainActivity extends Activity {
         statusView = new TextView(this);
         statusView.setText("地址须由设备访问，设备上的 localhost 不是开发机");
         layout.addView(statusView);
+
+        capabilityView = new TextView(this);
+        capabilityView.setText("本场功能将在创建会议后按后端能力显示");
+        layout.addView(capabilityView);
         setContentView(layout);
     }
 
@@ -130,7 +137,8 @@ public final class MainActivity extends Activity {
         statusView.setText("正在创建会议…");
         network.execute(() -> {
             try {
-                String meetingId = client.createMeeting();
+                CreatedMeeting created = client.createMeeting();
+                String meetingId = created.meetingId();
                 Log.i(TAG, "会议已创建 meetingId=" + meetingId);
                 client.startClient(meetingId);
                 Log.i(TAG, "客户端会议已启动 meetingId=" + meetingId);
@@ -138,8 +146,8 @@ public final class MainActivity extends Activity {
                         ? client.requestModelSession(meetingId) : null;
                 if (grant != null) Log.i(TAG, "模型会话材料已领取 meetingId=" + meetingId
                         + " adapterId=" + grant.adapterId());
-                CreatedMeeting created = new CreatedMeeting(meetingId, grant);
-                runOnUiThread(() -> startModelMeeting(client, created));
+                CreatedMeeting ready = created.withModelSession(grant);
+                runOnUiThread(() -> startModelMeeting(client, ready));
             } catch (IOException failure) {
                 Log.e(TAG, "创建或启动会议失败", failure);
                 runOnUiThread(() -> {
@@ -168,6 +176,13 @@ public final class MainActivity extends Activity {
         stopButton.setOnClickListener(view -> requestStop(client, meetingId,
                 appendFailed, completionQueued));
         try {
+            Set<String> localCapabilities = runtime.realtimeCapabilities(created);
+            MeetingCapabilityState capabilities = created.capabilities();
+            capabilityView.setText("本场功能：实时字幕"
+                    + (capabilities.canUse(MeetingCapabilityState.TRANSLATION,
+                            localCapabilities) ? "、实时翻译" : "；实时翻译已关闭")
+                    + (capabilities.canUse(MeetingCapabilityState.SUMMARY,
+                            localCapabilities) ? "、会议纪要" : "；会议纪要已关闭"));
             session = runtime.open(created, event -> {
                 runOnUiThread(() -> showTranscript(event));
                 int clientSequence = sequence.incrementAndGet();
