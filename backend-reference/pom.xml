@@ -81,6 +81,12 @@
       <version>42.6.2</version>
       <scope>runtime</scope>
     </dependency>
+    <!-- P5-3 可替换对象存储仅在 S3 ArtifactStore 适配器内使用。 -->
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>s3</artifactId>
+      <version>2.32.0</version>
+    </dependency>
     <dependency>
       <groupId>org.junit.jupiter</groupId>
       <artifactId>junit-jupiter</artifactId>

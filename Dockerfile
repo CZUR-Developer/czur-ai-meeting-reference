@@ -17,7 +17,7 @@ WORKDIR /app
 COPY --from=build /build/backend-reference/target/backend-reference-0.1.0-SNAPSHOT.jar backend-reference.jar
 COPY --from=build /build/backend-reference/target/runtime-libs/ lib/
 
-# Artifact 必须使用持久卷；数据库连接、身份凭据和 TLS 证书均由部署环境提供。
+# file 模式的 Artifact 使用持久卷；s3 模式由部署环境提供对象存储配置。
 ENV AI_MEETING_HTTP_BIND=0.0.0.0:8080 \
     AI_MEETING_WSS_BIND=0.0.0.0:8443 \
     AI_MEETING_ARTIFACT_ROOT=/var/lib/meeting/artifacts

@@ -13,6 +13,7 @@
 | `AI_MEETING_PAGE_TOKEN_SECRET` | 自行指定不少于 32 字节的分页密钥。 |
 | `AI_MEETING_TLS_KEYSTORE_FILE`、`AI_MEETING_TLS_KEYSTORE_PASSWORD` | 可读取的 PKCS#12 文件路径及其密码；Compose 将文件只读挂载给 WSS。 |
 | `AI_MEETING_WSS_ORIGIN` | App 可访问的 `wss://主机:端口`；端口须与 `WSS_PORT` 一致。 |
+| `AI_MEETING_ARTIFACT_STORE` | `file`（默认）或 `s3`，决定结果正文的存放位置。 |
 
 示例已经给出 24 小时的结果链接有效期；如需调整，修改 `AI_MEETING_RESULT_LINK_TTL_MS`。保持该项为正数，才能读取结果页使用的 Manifest。
 
@@ -37,6 +38,27 @@ docker compose up --build
 ```
 
 此命令不启动 `db`，但仍由同一个 `migrate` 服务执行 `migrate.sh`，成功后才启动应用。外部数据库必须已创建目标空库且可连接；迁移用户需有建表权限。App 与迁移使用 `.env` 中相同的数据库地址和凭据。
+
+## P5-3 结果存储切换
+
+默认 `AI_MEETING_ARTIFACT_STORE=file` 使用已有参考文件 Store，正文写入
+`AI_MEETING_ARTIFACT_ROOT`。Compose 将 `/var/lib/meeting/artifacts` 挂到持久卷；
+本机运行需自行设置可写目录。这个实现原本是无网络测试替身，现用于**单进程参考部署**，
+不代表已交付生产级文件存储能力。
+
+改为 `AI_MEETING_ARTIFACT_STORE=s3` 时，在 `.env` 填写
+`AI_MEETING_S3_REGION`、`AI_MEETING_S3_BUCKET`、
+`AI_MEETING_S3_ACCESS_KEY_ID`、`AI_MEETING_S3_SECRET_ACCESS_KEY`。
+自建 S3 兼容服务再填写 `AI_MEETING_S3_ENDPOINT`（例如
+`http://minio.example.invalid:9000`）；留空则使用指定 Region 的标准 S3。
+可用 `AI_MEETING_S3_PREFIX` 隔离同 Bucket 中的参考数据，默认 `artifacts/`。
+此模式需要服务端能够向对象存储发出带 `If-None-Match: *` 的条件写请求；
+应先用自己的 S3 兼容服务验证这一能力。Compose 的文件卷在 s3 模式下不保存结果正文。
+
+切换存储**不迁移既有结果**：同一部署应在无待处理会议时确定模式，已有会议须继续
+使用原 Store 读取。两种实现共用 `ArtifactStore` 两段发布、读取和删除端口，
+后端 Manifest/Artifact GET 与参考 Web 均不按存储类型分支；模型音频仍由 App
+直连模型，不经过后端。
 
 `API_PORT`、`WSS_PORT` 控制宿主机映射端口；容器内固定监听 8080/8443。后端运行失败时先检查迁移服务退出状态、readiness 和应用日志。结果读取仍遵循本仓的统一 HTTP 协议；旧 WSS 音频链路继续产生 Mock 字幕，P5 直连模型链路由 App 提交标准事件。
 

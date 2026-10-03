@@ -1,6 +1,7 @@
 package com.czur.reference.application.bootstrap;
 
 import com.czur.reference.application.artifact.filesystem.PersistentFileSystemMockArtifactStore;
+import com.czur.reference.application.artifact.s3.S3ArtifactStore;
 import com.czur.reference.application.entitlement.referencedev.ReferenceDevEntitlementPolicy;
 import com.czur.reference.application.finalization.MeetingInputReconciliationScan;
 import com.czur.reference.application.finalization.MockFinalizationWorker;
@@ -10,12 +11,14 @@ import com.czur.reference.application.persistence.jdbc.JdbcReferenceDevEntitleme
 import com.czur.reference.application.persistence.jdbc.JdbcWorkflowStepStore;
 import com.czur.reference.application.port.entitlement.EntitlementIdGenerator;
 import com.czur.reference.application.port.artifact.ArtifactStoreException;
+import com.czur.reference.application.port.artifact.ArtifactStore;
 import com.czur.reference.application.wss.MeetingRealtimeWssServer;
 
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.GeneralSecurityException;
@@ -51,20 +54,29 @@ public final class ReferenceMeetingProcess implements AutoCloseable {
     public static final String TLS_KEYSTORE_PATH = "AI_MEETING_TLS_KEYSTORE_PATH";
     public static final String TLS_KEYSTORE_PASSWORD = "AI_MEETING_TLS_KEYSTORE_PASSWORD";
     public static final String ARTIFACT_ROOT = "AI_MEETING_ARTIFACT_ROOT";
+    public static final String ARTIFACT_STORE = "AI_MEETING_ARTIFACT_STORE";
+    public static final String S3_ENDPOINT = "AI_MEETING_S3_ENDPOINT";
+    public static final String S3_REGION = "AI_MEETING_S3_REGION";
+    public static final String S3_BUCKET = "AI_MEETING_S3_BUCKET";
+    public static final String S3_PREFIX = "AI_MEETING_S3_PREFIX";
+    public static final String S3_ACCESS_KEY_ID = "AI_MEETING_S3_ACCESS_KEY_ID";
+    public static final String S3_SECRET_ACCESS_KEY = "AI_MEETING_S3_SECRET_ACCESS_KEY";
 
     private final ReferenceMeetingHttpAssembly assembly;
     private final MeetingJdkHttpServer http;
     private final MeetingRealtimeWssServer wss;
     private final ScheduledExecutorService scheduler;
+    private final ArtifactStore artifacts;
     private boolean closed;
 
     private ReferenceMeetingProcess(ReferenceMeetingHttpAssembly assembly,
             MeetingJdkHttpServer http, MeetingRealtimeWssServer wss,
-            ScheduledExecutorService scheduler) {
+            ScheduledExecutorService scheduler, ArtifactStore artifacts) {
         this.assembly = assembly;
         this.http = http;
         this.wss = wss;
         this.scheduler = scheduler;
+        this.artifacts = artifacts;
     }
 
     /**
@@ -85,10 +97,8 @@ public final class ReferenceMeetingProcess implements AutoCloseable {
                 ReferenceMeetingDeploymentConfig.fromEnvironment(values);
         InetSocketAddress httpBind = bind(values, HTTP_BIND);
         InetSocketAddress wssBind = bind(values, WSS_BIND);
-        Path artifactRoot = Path.of(required(values, ARTIFACT_ROOT));
         SSLContext tls = tls(values);
-        var artifacts = new PersistentFileSystemMockArtifactStore(
-                artifactRoot, MAX_ARTIFACT_BYTES);
+        ArtifactStore artifacts = createArtifactStore(values);
 
         ReferenceMeetingHttpAssembly assembly = null;
         MeetingJdkHttpServer http = null;
@@ -128,12 +138,13 @@ public final class ReferenceMeetingProcess implements AutoCloseable {
                     TICK_SECONDS, TimeUnit.SECONDS);
             LOGGER.log(Level.INFO, "参考后端单进程已启动 httpPort="
                     + http.address().getPort() + " wssPort=" + wss.getPort());
-            return new ReferenceMeetingProcess(assembly, http, wss, scheduler);
+            return new ReferenceMeetingProcess(assembly, http, wss, scheduler, artifacts);
         } catch (IOException | InterruptedException | RuntimeException | Error failure) {
             if (scheduler != null) scheduler.shutdownNow();
             if (wss != null) closeSuppressing(wss, failure);
             if (http != null) closeSuppressing(http, failure);
             if (assembly != null) closeSuppressing(assembly, failure);
+            if (artifacts instanceof S3ArtifactStore s3) closeSuppressing(s3, failure);
             throw failure;
         }
     }
@@ -165,10 +176,38 @@ public final class ReferenceMeetingProcess implements AutoCloseable {
             try {
                 wss.close();
             } finally {
-                assembly.close();
+                try {
+                    assembly.close();
+                } finally {
+                    if (artifacts instanceof S3ArtifactStore s3) s3.close();
+                }
             }
         }
         LOGGER.log(Level.INFO, "参考后端单进程已关闭");
+    }
+
+    /**
+     * 从部署配置选用唯一 Artifact Store。文件模式保持已有参考文件数据布局；
+     * S3 模式把对象连接材料限制在基础设施适配器，不改变 HTTP/Worker 协议。
+     */
+    static ArtifactStore createArtifactStore(Map<String, String> values)
+            throws ArtifactStoreException {
+        String mode = values.getOrDefault(ARTIFACT_STORE, "file").trim();
+        return switch (mode) {
+            case "file" -> new PersistentFileSystemMockArtifactStore(
+                    Path.of(required(values, ARTIFACT_ROOT)), MAX_ARTIFACT_BYTES);
+            case "s3" -> {
+                String rawEndpoint = values.get(S3_ENDPOINT);
+                URI endpoint = rawEndpoint == null || rawEndpoint.isBlank()
+                        ? null : URI.create(rawEndpoint.trim());
+                yield new S3ArtifactStore(endpoint, required(values, S3_REGION),
+                        required(values, S3_BUCKET), values.getOrDefault(S3_PREFIX, "artifacts/"),
+                        required(values, S3_ACCESS_KEY_ID),
+                        required(values, S3_SECRET_ACCESS_KEY), MAX_ARTIFACT_BYTES);
+            }
+            default -> throw new IllegalArgumentException(
+                    ARTIFACT_STORE + " must be file or s3");
+        };
     }
 
     private static void tick(MeetingInputReconciliationScan scan,
