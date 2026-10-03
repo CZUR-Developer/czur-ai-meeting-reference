@@ -5,7 +5,8 @@ info:
   description: |
     AI 字幕纪要设备端与后端之间的公开控制面协议草案。
     实时音频和事件使用 realtime.proto；最终结果清单使用
-    meeting-manifest.schema.json。本协议不暴露模型厂商、对象存储路径或 CZUR 内部接口。
+    meeting-manifest.schema.json。模型直连材料只由独立的已认证会话接口返回；
+    其它会议控制接口不暴露模型厂商、对象存储路径或 CZUR 内部接口。
 servers:
   - url: https://ai.example.com
 tags:
@@ -224,6 +225,41 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/meetings/{meetingId}:modelSession:
+    post:
+      tags: [Meetings]
+      operationId: issueModelSession
+      summary: 为已创建的会议申请本场模型直连材料
+      description: |
+        使用用户 Bearer 验证会议归属及创建权限。仅 CREATED/RUNNING 可申请；
+        每次调用向部署方配置的听悟账号新建一项实时任务。Android App 将音频
+        直接送往 endpoint，后端只接收归一化的标准事件。听悟的 endpoint 为
+        自带连接凭据的 MeetingJoinUrl，所以 token 省略；expiresAt 是参考后端
+        给出的最迟开始连接时间，不表示听悟服务端保证的 URL 过期时间。
+        Create v1 的 realtime 字段和旧 WSS 音频路径保持原义。
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/MeetingId"
+      responses:
+        "200":
+          description: 单场直连模型的临时材料；不得持久记录或写日志
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelSessionGrant"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
           $ref: "#/components/responses/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
@@ -846,6 +882,38 @@ components:
               format: date-time
         limits:
           $ref: "#/components/schemas/Limits"
+    ModelSessionGrant:
+      type: object
+      additionalProperties: false
+      required: [meetingId, adapterId, endpoint, expiresAt, initParams]
+      properties:
+        meetingId:
+          type: string
+          pattern: "^mtg_[A-Za-z0-9_-]+$"
+          maxLength: 1024
+        adapterId:
+          type: string
+          description: 构建期注册的 Android ModelAdapter 标识；本参考部署为 tingwu-realtime。
+        endpoint:
+          type: string
+          format: uri
+          description: 模型直连 WSS 地址；可能包含临时凭据，禁止日志和持久化。
+        token:
+          type: string
+          description: 仅模型协议单独签发 Token 时提供；听悟 MeetingJoinUrl 模式省略。
+        expiresAt:
+          type: string
+          format: date-time
+          description: 客户端最迟开始连接时间；不是厂商服务端保证的 URL 失效时间。
+        initParams:
+          type: object
+          description: Adapter 专用的字符串初始化参数；听悟 Adapter 要求 taskId。
+          additionalProperties:
+            type: string
+          properties:
+            taskId:
+              type: string
+              description: 听悟 StartTranscription/StopTranscription 的 header.task_id。
     RealtimeTokenGrant:
       type: object
       additionalProperties: false

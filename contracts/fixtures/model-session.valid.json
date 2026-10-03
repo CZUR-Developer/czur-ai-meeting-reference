@@ -1,0 +1,9 @@
+{
+  "meetingId": "mtg_example123",
+  "adapterId": "tingwu-realtime",
+  "endpoint": "wss://model.example.invalid/meeting/join?temporary=placeholder",
+  "expiresAt": "2026-10-03T02:05:00Z",
+  "initParams": {
+    "taskId": "example-task-id"
+  }
+}

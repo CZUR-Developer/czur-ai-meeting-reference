@@ -5,6 +5,7 @@ import com.czur.reference.application.entitlement.referencedev.ReferenceDevEntit
 import com.czur.reference.application.finalization.MockFinalizationArtifactContent;
 import com.czur.reference.application.finalization.ProductProfileSnapshot;
 import com.czur.reference.application.identity.referencedev.ReferenceDevIdentityConfig;
+import com.czur.reference.application.model.TingwuModelSessionConfig;
 import com.czur.reference.application.persistence.jdbc.DatabaseRuntimeConfig;
 import com.czur.reference.application.port.entitlement.UsageEstimate;
 import com.czur.reference.application.port.entitlement.UsageUnit;
@@ -88,6 +89,7 @@ public final class ReferenceMeetingDeploymentConfig {
     private final boolean createEnabled;
     private final boolean realtimeRenewEnabled;
     private final Duration resultLinkTtl;
+    private final TingwuModelSessionConfig tingwuModelSession;
 
     private ReferenceMeetingDeploymentConfig(
             DatabaseRuntimeConfig database,
@@ -97,7 +99,8 @@ public final class ReferenceMeetingDeploymentConfig {
             CapabilityDescriptor mockCapabilities, DeploymentLimits capabilityLimits,
             UsageEstimate trustedEstimate, TrustedCreateRuntimeLimits runtimeLimits,
             byte[] pageTokenSecret, URI wssOrigin, Duration wssTokenTtl,
-            boolean createEnabled, boolean realtimeRenewEnabled, Duration resultLinkTtl) {
+            boolean createEnabled, boolean realtimeRenewEnabled, Duration resultLinkTtl,
+            TingwuModelSessionConfig tingwuModelSession) {
         this.database = database;
         this.identity = identity;
         this.deploymentScope = deploymentScope;
@@ -115,6 +118,7 @@ public final class ReferenceMeetingDeploymentConfig {
         this.createEnabled = createEnabled;
         this.realtimeRenewEnabled = realtimeRenewEnabled;
         this.resultLinkTtl = resultLinkTtl;
+        this.tingwuModelSession = tingwuModelSession;
     }
 
     /**
@@ -259,7 +263,8 @@ public final class ReferenceMeetingDeploymentConfig {
             return new ReferenceMeetingDeploymentConfig(database, identity, scope,
                     audience, clientId, profile, entitlement, mock, limits, estimate,
                     runtimeLimits, secret, wssOrigin, tokenTtl,
-                    enabled, renewEnabled, resultLinkTtl);
+                    enabled, renewEnabled, resultLinkTtl,
+                    TingwuModelSessionConfig.fromEnvironment(environment));
         } finally {
             Arrays.fill(secret, (byte) 0);
         }
@@ -289,6 +294,10 @@ public final class ReferenceMeetingDeploymentConfig {
     public boolean realtimeRenewEnabled() { return realtimeRenewEnabled; }
     /** 仅显式配置正值 TTL 时开放匿名 Manifest GET；genTime 不是防篡改凭证。 */
     public Optional<Duration> resultLinkTtl() { return Optional.ofNullable(resultLinkTtl); }
+    /** 只有显式配置听悟凭据才开放独立模型会话路由。 */
+    public Optional<TingwuModelSessionConfig> tingwuModelSession() {
+        return Optional.ofNullable(tingwuModelSession);
+    }
 
     @Override
     public String toString() {

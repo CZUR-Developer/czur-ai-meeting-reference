@@ -3,6 +3,7 @@ package com.czur.reference.application.http;
 import com.czur.reference.application.command.AuthenticatedMeetingStopApplicationService;
 import com.czur.reference.application.command.AuthenticatedCompleteMeetingApplicationService;
 import com.czur.reference.application.command.AuthenticatedRealtimeTokenRenewApplicationService;
+import com.czur.reference.application.model.ModelSessionIssuer;
 import com.czur.reference.application.port.MeetingDeletionPort;
 import com.czur.reference.application.port.MeetingQueryPort;
 import com.czur.reference.application.port.MeetingManifestPort;
@@ -171,9 +172,30 @@ public final class MeetingHttpRuntime implements AutoCloseable {
             MeetingArtifactContentPort artifactPort,
             MeetingEventLogPort eventLogPort,
             ClientMeetingInputPort clientInputPort) {
+        this(queryPort, deletionPort, decoder, errors, stopService, createService,
+                createDecoder, createEnabled, manifestPort, renewService, artifactPort,
+                eventLogPort, clientInputPort, null);
+    }
+
+    /** P5 独立模型会话签发；旧构造器保留原有 Create v1 与 WSS 路由。 */
+    public MeetingHttpRuntime(
+            MeetingQueryPort queryPort,
+            MeetingDeletionPort deletionPort,
+            MeetingHttpAdapter.RequestDecoder decoder,
+            HttpErrorMapper errors,
+            AuthenticatedMeetingStopApplicationService stopService,
+            AuthenticatedCompleteMeetingApplicationService createService,
+            CreateMeetingHttpRequestDecoder createDecoder,
+            boolean createEnabled,
+            MeetingManifestPort manifestPort,
+            AuthenticatedRealtimeTokenRenewApplicationService renewService,
+            MeetingArtifactContentPort artifactPort,
+            MeetingEventLogPort eventLogPort,
+            ClientMeetingInputPort clientInputPort,
+            ModelSessionIssuer modelSessions) {
         this(new MeetingHttpAdapter(queryPort, deletionPort, decoder, errors, stopService,
                 createService, createDecoder, createEnabled, manifestPort, renewService,
-                artifactPort, eventLogPort, clientInputPort), errors);
+                artifactPort, eventLogPort, clientInputPort, modelSessions), errors);
     }
 
     /** 使用默认错误映射器创建已认证 Stop 运行时。 */

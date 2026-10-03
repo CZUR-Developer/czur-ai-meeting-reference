@@ -4,6 +4,17 @@ Versioned OpenAPI, JSON Schema, and realtime event definitions belong here.
 Every contract change must include positive and negative fixtures plus a
 backward-compatibility note.
 
+## Model session compatibility
+
+`POST /v1/meetings/{meetingId}:modelSession` is a separate authenticated
+operation. It returns the configured Adapter ID, a temporary model endpoint,
+an activation deadline and Adapter initialization values. The Tingwu example
+uses `initParams.taskId`; its JoinUrl already contains the connection credential,
+so the optional `token` field is absent. See `model-session.valid.json` and
+`model-session.missing-endpoint.invalid.json`. This addition does not change
+the existing Create v1 `realtime` response or `/v1/realtime/{streamId}` WSS
+audio contract; older clients can continue using that path.
+
 ## App transcript append compatibility
 
 The new `POST /v1/meetings/{meetingId}:startClient` and

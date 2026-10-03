@@ -27,7 +27,18 @@ Driver 实现中。
 `planRevision` 的不可变结果。Model Driver 只接收应用层已经固化的
 `RealtimeSessionSpec`，按公共序号处理音频并输出稳定的
 `segmentId`/`revision`/`final` 事件；Mock 和 `AlternativeTextModelDriver` 均不访问网络，
-固定文本仅用于契约测试和示例，不代表任何真实模型已接入。
+固定文本仅用于契约测试和示例；上述服务端 Driver 不承担 P5 的 Android 直连模型运行。
+
+## P5-1 听悟临时会话
+
+显式启用 `AI_MEETING_TINGWU_ENABLED=true` 后，已认证的
+`POST /v1/meetings/{meetingId}:modelSession` 为归属当前主体、处于 CREATED 或
+RUNNING 的会议调用听悟实时 `CreateTask`。响应只下发 `meetingId`、
+`adapterId=tingwu-realtime`、包含临时凭据的 `endpoint`、`expiresAt` 和
+`initParams.taskId`；听悟没有单独的 `token` 字段。RAM AccessKey 留在服务端，
+App 按公开 Adapter 接口直连听悟，后端继续只保存标准事件。此接口不改写
+Create v1 的 `realtime` 响应或旧 WSS 路径。部署变量及启用窗口见
+`deploy/README.md`。
 
 ## P3-T05 会议应用切片
 

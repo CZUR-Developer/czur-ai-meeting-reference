@@ -5,6 +5,8 @@ import com.czur.reference.application.command.AuthenticatedMeetingStopApplicatio
 import com.czur.reference.application.command.AuthenticatedCompleteMeetingApplicationService;
 import com.czur.reference.application.command.AuthenticatedRealtimeTokenRenewApplicationService;
 import com.czur.reference.application.command.StopMeetingIntent;
+import com.czur.reference.application.model.ModelSessionIssuer;
+import com.czur.reference.application.model.TingwuModelSessionIssuer;
 import com.czur.reference.application.port.DeleteRequest;
 import com.czur.reference.application.port.MeetingDeletionPort;
 import com.czur.reference.application.port.MeetingManifestPort;
@@ -58,6 +60,8 @@ public final class MeetingHttpAdapter {
             "^/v1/meetings/(mtg_[A-Za-z0-9_-]+):stop$");
     private static final Pattern CLIENT_START_PATH = Pattern.compile(
             "^/v1/meetings/(mtg_[A-Za-z0-9_-]+):startClient$");
+    private static final Pattern MODEL_SESSION_PATH = Pattern.compile(
+            "^/v1/meetings/(mtg_[A-Za-z0-9_-]+):modelSession$");
     private static final Pattern CLIENT_APPEND_PATH = Pattern.compile(
             "^/v1/meetings/(mtg_[A-Za-z0-9_-]+)/events:append$");
     private static final Pattern RENEW_PATH = Pattern.compile(
@@ -85,6 +89,7 @@ public final class MeetingHttpAdapter {
     private final AuthenticatedRealtimeTokenRenewApplicationService renewService;
     private final MeetingEventLogPort eventLogPort;
     private final ClientMeetingInputPort clientInputPort;
+    private final ModelSessionIssuer modelSessions;
 
     /** 使用随机 opaque diagnosticId 的默认错误映射器。 */
     public MeetingHttpAdapter(
@@ -113,6 +118,7 @@ public final class MeetingHttpAdapter {
         this.renewService = null;
         this.eventLogPort = null;
         this.clientInputPort = null;
+        this.modelSessions = null;
     }
 
     /** 装配完整认证 Stop application service 的构造器。 */
@@ -135,6 +141,7 @@ public final class MeetingHttpAdapter {
         this.renewService = null;
         this.eventLogPort = null;
         this.clientInputPort = null;
+        this.modelSessions = null;
     }
 
     /**
@@ -242,6 +249,27 @@ public final class MeetingHttpAdapter {
             MeetingArtifactContentPort artifactPort,
             MeetingEventLogPort eventLogPort,
             ClientMeetingInputPort clientInputPort) {
+        this(queryPort, deletionPort, decoder, errors, stopService, createService,
+                createDecoder, createEnabled, manifestPort, renewService, artifactPort,
+                eventLogPort, clientInputPort, null);
+    }
+
+    /** P5 模型会话独立装配，不复用旧 WSS Token 或首次 Create 响应事实。 */
+    public MeetingHttpAdapter(
+            MeetingQueryPort queryPort,
+            MeetingDeletionPort deletionPort,
+            RequestDecoder decoder,
+            HttpErrorMapper errors,
+            AuthenticatedMeetingStopApplicationService stopService,
+            AuthenticatedCompleteMeetingApplicationService createService,
+            CreateMeetingHttpRequestDecoder createDecoder,
+            boolean createEnabled,
+            MeetingManifestPort manifestPort,
+            AuthenticatedRealtimeTokenRenewApplicationService renewService,
+            MeetingArtifactContentPort artifactPort,
+            MeetingEventLogPort eventLogPort,
+            ClientMeetingInputPort clientInputPort,
+            ModelSessionIssuer modelSessions) {
         this.queryPort = Objects.requireNonNull(queryPort, "queryPort");
         this.deletionPort = Objects.requireNonNull(deletionPort, "deletionPort");
         this.decoder = Objects.requireNonNull(decoder, "decoder");
@@ -259,6 +287,7 @@ public final class MeetingHttpAdapter {
         this.renewService = renewService;
         this.eventLogPort = eventLogPort;
         this.clientInputPort = clientInputPort;
+        this.modelSessions = modelSessions;
     }
 
     /** 与 runtime 常见的 service-before-mapper 装配顺序兼容。 */
@@ -316,6 +345,10 @@ public final class MeetingHttpAdapter {
         if ("POST".equals(request.method())
                 && (CLIENT_START_PATH.matcher(request.path()).matches()
                 || CLIENT_APPEND_PATH.matcher(request.path()).matches())) {
+            return AuthenticationRoute.CLIENT_WRITE;
+        }
+        if ("POST".equals(request.method())
+                && MODEL_SESSION_PATH.matcher(request.path()).matches()) {
             return AuthenticationRoute.CLIENT_WRITE;
         }
         return AuthenticationRoute.NONE;
@@ -403,6 +436,28 @@ public final class MeetingHttpAdapter {
         }
 
         Matcher clientStart = CLIENT_START_PATH.matcher(path);
+        Matcher modelSession = MODEL_SESSION_PATH.matcher(path);
+        if ("POST".equals(method) && modelSession.matches()) {
+            if (modelSessions == null) return errors.notImplemented();
+            if (context == null) return errors.missingContext();
+            if (!request.query().isEmpty() || !request.body().isEmpty()) {
+                throw new IllegalArgumentException("model session must have no body or query");
+            }
+            MeetingQueryPort.Result meeting = queryPort.get(new MeetingQueryPort.GetRequest(
+                    context, modelSession.group(1)));
+            if (!(meeting instanceof MeetingQueryPort.Found found)) {
+                return errors.query(meeting);
+            }
+            if (found.meeting().state() != com.czur.reference.domain.meeting.MeetingState.CREATED
+                    && found.meeting().state() != com.czur.reference.domain.meeting.MeetingState.RUNNING) {
+                return errors.modelSessionInvalidState();
+            }
+            try {
+                return errors.modelSession(modelSession.group(1), modelSessions.issue());
+            } catch (TingwuModelSessionIssuer.SessionIssueException unavailable) {
+                return errors.modelSessionUnavailable();
+            }
+        }
         if ("POST".equals(method) && clientStart.matches()) {
             if (clientInputPort == null) return errors.notImplemented();
             if (context == null) return errors.missingContext();
@@ -698,6 +753,8 @@ public final class MeetingHttpAdapter {
                 && EVENTS_PATH.matcher(request.path()).matches()) {
             return "events";
         }
+        if ("POST".equals(request.method())
+                && MODEL_SESSION_PATH.matcher(request.path()).matches()) return "modelSession";
         if ("POST".equals(request.method())
                 && CLIENT_START_PATH.matcher(request.path()).matches()) return "startClient";
         if ("POST".equals(request.method())

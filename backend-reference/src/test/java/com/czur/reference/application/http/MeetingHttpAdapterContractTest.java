@@ -7,6 +7,7 @@ import com.czur.reference.application.command.CompleteMeetingResponseAssembler;
 import com.czur.reference.application.command.TrustedCreateRuntimeLimits;
 import com.czur.reference.application.command.MeetingCommandResult;
 import com.czur.reference.application.command.StopMeetingIntent;
+import com.czur.reference.application.model.ModelSessionIssuer;
 import com.czur.reference.application.port.DeleteRequest;
 import com.czur.reference.application.port.DeleteResult;
 import com.czur.reference.application.port.FinalizationFact;
@@ -88,6 +89,37 @@ class MeetingHttpAdapterContractTest {
                 query, deletion, decoder,
                 new HttpErrorMapper(() -> "adapter-diagnostic"));
         stop = new RecordingStop();
+    }
+
+    @Test
+    void modelSessionRequiresOwnedActiveMeetingBeforeIssuingProviderTask() {
+        int[] issues = {0};
+        ModelSessionIssuer issuer = () -> {
+            issues[0]++;
+            return new ModelSessionIssuer.Session("tingwu-realtime",
+                    "wss://join.example.invalid/meeting?temporary=grant",
+                    NOW.plusSeconds(300), Map.of("taskId", "task-123"));
+        };
+        adapter = new MeetingHttpAdapter(query, deletion, decoder,
+                new HttpErrorMapper(() -> "model-diagnostic"), stopService(),
+                null, null, false, null, null, null, null, null, issuer);
+        var request = new HttpRequest("POST", "/v1/meetings/mtg_detail:modelSession",
+                Map.of(), "");
+        assertEquals(MeetingHttpAdapter.AuthenticationRoute.CLIENT_WRITE,
+                MeetingHttpAdapter.authenticationRoute(request));
+        assertEquals(401, adapter.handle(request, null).status());
+        query.getResult = new MeetingQueryPort.AccessDenied();
+        assertEquals(403, adapter.handle(request, context()).status());
+        query.getResult = new MeetingQueryPort.Found(status(MeetingState.READY));
+        assertEquals(409, adapter.handle(request, context()).status());
+        assertEquals(0, issues[0]);
+        query.getResult = new MeetingQueryPort.Found(status(MeetingState.CREATED));
+        var response = adapter.handle(request, context());
+        assertEquals(200, response.status());
+        assertEquals(1, issues[0]);
+        assertTrue(response.body().contains("\"meetingId\":\"mtg_detail\""));
+        assertTrue(response.body().contains("\"taskId\":\"task-123\""));
+        assertFalse(response.body().contains("\"token\""));
     }
 
     @Test

@@ -10,6 +10,9 @@ services:
       AI_MEETING_WSS_BIND: 0.0.0.0:8443
       AI_MEETING_TLS_KEYSTORE_PATH: /run/meeting/tls.p12
       AI_MEETING_ARTIFACT_ROOT: /var/lib/meeting/artifacts
+      TINGWU_APP_KEY: ${TINGWU_APP_KEY:-}
+      ALIYUN_ACCESS_KEY_ID: ${ALIYUN_ACCESS_KEY_ID:-}
+      ALIYUN_ACCESS_KEY_SECRET: ${ALIYUN_ACCESS_KEY_SECRET:-}
     ports:
       - "${API_PORT:-8080}:8080"
       - "${WSS_PORT:-8443}:8443"

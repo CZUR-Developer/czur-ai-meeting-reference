@@ -11,6 +11,7 @@ import com.czur.reference.application.port.DeleteResult;
 import com.czur.reference.application.port.MeetingQueryPort;
 import com.czur.reference.application.port.MeetingEventLogPort;
 import com.czur.reference.application.port.ClientMeetingInputPort;
+import com.czur.reference.application.model.ModelSessionIssuer;
 import com.czur.reference.application.port.MeetingManifestPort;
 import com.czur.reference.application.port.MeetingArtifactContentPort;
 import com.czur.reference.application.port.OwnedMeetingStopUnitOfWork;
@@ -90,6 +91,25 @@ public final class HttpErrorMapper {
                     + "\",\"inputSource\":\"CLIENT_EVENTS\"}");
         }
         return clientInputFailure(((ClientMeetingInputPort.Rejected) result).reason());
+    }
+
+    /** 模型材料只在已认证的成功响应中出现，日志和错误 envelope 不含 JoinUrl。 */
+    public HttpResponse modelSession(String meetingId, ModelSessionIssuer.Session session) {
+        return success(200, Map.of("meetingId", meetingId, "adapterId", session.adapterId(),
+                "endpoint", session.endpoint(), "expiresAt", session.expiresAt().toString(),
+                "initParams", session.initParams()));
+    }
+
+    public HttpResponse modelSessionInvalidState() {
+        return error(409, HttpErrorEnvelope.Domain.SESSION, "MODEL_SESSION_INVALID_STATE",
+                false, HttpErrorEnvelope.UserAction.NONE,
+                "ai_meeting.session.model_session_invalid_state");
+    }
+
+    public HttpResponse modelSessionUnavailable() {
+        return error(503, HttpErrorEnvelope.Domain.MODEL, "MODEL_SESSION_UNAVAILABLE",
+                true, HttpErrorEnvelope.UserAction.RETRY,
+                "ai_meeting.model.session_unavailable");
     }
 
     public HttpResponse clientAppend(ClientMeetingInputPort.AppendResult result) {

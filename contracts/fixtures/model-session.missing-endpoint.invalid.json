@@ -1,0 +1,8 @@
+{
+  "meetingId": "mtg_example123",
+  "adapterId": "tingwu-realtime",
+  "expiresAt": "2026-10-03T02:05:00Z",
+  "initParams": {
+    "taskId": "example-task-id"
+  }
+}
