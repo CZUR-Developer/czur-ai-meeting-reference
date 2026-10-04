@@ -179,7 +179,7 @@ public final class MainActivity extends Activity {
         layout.addView(sourceLanguageView);
 
         TextView targetTitle = new TextView(this);
-        targetTitle.setText("互译目标语言（现场互译可用后选择）");
+        targetTitle.setText("互译目标语言");
         layout.addView(targetTitle);
         targetLanguageView = new Spinner(this);
         targetLanguageView.setAdapter(new ArrayAdapter<>(this,

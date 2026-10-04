@@ -12,9 +12,9 @@ import java.util.function.Supplier;
  * 伙伴接入不同格式时增加公开 Adapter 并在这里登记，不修改会议页面或 SDK。
  */
 public final class ModelAdapterRegistry {
-    /** 会前可交付流程；译文解析已具备，但翻译会议的 Stop/结果与分栏尚未完成。 */
+    /** 已接通会中显示、标准事件提交和 Stop/结果的会前模式；真实双向会议仍需验收。 */
     private static final Set<String> READY_MEETING_CAPABILITIES =
-            Set.of(MeetingCapabilityState.TRANSCRIPT);
+            Set.of(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.TRANSLATION);
     private final Map<String, Entry> entries = Map.of(
             TingwuModelAdapter.ID, new Entry(TingwuModelAdapter::new,
                     Set.of(MeetingCapabilityState.TRANSCRIPT,
@@ -31,10 +31,7 @@ public final class ModelAdapterRegistry {
         return entry(adapterId).capabilities;
     }
 
-    /**
-     * 会前仅开放已具备完整会议收口的模式。听悟 Adapter 已能回调译文，但后端 Stop
-     * 和按方向分栏尚未接通，不能因此把互译入口作为可交付功能提前开放。
-     */
+    /** 会前仅开放已接通的模式；当前只有听悟 Adapter 登记实时翻译能力。 */
     public Set<String> setupCapabilities() {
         return entries.values().stream().flatMap(entry -> entry.capabilities.stream())
                 .filter(READY_MEETING_CAPABILITIES::contains)
