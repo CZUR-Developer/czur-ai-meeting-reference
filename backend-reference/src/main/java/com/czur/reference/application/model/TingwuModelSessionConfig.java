@@ -11,13 +11,12 @@ import java.util.Objects;
  */
 public record TingwuModelSessionConfig(
         URI createTaskUrl, String appKey, String accessKeyId, String accessKeySecret,
-        String sourceLanguage, Duration connectTtl) {
+        Duration connectTtl) {
     public static final String ENABLED = "AI_MEETING_TINGWU_ENABLED";
     public static final String CREATE_TASK_URL = "AI_MEETING_TINGWU_CREATE_TASK_URL";
     public static final String APP_KEY = "AI_MEETING_TINGWU_APP_KEY";
     public static final String ACCESS_KEY_ID = "AI_MEETING_TINGWU_ACCESS_KEY_ID";
     public static final String ACCESS_KEY_SECRET = "AI_MEETING_TINGWU_ACCESS_KEY_SECRET";
-    public static final String SOURCE_LANGUAGE = "AI_MEETING_TINGWU_SOURCE_LANGUAGE";
     public static final String TINGWU_APP_KEY = "TINGWU_APP_KEY";
     public static final String ALIYUN_ACCESS_KEY_ID = "ALIYUN_ACCESS_KEY_ID";
     public static final String ALIYUN_ACCESS_KEY_SECRET = "ALIYUN_ACCESS_KEY_SECRET";
@@ -35,9 +34,6 @@ public record TingwuModelSessionConfig(
         required(appKey, APP_KEY);
         required(accessKeyId, ACCESS_KEY_ID);
         required(accessKeySecret, ACCESS_KEY_SECRET);
-        if (!"cn".equals(sourceLanguage) && !"en".equals(sourceLanguage)) {
-            throw new IllegalArgumentException(SOURCE_LANGUAGE);
-        }
         if (connectTtl.isNegative() || connectTtl.isZero()) {
             throw new IllegalArgumentException("connectTtl");
         }
@@ -58,7 +54,7 @@ public record TingwuModelSessionConfig(
                 credential(environment, TINGWU_APP_KEY, APP_KEY),
                 credential(environment, ALIYUN_ACCESS_KEY_ID, ACCESS_KEY_ID),
                 credential(environment, ALIYUN_ACCESS_KEY_SECRET, ACCESS_KEY_SECRET),
-                environment.getOrDefault(SOURCE_LANGUAGE, "cn"), Duration.ofMinutes(5));
+                Duration.ofMinutes(5));
     }
 
     /** 优先复用已有听悟评测凭据注入名；空占位符不遮蔽另一来源。 */

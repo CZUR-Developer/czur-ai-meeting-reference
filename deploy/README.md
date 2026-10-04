@@ -78,8 +78,8 @@ docker compose up --build
 `TINGWU_APP_KEY`、`ALIYUN_ACCESS_KEY_ID`、
 `ALIYUN_ACCESS_KEY_SECRET`；参考后端也接受 `.env.example` 中的
 `AI_MEETING_TINGWU_*` 同义配置，前者有值时优先使用。Compose 会把宿主环境
-已注入的三个标准变量传给应用容器。可用
-`AI_MEETING_TINGWU_SOURCE_LANGUAGE=cn`（或 `en`）选择本次部署的识别语言；
+已注入的三个标准变量传给应用容器。
+听悟识别语言取自每场会议 Create 请求的 `languages.source`：`zh-CN` 映射为听悟 `cn`，`en-US` 映射为 `en`；不再使用部署级固定语言配置。
 `AI_MEETING_TINGWU_CREATE_TASK_URL` 缺省为阿里云北京听悟 OpenAPI 地址。
 这些值属于部署方自己的听悟账号，不依赖 CZUR 云账号。
 

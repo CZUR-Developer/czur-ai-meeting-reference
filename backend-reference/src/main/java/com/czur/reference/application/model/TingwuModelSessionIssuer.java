@@ -58,10 +58,10 @@ public final class TingwuModelSessionIssuer implements ModelSessionIssuer {
         this.clock = Objects.requireNonNull(clock, "clock");
     }
 
-    @Override public Session issue() {
+    @Override public Session issue(String sourceLanguage) {
         try {
             URI target = URI.create(config.createTaskUrl() + "?" + QUERY);
-            String body = createBody();
+            String body = createBody(providerLanguage(sourceLanguage));
             String date = DATE.format(clock.instant());
             String host = target.getHost() + (target.getPort() < 0 || target.getPort() == 443
                     ? "" : ":" + target.getPort());
@@ -108,10 +108,19 @@ public final class TingwuModelSessionIssuer implements ModelSessionIssuer {
         }
     }
 
-    private String createBody() throws IOException {
+    /** Create 保存 IETF 语言码；听悟 CreateTask 使用自己的 cn/en 枚举。 */
+    private static String providerLanguage(String sourceLanguage) {
+        return switch (sourceLanguage) {
+            case "zh-CN" -> "cn";
+            case "en-US" -> "en";
+            default -> throw new SessionIssueException();
+        };
+    }
+
+    private String createBody(String providerLanguage) throws IOException {
         return JSON.writeValueAsString(Map.of(
                 "AppKey", config.appKey(),
-                "Input", Map.of("SourceLanguage", config.sourceLanguage(), "Format", "pcm",
+                "Input", Map.of("SourceLanguage", providerLanguage, "Format", "pcm",
                         "SampleRate", 16000, "EnableWords", true),
                 "Parameters", Map.of("Transcription", Map.of("OutputLevel", 2,
                         "RealtimeDiarizationEnabled", true, "DiarizationEnabled", true))));

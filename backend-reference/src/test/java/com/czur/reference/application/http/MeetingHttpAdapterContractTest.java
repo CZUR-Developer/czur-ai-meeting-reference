@@ -98,15 +98,17 @@ class MeetingHttpAdapterContractTest {
     @Test
     void modelSessionRequiresOwnedActiveMeetingBeforeIssuingProviderTask() {
         int[] issues = {0};
-        ModelSessionIssuer issuer = () -> {
+        ModelSessionIssuer issuer = sourceLanguage -> {
             issues[0]++;
+            assertEquals("en-US", sourceLanguage);
             return new ModelSessionIssuer.Session("tingwu-realtime",
                     "wss://join.example.invalid/meeting?temporary=grant",
                     NOW.plusSeconds(300), Map.of("taskId", "task-123"));
         };
         adapter = new MeetingHttpAdapter(query, deletion, decoder,
                 new HttpErrorMapper(() -> "model-diagnostic"), stopService(),
-                null, null, false, null, null, null, null, null, issuer);
+                null, null, false, null, null, null, null, null, issuer,
+                (context, meetingId) -> "en-US");
         var request = new HttpRequest("POST", "/v1/meetings/mtg_detail:modelSession",
                 Map.of(), "");
         assertEquals(MeetingHttpAdapter.AuthenticationRoute.CLIENT_WRITE,
@@ -132,7 +134,8 @@ class MeetingHttpAdapterContractTest {
                 URI.create("ws://127.0.0.1:19091/model"), Clock.fixed(NOW, ZoneOffset.UTC));
         adapter = new MeetingHttpAdapter(query, deletion, decoder,
                 new HttpErrorMapper(() -> "sample-diagnostic"), stopService(),
-                null, null, false, null, null, null, null, null, issuer);
+                null, null, false, null, null, null, null, null, issuer,
+                (context, meetingId) -> "zh-CN");
         query.getResult = new MeetingQueryPort.Found(status(MeetingState.CREATED));
         var response = adapter.handle(new HttpRequest("POST",
                 "/v1/meetings/mtg_detail:modelSession", Map.of(), ""), context());

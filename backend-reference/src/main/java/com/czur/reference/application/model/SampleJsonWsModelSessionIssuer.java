@@ -33,7 +33,7 @@ public final class SampleJsonWsModelSessionIssuer implements ModelSessionIssuer 
 
     /** 返回该部署的固定模型地址及本次使用窗口，不申请真实厂商任务。 */
     @Override
-    public Session issue() {
+    public Session issue(String sourceLanguage) {
         return new Session(ADAPTER_ID, endpoint.toString(),
                 clock.instant().plus(SESSION_TTL), Map.of());
     }

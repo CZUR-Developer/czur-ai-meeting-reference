@@ -23,7 +23,7 @@ class TingwuModelSessionIssuerTest {
             Instant.parse("2026-10-03T02:00:00Z"), ZoneOffset.UTC);
     private static final TingwuModelSessionConfig CONFIG = new TingwuModelSessionConfig(
             URI.create("https://tingwu.cn-beijing.aliyuncs.com/openapi/tingwu/v2/tasks"),
-            "example-app", "example-access-id", "example-secret", "cn",
+            "example-app", "example-access-id", "example-secret",
             Duration.ofMinutes(5));
 
     @Test void signsRealtimeCreateTaskAndReturnsJoinUrlWithoutRamCredentials() throws Exception {
@@ -35,7 +35,7 @@ class TingwuModelSessionIssuerTest {
                             + "\"wss://join.example.invalid/meeting?temporary=grant\"}}");
         }, CLOCK);
 
-        var session = issuer.issue();
+        var session = issuer.issue("zh-CN");
         assertEquals("PUT", sent.get().method());
         assertEquals("type=realtime&RegionId=cn-beijing", sent.get().uri().getRawQuery());
         assertEquals("CreateTask", sent.get().headers().firstValue("X-Acs-Action").orElseThrow());
@@ -62,7 +62,22 @@ class TingwuModelSessionIssuerTest {
         var issuer = new TingwuModelSessionIssuer(CONFIG,
                 request -> new TingwuModelSessionIssuer.ProviderResponse(200,
                         "{\"Data\":{\"TaskId\":\"task-123\"}}"), CLOCK);
-        assertThrows(TingwuModelSessionIssuer.SessionIssueException.class, issuer::issue);
+        assertThrows(TingwuModelSessionIssuer.SessionIssueException.class,
+                () -> issuer.issue("zh-CN"));
+    }
+
+    @Test void englishMeetingUsesEnglishInCreateTask() throws Exception {
+        AtomicReference<HttpRequest> sent = new AtomicReference<>();
+        var issuer = new TingwuModelSessionIssuer(CONFIG, request -> {
+            sent.set(request);
+            return new TingwuModelSessionIssuer.ProviderResponse(200,
+                    "{\"Data\":{\"TaskId\":\"task-en\",\"MeetingJoinUrl\":"
+                            + "\"wss://join.example.invalid/meeting\"}}");
+        }, CLOCK);
+
+        issuer.issue("en-US");
+        var body = new ObjectMapper().readTree(readBody(sent.get()));
+        assertEquals("en", body.path("Input").path("SourceLanguage").asText());
     }
 
     @Test void remainsDisabledWithoutConfiguredCredentials() {

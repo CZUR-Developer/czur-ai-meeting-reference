@@ -29,6 +29,7 @@ import com.czur.reference.application.persistence.jdbc.JdbcMeetingQueryPort;
 import com.czur.reference.application.persistence.jdbc.JdbcMeetingManifestQueryPort;
 import com.czur.reference.application.persistence.jdbc.JdbcMeetingArtifactContentQueryPort;
 import com.czur.reference.application.persistence.jdbc.JdbcMeetingEventLogPort;
+import com.czur.reference.application.persistence.jdbc.JdbcModelSessionLanguageLookup;
 import com.czur.reference.application.persistence.jdbc.JdbcClientMeetingInputPort;
 import com.czur.reference.application.persistence.jdbc.JdbcClientMeetingResultFinalizer;
 import com.czur.reference.application.persistence.jdbc.JdbcOwnedMeetingStopUnitOfWork;
@@ -255,6 +256,8 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                     .orElseGet(() -> config.tingwuModelSession()
                             .<ModelSessionIssuer>map(model ->
                                     new TingwuModelSessionIssuer(model, clock)).orElse(null));
+            var modelSessionLanguages = modelSessions == null ? null
+                    : new JdbcModelSessionLanguageLookup(dataSource);
             if (config.createEnabled()) {
                 // 与查询、Stop、Delete 共用唯一连接池、身份 Provider、Clock 和错误映射。
                 // ID 仅由服务端安全随机源生成；首次公开响应由 V013 持久化。
@@ -277,11 +280,12 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                         create, new CreateMeetingHttpRequestDecoder(
                                 config.audience(), config.clientId()), true, manifest,
                         renewService, artifact, events, clientInput, modelSessions,
+                        modelSessionLanguages,
                         referenceLogin);
             } else {
                 runtime = new MeetingHttpRuntime(query, deletion, decoder, errors, stopService,
                         null, null, false, manifest, renewService, artifact, events,
-                        clientInput, modelSessions, referenceLogin);
+                        clientInput, modelSessions, modelSessionLanguages, referenceLogin);
             }
             LOGGER.log(Level.INFO,
                     "reference meeting HTTP 装配完成 createEnabled={0} realtimeRenewEnabled={1}",

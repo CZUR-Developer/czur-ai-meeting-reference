@@ -6,6 +6,7 @@ import com.czur.reference.application.command.AuthenticatedCompleteMeetingApplic
 import com.czur.reference.application.command.AuthenticatedRealtimeTokenRenewApplicationService;
 import com.czur.reference.application.command.StopMeetingIntent;
 import com.czur.reference.application.model.ModelSessionIssuer;
+import com.czur.reference.application.model.ModelSessionLanguageLookup;
 import com.czur.reference.application.model.TingwuModelSessionIssuer;
 import com.czur.reference.application.port.DeleteRequest;
 import com.czur.reference.application.port.MeetingDeletionPort;
@@ -90,6 +91,7 @@ public final class MeetingHttpAdapter {
     private final MeetingEventLogPort eventLogPort;
     private final ClientMeetingInputPort clientInputPort;
     private final ModelSessionIssuer modelSessions;
+    private final ModelSessionLanguageLookup modelSessionLanguages;
 
     /** 使用随机 opaque diagnosticId 的默认错误映射器。 */
     public MeetingHttpAdapter(
@@ -119,6 +121,7 @@ public final class MeetingHttpAdapter {
         this.eventLogPort = null;
         this.clientInputPort = null;
         this.modelSessions = null;
+        this.modelSessionLanguages = null;
     }
 
     /** 装配完整认证 Stop application service 的构造器。 */
@@ -142,6 +145,7 @@ public final class MeetingHttpAdapter {
         this.eventLogPort = null;
         this.clientInputPort = null;
         this.modelSessions = null;
+        this.modelSessionLanguages = null;
     }
 
     /**
@@ -270,6 +274,28 @@ public final class MeetingHttpAdapter {
             MeetingEventLogPort eventLogPort,
             ClientMeetingInputPort clientInputPort,
             ModelSessionIssuer modelSessions) {
+        this(queryPort, deletionPort, decoder, errors, stopService, createService,
+                createDecoder, createEnabled, manifestPort, renewService, artifactPort,
+                eventLogPort, clientInputPort, modelSessions, null);
+    }
+
+    /** 本场模型会话从首次 Create 事实取源语言，不读取会话请求 body。 */
+    public MeetingHttpAdapter(
+            MeetingQueryPort queryPort,
+            MeetingDeletionPort deletionPort,
+            RequestDecoder decoder,
+            HttpErrorMapper errors,
+            AuthenticatedMeetingStopApplicationService stopService,
+            AuthenticatedCompleteMeetingApplicationService createService,
+            CreateMeetingHttpRequestDecoder createDecoder,
+            boolean createEnabled,
+            MeetingManifestPort manifestPort,
+            AuthenticatedRealtimeTokenRenewApplicationService renewService,
+            MeetingArtifactContentPort artifactPort,
+            MeetingEventLogPort eventLogPort,
+            ClientMeetingInputPort clientInputPort,
+            ModelSessionIssuer modelSessions,
+            ModelSessionLanguageLookup modelSessionLanguages) {
         this.queryPort = Objects.requireNonNull(queryPort, "queryPort");
         this.deletionPort = Objects.requireNonNull(deletionPort, "deletionPort");
         this.decoder = Objects.requireNonNull(decoder, "decoder");
@@ -288,6 +314,7 @@ public final class MeetingHttpAdapter {
         this.eventLogPort = eventLogPort;
         this.clientInputPort = clientInputPort;
         this.modelSessions = modelSessions;
+        this.modelSessionLanguages = modelSessionLanguages;
     }
 
     /** 与 runtime 常见的 service-before-mapper 装配顺序兼容。 */
@@ -438,7 +465,7 @@ public final class MeetingHttpAdapter {
         Matcher clientStart = CLIENT_START_PATH.matcher(path);
         Matcher modelSession = MODEL_SESSION_PATH.matcher(path);
         if ("POST".equals(method) && modelSession.matches()) {
-            if (modelSessions == null) return errors.notImplemented();
+            if (modelSessions == null || modelSessionLanguages == null) return errors.notImplemented();
             if (context == null) return errors.missingContext();
             if (!request.query().isEmpty() || !request.body().isEmpty()) {
                 throw new IllegalArgumentException("model session must have no body or query");
@@ -453,8 +480,10 @@ public final class MeetingHttpAdapter {
                 return errors.modelSessionInvalidState();
             }
             try {
-                return errors.modelSession(modelSession.group(1), modelSessions.issue());
-            } catch (TingwuModelSessionIssuer.SessionIssueException unavailable) {
+                String sourceLanguage = modelSessionLanguages.load(context, modelSession.group(1));
+                return errors.modelSession(modelSession.group(1),
+                        modelSessions.issue(sourceLanguage));
+            } catch (TingwuModelSessionIssuer.SessionIssueException | IllegalStateException unavailable) {
                 return errors.modelSessionUnavailable();
             }
         }
