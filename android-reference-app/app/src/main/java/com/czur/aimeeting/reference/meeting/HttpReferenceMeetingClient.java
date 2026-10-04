@@ -97,18 +97,23 @@ public final class HttpReferenceMeetingClient implements ReferenceMeetingClient 
     public void appendTranscript(String meetingId, int clientSequence, TranscriptEvent event)
             throws IOException {
         try {
+            JSONObject transcript = new JSONObject()
+                    .put("segmentId", event.segmentId())
+                    .put("revision", event.revision())
+                    .put("operation", "UPSERT_OPERATION_UPSERT")
+                    .put("startMs", event.startMs())
+                    .put("endMs", event.endMs())
+                    .put("language", event.language())
+                    .put("text", event.text())
+                    .put("final", event.isFinal());
+            if (event.sessionSpeakerId() != null) {
+                transcript.put("speaker", new JSONObject()
+                        .put("sessionSpeakerId", event.sessionSpeakerId()));
+            }
             JSONObject body = new JSONObject()
                     .put("clientEventId", event.segmentId() + "-r" + event.revision())
                     .put("clientSequence", clientSequence)
-                    .put("transcriptUpsert", new JSONObject()
-                            .put("segmentId", event.segmentId())
-                            .put("revision", event.revision())
-                            .put("operation", "UPSERT_OPERATION_UPSERT")
-                            .put("startMs", event.startMs())
-                            .put("endMs", event.endMs())
-                            .put("language", event.language())
-                            .put("text", event.text())
-                            .put("final", event.isFinal()));
+                    .put("transcriptUpsert", transcript);
             post("/v1/meetings/" + meetingId + "/events:append", body.toString(), null,
                     200, 201);
         } catch (JSONException invalidEvent) {

@@ -2,6 +2,7 @@ package com.czur.aimeeting.reference.tingwu;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import com.czur.aimeeting.model.ModelSessionGrant;
@@ -138,6 +139,28 @@ public final class TingwuModelAdapterTest {
         assertEquals("und", events.get(0).language());
         assertEquals("en-US", events.get(1).language());
         assertEquals(2, events.get(1).revision());
+    }
+
+    @Test
+    public void lateSessionSpeakerWithSameTextCreatesRevisionAndMissingSpeakerStaysUnknown() {
+        TingwuModelAdapter adapter = new TingwuModelAdapter();
+        List<TranscriptEvent> events = new ArrayList<>();
+        adapter.onServerMessage("{\"header\":{\"name\":\"TranscriptionResultChanged\"},"
+                + "\"payload\":{\"index\":2,\"result\":\"你好\"}}", events::add);
+        adapter.onServerMessage("{\"header\":{\"name\":\"TranscriptionResultChanged\"},"
+                + "\"payload\":{\"index\":2,\"result\":\"你好\",\"SpeakerId\":\"speaker-2\"}}",
+                events::add);
+        adapter.onServerMessage("{\"header\":{\"name\":\"SentenceEnd\"},"
+                + "\"payload\":{\"index\":2,\"result\":\"你好。\"}}", events::add);
+        adapter.onServerMessage("{\"header\":{\"name\":\"SentenceEnd\"},"
+                + "\"payload\":{\"index\":3,\"result\":\"下一句。\"}}", events::add);
+        assertEquals(4, events.size());
+        assertNull(events.get(0).sessionSpeakerId());
+        assertEquals(2, events.get(1).revision());
+        assertEquals("speaker-2", events.get(1).sessionSpeakerId());
+        assertEquals("speaker-2", events.get(2).sessionSpeakerId());
+        assertTrue(events.get(2).isFinal());
+        assertNull(events.get(3).sessionSpeakerId());
     }
 
     @Test

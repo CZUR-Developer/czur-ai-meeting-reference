@@ -26,6 +26,7 @@ public final class TingwuModelAdapter implements ModelAdapter {
     private final Map<String, SegmentState> segments = new HashMap<>();
     private final Map<String, SegmentState> translations = new HashMap<>();
     private final Map<Integer, Long> sentenceStarts = new HashMap<>();
+    private final Map<Integer, String> sentenceSpeakers = new HashMap<>();
     private int fallbackIndex;
     private volatile boolean translationEnabled;
 
@@ -79,6 +80,9 @@ public final class TingwuModelAdapter implements ModelAdapter {
             JSONObject payload = root.optJSONObject("payload");
             if (payload != null) {
                 if (translationEnabled) emitTranslations(payload, translationListener);
+                int index = payload.optInt("index", -1);
+                String speaker = speakerId(payload);
+                if (index >= 0 && speaker != null) sentenceSpeakers.put(index, speaker);
                 if ("SentenceBegin".equals(name) && payload.has("index")) {
                     sentenceStarts.put(payload.optInt("index"),
                             Math.max(0, payload.optLong("time", 0)));
@@ -152,14 +156,41 @@ public final class TingwuModelAdapter implements ModelAdapter {
         SegmentState previous = segments.get(segmentId);
         String language = language(payload.optString("detected_source_lang",
                 payload.optString("source_lang", payload.optString("source_language", ""))));
+        String speaker = speakerId(payload);
+        if (speaker == null && index >= 0) speaker = sentenceSpeakers.get(index);
         if (previous != null) {
             if (previous.isFinal) return;
-            if (!isFinal && previous.text.equals(text) && previous.language.equals(language)) return;
+            if (!isFinal && previous.text.equals(text) && previous.language.equals(language)
+                    && java.util.Objects.equals(previous.speaker, speaker)) return;
         }
         int revision = previous == null ? 1 : previous.revision + 1;
         listener.onTranscript(new TranscriptEvent(segmentId, revision, startMs, endMs,
-                language, text, isFinal));
-        segments.put(segmentId, new SegmentState(revision, text, isFinal, language));
+                language, text, isFinal, speaker));
+        segments.put(segmentId, new SegmentState(revision, text, isFinal, language, speaker));
+    }
+
+    private static String speakerId(JSONObject payload) {
+        String value = speakerIdIn(payload);
+        if (value != null) return value;
+        value = speakerIdIn(payload.optJSONObject("transcription"));
+        if (value != null) return value;
+        JSONArray words = payload.optJSONArray("words");
+        if (words != null) {
+            for (int index = 0; index < words.length(); index++) {
+                value = speakerIdIn(words.optJSONObject(index));
+                if (value != null) return value;
+            }
+        }
+        return null;
+    }
+
+    private static String speakerIdIn(JSONObject source) {
+        if (source == null) return null;
+        for (String key : new String[]{"SpeakerId", "speaker_id", "speakerId", "speaker"}) {
+            String value = source.optString(key, "").trim();
+            if (!value.isEmpty() && !"null".equalsIgnoreCase(value)) return value;
+        }
+        return null;
     }
 
     private static String taskId(ModelSessionGrant grant) {
@@ -203,16 +234,19 @@ public final class TingwuModelAdapter implements ModelAdapter {
         private final String text;
         private final boolean isFinal;
         private final String language;
+        private final String speaker;
 
         private SegmentState(int revision, String text, boolean isFinal) {
-            this(revision, text, isFinal, "");
+            this(revision, text, isFinal, "", null);
         }
 
-        private SegmentState(int revision, String text, boolean isFinal, String language) {
+        private SegmentState(int revision, String text, boolean isFinal, String language,
+                String speaker) {
             this.revision = revision;
             this.text = text;
             this.isFinal = isFinal;
             this.language = language;
+            this.speaker = speaker;
         }
     }
 }

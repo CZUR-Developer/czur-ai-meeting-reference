@@ -341,14 +341,18 @@ public final class MeetingService extends Service {
         capabilityText = "本场功能：实时字幕"
                 + (capabilities.canUse(MeetingCapabilityState.TRANSLATION, local)
                         ? "、实时翻译" : "；实时翻译已关闭")
+                + (capabilities.canUse(MeetingCapabilityState.SPEAKER, local)
+                        ? "、本场发言人" : "；本场发言人已关闭")
                 + (capabilities.canUse(MeetingCapabilityState.SUMMARY, local)
                         ? "、会议纪要" : "；会议纪要已关闭");
         try {
             session = runtime.open(created, event -> {
-                main.post(() -> showTranscript(event));
+                TranscriptEvent standard = capabilities.canUse(
+                        MeetingCapabilityState.SPEAKER, local) ? event : event.withoutSpeaker();
+                main.post(() -> showTranscript(standard));
                 int clientSequence = sequence.incrementAndGet();
                 network.execute(() -> appendTranscript(nextClient, created.meetingId(),
-                        clientSequence, event));
+                        clientSequence, standard));
             }, new ModelSessionListener() {
                 @Override public void onTranslation(TranslationEvent event) {
                     main.post(() -> showTranslation(event));

@@ -9,9 +9,15 @@ public final class TranscriptEvent {
     private final String language;
     private final String text;
     private final boolean isFinal;
+    private final String sessionSpeakerId;
 
     public TranscriptEvent(String segmentId, int revision, long startMs, long endMs,
             String language, String text, boolean isFinal) {
+        this(segmentId, revision, startMs, endMs, language, text, isFinal, null);
+    }
+
+    public TranscriptEvent(String segmentId, int revision, long startMs, long endMs,
+            String language, String text, boolean isFinal, String sessionSpeakerId) {
         this.segmentId = segmentId;
         this.revision = revision;
         this.startMs = startMs;
@@ -19,6 +25,7 @@ public final class TranscriptEvent {
         this.language = language;
         this.text = text;
         this.isFinal = isFinal;
+        this.sessionSpeakerId = sessionSpeakerId;
     }
 
     /** 同一段文字的稳定标识，修订期间不改变。 */
@@ -41,4 +48,13 @@ public final class TranscriptEvent {
 
     /** 模型已确认该片段不会再修订。 */
     public boolean isFinal() { return isFinal; }
+
+    /** 模型提供的本场临时发言人；缺失时为 null，不代表跨会议身份。 */
+    public String sessionSpeakerId() { return sessionSpeakerId; }
+
+    /** 本场未授权发言人能力时，只提交普通字幕。 */
+    public TranscriptEvent withoutSpeaker() {
+        return sessionSpeakerId == null ? this : new TranscriptEvent(segmentId, revision,
+                startMs, endMs, language, text, isFinal, null);
+    }
 }

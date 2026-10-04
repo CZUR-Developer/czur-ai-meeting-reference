@@ -50,4 +50,20 @@ public final class MeetingCapabilityStateTest {
                 Set.of(MeetingCapabilityState.TRANSCRIPT)));
         assertFalse(state.canUse(MeetingCapabilityState.TRANSLATION, Set.of()));
     }
+
+    @Test
+    public void sessionSpeakerNeedsBothFrozenDecisionAndLocalAdapter() throws Exception {
+        MeetingCapabilityState available = MeetingCapabilityState.fromCreateResponse(
+                new JSONObject("{\"capabilityDecisions\":[{\"capability\":\"speaker.diarization.session\","
+                        + "\"availability\":\"AVAILABLE\"}]}"));
+        assertTrue(available.canUse(MeetingCapabilityState.SPEAKER,
+                Set.of(MeetingCapabilityState.SPEAKER)));
+        assertFalse(available.canUse(MeetingCapabilityState.SPEAKER,
+                Set.of(MeetingCapabilityState.TRANSCRIPT)));
+
+        MeetingCapabilityState missing = MeetingCapabilityState.fromCreateResponse(
+                new JSONObject("{\"capabilityDecisions\":[]}"));
+        assertFalse(missing.canUse(MeetingCapabilityState.SPEAKER,
+                Set.of(MeetingCapabilityState.SPEAKER)));
+    }
 }

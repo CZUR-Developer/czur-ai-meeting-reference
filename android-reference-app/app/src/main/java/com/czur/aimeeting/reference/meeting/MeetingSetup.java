@@ -37,11 +37,12 @@ public record MeetingSetup(Mode mode, String sourceLanguage, String targetLangua
     /** 会前选择直接决定 Create 的请求能力；字幕是所有当前模式的基础产物。 */
     public List<String> requestedCapabilities() {
         return switch (mode) {
-            case LIVE_TRANSCRIPT -> List.of(MeetingCapabilityState.TRANSCRIPT);
+            case LIVE_TRANSCRIPT -> List.of(MeetingCapabilityState.TRANSCRIPT,
+                    MeetingCapabilityState.SPEAKER);
             case MEETING_MINUTES -> List.of(MeetingCapabilityState.TRANSCRIPT,
-                    MeetingCapabilityState.SUMMARY);
+                    MeetingCapabilityState.SUMMARY, MeetingCapabilityState.SPEAKER);
             case LIVE_TRANSLATION -> List.of(MeetingCapabilityState.TRANSCRIPT,
-                    MeetingCapabilityState.TRANSLATION);
+                    MeetingCapabilityState.TRANSLATION, MeetingCapabilityState.SPEAKER);
         };
     }
 

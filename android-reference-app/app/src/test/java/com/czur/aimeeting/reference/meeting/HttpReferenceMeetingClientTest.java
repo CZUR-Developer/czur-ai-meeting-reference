@@ -2,6 +2,7 @@ package com.czur.aimeeting.reference.meeting;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 import com.czur.aimeeting.model.TranscriptEvent;
@@ -67,6 +68,8 @@ public final class HttpReferenceMeetingClientTest {
             assertEquals(0, create.getJSONObject("languages").getJSONArray("targets").length());
             assertEquals("transcript.realtime",
                     create.getJSONArray("requestedCapabilities").getString(0));
+            assertEquals("speaker.diarization.session",
+                    create.getJSONArray("requestedCapabilities").getString(1));
             assertTrue(!create.getJSONObject("artifactPolicy").getBoolean("presentationCapture"));
             assertTrue(startRequest.getBody().readUtf8().isEmpty());
             JSONObject append = new JSONObject(appendRequest.getBody().readUtf8());
@@ -76,10 +79,37 @@ public final class HttpReferenceMeetingClientTest {
                     append.getJSONObject("transcriptUpsert").getString("operation"));
             assertEquals("今天我们讨论 AI",
                     append.getJSONObject("transcriptUpsert").getString("text"));
+            assertFalse(append.getJSONObject("transcriptUpsert").has("speaker"));
             assertEquals("/v1/meetings/mtg_test:stop", stopRequest.getPath());
             assertEquals("Bearer local-demo-token", stopRequest.getHeader("Authorization"));
             assertTrue(stopRequest.getBody().readUtf8().isEmpty());
             assertTrue(stopRequest.getHeader("Idempotency-Key") != null);
+        }
+    }
+
+    @Test
+    public void sessionSpeakerIsOptionalStandardTranscriptField() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setResponseCode(201).setBody("{}"));
+            server.enqueue(new MockResponse().setResponseCode(201).setBody("{}"));
+            server.start();
+            ReferenceMeetingClient client = new HttpReferenceMeetingClient(
+                    server.url("/").toString(), "local-demo-token");
+            TranscriptEvent spoken = new TranscriptEvent("seg-1", 1, 0, 500,
+                    "zh-CN", "你好", false, "speaker-2");
+            client.appendTranscript("mtg_speaker", 1, spoken);
+            client.appendTranscript("mtg_speaker", 2,
+                    new TranscriptEvent("seg-2", 1, 500, 800, "zh-CN", "继续", true));
+
+            JSONObject withSpeaker = new JSONObject(server.takeRequest().getBody().readUtf8())
+                    .getJSONObject("transcriptUpsert");
+            JSONObject withoutSpeaker = new JSONObject(server.takeRequest().getBody().readUtf8())
+                    .getJSONObject("transcriptUpsert");
+            assertEquals("speaker-2", withSpeaker.getJSONObject("speaker")
+                    .getString("sessionSpeakerId"));
+            assertEquals("你好", withSpeaker.getString("text"));
+            assertFalse(withoutSpeaker.has("speaker"));
+            assertEquals(2, server.getRequestCount());
         }
     }
 

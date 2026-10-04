@@ -18,7 +18,8 @@ public final class ModelAdapterRegistry {
     private final Map<String, Entry> entries = Map.of(
             TingwuModelAdapter.ID, new Entry(TingwuModelAdapter::new,
                     Set.of(MeetingCapabilityState.TRANSCRIPT,
-                            MeetingCapabilityState.TRANSLATION)),
+                            MeetingCapabilityState.TRANSLATION,
+                            MeetingCapabilityState.SPEAKER)),
             SampleJsonModelAdapter.ID, new Entry(SampleJsonModelAdapter::new,
                     Set.of(MeetingCapabilityState.TRANSCRIPT)));
 

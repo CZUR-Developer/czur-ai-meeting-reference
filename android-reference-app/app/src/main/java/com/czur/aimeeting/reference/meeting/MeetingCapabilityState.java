@@ -16,6 +16,7 @@ public final class MeetingCapabilityState {
     public static final String TRANSCRIPT = "transcript.realtime";
     public static final String TRANSLATION = "translation.realtime";
     public static final String SUMMARY = "summary.structured";
+    public static final String SPEAKER = "speaker.diarization.session";
 
     private final Map<String, String> effectiveCapabilities;
 

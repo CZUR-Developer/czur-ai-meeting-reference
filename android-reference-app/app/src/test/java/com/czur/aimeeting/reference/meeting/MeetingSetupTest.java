@@ -11,7 +11,8 @@ public final class MeetingSetupTest {
     public void transcriptKeepsChosenSourceAndWebResultWithoutTargetLanguage() {
         MeetingSetup setup = MeetingSetup.transcript("en-US",
                 "https://result.example.test/index.html");
-        assertEquals(List.of(MeetingCapabilityState.TRANSCRIPT), setup.requestedCapabilities());
+        assertEquals(List.of(MeetingCapabilityState.TRANSCRIPT,
+                MeetingCapabilityState.SPEAKER), setup.requestedCapabilities());
         assertEquals(List.of(), setup.targetLanguages());
         assertEquals("en-US", setup.sourceLanguage());
         assertEquals(MeetingSetup.ResultDelivery.WEB, setup.resultDelivery());
@@ -22,7 +23,8 @@ public final class MeetingSetupTest {
         MeetingSetup setup = new MeetingSetup(MeetingSetup.Mode.LIVE_TRANSLATION, "zh-CN",
                 "en-US", false, MeetingSetup.ResultDelivery.QR_CODE, "");
         assertEquals(List.of(MeetingCapabilityState.TRANSCRIPT,
-                MeetingCapabilityState.TRANSLATION), setup.requestedCapabilities());
+                MeetingCapabilityState.TRANSLATION, MeetingCapabilityState.SPEAKER),
+                setup.requestedCapabilities());
         assertEquals(List.of("en-US"), setup.targetLanguages());
         assertEquals(MeetingSetup.ResultDelivery.QR_CODE, setup.resultDelivery());
     }
