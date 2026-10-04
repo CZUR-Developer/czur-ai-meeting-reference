@@ -47,6 +47,7 @@ public final class MeetingHttpRuntime implements AutoCloseable {
     private final MeetingHttpAdapter adapter;
     private final HttpErrorMapper errors;
     private final ReferenceDevSessionLoginEndpoint referenceLogin;
+    private final ReferenceDeploymentCapabilitiesEndpoint capabilities;
     private final AtomicBoolean closed = new AtomicBoolean(false);
 
     /**
@@ -255,11 +256,31 @@ public final class MeetingHttpRuntime implements AutoCloseable {
             ModelSessionLanguageLookup modelSessionLanguages,
             BailianSummarySessionIssuer summarySessions,
             ReferenceDevSessionLoginEndpoint referenceLogin) {
+        this(queryPort, deletionPort, decoder, errors, stopService, createService,
+                createDecoder, createEnabled, manifestPort, renewService, artifactPort,
+                eventLogPort, clientInputPort, modelSessions, modelSessionLanguages,
+                summarySessions, referenceLogin, null);
+    }
+
+    public MeetingHttpRuntime(
+            MeetingQueryPort queryPort, MeetingDeletionPort deletionPort,
+            MeetingHttpAdapter.RequestDecoder decoder, HttpErrorMapper errors,
+            AuthenticatedMeetingStopApplicationService stopService,
+            AuthenticatedCompleteMeetingApplicationService createService,
+            CreateMeetingHttpRequestDecoder createDecoder, boolean createEnabled,
+            MeetingManifestPort manifestPort,
+            AuthenticatedRealtimeTokenRenewApplicationService renewService,
+            MeetingArtifactContentPort artifactPort, MeetingEventLogPort eventLogPort,
+            ClientMeetingInputPort clientInputPort, ModelSessionIssuer modelSessions,
+            ModelSessionLanguageLookup modelSessionLanguages,
+            BailianSummarySessionIssuer summarySessions,
+            ReferenceDevSessionLoginEndpoint referenceLogin,
+            ReferenceDeploymentCapabilitiesEndpoint capabilities) {
         this(new MeetingHttpAdapter(queryPort, deletionPort, decoder, errors, stopService,
                 createService, createDecoder, createEnabled, manifestPort, renewService,
                 artifactPort, eventLogPort, clientInputPort, modelSessions,
                 modelSessionLanguages, summarySessions), errors,
-                referenceLogin);
+                referenceLogin, capabilities);
     }
 
     /** 使用默认错误映射器创建已认证 Stop 运行时。 */
@@ -278,14 +299,16 @@ public final class MeetingHttpRuntime implements AutoCloseable {
      * 关闭响应和 adapter 内的业务错误使用同一套 envelope 版本与诊断 ID 策略。</p>
      */
     public MeetingHttpRuntime(MeetingHttpAdapter adapter, HttpErrorMapper errors) {
-        this(adapter, errors, null);
+        this(adapter, errors, null, null);
     }
 
     private MeetingHttpRuntime(MeetingHttpAdapter adapter, HttpErrorMapper errors,
-            ReferenceDevSessionLoginEndpoint referenceLogin) {
+            ReferenceDevSessionLoginEndpoint referenceLogin,
+            ReferenceDeploymentCapabilitiesEndpoint capabilities) {
         this.adapter = Objects.requireNonNull(adapter, "adapter");
         this.errors = Objects.requireNonNull(errors, "errors");
         this.referenceLogin = referenceLogin;
+        this.capabilities = capabilities;
         LOGGER.log(Level.INFO, "meeting HTTP 运行时装配完成");
     }
 
@@ -310,6 +333,10 @@ public final class MeetingHttpRuntime implements AutoCloseable {
         if (referenceLogin != null
                 && ReferenceDevSessionLoginEndpoint.PATH.equals(request.path())) {
             return referenceLogin.handle(request);
+        }
+        if (capabilities != null
+                && ReferenceDeploymentCapabilitiesEndpoint.PATH.equals(request.path())) {
+            return capabilities.handle(request);
         }
         return adapter.handle(request, context);
     }

@@ -16,6 +16,7 @@ import com.czur.reference.application.http.MeetingJdkHttpServer;
 import com.czur.reference.application.http.MeetingHttpRuntime;
 import com.czur.reference.application.http.ReferenceMeetingHttpRequestDecoder;
 import com.czur.reference.application.http.ReferenceDevSessionLoginEndpoint;
+import com.czur.reference.application.http.ReferenceDeploymentCapabilitiesEndpoint;
 import com.czur.reference.application.identity.referencedev.ReferenceDevIdentityProvider;
 import com.czur.reference.application.manifest.ManifestResultAccessPolicy;
 import com.czur.reference.application.model.ModelSessionIssuer;
@@ -193,6 +194,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
             var referenceLogin = config.login()
                     .map(login -> new ReferenceDevSessionLoginEndpoint(login, errors, clock))
                     .orElse(null);
+            var capabilities = new ReferenceDeploymentCapabilitiesEndpoint(config, errors);
             var decoder = new ReferenceMeetingHttpRequestDecoder(
                     config.audience(), config.clientId());
             var resolver = new AuthenticatedMeetingHttpContextResolver(
@@ -284,12 +286,12 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                                 config.audience(), config.clientId()), true, manifest,
                         renewService, artifact, events, clientInput, modelSessions,
                         modelSessionLanguages, summarySessions,
-                        referenceLogin);
+                        referenceLogin, capabilities);
             } else {
                 runtime = new MeetingHttpRuntime(query, deletion, decoder, errors, stopService,
                         null, null, false, manifest, renewService, artifact, events,
                         clientInput, modelSessions, modelSessionLanguages, summarySessions,
-                        referenceLogin);
+                        referenceLogin, capabilities);
             }
             LOGGER.log(Level.INFO,
                     "reference meeting HTTP 装配完成 createEnabled={0} realtimeRenewEnabled={1}",

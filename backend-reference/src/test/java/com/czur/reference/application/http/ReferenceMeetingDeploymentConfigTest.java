@@ -60,6 +60,43 @@ class ReferenceMeetingDeploymentConfigTest {
     }
 
     @Test
+    void publicDiscoveryOnlyShowsConfiguredSummaryCapability() throws Exception {
+        Map<String, String> values = valid();
+        values.put(ReferenceMeetingDeploymentConfig.CREATE_ENABLED, "true");
+        values.put(ReferenceMeetingDeploymentConfig.PROFILE_OPTIONAL_CAPABILITIES,
+                CapabilityIds.SUMMARY_STRUCTURED);
+        values.put(ReferenceMeetingDeploymentConfig.ENTITLEMENT_SUPPORTED_CAPABILITIES,
+                CapabilityIds.TRANSCRIPT_REALTIME + "," + CapabilityIds.SUMMARY_STRUCTURED);
+        values.put(ReferenceMeetingDeploymentConfig.MODEL_CAPABILITIES,
+                CapabilityIds.TRANSCRIPT_REALTIME + "," + CapabilityIds.SUMMARY_STRUCTURED);
+        HttpRequest request = new HttpRequest("GET", "/v1/capabilities", Map.of(), "");
+        var withoutIssuer = new ReferenceDeploymentCapabilitiesEndpoint(
+                ReferenceMeetingDeploymentConfig.fromEnvironment(values), new HttpErrorMapper());
+        var asrOnly = new ObjectMapper().readTree(withoutIssuer.handle(request).body());
+        assertEquals(200, withoutIssuer.handle(request).status());
+        assertEquals(List.of(CapabilityIds.TRANSCRIPT_REALTIME), new ObjectMapper().convertValue(
+                asrOnly.get("capabilities"), new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {}));
+        assertEquals("v1", asrOnly.get("specVersion").asText());
+        assertTrue(asrOnly.has("languages"));
+        assertTrue(asrOnly.has("audioProfiles"));
+        assertTrue(asrOnly.has("limits"));
+
+        values.put(BailianSummarySessionConfig.ENABLED, "true");
+        values.put(BailianSummarySessionConfig.APP_ID, "app-local");
+        values.put(BailianSummarySessionConfig.API_KEY, "permanent-local-only");
+        var withIssuer = new ReferenceDeploymentCapabilitiesEndpoint(
+                ReferenceMeetingDeploymentConfig.fromEnvironment(values), new HttpErrorMapper());
+        String enabled = withIssuer.handle(request).body();
+        assertTrue(enabled.contains(CapabilityIds.SUMMARY_STRUCTURED));
+        assertFalse(enabled.contains("permanent-local-only"));
+        values.put(ReferenceMeetingDeploymentConfig.DISABLED_CAPABILITIES,
+                CapabilityIds.SUMMARY_STRUCTURED);
+        var disabled = new ReferenceDeploymentCapabilitiesEndpoint(
+                ReferenceMeetingDeploymentConfig.fromEnvironment(values), new HttpErrorMapper());
+        assertFalse(disabled.handle(request).body().contains(CapabilityIds.SUMMARY_STRUCTURED));
+    }
+
+    @Test
     void preconfiguredUserLogsInAndReceivesTheExistingMeetingBearer() throws Exception {
         Map<String, String> values = valid();
         assertTrue(ReferenceMeetingDeploymentConfig.fromEnvironment(values).login().isEmpty());
