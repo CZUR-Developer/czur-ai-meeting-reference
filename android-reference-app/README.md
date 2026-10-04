@@ -111,9 +111,10 @@ App 调用 `POST /v1/reference/session:login` 取得访问令牌，再以该令�
 定时采集 JPEG，并在 Stop 前提交截图包；互译模式暂不开放演示文稿。用户点击开始时冻结本场设置；创建后
 还会核对后端 `capabilityDecisions`，能力不满足时不会启动客户端会议。
 Mock 模式三次字幕都保存后可停止；SDK 模式随时可请求停止输入，等待模型最后一条
-字幕后再向后端结束会议。结果页地址单独填写
-已部署的静态 Web `index.html` 地址；Stop 返回已受理后，App 在内置 WebView
-打开含 `meetingId` 与单次生成的 `genTime` 的结果链接。Starry 设备无需外部浏览器。
+字幕后再向后端结束会议。网页和邮箱方式需要填写已部署的静态 Web `index.html`
+地址；网页方式在 Stop 成功后由内置 WebView 打开含 `meetingId` 与 `genTime` 的
+结果链接，邮箱方式发送同一链接。本地方式生成 PDF，互译无痕方式不主动交付结果。
+Starry 设备无需外部浏览器。
 
 ### 合作伙伴会前开会条件 Hook
 
