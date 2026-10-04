@@ -172,8 +172,8 @@ public final class ReferenceMeetingDeploymentConfig {
         Set<String> optional = capabilities(environment, PROFILE_OPTIONAL_CAPABILITIES, false);
         ProductProfile profile;
         try {
-            // P5-5 只登记真实模型互译的本场执行能力。产物名称先冻结为协议名；
-            // 标准译文事件和最终收口在下一片接入，当前收口仍明确拒绝翻译会议。
+            // P5-5 登记真实模型互译的本场执行能力；客户端标准译文事件和最终结果
+            // 已按该冻结能力决定接入。旧 WSS 音频 Worker 不因此具备译文收口。
             Map<String, List<String>> workflows = optional.contains(
                     CapabilityIds.TRANSLATION_REALTIME)
                     ? Map.of(CapabilityIds.TRANSCRIPT_REALTIME,

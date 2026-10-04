@@ -151,7 +151,7 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
     /** 能力以本场首次持久化 Create 决策为准；全局配置变动不改变既有会议。 */
     private static boolean translationEnabled(Connection connection, String meetingId) {
         var first = new JdbcCreateMeetingFactStore(connection)
-                .findByMeetingIdReadOnly(meetingId).orElse(null);
+                .findByMeetingId(meetingId).orElse(null);
         if (first == null || !first.request().requestSnapshot().requestedCapabilities()
                 .contains(CapabilityIds.TRANSLATION_REALTIME)) return false;
         return first.response().capabilityDecisions().stream().anyMatch(decision ->

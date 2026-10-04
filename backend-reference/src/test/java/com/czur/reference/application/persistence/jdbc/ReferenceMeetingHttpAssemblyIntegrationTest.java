@@ -20,10 +20,12 @@ import com.czur.reference.application.port.MeetingStartExecutionUnitOfWork;
 import com.czur.reference.application.port.CreateMeetingFactStore;
 import com.czur.reference.application.port.FinalizationAdmissionUnitOfWork;
 import com.czur.reference.application.port.FinalizationInputFact;
+import com.czur.reference.application.port.EventLog;
 import com.czur.reference.application.port.ManifestStatus;
 import com.czur.reference.application.port.MeetingManifest;
 import com.czur.reference.application.port.MeetingManifestPort;
 import com.czur.reference.application.port.model.CanonicalTranscriptEvent;
+import com.czur.reference.application.port.model.CanonicalTranslationEvent;
 import com.czur.reference.application.port.WorkflowStep;
 import com.czur.reference.application.port.artifact.ArtifactReadyMetadataStore;
 import com.czur.reference.application.port.artifact.ArtifactStore;
@@ -46,6 +48,7 @@ import com.czur.reference.protocol.json.FinalizationCheckpointJson;
 import com.czur.reference.protocol.json.FinalizationExecutionFactJson;
 import com.czur.reference.protocol.json.MeetingManifestJson;
 import com.czur.reference.protocol.realtime.RealtimeTranscriptEventMapper;
+import com.czur.reference.protocol.realtime.RealtimeTranslationEventMapper;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -264,6 +267,175 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
             assertEquals(200, artifactResponse.status());
             assertEquals(finalText, ERROR_JSON.readTree(artifactResponse.body())
                     .path("text").asText());
+            assertFalse(ERROR_JSON.readTree(artifactResponse.body()).has("segments"));
+        }
+    }
+
+    @Test
+    void mixedClientLanguageAndFinalTranslationsPublishTwoReadableArtifacts(
+            @TempDir Path artifactRoot) throws Exception {
+        migrate(1);
+        String meetingId = clientMeeting("mixed_translation");
+        List<EventLog> revisions = List.of(
+                RealtimeTranscriptEventMapper.event(meetingId, "evt_mixed_1", 1, NOW,
+                        new CanonicalTranscriptEvent("zh-segment", 1,
+                                CanonicalTranscriptEvent.Operation.UPSERT, 0, 1000,
+                                "zh-CN", "初稿", false, null, 0, List.of(), List.of())),
+                RealtimeTranscriptEventMapper.event(meetingId, "evt_mixed_2", 2, NOW,
+                        new CanonicalTranscriptEvent("zh-segment", 2,
+                                CanonicalTranscriptEvent.Operation.REPLACE, 0, 1000,
+                                "zh-CN", "你好", true, null, 0, List.of(), List.of())),
+                RealtimeTranscriptEventMapper.event(meetingId, "evt_mixed_3", 3, NOW,
+                        new CanonicalTranscriptEvent("en-segment", 1,
+                                CanonicalTranscriptEvent.Operation.UPSERT, 1000, 2000,
+                                "en-US", "Good morning", true, null, 0, List.of(), List.of())),
+                RealtimeTranslationEventMapper.event(meetingId, "evt_mixed_4", 4, NOW,
+                        new CanonicalTranslationEvent("zh-translation", "zh-segment", 1,
+                                CanonicalTranscriptEvent.Operation.UPSERT, "zh-CN", "en-US",
+                                "Draft", false, List.of())),
+                RealtimeTranslationEventMapper.event(meetingId, "evt_mixed_5", 5, NOW,
+                        new CanonicalTranslationEvent("zh-translation", "zh-segment", 2,
+                                CanonicalTranscriptEvent.Operation.REPLACE, "zh-CN", "en-US",
+                                "Hello", true, List.of())),
+                RealtimeTranslationEventMapper.event(meetingId, "evt_mixed_6", 6, NOW,
+                        new CanonicalTranslationEvent("en-translation", "en-segment", 1,
+                                CanonicalTranscriptEvent.Operation.UPSERT, "en-US", "zh-CN",
+                                "早上好", true, List.of())));
+        for (int index = 0; index < revisions.size(); index++) {
+            EventLog event = revisions.get(index);
+            new JdbcMeetingEventLogStore(fixtureDataSource).append(event);
+            try (Connection connection = fixtureDataSource.getConnection();
+                 PreparedStatement identity = connection.prepareStatement("""
+                         INSERT INTO meeting_client_event
+                             (meeting_id, client_event_id, client_sequence, event_id)
+                         VALUES (?, ?, ?, ?)
+                         """)) {
+                identity.setString(1, meetingId);
+                identity.setString(2, "mixed-client-" + (index + 1));
+                identity.setInt(3, index + 1);
+                identity.setString(4, event.eventId());
+                identity.executeUpdate();
+            }
+        }
+        Map<String, String> enabled = config();
+        enabled.put(ReferenceMeetingDeploymentConfig.RESULT_LINK_TTL_MS, "60000");
+        try (var assembly = ReferenceMeetingHttpAssembly.start(enabled, CLOCK,
+                new PersistentFileSystemMockArtifactStore(artifactRoot, 1024 * 1024))) {
+            assertEquals(200, assembly.runtime().handle(new HttpRequest("POST",
+                    "/v1/meetings/" + meetingId + ":stop",
+                    headers("client-mixed-stop-key-123456789"), ""), null).status());
+            assertEquals("READY", meetingState(meetingId));
+            assertEquals(2, count("artifact"));
+            Map<String, String> query = Map.of("genTime", Long.toString(NOW.toEpochMilli()));
+            var response = assembly.runtime().handle(new HttpRequest("GET",
+                    "/v1/meetings/" + meetingId + "/manifest", Map.of(), query, ""), null);
+            assertEquals(200, response.status());
+            MeetingManifest manifest = MeetingManifestJson.decode(response.body());
+            assertEquals("mul", manifest.languages().source());
+            assertEquals(List.of("en-US", "zh-CN"), manifest.languages().targets());
+            assertEquals(List.of("transcript.final", "translation.final"),
+                    manifest.artifacts().stream().map(MeetingManifest.ArtifactRef::type).toList());
+            var transcript = assembly.runtime().handle(new HttpRequest("GET",
+                    "/v1/artifacts/" + manifest.artifacts().get(0).artifactId(),
+                    Map.of(), query, ""), null);
+            var translation = assembly.runtime().handle(new HttpRequest("GET",
+                    "/v1/artifacts/" + manifest.artifacts().get(1).artifactId(),
+                    Map.of(), query, ""), null);
+            assertEquals(200, transcript.status());
+            assertEquals(200, translation.status());
+            JsonNode source = ERROR_JSON.readTree(transcript.body());
+            assertEquals("你好\nGood morning", source.path("text").asText());
+            assertEquals("zh-CN", source.path("segments").get(0).path("language").asText());
+            assertEquals("en-US", source.path("segments").get(1).path("language").asText());
+            JsonNode translated = ERROR_JSON.readTree(translation.body());
+            assertEquals(2, translated.path("translations").size());
+            assertEquals("Hello", translated.path("translations").get(0).path("text").asText());
+            assertEquals("早上好", translated.path("translations").get(1).path("text").asText());
+        }
+    }
+
+    @Test
+    void translationAppendUsesFrozenGrantSharedSequenceAndAuthenticatedEventPage(
+            @TempDir Path artifactRoot) throws Exception {
+        migrate(1);
+        Map<String, String> enabled = enabledConfig();
+        enabled.put(ReferenceMeetingDeploymentConfig.PROFILE_OPTIONAL_CAPABILITIES,
+                "translation.realtime");
+        enabled.put(ReferenceMeetingDeploymentConfig.ENTITLEMENT_SUPPORTED_CAPABILITIES,
+                "transcript.realtime,translation.realtime");
+        enabled.put(ReferenceMeetingDeploymentConfig.MOCK_CAPABILITIES,
+                "transcript.realtime,translation.realtime");
+        enabled.put(ReferenceMeetingDeploymentConfig.RESULT_LINK_TTL_MS, "60000");
+        try (var assembly = ReferenceMeetingHttpAssembly.start(enabled, CLOCK,
+                new PersistentFileSystemMockArtifactStore(artifactRoot, 1024 * 1024));
+             var network = assembly.newJdkHttpServer(new InetSocketAddress("127.0.0.1", 0))) {
+            network.start();
+            int port = network.address().getPort();
+            HttpRequest base = createRequest("translation-create-key-123456789", "translation-client");
+            String body = base.body().replace("\"targets\":[]", "\"targets\":[\"en-US\"]")
+                    .replace("[\"transcript.realtime\"]",
+                            "[\"transcript.realtime\",\"translation.realtime\"]");
+            String created = exchange(port, "POST", "/v1/meetings", body,
+                    networkHeaders(TOKEN, "translation-create-key-123456789", true));
+            assertEquals(201, status(created));
+            String meetingId = ERROR_JSON.readTree(responseBody(created))
+                    .path("meetingId").asText();
+            assertEquals(200, status(exchange(port, "POST",
+                    "/v1/meetings/" + meetingId + ":startClient", "",
+                    networkHeaders(TOKEN, null, false))));
+            String path = "/v1/meetings/" + meetingId + "/events:append";
+            String transcript = """
+                    {"clientEventId":"client-transcript-1","clientSequence":1,
+                     "transcriptUpsert":{"segmentId":"source-1","revision":1,
+                     "operation":"UPSERT_OPERATION_UPSERT","startMs":0,"endMs":1000,
+                     "language":"zh-CN","text":"你好","final":true}}
+                    """;
+            String translation = """
+                    {"clientEventId":"client-translation-2","clientSequence":2,
+                     "translationUpsert":{"translationId":"translation-1",
+                     "sourceSegmentId":"source-1","revision":1,
+                     "operation":"UPSERT_OPERATION_UPSERT","sourceLanguage":"zh-CN",
+                     "targetLanguage":"en-US","text":"Hello","final":true,
+                     "supersedesTranslationIds":[]}}
+                    """;
+            assertEquals(201, status(exchange(port, "POST", path, transcript,
+                    networkHeaders(TOKEN, null, true))));
+            assertEquals(201, status(exchange(port, "POST", path, translation,
+                    networkHeaders(TOKEN, null, true))));
+            assertEquals(200, status(exchange(port, "POST", path, translation,
+                    networkHeaders(TOKEN, null, true))));
+            assertEquals(409, status(exchange(port, "POST", path,
+                    translation.replace("\"clientSequence\":2", "\"clientSequence\":3"),
+                    networkHeaders(TOKEN, null, true))));
+            assertEquals(2, count("meeting_client_event"));
+            String page = exchange(port, "GET", "/v1/meetings/" + meetingId
+                    + "/events?afterSequence=0&limit=10", "",
+                    networkHeaders(TOKEN, null, false));
+            assertEquals(200, status(page));
+            JsonNode events = ERROR_JSON.readTree(responseBody(page)).path("items");
+            assertEquals(2, events.size());
+            assertEquals("Hello", events.get(1).path("translationUpsert").path("text").asText());
+        }
+    }
+
+    @Test
+    void translationAppendIsDeniedWithoutFrozenCapability() throws Exception {
+        migrate(1);
+        String meetingId = clientMeeting("translation_denied");
+        try (var assembly = ReferenceMeetingHttpAssembly.start(config(), CLOCK);
+             var network = assembly.newJdkHttpServer(new InetSocketAddress("127.0.0.1", 0))) {
+            network.start();
+            String denied = exchange(network.address().getPort(), "POST",
+                    "/v1/meetings/" + meetingId + "/events:append", """
+                    {"clientEventId":"denied-translation-1","clientSequence":1,
+                     "translationUpsert":{"translationId":"translation-1",
+                     "sourceSegmentId":"source-1","revision":1,
+                     "operation":"UPSERT_OPERATION_UPSERT","sourceLanguage":"zh-CN",
+                     "targetLanguage":"en-US","text":"Hello","final":true,
+                     "supersedesTranslationIds":[]}}
+                    """, networkHeaders(TOKEN, null, true));
+            assertNetworkError(denied, 422, "TRANSLATION_NOT_GRANTED");
+            assertEquals(0, count("meeting_client_event"));
         }
     }
 
