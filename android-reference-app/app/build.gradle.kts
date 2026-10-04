@@ -9,7 +9,7 @@ require(meetingRuntime == "mock" || meetingRuntime == "sdk") {
 val sdkAar = providers.gradleProperty("meetingSdkAar").orNull
 if (meetingRuntime == "sdk") {
     require(!sdkAar.isNullOrBlank() && file(sdkAar).isFile) {
-        "sdk mode requires -PmeetingSdkAar=/absolute/path/ai-meeting-sdk-0.3.0-release.aar"
+        "sdk mode requires -PmeetingSdkAar=/absolute/path/ai-meeting-sdk-0.4.0-release.aar"
     }
 }
 

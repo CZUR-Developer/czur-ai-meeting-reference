@@ -41,11 +41,11 @@ P5-2 增加 `sample-json-ws` 第二格式样例：它的模型消息使用顶层
 # 从 starry 构建或交付渠道取得对应版本 AAR 后，在本机注入
 ./gradlew :app:assembleDebug :app:testDebugUnitTest \
   -PmeetingRuntime=sdk \
-  -PmeetingSdkAar=/absolute/path/ai-meeting-sdk-0.3.0-release.aar
+  -PmeetingSdkAar=/absolute/path/ai-meeting-sdk-0.4.0-release.aar
 ```
 
 排查真实模型字幕但设备 MIC 声学入口不确定时，可将同一 SDK Module 的
-`ai-meeting-sdk-0.3.0-debug.aar` 注入上面的 `meetingSdkAar` 参数。调试 AAR 若在
+`ai-meeting-sdk-0.4.0-debug.aar` 注入上面的 `meetingSdkAar` 参数。调试 AAR 若在
 参考 App 私有外部目录找到 `meeting-debug.wav`，会按实时节奏把该 16 kHz、单声道、
 PCM16 WAV 发往模型；没有该文件就继续使用 MIC。录音仅通过设备调试工具临时放在
 `/sdcard/Android/data/com.czur.aimeeting.reference/files/meeting-debug.wav`，
