@@ -13,6 +13,7 @@ public final class FinalTranscriptCollector {
     public synchronized void clear() { latest.clear(); }
 
     public synchronized void apply(TranscriptEvent event) {
+        if (!event.isFinal()) return;
         TranscriptEvent previous = latest.get(event.segmentId());
         if (previous == null || event.revision() > previous.revision()) {
             latest.put(event.segmentId(), event);
@@ -20,7 +21,7 @@ public final class FinalTranscriptCollector {
     }
 
     public synchronized SummaryInput input(String language) {
-        String text = latest.values().stream().filter(TranscriptEvent::isFinal)
+        String text = latest.values().stream()
                 .sorted(Comparator.comparingLong(TranscriptEvent::startMs)
                         .thenComparing(TranscriptEvent::segmentId))
                 .map(TranscriptEvent::text)
