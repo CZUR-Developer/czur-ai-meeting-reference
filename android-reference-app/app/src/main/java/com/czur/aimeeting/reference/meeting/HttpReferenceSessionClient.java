@@ -6,6 +6,9 @@ import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.HashSet;
+import java.util.Set;
+import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
@@ -60,6 +63,35 @@ public final class HttpReferenceSessionClient {
                 return new ReferenceLoginSession(token, expiresAt);
             } catch (JSONException invalidResponse) {
                 throw new IOException("登录响应格式错误", invalidResponse);
+            }
+        } finally {
+            connection.disconnect();
+        }
+    }
+
+    /** 按现有匿名发现契约读取部署静态能力；本场能力仍以 Create 响应为准。 */
+    public Set<String> capabilities() throws IOException {
+        URL url = new URL(baseUrl + "/v1/capabilities");
+        validateLoginUrl(url);
+        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+        try {
+            connection.setRequestMethod("GET");
+            connection.setInstanceFollowRedirects(false);
+            connection.setConnectTimeout(10_000);
+            connection.setReadTimeout(10_000);
+            connection.setRequestProperty("Accept", "application/json");
+            int status = connection.getResponseCode();
+            if (status != 200) throw new IOException("部署能力发现失败，HTTP " + status);
+            try (InputStream input = connection.getInputStream()) {
+                JSONObject response = new JSONObject(readUtf8(input));
+                JSONArray values = response.getJSONArray("capabilities");
+                Set<String> capabilities = new HashSet<>();
+                for (int index = 0; index < values.length(); index++) {
+                    capabilities.add(values.getString(index));
+                }
+                return Set.copyOf(capabilities);
+            } catch (JSONException invalidResponse) {
+                throw new IOException("部署能力响应格式错误", invalidResponse);
             }
         } finally {
             connection.disconnect();

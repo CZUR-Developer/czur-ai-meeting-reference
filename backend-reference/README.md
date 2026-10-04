@@ -81,7 +81,12 @@ RUNNING 且首次 Create 已获准 `summary.structured` 时可调用
 应用 completion 地址与过期时间交给 App；永久 Key 不进入响应、日志或结果。
 TTL 默认 300 秒，允许 1–1800 秒；地区地址可由 `.env.example` 中的变量配置。
 Android SDK 调用应用 completion，App 归一化后在 Stop 前提交标准纪要。
-未配置时旧会、Mock 纪要和 ASR-only 部署保持原行为。
+未配置时旧会和 ASR-only 的 Create 行为不变；新版 App 的会前纪要入口会关闭。
+
+现有匿名 `GET /v1/capabilities` 返回当前部署的静态能力，取 Profile、权益、
+模型声明及部署开关的交集；`summary.structured` 还须已配置百炼签发。
+此接口不签发凭据，也不代表某位用户或某一场会议已获准能力；Create 的
+`capabilityDecisions` 仍是本场权威结果。
 
 ## P3-T05 会议应用切片
 

@@ -6,6 +6,7 @@ import static org.junit.Assert.assertThrows;
 
 import java.io.IOException;
 import java.net.URL;
+import java.util.Set;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import okhttp3.mockwebserver.RecordedRequest;
@@ -51,6 +52,27 @@ public final class HttpReferenceSessionClientTest {
                     () -> new HttpReferenceSessionClient(server.url("/").toString())
                             .login("viewer", "wrong-password"));
             assertEquals("账号或密码错误", failure.getMessage());
+        }
+    }
+
+    @Test
+    public void readsDeploymentCapabilitiesAfterLoginWithoutModelSecrets() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setResponseCode(200).setBody("{"
+                    + "\"specVersion\":\"v1\","
+                    + "\"capabilities\":[\"transcript.realtime\",\"summary.structured\"],"
+                    + "\"languages\":[\"zh-CN\"],\"audioProfiles\":[\"PCM_S16LE\"],"
+                    + "\"limits\":{\"maxMeetingDurationMs\":600000,"
+                    + "\"maxAudioFrameBytes\":32000,\"eventReplayWindow\":100}}"));
+            server.start();
+            Set<String> capabilities = new HttpReferenceSessionClient(server.url("/").toString())
+                    .capabilities();
+            assertEquals(Set.of(MeetingCapabilityState.TRANSCRIPT,
+                    MeetingCapabilityState.SUMMARY), capabilities);
+            RecordedRequest discovery = server.takeRequest();
+            assertEquals("GET", discovery.getMethod());
+            assertEquals("/v1/capabilities", discovery.getPath());
+            assertNull(discovery.getHeader("Authorization"));
         }
     }
 

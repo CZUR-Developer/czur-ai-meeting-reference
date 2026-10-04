@@ -27,9 +27,11 @@ P5-2 增加 `sample-json-ws` 第二格式样例：它的模型消息使用顶层
 `type/segment/revision`，与听悟的 `header/payload` 格式不同；两者在
 `ModelAdapterRegistry` 中构建期注册，后端 `modelSession.adapterId` 决定本场选用哪一个。
 伙伴适配其他格式时新增 Adapter 并在注册表登记其实时能力，通用会议页面和 SDK
-不用修改。参考 App 读取 Create 响应的 `capabilityDecisions`；未请求、模型不支持或
-本地 Adapter 未登记的翻译/总结能力会在本场功能提示中关闭。会前页面已显示
-本地已装配的模式，本场最终仍以 Create 能力决策为准；其他结果交付方式待 P5-6 接入。
+不用修改。登录后参考 App 读取既有 `GET /v1/capabilities`，将部署静态能力与
+本地已装配的 Adapter 能力求交后开放会前模式；旧后端未实现发现接口时只保留
+实时字幕入口。参考 App 仍读取 Create 响应的 `capabilityDecisions`，本场权益、
+模型与降级结果以该决策为准；未请求或本场不可用的翻译/总结不会启动会议。
+其他结果交付方式待 P5-6 接入。
 
 `sdk` 模式已构建期登记公开的 `bailian-summary` 文本 Adapter。AI 会议纪要模式
 在模型最终字幕到齐后，向已认证后端请求本场 `:summarySession`；后端只下发

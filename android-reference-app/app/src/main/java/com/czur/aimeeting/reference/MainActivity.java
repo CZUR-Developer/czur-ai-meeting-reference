@@ -39,6 +39,7 @@ import com.czur.aimeeting.reference.meeting.ReferenceLoginSession;
 import java.io.IOException;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -95,6 +96,7 @@ public final class MainActivity extends Activity {
     private Button loginButton;
     private String sessionToken;
     private String sessionBackendUrl;
+    private Set<String> deploymentCapabilities = Set.of();
     private MeetingSetup pendingPresentationSetup;
 
     @Override
@@ -158,21 +160,12 @@ public final class MainActivity extends Activity {
         modeGroup.addView(transcriptModeView);
         minutesModeView = new RadioButton(this);
         minutesModeView.setId(View.generateViewId());
-        boolean minutesAvailable = runtime.setupCapabilities().contains(
-                MeetingCapabilityState.SUMMARY);
-        minutesModeView.setText(minutesAvailable ? "AI 会议纪要"
-                : "AI 会议纪要（当前模型/应用未接入，暂不可用）");
-        minutesModeView.setEnabled(minutesAvailable);
         modeGroup.addView(minutesModeView);
         translationModeView = new RadioButton(this);
         translationModeView.setId(View.generateViewId());
-        boolean translationAvailable = runtime.setupCapabilities().contains(
-                MeetingCapabilityState.TRANSLATION);
-        translationModeView.setText(translationAvailable ? "现场互译"
-                : "现场互译（当前模型/应用未接入，暂不可用）");
-        translationModeView.setEnabled(translationAvailable);
         modeGroup.addView(translationModeView);
         modeGroup.check(transcriptModeView.getId());
+        refreshModeAvailability();
         layout.addView(modeGroup);
 
         TextView sourceTitle = new TextView(this);
@@ -328,12 +321,25 @@ public final class MainActivity extends Activity {
         statusView.setText("正在登录…");
         network.execute(() -> {
             try {
-                ReferenceLoginSession loginSession = new HttpReferenceSessionClient(baseUrl)
-                        .login(username, password);
+                HttpReferenceSessionClient sessionClient = new HttpReferenceSessionClient(baseUrl);
+                ReferenceLoginSession loginSession = sessionClient.login(username, password);
+                Set<String> discovered;
+                boolean discoveryUnavailable = false;
+                try {
+                    discovered = sessionClient.capabilities();
+                } catch (IOException failure) {
+                    // 旧后端仍可做字幕；增值模式必须有部署能力的明确声明。
+                    discovered = Set.of(MeetingCapabilityState.TRANSCRIPT);
+                    discoveryUnavailable = true;
+                }
+                Set<String> available = discovered;
+                boolean limited = discoveryUnavailable;
                 Log.i(TAG, "参考账号登录成功");
                 runOnUiThread(() -> {
                     sessionToken = loginSession.accessToken();
                     sessionBackendUrl = baseUrl;
+                    deploymentCapabilities = available;
+                    refreshModeAvailability();
                     passwordView.setText("");
                     backendUrlView.setEnabled(false);
                     usernameView.setEnabled(false);
@@ -341,7 +347,8 @@ public final class MainActivity extends Activity {
                     loginButton.setText("切换账号");
                     loginButton.setEnabled(true);
                     startButton.setEnabled(true);
-                    statusView.setText("登录成功，可开始会议");
+                    statusView.setText(limited ? "登录成功；能力发现不可用，仅开放实时字幕"
+                            : "登录成功，可开始会议");
                 });
             } catch (IOException failure) {
                 Log.w(TAG, "参考账号登录失败：" + failure.getClass().getSimpleName());
@@ -357,6 +364,8 @@ public final class MainActivity extends Activity {
     private void logout() {
         sessionToken = null;
         sessionBackendUrl = null;
+        deploymentCapabilities = Set.of();
+        refreshModeAvailability();
         backendUrlView.setEnabled(true);
         usernameView.setEnabled(true);
         passwordView.setEnabled(true);
@@ -364,6 +373,25 @@ public final class MainActivity extends Activity {
         startButton.setEnabled(false);
         statusView.setText("已退出，请重新登录");
         Log.i(TAG, "参考账号已退出");
+    }
+
+    /** 会前入口只展示本地 Adapter 与当前后端部署共同支持的模式。 */
+    private void refreshModeAvailability() {
+        Set<String> local = runtime.setupCapabilities();
+        boolean minutes = sessionToken != null
+                && local.contains(MeetingCapabilityState.SUMMARY)
+                && deploymentCapabilities.contains(MeetingCapabilityState.SUMMARY);
+        boolean translation = sessionToken != null
+                && local.contains(MeetingCapabilityState.TRANSLATION)
+                && deploymentCapabilities.contains(MeetingCapabilityState.TRANSLATION);
+        minutesModeView.setText(minutes ? "AI 会议纪要" : "AI 会议纪要（当前部署/应用不可用）");
+        minutesModeView.setEnabled(minutes);
+        translationModeView.setText(translation ? "现场互译" : "现场互译（当前部署/应用不可用）");
+        translationModeView.setEnabled(translation);
+        if ((!minutes && minutesModeView.isChecked())
+                || (!translation && translationModeView.isChecked())) {
+            transcriptModeView.setChecked(true);
+        }
     }
 
     @Override
@@ -401,7 +429,8 @@ public final class MainActivity extends Activity {
         }
         // 点击开始时读取一次会前设置。会议进行中即使输入框变化，也使用这份快照。
         MeetingSetup setup = selectedSetup();
-        if (!runtime.setupCapabilities().contains(setup.mode().requiredCapability())) {
+        if (!runtime.setupCapabilities().contains(setup.mode().requiredCapability())
+                || !deploymentCapabilities.contains(setup.mode().requiredCapability())) {
             statusView.setText(setup.mode().displayName() + "当前不可用");
             return;
         }
