@@ -15,6 +15,10 @@
 | `docs/` | 接入、开发和部署说明 |
 | `deploy/` | 后端 Docker Compose 示例 |
 
+合作伙伴扩展开会条件时，按 [`android-reference-app/README.md`](android-reference-app/README.md#合作伙伴会前开会条件-hook)
+替换参考 App 的默认放行检查。参考工程不包含扫码接收、小程序或录音归档；伙伴可自行
+开发接收者流程并在开会前读取其已缓存的状态，不必修改模型或会议收口链。
+
 ## 本机开发验证
 
 使用 IntelliJ IDEA 打开 `backend-reference/pom.xml`，使用 Android Studio 打开
