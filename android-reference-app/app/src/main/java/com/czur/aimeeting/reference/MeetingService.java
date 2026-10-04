@@ -18,9 +18,12 @@ import android.util.Log;
 import com.czur.aimeeting.model.ModelSession;
 import com.czur.aimeeting.model.ModelSessionGrant;
 import com.czur.aimeeting.model.ModelSessionListener;
+import com.czur.aimeeting.model.SummaryInput;
+import com.czur.aimeeting.model.SummarySessionGrant;
 import com.czur.aimeeting.model.TranscriptEvent;
 import com.czur.aimeeting.model.TranslationEvent;
 import com.czur.aimeeting.reference.meeting.CreatedMeeting;
+import com.czur.aimeeting.reference.meeting.FinalTranscriptCollector;
 import com.czur.aimeeting.reference.meeting.HttpReferenceMeetingClient;
 import com.czur.aimeeting.reference.meeting.MeetingCapabilityState;
 import com.czur.aimeeting.reference.meeting.MeetingDisplayState;
@@ -97,6 +100,7 @@ public final class MeetingService extends Service {
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService network = Executors.newSingleThreadExecutor();
     private final MeetingDisplayState display = new MeetingDisplayState();
+    private final FinalTranscriptCollector finalTranscript = new FinalTranscriptCollector();
     private final AtomicInteger sequence = new AtomicInteger();
     private final AtomicInteger saved = new AtomicInteger();
     private final AtomicBoolean appendFailed = new AtomicBoolean();
@@ -152,6 +156,7 @@ public final class MeetingService extends Service {
     private boolean canStop;
     private volatile boolean stopRequested;
     private volatile boolean modelFinished;
+    private boolean summarySubmitted;
     private boolean limitReminderLogged;
     private boolean idleReminderLogged;
     private Intent projectionData;
@@ -327,6 +332,8 @@ public final class MeetingService extends Service {
         stopInputSent.set(false);
         stopRequested = false;
         modelFinished = false;
+        summarySubmitted = false;
+        finalTranscript.clear();
         presentationSequence = 0;
         long startedAtMs = SystemClock.elapsedRealtime();
         timing = new MeetingTimeRule(startedAtMs, created.maxMeetingDurationMs());
@@ -349,6 +356,7 @@ public final class MeetingService extends Service {
             session = runtime.open(created, event -> {
                 TranscriptEvent standard = capabilities.canUse(
                         MeetingCapabilityState.SPEAKER, local) ? event : event.withoutSpeaker();
+                finalTranscript.apply(standard);
                 main.post(() -> showTranscript(standard));
                 int clientSequence = sequence.incrementAndGet();
                 network.execute(() -> appendTranscript(nextClient, created.meetingId(),
@@ -573,6 +581,19 @@ public final class MeetingService extends Service {
             return;
         }
         try {
+            if (setup.mode() == MeetingSetup.Mode.MEETING_MINUTES && !summarySubmitted) {
+                final SummaryInput input;
+                try {
+                    input = finalTranscript.input(setup.sourceLanguage());
+                } catch (IllegalArgumentException noFinalTranscript) {
+                    throw new IOException("没有最终字幕，无法生成本场纪要", noFinalTranscript);
+                }
+                SummarySessionGrant grant = runtime.waitsForModelFinish()
+                        ? client.requestSummarySession(meetingId) : null;
+                client.submitSummary(meetingId, runtime.summarize(input, grant));
+                summarySubmitted = true;
+                Log.i(TAG, "标准纪要已送达后端 meetingId=" + meetingId);
+            }
             if (!client.stopMeeting(meetingId)) {
                 completionQueued.set(false);
                 main.post(() -> {

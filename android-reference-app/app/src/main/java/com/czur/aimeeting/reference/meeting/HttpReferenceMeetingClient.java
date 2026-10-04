@@ -1,6 +1,8 @@
 package com.czur.aimeeting.reference.meeting;
 
 import com.czur.aimeeting.model.ModelSessionGrant;
+import com.czur.aimeeting.model.SummaryResult;
+import com.czur.aimeeting.model.SummarySessionGrant;
 import com.czur.aimeeting.model.TranscriptEvent;
 import com.czur.aimeeting.model.TranslationEvent;
 import java.io.ByteArrayOutputStream;
@@ -88,6 +90,22 @@ public final class HttpReferenceMeetingClient implements ReferenceMeetingClient 
         }
     }
 
+    @Override public SummarySessionGrant requestSummarySession(String meetingId)
+            throws IOException {
+        try {
+            JSONObject body = new JSONObject(post("/v1/meetings/" + meetingId
+                    + ":summarySession", null, null, 200).body);
+            if (!meetingId.equals(body.getString("meetingId"))) {
+                throw new IOException("文本模型材料与会议 ID 不一致");
+            }
+            return new SummarySessionGrant(body.getString("adapterId"),
+                    body.getString("endpoint"), body.getString("expiresAt"),
+                    body.getString("token"));
+        } catch (JSONException invalidResponse) {
+            throw new IOException("文本模型材料响应格式错误", invalidResponse);
+        }
+    }
+
     @Override
     public void startClient(String meetingId) throws IOException {
         post("/v1/meetings/" + meetingId + ":startClient", null, null, 200);
@@ -161,6 +179,22 @@ public final class HttpReferenceMeetingClient implements ReferenceMeetingClient 
                     body.toString(), null, 200, 201);
         } catch (JSONException invalidFrame) {
             throw new IOException("演示截图格式错误", invalidFrame);
+        }
+    }
+
+    @Override public void submitSummary(String meetingId, SummaryResult summary)
+            throws IOException {
+        try {
+            JSONObject body = new JSONObject()
+                    .put("language", summary.language())
+                    .put("title", summary.title())
+                    .put("overview", summary.overview())
+                    .put("keyPoints", new JSONArray(summary.keyPoints()))
+                    .put("actionItems", new JSONArray(summary.actionItems()));
+            post("/v1/meetings/" + meetingId + "/summary:submit", body.toString(),
+                    null, 200, 201);
+        } catch (JSONException invalidSummary) {
+            throw new IOException("标准纪要格式错误", invalidSummary);
         }
     }
 

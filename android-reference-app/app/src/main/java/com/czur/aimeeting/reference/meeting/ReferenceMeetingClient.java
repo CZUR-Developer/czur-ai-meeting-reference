@@ -1,6 +1,8 @@
 package com.czur.aimeeting.reference.meeting;
 
 import com.czur.aimeeting.model.ModelSessionGrant;
+import com.czur.aimeeting.model.SummaryResult;
+import com.czur.aimeeting.model.SummarySessionGrant;
 import com.czur.aimeeting.model.TranscriptEvent;
 import com.czur.aimeeting.model.TranslationEvent;
 import java.io.IOException;
@@ -19,6 +21,9 @@ public interface ReferenceMeetingClient {
     /** 单独领取本场模型直连材料；旧 Create 响应的 realtime 字段不属于模型。 */
     ModelSessionGrant requestModelSession(String meetingId) throws IOException;
 
+    /** 本场最终字幕齐备后才领取短期文本模型材料；Mock 路径不调用。 */
+    SummarySessionGrant requestSummarySession(String meetingId) throws IOException;
+
     /** 提交一次字幕修订；调用方负责按 clientSequence 顺序提交。 */
     void appendTranscript(String meetingId, int clientSequence, TranscriptEvent event)
             throws IOException;
@@ -30,6 +35,9 @@ public interface ReferenceMeetingClient {
     /** 演示截图与字幕事件使用独立的包序号；每包至少一帧。 */
     void appendPresentation(String meetingId, int chunkSequence, long offsetMs, byte[] jpeg)
             throws IOException;
+
+    /** 在 Stop 前提交已归一化的本场纪要；后端不接收厂商原始输出。 */
+    void submitSummary(String meetingId, SummaryResult summary) throws IOException;
 
     /**
      * 请求结束会议。返回 true 表示后端已受理完整输入（HTTP 200）；

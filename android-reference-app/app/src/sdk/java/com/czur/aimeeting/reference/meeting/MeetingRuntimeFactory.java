@@ -5,8 +5,12 @@ import com.czur.aimeeting.model.ModelRuntime;
 import com.czur.aimeeting.model.ModelSession;
 import com.czur.aimeeting.model.ModelSessionGrant;
 import com.czur.aimeeting.model.ModelSessionListener;
+import com.czur.aimeeting.model.SummaryInput;
+import com.czur.aimeeting.model.SummaryResult;
+import com.czur.aimeeting.model.SummarySessionGrant;
 import com.czur.aimeeting.model.TranscriptListener;
 import com.czur.aimeeting.sdk.AndroidModelRuntime;
+import java.io.IOException;
 import java.util.Set;
 
 /** SDK 装配与具体模型协议在构建期确定，通用会议页面不依赖私有类。 */
@@ -42,6 +46,11 @@ public final class MeetingRuntimeFactory {
             @Override
             public Set<String> realtimeCapabilities(CreatedMeeting created) {
                 return adapters.realtimeCapabilities(created.modelSession().adapterId());
+            }
+
+            @Override public SummaryResult summarize(SummaryInput input,
+                    SummarySessionGrant grant) throws IOException {
+                throw new IOException("当前真实模型尚未登记文本总结 Adapter");
             }
         };
     }

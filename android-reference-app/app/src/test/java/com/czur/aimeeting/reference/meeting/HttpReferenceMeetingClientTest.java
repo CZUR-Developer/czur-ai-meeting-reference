@@ -7,6 +7,7 @@ import static org.junit.Assert.assertTrue;
 
 import com.czur.aimeeting.model.TranscriptEvent;
 import com.czur.aimeeting.model.TranslationEvent;
+import com.czur.aimeeting.model.SummaryResult;
 import java.util.List;
 import java.util.Base64;
 import okhttp3.mockwebserver.MockResponse;
@@ -110,6 +111,33 @@ public final class HttpReferenceMeetingClientTest {
             assertEquals("你好", withSpeaker.getString("text"));
             assertFalse(withoutSpeaker.has("speaker"));
             assertEquals(2, server.getRequestCount());
+        }
+    }
+
+    @Test
+    public void submitsCanonicalSummaryBeforeStopWithoutVendorResponse() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setResponseCode(201).setBody("{}"));
+            server.enqueue(new MockResponse().setResponseCode(200).setBody("{}"));
+            server.start();
+            ReferenceMeetingClient client = new HttpReferenceMeetingClient(
+                    server.url("/").toString(), "local-demo-token");
+            client.submitSummary("mtg_minutes", new SummaryResult("zh-CN", "方案会议",
+                    "已确定下一步方案", List.of("先做样例"), List.of("确认负责人")));
+            assertTrue(client.stopMeeting("mtg_minutes"));
+
+            RecordedRequest submit = server.takeRequest();
+            RecordedRequest stop = server.takeRequest();
+            assertEquals("/v1/meetings/mtg_minutes/summary:submit", submit.getPath());
+            assertEquals("Bearer local-demo-token", submit.getHeader("Authorization"));
+            JSONObject summary = new JSONObject(submit.getBody().readUtf8());
+            assertEquals("zh-CN", summary.getString("language"));
+            assertEquals("方案会议", summary.getString("title"));
+            assertEquals("已确定下一步方案", summary.getString("overview"));
+            assertEquals("先做样例", summary.getJSONArray("keyPoints").getString(0));
+            assertEquals("确认负责人", summary.getJSONArray("actionItems").getString(0));
+            assertFalse(summary.has("output"));
+            assertEquals("/v1/meetings/mtg_minutes:stop", stop.getPath());
         }
     }
 
