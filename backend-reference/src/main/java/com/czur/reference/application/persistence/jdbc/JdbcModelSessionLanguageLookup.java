@@ -36,8 +36,10 @@ public final class JdbcModelSessionLanguageLookup implements ModelSessionLanguag
     }
 
     @Override
-    public boolean summaryEnabled(MeetingCommandContext context, String meetingId) {
-        return loadFacts(context, meetingId).summaryEnabled();
+    public SummaryEligibility summaryEligibility(MeetingCommandContext context,
+            String meetingId) {
+        Facts facts = loadFacts(context, meetingId);
+        return new SummaryEligibility(facts.clientStarted(), facts.summaryEnabled());
     }
 
     private Facts loadFacts(MeetingCommandContext context, String meetingId) {
@@ -70,6 +72,14 @@ public final class JdbcModelSessionLanguageLookup implements ModelSessionLanguag
                             || createdAt == null || !first.createdAt().equals(createdAt.toInstant())) {
                         throw unavailable();
                     }
+                    boolean clientStarted;
+                    try (PreparedStatement marker = connection.prepareStatement(
+                            "SELECT 1 FROM meeting_client_input WHERE meeting_id=?")) {
+                        marker.setString(1, meetingId);
+                        try (ResultSet clientRows = marker.executeQuery()) {
+                            clientStarted = clientRows.next();
+                        }
+                    }
                     connection.rollback();
                     boolean translationEnabled = request.requestedCapabilities().contains(
                             CapabilityIds.TRANSLATION_REALTIME)
@@ -82,7 +92,8 @@ public final class JdbcModelSessionLanguageLookup implements ModelSessionLanguag
                                     CapabilityIds.SUMMARY_STRUCTURED.equals(decision.capability())
                                     && decision.action() == CapabilityDecision.Action.ENABLE);
                     return new Facts(new ModelSessionIssuer.Request(request.languages().source(),
-                            request.languages().targets(), translationEnabled), summaryEnabled);
+                            request.languages().targets(), translationEnabled), summaryEnabled,
+                            clientStarted);
                 }
             }
         } catch (SQLException | RuntimeException failure) {
@@ -102,5 +113,6 @@ public final class JdbcModelSessionLanguageLookup implements ModelSessionLanguag
         return new IllegalStateException("model session language unavailable");
     }
 
-    private record Facts(ModelSessionIssuer.Request request, boolean summaryEnabled) {}
+    private record Facts(ModelSessionIssuer.Request request, boolean summaryEnabled,
+            boolean clientStarted) {}
 }

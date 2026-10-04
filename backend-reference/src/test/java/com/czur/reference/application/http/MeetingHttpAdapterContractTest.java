@@ -175,14 +175,15 @@ class MeetingHttpAdapterContractTest {
                     base.resolve("/api/v1/tokens"), base.resolve("/api/v1/apps"),
                     "app-local", "permanent-local-only", 300), clock);
             boolean[] granted = {false};
+            boolean[] clientStarted = {false};
             ModelSessionLanguageLookup lookup = new ModelSessionLanguageLookup() {
                 @Override public ModelSessionIssuer.Request load(MeetingCommandContext context,
                         String meetingId) {
                     return new ModelSessionIssuer.Request("zh-CN", List.of(), false);
                 }
-                @Override public boolean summaryEnabled(MeetingCommandContext context,
+                @Override public SummaryEligibility summaryEligibility(MeetingCommandContext context,
                         String meetingId) {
-                    return granted[0];
+                    return new SummaryEligibility(clientStarted[0], granted[0]);
                 }
             };
             adapter = new MeetingHttpAdapter(query, deletion, decoder,
@@ -197,7 +198,9 @@ class MeetingHttpAdapterContractTest {
             assertEquals(403, adapter.handle(request, context()).status());
             query.getResult = new MeetingQueryPort.Found(status(MeetingState.CREATED));
             assertEquals(409, adapter.handle(request, context()).status());
-            query.getResult = new MeetingQueryPort.Found(status(MeetingState.RUNNING));
+            query.getResult = new MeetingQueryPort.Found(status(MeetingState.STARTING));
+            assertEquals(409, adapter.handle(request, context()).status());
+            clientStarted[0] = true;
             assertEquals(422, adapter.handle(request, context()).status());
             assertEquals(0, tokenRequests.get());
             granted[0] = true;
@@ -207,6 +210,8 @@ class MeetingHttpAdapterContractTest {
             assertTrue(response.body().contains("\"adapterId\":\"bailian-summary\""));
             assertTrue(response.body().contains("\"token\":\"st-local-only\""));
             assertFalse(response.body().contains("permanent-local-only"));
+            query.getResult = new MeetingQueryPort.Found(status(MeetingState.RUNNING));
+            assertEquals(200, adapter.handle(request, context()).status());
         } finally {
             server.stop(0);
         }

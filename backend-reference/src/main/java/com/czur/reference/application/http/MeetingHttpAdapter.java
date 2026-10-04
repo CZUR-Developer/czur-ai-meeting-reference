@@ -539,11 +539,17 @@ public final class MeetingHttpAdapter {
             if (!(meeting instanceof MeetingQueryPort.Found found)) {
                 return errors.query(meeting);
             }
-            if (found.meeting().state() != com.czur.reference.domain.meeting.MeetingState.RUNNING) {
+            if (found.meeting().state() != com.czur.reference.domain.meeting.MeetingState.STARTING
+                    && found.meeting().state()
+                    != com.czur.reference.domain.meeting.MeetingState.RUNNING) {
                 return errors.summarySessionInvalidState();
             }
             try {
-                if (!modelSessionLanguages.summaryEnabled(context, meetingId)) {
+                var eligibility = modelSessionLanguages.summaryEligibility(context, meetingId);
+                if (!eligibility.clientStarted()) {
+                    return errors.summarySessionInvalidState();
+                }
+                if (!eligibility.granted()) {
                     return errors.summaryNotGranted();
                 }
                 return errors.summarySession(meetingId, summarySessions.issue());

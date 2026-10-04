@@ -289,7 +289,7 @@ paths:
       tags: [Meetings]
       operationId: issueSummarySession
       summary: 为本场获准的结构化纪要签发百炼短期文本材料
-      description: 仅当前用户所属且 RUNNING 的会议可申请；首次 Create 必须请求并获准 summary.structured。后端用永久 DASHSCOPE_API_KEY 向百炼签发临时 API Key，响应只含短期 Key 与应用 completion 地址；Android SDK 直连百炼，后端只接收 App 提交的标准纪要。不记录请求或响应中的密钥。
+      description: 仅当前用户所属、已调用 startClient 建立客户端输入标记且处于 STARTING 或 RUNNING 的会议可申请；首次 Create 必须请求并获准 summary.structured。后端用永久 DASHSCOPE_API_KEY 向百炼签发临时 API Key，响应只含短期 Key 与应用 completion 地址；Android SDK 直连百炼，后端只接收 App 提交的标准纪要。不记录请求或响应中的密钥。
       security:
         - bearerAuth: []
       parameters:

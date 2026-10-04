@@ -3,6 +3,7 @@ package com.czur.reference.application.persistence.jdbc;
 import com.czur.reference.application.bootstrap.ReferenceMeetingDeploymentConfig;
 import com.czur.reference.application.bootstrap.ReferenceMeetingJdkHttpService;
 import com.czur.reference.application.bootstrap.ReferenceMeetingHttpAssembly;
+import com.czur.reference.application.model.BailianSummarySessionConfig;
 import com.czur.reference.application.artifact.filesystem.PersistentFileSystemMockArtifactStore;
 import com.czur.reference.application.entitlement.referencedev.ReferenceDevEntitlementPolicy;
 import com.czur.reference.application.finalization.DeterministicMockFinalizationPlanner;
@@ -52,6 +53,7 @@ import com.czur.reference.protocol.realtime.RealtimeTranslationEventMapper;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sun.net.httpserver.HttpServer;
 import com.zaxxer.hikari.HikariDataSource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -93,6 +95,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Handler;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
@@ -178,6 +181,67 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
             assertEquals("STARTING", ERROR_JSON.readTree(responseBody(start))
                     .path("state").asText());
             assertEquals("STARTING", meetingState(meetingId));
+        }
+    }
+
+    @Test
+    void summarySessionUsesStartedClientInputWhileMeetingRemainsStarting() throws Exception {
+        migrate(1);
+        AtomicInteger tokenRequests = new AtomicInteger();
+        HttpServer tokenServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        tokenServer.createContext("/api/v1/tokens", exchange -> {
+            tokenRequests.incrementAndGet();
+            byte[] body = ("{\"token\":\"st-local-only\",\"expires_at\":"
+                    + NOW.plusSeconds(300).getEpochSecond() + "}")
+                    .getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            try (var output = exchange.getResponseBody()) { output.write(body); }
+        });
+        tokenServer.start();
+        try {
+            String base = "http://127.0.0.1:" + tokenServer.getAddress().getPort();
+            Map<String, String> settings = enabledConfig();
+            settings.put(ReferenceMeetingDeploymentConfig.PROFILE_OPTIONAL_CAPABILITIES,
+                    "summary.structured");
+            settings.put(ReferenceMeetingDeploymentConfig.ENTITLEMENT_SUPPORTED_CAPABILITIES,
+                    "transcript.realtime,summary.structured");
+            settings.put(ReferenceMeetingDeploymentConfig.MODEL_CAPABILITIES,
+                    "transcript.realtime,summary.structured");
+            settings.put(BailianSummarySessionConfig.ENABLED, "true");
+            settings.put(BailianSummarySessionConfig.APP_ID, "app-local");
+            settings.put(BailianSummarySessionConfig.API_KEY, "permanent-local-only");
+            settings.put(BailianSummarySessionConfig.TOKEN_URL, base + "/api/v1/tokens");
+            settings.put(BailianSummarySessionConfig.COMPLETION_BASE_URL,
+                    base + "/api/v1/apps");
+            try (var assembly = ReferenceMeetingHttpAssembly.start(settings, CLOCK);
+                 var network = assembly.newJdkHttpServer(new InetSocketAddress("127.0.0.1", 0))) {
+                network.start();
+                int port = network.address().getPort();
+                String key = "summary-session-starting-key-123456789";
+                String create = createRequest(key, "summary-session-starting").body()
+                        .replace("[\"transcript.realtime\"]",
+                                "[\"transcript.realtime\",\"summary.structured\"]");
+                String created = exchange(port, "POST", "/v1/meetings", create,
+                        networkHeaders(TOKEN, key, true));
+                assertEquals(201, status(created));
+                String meetingId = ERROR_JSON.readTree(responseBody(created))
+                        .path("meetingId").asText();
+                String sessionPath = "/v1/meetings/" + meetingId + ":summarySession";
+                assertEquals(409, status(exchange(port, "POST", sessionPath, "",
+                        networkHeaders(TOKEN, null, false))));
+                String started = exchange(port, "POST", "/v1/meetings/" + meetingId
+                        + ":startClient", "", networkHeaders(TOKEN, null, false));
+                assertEquals(200, status(started));
+                assertEquals("STARTING", meetingState(meetingId));
+                String grant = exchange(port, "POST", sessionPath, "",
+                        networkHeaders(TOKEN, null, false));
+                assertEquals(200, status(grant));
+                assertEquals("st-local-only", ERROR_JSON.readTree(responseBody(grant))
+                        .path("token").asText());
+                assertEquals(1, tokenRequests.get());
+            }
+        } finally {
+            tokenServer.stop(0);
         }
     }
 

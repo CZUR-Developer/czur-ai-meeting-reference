@@ -75,7 +75,8 @@ Create v1 的旧 `realtime` 字段与 P2 音频链路不变。
 
 显式配置 `AI_MEETING_BAILIAN_SUMMARY_ENABLED=true`、部署方的
 `DASHSCOPE_API_KEY` 与 `AI_MEETING_BAILIAN_APP_ID` 后，认证 App 在本场
-RUNNING 且首次 Create 已获准 `summary.structured` 时可调用
+已 `startClient`、状态为 STARTING/RUNNING 且首次 Create 已获准
+`summary.structured` 时可调用
 `POST /v1/meetings/{meetingId}:summarySession`。后端向百炼
 `POST /api/v1/tokens?expire_in_seconds=...` 换取短期 Key，只将短期 Bearer、
 应用 completion 地址与过期时间交给 App；永久 Key 不进入响应、日志或结果。
