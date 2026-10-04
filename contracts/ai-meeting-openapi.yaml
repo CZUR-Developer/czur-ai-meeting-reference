@@ -317,6 +317,37 @@ paths:
                 $ref: "#/components/schemas/MeetingEvent"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/meetings/{meetingId}/presentation-captures:append:
+    post:
+      tags: [Meetings]
+      operationId: appendPresentationCaptureChunk
+      summary: App 顺序上传本场演示截图包
+      description: 仅已启动且 Create 时启用 presentationCapture 的客户端会议可上传。每包不可变；chunkSequence 从 1 连续递增，相同序号与内容重放返回 200。帧按数组顺序，offsetMs 为本场开始后的相对毫秒且包内递增。服务端以 presentation.capture JSON 产物写入可替换 ArtifactStore，ArtifactRef.revision 等于 chunkSequence、supersedesArtifactId 为空；Stop 后按包序发布在 Manifest。
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/MeetingId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppendPresentationCaptureChunkRequest"
+      responses:
+        "201":
+          description: 截图包已保存
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppendPresentationCaptureChunkResponse"
+        "200":
+          description: 相同截图包的幂等重放
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppendPresentationCaptureChunkResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/meetings/{meetingId}:renewRealtimeToken:
     post:
       tags: [Meetings]
@@ -531,7 +562,7 @@ paths:
         - $ref: "#/components/parameters/GenTime"
       responses:
         "200":
-          description: 产物内容；media type 由 Manifest 中的 ArtifactRef 声明
+          description: 产物内容；presentation.capture 为 PresentationCaptureArtifact JSON，其余 media type 由 Manifest 中的 ArtifactRef 声明
           content:
             application/json: {}
             text/plain: {}
@@ -830,6 +861,72 @@ components:
           type: boolean
         presentationCapture:
           type: boolean
+    AppendPresentationCaptureChunkRequest:
+      type: object
+      additionalProperties: false
+      required: [chunkSequence, frames]
+      properties:
+        chunkSequence:
+          type: integer
+          minimum: 1
+        frames:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            additionalProperties: false
+            required: [offsetMs, jpegBase64]
+            properties:
+              offsetMs:
+                type: integer
+                minimum: 0
+                format: int64
+              jpegBase64:
+                type: string
+                contentEncoding: base64
+                contentMediaType: image/jpeg
+    AppendPresentationCaptureChunkResponse:
+      type: object
+      additionalProperties: false
+      required: [artifactId, chunkSequence, frameCount]
+      properties:
+        artifactId:
+          type: string
+          pattern: "^art_[A-Za-z0-9_-]+$"
+        chunkSequence:
+          type: integer
+          minimum: 1
+        frameCount:
+          type: integer
+          minimum: 1
+    PresentationCaptureArtifact:
+      description: presentation.capture 产物正文；由服务端规范化生成，不暴露对象存储位置。
+      type: object
+      additionalProperties: false
+      required: [schemaVersion, chunkSequence, frames]
+      properties:
+        schemaVersion:
+          type: string
+          const: presentation-capture/v1
+        chunkSequence:
+          type: integer
+          minimum: 1
+        frames:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            additionalProperties: false
+            required: [offsetMs, jpegBase64]
+            properties:
+              offsetMs:
+                type: integer
+                minimum: 0
+                format: int64
+              jpegBase64:
+                type: string
+                contentEncoding: base64
+                contentMediaType: image/jpeg
     CreateMeetingResponse:
       type: object
       additionalProperties: false

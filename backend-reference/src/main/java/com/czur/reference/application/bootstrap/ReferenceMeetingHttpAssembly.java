@@ -233,7 +233,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                             dataSource, new CapabilityPlanner()));
             var realtimeIngress = new RealtimeAudioIngress(startCoordinator, durableAudio);
             var clientInput = new JdbcClientMeetingInputPort(dataSource,
-                    startCoordinator, clock);
+                    startCoordinator, clock, artifactStore);
             var realtimeTranscripts = new RealtimeMockTranscriptRuntime(
                     new JdbcRealtimeMockSessionSpecLookup(dataSource,
                             config.deploymentScope()), durableAudio,

@@ -122,6 +122,17 @@ public final class HttpErrorMapper {
         return clientInputFailure(((ClientMeetingInputPort.Rejected) result).reason());
     }
 
+    public HttpResponse presentationAppend(ClientMeetingInputPort.CaptureAppendResult result) {
+        Objects.requireNonNull(result, "result");
+        if (result instanceof ClientMeetingInputPort.CaptureAppended appended) {
+            return success(appended.created() ? 201 : 200, Map.of(
+                    "artifactId", appended.artifactId(),
+                    "chunkSequence", appended.chunkSequence(),
+                    "frameCount", appended.frameCount()));
+        }
+        return clientInputFailure(((ClientMeetingInputPort.Rejected) result).reason());
+    }
+
     private HttpResponse clientInputFailure(ClientMeetingInputPort.Reason reason) {
         return switch (reason) {
             case NOT_FOUND -> error(404, HttpErrorEnvelope.Domain.SESSION,
@@ -133,6 +144,9 @@ public final class HttpErrorMapper {
             case INVALID_STATE, INPUT_SOURCE_CONFLICT, EVENT_CONFLICT -> error(409,
                     HttpErrorEnvelope.Domain.CONTRACT, reason.name(), false,
                     HttpErrorEnvelope.UserAction.NONE, "ai_meeting.contract.input_conflict");
+            case PRESENTATION_NOT_REQUESTED -> error(422, HttpErrorEnvelope.Domain.CONTRACT,
+                    "PRESENTATION_NOT_REQUESTED", false, HttpErrorEnvelope.UserAction.NONE,
+                    "ai_meeting.contract.presentation_not_requested");
             case CAPABILITY_NOT_GRANTED -> error(422, HttpErrorEnvelope.Domain.ENTITLEMENT,
                     "TRANSLATION_NOT_GRANTED", false, HttpErrorEnvelope.UserAction.NONE,
                     "ai_meeting.entitlement.translation_not_granted");

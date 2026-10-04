@@ -31,6 +31,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.Base64;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Matcher;
@@ -68,6 +69,8 @@ public final class MeetingHttpAdapter {
             "^/v1/meetings/(mtg_[A-Za-z0-9_-]+):modelSession$");
     private static final Pattern CLIENT_APPEND_PATH = Pattern.compile(
             "^/v1/meetings/(mtg_[A-Za-z0-9_-]+)/events:append$");
+    private static final Pattern PRESENTATION_APPEND_PATH = Pattern.compile(
+            "^/v1/meetings/(mtg_[A-Za-z0-9_-]+)/presentation-captures:append$");
     private static final Pattern RENEW_PATH = Pattern.compile(
             "^/v1/meetings/(mtg_[A-Za-z0-9_-]+):renewRealtimeToken$");
     private static final Pattern MANIFEST_PATH = Pattern.compile(
@@ -374,7 +377,8 @@ public final class MeetingHttpAdapter {
         }
         if ("POST".equals(request.method())
                 && (CLIENT_START_PATH.matcher(request.path()).matches()
-                || CLIENT_APPEND_PATH.matcher(request.path()).matches())) {
+                || CLIENT_APPEND_PATH.matcher(request.path()).matches()
+                || PRESENTATION_APPEND_PATH.matcher(request.path()).matches())) {
             return AuthenticationRoute.CLIENT_WRITE;
         }
         if ("POST".equals(request.method())
@@ -510,6 +514,17 @@ public final class MeetingHttpAdapter {
             ClientMeetingInputPort.ClientEvent event = decodeClientEvent(request);
             return errors.clientAppend(clientInputPort.append(
                     context, clientAppend.group(1), event));
+        }
+
+        Matcher presentationAppend = PRESENTATION_APPEND_PATH.matcher(path);
+        if ("POST".equals(method) && presentationAppend.matches()) {
+            if (clientInputPort == null) return errors.notImplemented();
+            if (context == null) return errors.missingContext();
+            if (!request.query().isEmpty()) {
+                throw new IllegalArgumentException("presentation query is invalid");
+            }
+            return errors.presentationAppend(clientInputPort.appendPresentation(context,
+                    presentationAppend.group(1), decodePresentationChunk(request)));
         }
 
         if ("POST".equals(method) && MEETINGS_PATH.equals(path)) {
@@ -761,6 +776,56 @@ public final class MeetingHttpAdapter {
         }
     }
 
+    private static ClientMeetingInputPort.PresentationChunk decodePresentationChunk(
+            HttpRequest request) {
+        String contentType = request.header("content-type");
+        if (contentType == null || !contentType.matches(
+                "(?i)application/json(?:[ \\t]*;[ \\t]*charset=utf-8)?")) {
+            throw new IllegalArgumentException("presentation content-type is invalid");
+        }
+        try {
+            JsonNode root = JSON.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                    .readTree(request.body());
+            requireFields(root, Set.of("chunkSequence", "frames"));
+            int sequence = intField(root, "chunkSequence");
+            JsonNode frames = root.get("frames");
+            if (!frames.isArray() || frames.isEmpty()) {
+                throw new IllegalArgumentException("presentation frames are invalid");
+            }
+            var canonical = JSON.createObjectNode();
+            canonical.put("schemaVersion", "presentation-capture/v1");
+            canonical.put("chunkSequence", sequence);
+            var outputFrames = canonical.putArray("frames");
+            long previous = -1;
+            for (JsonNode frame : frames) {
+                requireFields(frame, Set.of("offsetMs", "jpegBase64"));
+                long offset = longField(frame, "offsetMs");
+                if (offset <= previous) {
+                    throw new IllegalArgumentException("presentation frame time is invalid");
+                }
+                previous = offset;
+                String encoded = textField(frame, "jpegBase64");
+                byte[] jpeg = Base64.getDecoder().decode(encoded);
+                if (jpeg.length < 4 || (jpeg[0] & 255) != 0xff || (jpeg[1] & 255) != 0xd8
+                        || (jpeg[jpeg.length - 2] & 255) != 0xff
+                        || (jpeg[jpeg.length - 1] & 255) != 0xd9) {
+                    throw new IllegalArgumentException("presentation JPEG is invalid");
+                }
+                var item = outputFrames.addObject();
+                item.put("offsetMs", offset);
+                item.put("jpegBase64", Base64.getEncoder().encodeToString(jpeg));
+            }
+            byte[] content = JSON.writeValueAsBytes(canonical);
+            if (content.length > HttpRequest.MAX_BODY_BYTES) {
+                throw new IllegalArgumentException("presentation body is too large");
+            }
+            return new ClientMeetingInputPort.PresentationChunk(
+                    sequence, frames.size(), content);
+        } catch (JsonProcessingException failure) {
+            throw new IllegalArgumentException("presentation JSON is invalid");
+        }
+    }
+
     private static CanonicalTranscriptEvent.Operation upsertOperation(JsonNode body) {
         return switch (textField(body, "operation")) {
             case "UPSERT_OPERATION_UPSERT" -> CanonicalTranscriptEvent.Operation.UPSERT;
@@ -824,6 +889,9 @@ public final class MeetingHttpAdapter {
                 && CLIENT_START_PATH.matcher(request.path()).matches()) return "startClient";
         if ("POST".equals(request.method())
                 && CLIENT_APPEND_PATH.matcher(request.path()).matches()) return "appendClientEvent";
+        if ("POST".equals(request.method())
+                && PRESENTATION_APPEND_PATH.matcher(request.path()).matches())
+            return "appendPresentation";
         if ("POST".equals(request.method()) && MEETINGS_PATH.equals(request.path())) {
             return "create";
         }

@@ -25,6 +25,28 @@ public interface ClientMeetingInputPort {
     AppendResult append(MeetingCommandContext context, String meetingId,
             ClientEvent request);
 
+    /** 上传一个不可变的有序演示截图包；正文为规范化 JSON，内容由 ArtifactStore 保存。 */
+    default CaptureAppendResult appendPresentation(MeetingCommandContext context,
+            String meetingId, PresentationChunk request) {
+        return new Rejected(Reason.STORAGE_UNAVAILABLE);
+    }
+
+    record PresentationChunk(int chunkSequence, int frameCount, byte[] content) {
+        public PresentationChunk {
+            if (chunkSequence <= 0 || frameCount <= 0 || content == null || content.length == 0) {
+                throw new IllegalArgumentException("presentation chunk is invalid");
+            }
+            content = content.clone();
+        }
+
+        @Override public byte[] content() { return content.clone(); }
+    }
+
+    sealed interface CaptureAppendResult permits CaptureAppended, Rejected { }
+
+    record CaptureAppended(String artifactId, int chunkSequence, int frameCount,
+            boolean created) implements CaptureAppendResult { }
+
     /** 两种事件共用客户端去重身份和顺序；内容保持强类型。 */
     sealed interface ClientEvent permits ClientTranscript, ClientTranslation {
         String clientEventId();
@@ -76,10 +98,11 @@ public interface ClientMeetingInputPort {
     }
 
     /** 当前会议不可接受客户端事件；不会包含身份或正文。 */
-    record Rejected(Reason reason) implements StartResult, AppendResult {
+    record Rejected(Reason reason) implements StartResult, AppendResult, CaptureAppendResult {
         public Rejected { Objects.requireNonNull(reason, "reason"); }
     }
 
     enum Reason { NOT_FOUND, ACCESS_DENIED, INVALID_STATE, INPUT_SOURCE_CONFLICT,
-        EVENT_CONFLICT, CAPABILITY_NOT_GRANTED, STORAGE_UNAVAILABLE }
+        EVENT_CONFLICT, CAPABILITY_NOT_GRANTED, PRESENTATION_NOT_REQUESTED,
+        STORAGE_UNAVAILABLE }
 }

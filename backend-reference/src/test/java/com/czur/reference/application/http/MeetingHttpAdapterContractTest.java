@@ -327,6 +327,32 @@ class MeetingHttpAdapterContractTest {
                 context()).status());
     }
 
+    @Test
+    void presentationChunkAcceptsOrderedJpegFramesAndRejectsBadOrder() {
+        RecordingClientInput client = new RecordingClientInput();
+        adapter = new MeetingHttpAdapter(query, deletion, decoder,
+                new HttpErrorMapper(() -> "presentation-diagnostic"), stopService(),
+                null, null, false, null, null, null, null, client);
+        String body = """
+                {"chunkSequence":1,"frames":[
+                  {"offsetMs":0,"jpegBase64":"/9j/2Q=="},
+                  {"offsetMs":10000,"jpegBase64":"/9j/2Q=="}]}
+                """;
+        HttpRequest upload = new HttpRequest("POST",
+                "/v1/meetings/mtg_client/presentation-captures:append",
+                Map.of("content-type", "application/json"), body);
+        assertEquals(201, adapter.handle(upload, context()).status());
+        assertEquals(1, client.capture.chunkSequence());
+        assertEquals(2, client.capture.frameCount());
+        assertTrue(new String(client.capture.content(), StandardCharsets.UTF_8)
+                .contains("presentation-capture/v1"));
+        client.created = false;
+        assertEquals(200, adapter.handle(upload, context()).status());
+        assertEquals(401, adapter.handle(upload, null).status());
+        assertEquals(400, adapter.handle(new HttpRequest("POST", upload.path(),
+                upload.headers(), body.replace("10000", "0")), context()).status());
+    }
+
     private MeetingHttpAdapter withEvents(MeetingEventLogPort events) {
         return new MeetingHttpAdapter(query, deletion, decoder,
                 new HttpErrorMapper(() -> "event-diagnostic"), stopService(),
@@ -809,6 +835,14 @@ class MeetingHttpAdapterContractTest {
         private String meetingId;
         private ClientEvent request;
         private boolean created = true;
+        private PresentationChunk capture;
+
+        @Override public CaptureAppendResult appendPresentation(MeetingCommandContext context,
+                String meetingId, PresentationChunk request) {
+            this.capture = request;
+            return new CaptureAppended("art_test_presentation", request.chunkSequence(),
+                    request.frameCount(), created);
+        }
 
         @Override public StartResult start(MeetingCommandContext context, String meetingId) {
             this.meetingId = meetingId;

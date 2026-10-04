@@ -5,6 +5,10 @@ import com.czur.reference.application.command.MeetingCommandContext;
 import com.czur.reference.application.port.ClientMeetingInputPort;
 import com.czur.reference.application.port.EventLog;
 import com.czur.reference.application.port.EventLogStore;
+import com.czur.reference.application.port.artifact.ArtifactStore;
+import com.czur.reference.application.port.artifact.ArtifactStore.WriteIntentSpec;
+import com.czur.reference.application.port.artifact.ArtifactStore.ContentClaim;
+import com.czur.reference.application.port.artifact.ArtifactReadyMetadataStore;
 import com.czur.reference.application.port.MeetingStartExecutionUnitOfWork;
 import com.czur.reference.domain.capability.CapabilityDecision;
 import com.czur.reference.domain.capability.CapabilityIds;
@@ -15,6 +19,7 @@ import com.czur.reference.protocol.realtime.RealtimeTranscriptEventMapper;
 import com.czur.reference.protocol.realtime.RealtimeTranslationEventMapper;
 
 import javax.sql.DataSource;
+import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -43,12 +48,117 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
     private final DataSource dataSource;
     private final RealtimeMeetingStartCoordinator startCoordinator;
     private final Clock clock;
+    private final ArtifactStore artifactStore;
 
     public JdbcClientMeetingInputPort(DataSource dataSource,
             RealtimeMeetingStartCoordinator startCoordinator, Clock clock) {
+        this(dataSource, startCoordinator, clock, null);
+    }
+
+    public JdbcClientMeetingInputPort(DataSource dataSource,
+            RealtimeMeetingStartCoordinator startCoordinator, Clock clock,
+            ArtifactStore artifactStore) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
         this.startCoordinator = Objects.requireNonNull(startCoordinator, "startCoordinator");
         this.clock = Objects.requireNonNull(clock, "clock");
+        this.artifactStore = artifactStore;
+    }
+
+    @Override
+    public CaptureAppendResult appendPresentation(MeetingCommandContext context,
+            String meetingId, PresentationChunk request) {
+        Objects.requireNonNull(context, "context");
+        MeetingIdPolicy.requireValid(meetingId);
+        Objects.requireNonNull(request, "request");
+        if (artifactStore == null) return new Rejected(Reason.STORAGE_UNAVAILABLE);
+        byte[] content = request.content();
+        String checksum = "sha256:" + sha256(content);
+        String artifactId = "art_client_presentation_" + sha256((meetingId + "\u0000"
+                + request.chunkSequence()).getBytes(StandardCharsets.UTF_8));
+        WriteIntentSpec spec = new WriteIntentSpec(artifactId, meetingId,
+                "presentation.capture", "application/json", null,
+                request.chunkSequence(), content.length, checksum);
+        try (Connection connection = dataSource.getConnection()) {
+            connection.setAutoCommit(false);
+            try {
+                MeetingRow meeting = lockMeeting(connection, meetingId);
+                Rejected rejected = checkOwner(context, meeting);
+                if (rejected != null) return rollback(connection, rejected);
+                if (!clientSourceExists(connection, meetingId)) {
+                    return rollback(connection, new Rejected(Reason.INPUT_SOURCE_CONFLICT));
+                }
+                if (!presentationRequested(connection, meetingId)) {
+                    return rollback(connection, new Rejected(Reason.PRESENTATION_NOT_REQUESTED));
+                }
+                var metadata = new JdbcArtifactReadyMetadataStore(connection);
+                var previous = metadata.findByArtifactId(artifactId);
+                if (previous.isPresent()) {
+                    connection.rollback();
+                    return previous.orElseThrow().artifact().intent().spec().equals(spec)
+                            ? new CaptureAppended(artifactId, request.chunkSequence(),
+                                    request.frameCount(), false)
+                            : new Rejected(Reason.EVENT_CONFLICT);
+                }
+                if (meeting.state() != MeetingState.STARTING
+                        && meeting.state() != MeetingState.RUNNING) {
+                    return rollback(connection, new Rejected(Reason.INVALID_STATE));
+                }
+                if (request.chunkSequence() != lastPresentationSequence(connection, meetingId) + 1) {
+                    return rollback(connection, new Rejected(Reason.EVENT_CONFLICT));
+                }
+                var prepared = artifactStore.createWriteIntent(spec);
+                if (prepared.status() == ArtifactStore.PrepareStatus.CONFLICT) {
+                    return rollback(connection, new Rejected(Reason.EVENT_CONFLICT));
+                }
+                var intent = prepared.intent();
+                var claim = new ContentClaim(content.length, checksum);
+                artifactStore.writeContent(intent, new ByteArrayInputStream(content));
+                var descriptor = artifactStore.completeWrite(intent, claim).artifact();
+                var persisted = metadata.persistReady(descriptor);
+                if (persisted.status() == ArtifactReadyMetadataStore.PersistStatus.CONFLICT) {
+                    return rollback(connection, new Rejected(Reason.EVENT_CONFLICT));
+                }
+                connection.commit();
+                return new CaptureAppended(artifactId, request.chunkSequence(),
+                        request.frameCount(), persisted.status()
+                        == ArtifactReadyMetadataStore.PersistStatus.APPLIED);
+            } catch (Exception failure) {
+                rollbackQuietly(connection);
+                LOGGER.log(Level.WARNING, "演示截图包保存失败 reason={0}",
+                        failure.getClass().getSimpleName());
+                return new Rejected(Reason.STORAGE_UNAVAILABLE);
+            }
+        } catch (SQLException failure) {
+            return new Rejected(Reason.STORAGE_UNAVAILABLE);
+        }
+    }
+
+    private static boolean presentationRequested(Connection connection, String meetingId) {
+        var first = new JdbcCreateMeetingFactStore(connection)
+                .findByMeetingId(meetingId).orElse(null);
+        return first != null && first.request().requestSnapshot()
+                .artifactPolicy().presentationCapture();
+    }
+
+    private static int lastPresentationSequence(Connection connection, String meetingId)
+            throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT COALESCE(MAX(revision), 0) FROM artifact "
+                + "WHERE meeting_id=? AND artifact_type='presentation.capture'")) {
+            statement.setString(1, meetingId);
+            try (ResultSet rows = statement.executeQuery()) {
+                rows.next();
+                return rows.getInt(1);
+            }
+        }
+    }
+
+    private static String sha256(byte[] content) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(content));
+        } catch (NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException("SHA-256 unavailable", impossible);
+        }
     }
 
     @Override

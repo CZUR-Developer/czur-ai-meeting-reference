@@ -94,6 +94,8 @@ public final class JdbcMeetingArtifactContentQueryPort
                     .findFirst().orElse(null);
             if (reference == null || reference.status() != MeetingManifest.ArtifactStatus.READY
                     || !("transcript.final".equals(reference.type())
+                        || (request.artifactId().startsWith("art_client_presentation_")
+                            && "presentation.capture".equals(reference.type()))
                         || (request.artifactId().startsWith("art_client_translation_")
                             && "translation.final".equals(reference.type())))) {
                 return new NotFound();

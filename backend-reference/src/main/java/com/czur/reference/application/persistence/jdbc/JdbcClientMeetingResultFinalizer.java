@@ -145,6 +145,28 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
                     artifactRefs.add(publishReady(connection, translationId, meetingId,
                             "translation.final", projection.translationLanguage(), artifact));
                 }
+                List<ArtifactReadyMetadataStore.ReadyMetadata> captures =
+                        new JdbcArtifactReadyMetadataStore(connection).findByMeetingId(meetingId)
+                                .stream().filter(item -> "presentation.capture".equals(
+                                        item.artifact().intent().spec().artifactType()))
+                                .sorted(Comparator.comparingInt(item ->
+                                        item.artifact().intent().spec().revision()))
+                                .toList();
+                int nextCapture = 1;
+                for (var capture : captures) {
+                    WriteIntentSpec spec = capture.artifact().intent().spec();
+                    if (spec.revision() != nextCapture++
+                            || !"application/json".equals(spec.mediaType())
+                            || spec.language() != null) {
+                        throw new IllegalStateException("presentation capture order is invalid");
+                    }
+                    artifactRefs.add(new MeetingManifest.ArtifactRef(
+                            spec.artifactId(), spec.artifactType(), spec.mediaType(), null,
+                            spec.revision(), capture.artifact().content().size(),
+                            capture.artifact().content().checksum(),
+                            MeetingManifest.ArtifactStatus.READY, capture.recordedAt(),
+                            null, null));
+                }
                 MeetingManifest manifest = new MeetingManifest(
                         "0.1", meetingId, 1,
                         new MeetingManifest.Profile(locked.snapshot().profileId(),

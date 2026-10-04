@@ -468,6 +468,72 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
     }
 
     @Test
+    void presentationChunksSurviveStopInOrderAndReadThroughArtifactStore(
+            @TempDir Path artifactRoot) throws Exception {
+        migrate(1);
+        Map<String, String> enabled = enabledConfig();
+        enabled.put(ReferenceMeetingDeploymentConfig.RESULT_LINK_TTL_MS, "60000");
+        try (var assembly = ReferenceMeetingHttpAssembly.start(enabled, CLOCK,
+                    new PersistentFileSystemMockArtifactStore(artifactRoot, 1024 * 1024));
+             var network = assembly.newJdkHttpServer(new InetSocketAddress("127.0.0.1", 0))) {
+            network.start();
+            int port = network.address().getPort();
+            String created = exchange(port, "POST", "/v1/meetings",
+                    createRequest("presentation-create-123456789", "presentation-session")
+                            .body().replace("\"presentationCapture\":false",
+                                    "\"presentationCapture\":true"),
+                    networkHeaders(TOKEN, "presentation-create-123456789", true));
+            assertEquals(201, status(created));
+            String meetingId = ERROR_JSON.readTree(responseBody(created))
+                    .path("meetingId").asText();
+            assertEquals(200, status(exchange(port, "POST",
+                    "/v1/meetings/" + meetingId + ":startClient", "",
+                    networkHeaders(TOKEN, null, false))));
+            String path = "/v1/meetings/" + meetingId + "/presentation-captures:append";
+            String first = """
+                    {"chunkSequence":1,"frames":[{"offsetMs":0,"jpegBase64":"/9j/2Q=="}]}
+                    """;
+            String second = """
+                    {"chunkSequence":2,"frames":[
+                     {"offsetMs":10000,"jpegBase64":"/9j/2Q=="},
+                     {"offsetMs":20000,"jpegBase64":"/9j/2Q=="}]}
+                    """;
+            assertEquals(409, status(exchange(port, "POST", path, second,
+                    networkHeaders(TOKEN, null, true))));
+            assertEquals(201, status(exchange(port, "POST", path, first,
+                    networkHeaders(TOKEN, null, true))));
+            assertEquals(200, status(exchange(port, "POST", path, first,
+                    networkHeaders(TOKEN, null, true))));
+            assertEquals(409, status(exchange(port, "POST", path,
+                    first.replace("\"offsetMs\":0", "\"offsetMs\":1"),
+                    networkHeaders(TOKEN, null, true))));
+            assertEquals(201, status(exchange(port, "POST", path, second,
+                    networkHeaders(TOKEN, null, true))));
+            assertEquals(2, count("artifact"));
+            assertEquals(200, status(exchange(port, "POST",
+                    "/v1/meetings/" + meetingId + ":stop", "",
+                    networkHeaders(TOKEN, "presentation-stop-123456789", false))));
+            String manifestResponse = exchange(port, "GET", "/v1/meetings/" + meetingId
+                    + "/manifest?genTime=" + NOW.toEpochMilli(), "", "");
+            assertEquals(200, status(manifestResponse));
+            MeetingManifest manifest = MeetingManifestJson.decode(responseBody(manifestResponse));
+            assertEquals(2, manifest.artifacts().size());
+            for (int sequence = 1; sequence <= 2; sequence++) {
+                var ref = manifest.artifacts().get(sequence - 1);
+                assertEquals("presentation.capture", ref.type());
+                assertEquals(sequence, ref.revision());
+                String content = exchange(port, "GET", "/v1/artifacts/" + ref.artifactId()
+                        + "?genTime=" + NOW.toEpochMilli(), "", "");
+                assertEquals(200, status(content));
+                JsonNode payload = ERROR_JSON.readTree(responseBody(content));
+                assertEquals("presentation-capture/v1", payload.path("schemaVersion").asText());
+                assertEquals(sequence, payload.path("chunkSequence").asInt());
+                assertEquals(sequence, payload.path("frames").size());
+            }
+        }
+    }
+
+    @Test
     void clientStopWithOnlyPartialSubtitleDoesNotWaitForever(
             @TempDir Path artifactRoot) throws Exception {
         migrate(1);
