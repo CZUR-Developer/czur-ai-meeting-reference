@@ -37,7 +37,7 @@ public record MeetingSetup(Mode mode, String sourceLanguage, String targetLangua
         public String requiredCapability() { return requiredCapability; }
     }
 
-    public enum ResultDelivery { WEB, LOCAL, QR_CODE, EMAIL, TRACELESS }
+    public enum ResultDelivery { WEB, LOCAL, EMAIL, TRACELESS }
 
     public static MeetingSetup transcript(String sourceLanguage, String resultWebUrl) {
         return new MeetingSetup(Mode.LIVE_TRANSCRIPT, sourceLanguage, "en-US", false,

@@ -36,6 +36,8 @@ import com.czur.aimeeting.reference.meeting.MeetingRuntimeFactory;
 import com.czur.aimeeting.reference.meeting.MeetingCapabilityState;
 import com.czur.aimeeting.reference.meeting.MeetingDisplayState;
 import com.czur.aimeeting.reference.meeting.MeetingSetup;
+import com.czur.aimeeting.reference.meeting.MeetingStartCondition;
+import com.czur.aimeeting.reference.meeting.MeetingStartConditions;
 import com.czur.aimeeting.reference.meeting.ReferenceLoginSession;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -64,6 +66,7 @@ public final class MainActivity extends Activity {
         }
     };
     private MeetingRuntimeBridge runtime;
+    private MeetingStartCondition startCondition;
     private MeetingService meetingService;
     private boolean serviceBound;
     private ScrollView setupScreen;
@@ -113,6 +116,7 @@ public final class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         runtime = MeetingRuntimeFactory.create(this);
+        startCondition = MeetingStartConditions.create(getApplicationContext());
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -236,10 +240,6 @@ public final class MainActivity extends Activity {
         tracelessResultView.setText("无痕（仅现场互译）");
         tracelessResultView.setEnabled(false);
         resultGroup.addView(tracelessResultView);
-        RadioButton qrPlaceholder = new RadioButton(this);
-        qrPlaceholder.setText("二维码（交付流程待接入，暂不可用）");
-        qrPlaceholder.setEnabled(false);
-        resultGroup.addView(qrPlaceholder);
         resultGroup.check(webResultView.getId());
         layout.addView(resultGroup);
 
@@ -512,6 +512,14 @@ public final class MainActivity extends Activity {
                 || setup.resultEmails().stream().anyMatch(email ->
                         !Patterns.EMAIL_ADDRESS.matcher(email).matches()))) {
             statusView.setText("请填写 1～10 个不重复的有效收件邮箱后开始会议");
+            return;
+        }
+        // 合作伙伴的附加开会条件只在此处接入。默认实现直接放行；二次开发可检查
+        // 已缓存的接收者人数或其他外部状态，而无需改动后面的会议创建/模型流程。
+        MeetingStartCondition.Decision decision = startCondition.check(setup);
+        if (!decision.allowed()) {
+            Log.i(TAG, "合作伙伴开会条件未满足，会议未启动 mode=" + setup.mode());
+            statusView.setText(decision.message());
             return;
         }
         if (setup.presentationCapture()) {

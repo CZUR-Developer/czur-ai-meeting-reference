@@ -21,11 +21,11 @@ public final class MeetingSetupTest {
     @Test
     public void translationRequestsTranslationAndSelectedTarget() {
         MeetingSetup setup = new MeetingSetup(MeetingSetup.Mode.LIVE_TRANSLATION, "zh-CN",
-                "en-US", false, MeetingSetup.ResultDelivery.QR_CODE, "");
+                "en-US", false, MeetingSetup.ResultDelivery.TRACELESS, "");
         assertEquals(List.of(MeetingCapabilityState.TRANSCRIPT,
                 MeetingCapabilityState.TRANSLATION, MeetingCapabilityState.SPEAKER),
                 setup.requestedCapabilities());
         assertEquals(List.of("en-US"), setup.targetLanguages());
-        assertEquals(MeetingSetup.ResultDelivery.QR_CODE, setup.resultDelivery());
+        assertEquals(MeetingSetup.ResultDelivery.TRACELESS, setup.resultDelivery());
     }
 }
