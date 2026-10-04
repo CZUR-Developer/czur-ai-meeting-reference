@@ -63,6 +63,7 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
     private final HttpErrorMapper errors;
     private final AuthenticatedMeetingHttpContextResolver contextResolver;
     private final BooleanSupplier readinessCheck;
+    private final ResultEmailEndpoint resultEmail;
     private final RequestExecutor requests;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final AtomicBoolean started = new AtomicBoolean();
@@ -104,7 +105,14 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
             InetSocketAddress address, MeetingHttpRuntime runtime, HttpErrorMapper errors,
             AuthenticatedMeetingHttpContextResolver contextResolver,
             BooleanSupplier readinessCheck) throws IOException {
-        this(address, runtime, errors, contextResolver, readinessCheck,
+        this(address, runtime, errors, contextResolver, readinessCheck, null);
+    }
+
+    public MeetingJdkHttpServer(
+            InetSocketAddress address, MeetingHttpRuntime runtime, HttpErrorMapper errors,
+            AuthenticatedMeetingHttpContextResolver contextResolver,
+            BooleanSupplier readinessCheck, ResultEmailEndpoint resultEmail) throws IOException {
+        this(address, runtime, errors, contextResolver, readinessCheck, resultEmail,
                 DEFAULT_WORKERS, DEFAULT_QUEUE_CAPACITY);
     }
 
@@ -116,12 +124,22 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
             InetSocketAddress address, MeetingHttpRuntime runtime, HttpErrorMapper errors,
             AuthenticatedMeetingHttpContextResolver contextResolver,
             BooleanSupplier readinessCheck, int workers, int queueCapacity) throws IOException {
+        this(address, runtime, errors, contextResolver, readinessCheck, null,
+                workers, queueCapacity);
+    }
+
+    private MeetingJdkHttpServer(
+            InetSocketAddress address, MeetingHttpRuntime runtime, HttpErrorMapper errors,
+            AuthenticatedMeetingHttpContextResolver contextResolver,
+            BooleanSupplier readinessCheck, ResultEmailEndpoint resultEmail,
+            int workers, int queueCapacity) throws IOException {
         this.runtime = Objects.requireNonNull(runtime, "runtime");
         this.errors = Objects.requireNonNull(errors, "errors");
         if (contextResolver != null && contextResolver.errorMapper() != errors) {
             throw new IllegalArgumentException("HTTP error mapper must be shared");
         }
         this.contextResolver = contextResolver;
+        this.resultEmail = resultEmail;
         this.readinessCheck = Objects.requireNonNull(readinessCheck, "readinessCheck");
         this.requests = new RequestExecutor(workers, queueCapacity);
         this.bindAddress = Objects.requireNonNull(address, "address");
@@ -231,6 +249,16 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
     private HttpResponse dispatch(HttpRequest request) {
         if (LIVENESS_PATH.equals(request.path()) || READINESS_PATH.equals(request.path())) {
             return health(request);
+        }
+        if (ResultEmailEndpoint.matches(request)) {
+            if (resultEmail == null) return errors.notImplemented();
+            if (contextResolver == null) return errors.missingContext();
+            var resolution = contextResolver.forClientWrite(request);
+            if (resolution instanceof AuthenticatedMeetingHttpContextResolver.Rejected rejected) {
+                return rejected.response();
+            }
+            return resultEmail.handle(request,
+                    ((AuthenticatedMeetingHttpContextResolver.Ready) resolution).context());
         }
         if (contextResolver == null) {
             return runtime.handle(request, null);

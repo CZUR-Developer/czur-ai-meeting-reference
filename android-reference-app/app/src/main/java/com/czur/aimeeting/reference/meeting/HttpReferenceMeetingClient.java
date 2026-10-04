@@ -208,6 +208,18 @@ public final class HttpReferenceMeetingClient implements ReferenceMeetingClient 
                 200, 202).status == 200;
     }
 
+    @Override public void sendResultEmail(String meetingId, List<String> recipients,
+            String resultUrl) throws IOException {
+        try {
+            JSONObject body = new JSONObject().put("recipients", new JSONArray(recipients))
+                    .put("resultUrl", resultUrl);
+            post("/v1/meetings/" + meetingId + ":sendResultEmail", body.toString(),
+                    null, 200);
+        } catch (JSONException invalid) {
+            throw new IOException("邮箱结果请求格式错误", invalid);
+        }
+    }
+
     @Override public LocalMeetingResult readLocalResult(String meetingId, long genTime)
             throws IOException {
         String query = "?genTime=" + genTime;

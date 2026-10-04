@@ -6,6 +6,7 @@ import com.czur.aimeeting.model.SummarySessionGrant;
 import com.czur.aimeeting.model.TranscriptEvent;
 import com.czur.aimeeting.model.TranslationEvent;
 import java.io.IOException;
+import java.util.List;
 
 /**
  * 参考 App 使用的最小会议客户端端口。页面只调用这些业务动作，不拼接 HTTP 协议；
@@ -44,6 +45,10 @@ public interface ReferenceMeetingClient {
      * 返回 false 表示 Stop 已记录但仍在收口（HTTP 202）。
      */
     boolean stopMeeting(String meetingId) throws IOException;
+
+    /** Stop 成功后由后端向会前选定邮箱发送这一场的有效期结果链接。 */
+    void sendResultEmail(String meetingId, List<String> recipients, String resultUrl)
+            throws IOException;
 
     /** Stop 200 后等待本场 Manifest 就绪，并只读取 READY 最终产物。 */
     LocalMeetingResult readLocalResult(String meetingId, long genTime) throws IOException;

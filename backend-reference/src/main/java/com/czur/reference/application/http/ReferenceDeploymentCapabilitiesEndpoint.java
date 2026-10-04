@@ -46,6 +46,7 @@ public final class ReferenceDeploymentCapabilitiesEndpoint {
         body.put("limits", publicLimits);
         config.resultLinkTtl().ifPresent(ttl ->
                 body.put("resultLinkTtlMs", ttl.toMillis()));
+        body.put("resultEmailEnabled", config.resultEmail().isPresent());
         try {
             response = HttpResponse.json(200, JSON.writeValueAsString(body));
         } catch (JsonProcessingException impossible) {

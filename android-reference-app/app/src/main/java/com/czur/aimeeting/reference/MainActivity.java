@@ -16,6 +16,7 @@ import android.os.IBinder;
 import android.provider.Settings;
 import android.text.InputType;
 import android.util.Log;
+import android.util.Patterns;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.ArrayAdapter;
@@ -37,6 +38,8 @@ import com.czur.aimeeting.reference.meeting.MeetingDisplayState;
 import com.czur.aimeeting.reference.meeting.MeetingSetup;
 import com.czur.aimeeting.reference.meeting.ReferenceLoginSession;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
@@ -70,6 +73,7 @@ public final class MainActivity extends Activity {
     private EditText usernameView;
     private EditText passwordView;
     private EditText resultWebUrlView;
+    private EditText resultEmailsView;
     private TextView transcriptView;
     private TextView meetingTitle;
     private LinearLayout transcriptList;
@@ -90,6 +94,7 @@ public final class MainActivity extends Activity {
     private RadioButton translationModeView;
     private RadioButton webResultView;
     private RadioButton localResultView;
+    private RadioButton emailResultView;
     private Button startButton;
     private Button recentPdfButton;
     private Button stopButton;
@@ -99,6 +104,8 @@ public final class MainActivity extends Activity {
     private String sessionToken;
     private String sessionBackendUrl;
     private Set<String> deploymentCapabilities = Set.of();
+    private long resultLinkTtlMs;
+    private boolean resultEmailEnabled;
     private MeetingSetup pendingPresentationSetup;
 
     @Override
@@ -211,7 +218,12 @@ public final class MainActivity extends Activity {
         localResultView.setId(View.generateViewId());
         localResultView.setText("本地保存 PDF（下载/AI会议纪要）");
         resultGroup.addView(localResultView);
-        for (String unavailable : new String[] {"二维码", "邮箱", "无痕"}) {
+        emailResultView = new RadioButton(this);
+        emailResultView.setId(View.generateViewId());
+        emailResultView.setText("邮箱（当前部署不可用）");
+        emailResultView.setEnabled(false);
+        resultGroup.addView(emailResultView);
+        for (String unavailable : new String[] {"二维码", "无痕"}) {
             RadioButton option = new RadioButton(this);
             option.setText(unavailable + "（交付流程待接入，暂不可用）");
             option.setEnabled(false);
@@ -226,8 +238,17 @@ public final class MainActivity extends Activity {
                 | InputType.TYPE_TEXT_VARIATION_URI);
         resultWebUrlView.setHint("网页结果地址，例如 http://192.168.1.10:8081/index.html");
         layout.addView(resultWebUrlView);
-        resultGroup.setOnCheckedChangeListener((group, checkedId) ->
-                resultWebUrlView.setEnabled(checkedId == webResultView.getId()));
+        resultEmailsView = new EditText(this);
+        resultEmailsView.setHint("收件邮箱，多个用逗号分隔（最多 10 个）");
+        resultEmailsView.setInputType(InputType.TYPE_CLASS_TEXT
+                | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS);
+        resultEmailsView.setVisibility(View.GONE);
+        layout.addView(resultEmailsView);
+        resultGroup.setOnCheckedChangeListener((group, checkedId) -> {
+            resultWebUrlView.setEnabled(checkedId != localResultView.getId());
+            resultEmailsView.setVisibility(checkedId == emailResultView.getId()
+                    ? View.VISIBLE : View.GONE);
+        });
         recentPdfButton = new Button(this);
         recentPdfButton.setText("打开最近本地 PDF");
         recentPdfButton.setOnClickListener(view -> {
@@ -338,22 +359,28 @@ public final class MainActivity extends Activity {
             try {
                 HttpReferenceSessionClient sessionClient = new HttpReferenceSessionClient(baseUrl);
                 ReferenceLoginSession loginSession = sessionClient.login(username, password);
-                Set<String> discovered;
+                HttpReferenceSessionClient.DeploymentOptions options;
                 boolean discoveryUnavailable = false;
                 try {
-                    discovered = sessionClient.capabilities();
+                    options = sessionClient.deploymentOptions();
                 } catch (IOException failure) {
                     // 旧后端仍可做字幕；增值模式必须有部署能力的明确声明。
-                    discovered = Set.of(MeetingCapabilityState.TRANSCRIPT);
+                    options = new HttpReferenceSessionClient.DeploymentOptions(
+                            Set.of(MeetingCapabilityState.TRANSCRIPT), 0, false);
                     discoveryUnavailable = true;
                 }
-                Set<String> available = discovered;
+                Set<String> available = options.capabilities();
+                long linkTtl = options.resultLinkTtlMs();
+                boolean emailAvailable = options.resultEmailEnabled();
                 boolean limited = discoveryUnavailable;
                 Log.i(TAG, "参考账号登录成功");
                 runOnUiThread(() -> {
                     sessionToken = loginSession.accessToken();
                     sessionBackendUrl = baseUrl;
                     deploymentCapabilities = available;
+                    resultLinkTtlMs = linkTtl;
+                    resultEmailEnabled = emailAvailable;
+                    refreshResultAvailability();
                     refreshModeAvailability();
                     passwordView.setText("");
                     backendUrlView.setEnabled(false);
@@ -380,6 +407,9 @@ public final class MainActivity extends Activity {
         sessionToken = null;
         sessionBackendUrl = null;
         deploymentCapabilities = Set.of();
+        resultLinkTtlMs = 0;
+        resultEmailEnabled = false;
+        refreshResultAvailability();
         refreshModeAvailability();
         backendUrlView.setEnabled(true);
         usernameView.setEnabled(true);
@@ -407,6 +437,14 @@ public final class MainActivity extends Activity {
                 || (!translation && translationModeView.isChecked())) {
             transcriptModeView.setChecked(true);
         }
+    }
+
+    private void refreshResultAvailability() {
+        boolean available = sessionToken != null && resultLinkTtlMs > 0
+                && resultEmailEnabled;
+        emailResultView.setEnabled(available);
+        emailResultView.setText(available ? "邮箱" : "邮箱（当前部署不可用）");
+        if (!available && emailResultView.isChecked()) webResultView.setChecked(true);
     }
 
     @Override
@@ -449,9 +487,18 @@ public final class MainActivity extends Activity {
             statusView.setText(setup.mode().displayName() + "当前不可用");
             return;
         }
-        if (setup.resultDelivery() == MeetingSetup.ResultDelivery.WEB
+        if (setup.resultDelivery() != MeetingSetup.ResultDelivery.LOCAL
                 && setup.resultWebUrl().isEmpty()) {
-            statusView.setText("请填写网页结果地址，或选择本地保存 PDF");
+            statusView.setText("请填写网页结果地址");
+            return;
+        }
+        if (setup.resultDelivery() == MeetingSetup.ResultDelivery.EMAIL
+                && (setup.resultEmails().isEmpty() || setup.resultEmails().size() > 10
+                || setup.resultEmails().stream().distinct().count()
+                        != setup.resultEmails().size()
+                || setup.resultEmails().stream().anyMatch(email ->
+                        !Patterns.EMAIL_ADDRESS.matcher(email).matches()))) {
+            statusView.setText("请填写 1～10 个不重复的有效收件邮箱后开始会议");
             return;
         }
         if (setup.presentationCapture()) {
@@ -497,6 +544,8 @@ public final class MainActivity extends Activity {
         }
         begin.putExtra(MeetingService.EXTRA_RESULT_WEB, setup.resultWebUrl());
         begin.putExtra(MeetingService.EXTRA_RESULT_DELIVERY, setup.resultDelivery().name());
+        begin.putExtra(MeetingService.EXTRA_RESULT_EMAILS,
+                setup.resultEmails().toArray(new String[0]));
         try {
             // 用户仍在前台点击开始时启动 microphone 前台 Service，再由 Service 建会/开 MIC。
             startForegroundService(begin);
@@ -514,13 +563,18 @@ public final class MainActivity extends Activity {
                 : translationModeView.isChecked() ? MeetingSetup.Mode.LIVE_TRANSLATION
                 : MeetingSetup.Mode.LIVE_TRANSCRIPT;
         String[] codes = {"zh-CN", "en-US"};
+        List<String> emails = new ArrayList<>();
+        for (String entry : resultEmailsView.getText().toString().split("[,，;；\\s]+")) {
+            if (!entry.isBlank()) emails.add(entry.trim());
+        }
         return new MeetingSetup(mode, codes[sourceLanguageView.getSelectedItemPosition()],
                 codes[targetLanguageView.getSelectedItemPosition()],
                 mode == MeetingSetup.Mode.LIVE_TRANSCRIPT
                         && presentationCaptureView.isChecked(), localResultView.isChecked()
                                 ? MeetingSetup.ResultDelivery.LOCAL
+                                : emailResultView.isChecked() ? MeetingSetup.ResultDelivery.EMAIL
                                 : MeetingSetup.ResultDelivery.WEB,
-                resultWebUrlView.getText().toString().trim());
+                resultWebUrlView.getText().toString().trim(), emails);
     }
 
 

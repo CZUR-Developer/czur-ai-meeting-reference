@@ -17,6 +17,8 @@ import com.czur.reference.application.http.MeetingHttpRuntime;
 import com.czur.reference.application.http.ReferenceMeetingHttpRequestDecoder;
 import com.czur.reference.application.http.ReferenceDevSessionLoginEndpoint;
 import com.czur.reference.application.http.ReferenceDeploymentCapabilitiesEndpoint;
+import com.czur.reference.application.http.ResultEmailEndpoint;
+import com.czur.reference.application.http.SmtpResultEmailSender;
 import com.czur.reference.application.identity.referencedev.ReferenceDevIdentityProvider;
 import com.czur.reference.application.manifest.ManifestResultAccessPolicy;
 import com.czur.reference.application.model.ModelSessionIssuer;
@@ -109,6 +111,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
     private final MeetingInputReconciler inputReconciler;
     private final JdbcMeetingEventLogPort eventLog;
     private final Clock clock;
+    private final ResultEmailEndpoint resultEmail;
     private final AtomicBoolean closed = new AtomicBoolean();
 
     private ReferenceMeetingHttpAssembly(
@@ -119,7 +122,8 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
             RealtimeAudioIngress realtimeAudioIngress,
             RealtimeTranscriptSessions realtimeTranscriptSessions,
             MeetingInputReconciler inputReconciler,
-            JdbcMeetingEventLogPort eventLog, Clock clock) {
+            JdbcMeetingEventLogPort eventLog, Clock clock,
+            ResultEmailEndpoint resultEmail) {
         this.database = database;
         this.deploymentScope = deploymentScope;
         this.runtime = runtime;
@@ -132,6 +136,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
         this.inputReconciler = Objects.requireNonNull(inputReconciler, "inputReconciler");
         this.eventLog = Objects.requireNonNull(eventLog, "eventLog");
         this.clock = clock;
+        this.resultEmail = resultEmail;
     }
 
     /**
@@ -299,7 +304,9 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
             return new ReferenceMeetingHttpAssembly(database, config.deploymentScope(),
                     runtime, resolver, errors,
                     config.realtimeRenewEnabled(), realtimeVerifier, realtimeIngress,
-                    realtimeTranscripts, inputReconciler, events, clock);
+                    realtimeTranscripts, inputReconciler, events, clock,
+                    config.resultEmail().map(email -> new ResultEmailEndpoint(query, manifest,
+                            new SmtpResultEmailSender(email), errors)).orElse(null));
         } catch (RuntimeException | Error failure) {
             try {
                 if (runtime != null) {
@@ -362,7 +369,8 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
         return new MeetingJdkHttpServer(address, runtime, errors, contextResolver,
                 () -> database.checkReadiness().ready()
                         && (!realtimeRenewEnabled
-                                || database.checkRealtimeCredentialReadiness().ready()));
+                                || database.checkRealtimeCredentialReadiness().ready()),
+                resultEmail);
     }
 
     /**

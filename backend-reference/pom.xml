@@ -15,6 +15,11 @@
     <protobuf.version>3.25.3</protobuf.version>
   </properties>
   <dependencies>
+    <dependency>
+      <groupId>com.sun.mail</groupId>
+      <artifactId>jakarta.mail</artifactId>
+      <version>2.0.1</version>
+    </dependency>
     <!--
       公开 Manifest JSON 边界使用显式 tree codec，拒绝未知/重复/缺失字段及
       数值强制转换。Jackson 类型只停留在 protocol.json 基础设施包，不进入

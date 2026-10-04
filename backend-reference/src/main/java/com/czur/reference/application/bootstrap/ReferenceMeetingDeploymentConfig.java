@@ -104,6 +104,7 @@ public final class ReferenceMeetingDeploymentConfig {
     private final boolean createEnabled;
     private final boolean realtimeRenewEnabled;
     private final Duration resultLinkTtl;
+    private final ResultEmailConfig resultEmail;
     private final TingwuModelSessionConfig tingwuModelSession;
     private final URI sampleJsonWsEndpoint;
     private final BailianSummarySessionConfig bailianSummarySession;
@@ -118,6 +119,7 @@ public final class ReferenceMeetingDeploymentConfig {
             UsageEstimate trustedEstimate, TrustedCreateRuntimeLimits runtimeLimits,
             byte[] pageTokenSecret, URI wssOrigin, Duration wssTokenTtl,
             boolean createEnabled, boolean realtimeRenewEnabled, Duration resultLinkTtl,
+            ResultEmailConfig resultEmail,
             TingwuModelSessionConfig tingwuModelSession, URI sampleJsonWsEndpoint,
             BailianSummarySessionConfig bailianSummarySession) {
         this.database = database;
@@ -138,6 +140,7 @@ public final class ReferenceMeetingDeploymentConfig {
         this.createEnabled = createEnabled;
         this.realtimeRenewEnabled = realtimeRenewEnabled;
         this.resultLinkTtl = resultLinkTtl;
+        this.resultEmail = resultEmail;
         this.tingwuModelSession = tingwuModelSession;
         this.sampleJsonWsEndpoint = sampleJsonWsEndpoint;
         this.bailianSummarySession = bailianSummarySession;
@@ -312,6 +315,10 @@ public final class ReferenceMeetingDeploymentConfig {
             // 缺项保持旧部署行为：仅新 Manifest 路由关闭，不影响既有会议入口。
             Duration resultLinkTtl = environment.containsKey(RESULT_LINK_TTL_MS)
                     ? positiveDuration(environment, RESULT_LINK_TTL_MS) : null;
+            ResultEmailConfig resultEmail = ResultEmailConfig.fromEnvironment(environment);
+            if (resultEmail != null && resultLinkTtl == null) {
+                throw invalid(RESULT_LINK_TTL_MS);
+            }
             String adapter = environment.get(MODEL_ADAPTER);
             TingwuModelSessionConfig tingwu = null;
             URI sampleEndpoint = null;
@@ -330,7 +337,7 @@ public final class ReferenceMeetingDeploymentConfig {
             return new ReferenceMeetingDeploymentConfig(database, identity, login, scope,
                     audience, clientId, profile, entitlement, mock, limits, estimate,
                     runtimeLimits, secret, wssOrigin, tokenTtl,
-                    enabled, renewEnabled, resultLinkTtl,
+                    enabled, renewEnabled, resultLinkTtl, resultEmail,
                     tingwu, sampleEndpoint, bailian);
         } finally {
             Arrays.fill(secret, (byte) 0);
@@ -363,6 +370,8 @@ public final class ReferenceMeetingDeploymentConfig {
     public boolean realtimeRenewEnabled() { return realtimeRenewEnabled; }
     /** 仅显式配置正值 TTL 时开放匿名 Manifest GET；genTime 不是防篡改凭证。 */
     public Optional<Duration> resultLinkTtl() { return Optional.ofNullable(resultLinkTtl); }
+    /** 只有部署方显式配置邮件 SMTP 时开放邮箱结果方式。 */
+    public Optional<ResultEmailConfig> resultEmail() { return Optional.ofNullable(resultEmail); }
     /** 只有显式配置听悟凭据才开放独立模型会话路由。 */
     public Optional<TingwuModelSessionConfig> tingwuModelSession() {
         return Optional.ofNullable(tingwuModelSession);

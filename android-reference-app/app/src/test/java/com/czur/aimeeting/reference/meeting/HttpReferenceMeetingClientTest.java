@@ -19,6 +19,24 @@ import org.junit.Test;
 /** 用本机 HTTP 服务核对 P4-2 的 Create、启动和字幕提交正常路径。 */
 public final class HttpReferenceMeetingClientTest {
     @Test
+    public void sendsTheSameExpiringResultLinkToSelectedEmailsWithoutPdf() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setResponseCode(200).setBody("{\"sent\":true}"));
+            server.start();
+            String url = "https://result.example.test/index.html?meetingId=mtg_mail&genTime=123";
+            new HttpReferenceMeetingClient(server.url("/").toString(), "local-demo-token")
+                    .sendResultEmail("mtg_mail", List.of("viewer@example.test"), url);
+            RecordedRequest request = server.takeRequest();
+            assertEquals("/v1/meetings/mtg_mail:sendResultEmail", request.getPath());
+            assertEquals("Bearer local-demo-token", request.getHeader("Authorization"));
+            JSONObject body = new JSONObject(request.getBody().readUtf8());
+            assertEquals(url, body.getString("resultUrl"));
+            assertEquals("viewer@example.test", body.getJSONArray("recipients").getString(0));
+            assertFalse(body.has("pdf"));
+        }
+    }
+
+    @Test
     public void localResultReadsOnlyReadyArtifactsAfterManifestBecomesReady() throws Exception {
         try (MockWebServer server = new MockWebServer()) {
             server.enqueue(new MockResponse().setResponseCode(202).setBody("{}"));

@@ -558,6 +558,25 @@ class ReferenceMeetingDeploymentConfigTest {
         }
     }
 
+    @Test
+    void emailResultRequiresSmtpAndTheSameResultLinkTtl() {
+        Map<String, String> values = valid();
+        values.put(com.czur.reference.application.bootstrap.ResultEmailConfig.ENABLED, "true");
+        assertThrows(IllegalArgumentException.class,
+                () -> ReferenceMeetingDeploymentConfig.fromEnvironment(values));
+        values.put(ReferenceMeetingDeploymentConfig.RESULT_LINK_TTL_MS, "86400000");
+        values.put(com.czur.reference.application.bootstrap.ResultEmailConfig.HOST, "smtp.example.test");
+        values.put(com.czur.reference.application.bootstrap.ResultEmailConfig.PORT, "587");
+        values.put(com.czur.reference.application.bootstrap.ResultEmailConfig.USERNAME, "sender");
+        values.put(com.czur.reference.application.bootstrap.ResultEmailConfig.PASSWORD,
+                "smtp-private-sentinel");
+        values.put(com.czur.reference.application.bootstrap.ResultEmailConfig.FROM,
+                "meeting@example.test");
+        var configured = ReferenceMeetingDeploymentConfig.fromEnvironment(values);
+        assertTrue(configured.resultEmail().isPresent());
+        assertFalse(configured.toString().contains("smtp-private-sentinel"));
+    }
+
     private static void rejects(Map<String, String> values, String key) {
         IllegalArgumentException failure = assertThrows(IllegalArgumentException.class,
                 () -> ReferenceMeetingDeploymentConfig.fromEnvironment(values));

@@ -7,7 +7,17 @@ import java.util.List;
  * 前者进入 Create 的能力请求，后者留在 App 内决定网页或本地 PDF 交付。
  */
 public record MeetingSetup(Mode mode, String sourceLanguage, String targetLanguage,
-        boolean presentationCapture, ResultDelivery resultDelivery, String resultWebUrl) {
+        boolean presentationCapture, ResultDelivery resultDelivery, String resultWebUrl,
+        List<String> resultEmails) {
+    public MeetingSetup(Mode mode, String sourceLanguage, String targetLanguage,
+            boolean presentationCapture, ResultDelivery resultDelivery, String resultWebUrl) {
+        this(mode, sourceLanguage, targetLanguage, presentationCapture, resultDelivery,
+                resultWebUrl, List.of());
+    }
+
+    public MeetingSetup {
+        resultEmails = List.copyOf(resultEmails);
+    }
     public enum Mode {
         LIVE_TRANSCRIPT("实时字幕", MeetingCapabilityState.TRANSCRIPT),
         MEETING_MINUTES("AI 会议纪要", MeetingCapabilityState.SUMMARY),
@@ -31,7 +41,7 @@ public record MeetingSetup(Mode mode, String sourceLanguage, String targetLangua
 
     public static MeetingSetup transcript(String sourceLanguage, String resultWebUrl) {
         return new MeetingSetup(Mode.LIVE_TRANSCRIPT, sourceLanguage, "en-US", false,
-                ResultDelivery.WEB, resultWebUrl);
+                ResultDelivery.WEB, resultWebUrl, List.of());
     }
 
     /** 会前选择直接决定 Create 的请求能力；字幕是所有当前模式的基础产物。 */

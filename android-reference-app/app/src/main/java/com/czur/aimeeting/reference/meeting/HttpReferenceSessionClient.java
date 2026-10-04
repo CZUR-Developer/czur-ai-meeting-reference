@@ -71,6 +71,11 @@ public final class HttpReferenceSessionClient {
 
     /** 按现有匿名发现契约读取部署静态能力；本场能力仍以 Create 响应为准。 */
     public Set<String> capabilities() throws IOException {
+        return deploymentOptions().capabilities();
+    }
+
+    /** 同一能力响应还提供结果链接有效期及可用的邮箱交付方式。 */
+    public DeploymentOptions deploymentOptions() throws IOException {
         URL url = new URL(baseUrl + "/v1/capabilities");
         validateLoginUrl(url);
         HttpURLConnection connection = (HttpURLConnection) url.openConnection();
@@ -89,7 +94,9 @@ public final class HttpReferenceSessionClient {
                 for (int index = 0; index < values.length(); index++) {
                     capabilities.add(values.getString(index));
                 }
-                return Set.copyOf(capabilities);
+                return new DeploymentOptions(Set.copyOf(capabilities),
+                        response.optLong("resultLinkTtlMs", 0),
+                        response.optBoolean("resultEmailEnabled", false));
             } catch (JSONException invalidResponse) {
                 throw new IOException("部署能力响应格式错误", invalidResponse);
             }
@@ -97,6 +104,9 @@ public final class HttpReferenceSessionClient {
             connection.disconnect();
         }
     }
+
+    public record DeploymentOptions(Set<String> capabilities, long resultLinkTtlMs,
+            boolean resultEmailEnabled) { }
 
     /**
      * 账号密码只经 HTTPS 发送。唯一的明文例外是开发机通过 adb reverse 暴露给设备的

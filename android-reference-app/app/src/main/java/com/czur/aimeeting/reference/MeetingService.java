@@ -57,6 +57,7 @@ public final class MeetingService extends Service {
     static final String EXTRA_PROJECTION_DATA = "projectionData";
     static final String EXTRA_RESULT_WEB = "resultWeb";
     static final String EXTRA_RESULT_DELIVERY = "resultDelivery";
+    static final String EXTRA_RESULT_EMAILS = "resultEmails";
     private static final String TAG = "AiMeetingReference";
     private static final String CHANNEL = "ai_meeting_active";
     private static final int NOTIFICATION_ID = 100;
@@ -190,12 +191,14 @@ public final class MeetingService extends Service {
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null || !ACTION_BEGIN.equals(intent.getAction())) return START_NOT_STICKY;
         if (busy) return START_NOT_STICKY;
+        String[] emails = intent.getStringArrayExtra(EXTRA_RESULT_EMAILS);
         MeetingSetup requested = new MeetingSetup(MeetingSetup.Mode.valueOf(
                 intent.getStringExtra(EXTRA_MODE)), intent.getStringExtra(EXTRA_SOURCE),
                 intent.getStringExtra(EXTRA_TARGET),
                 intent.getBooleanExtra(EXTRA_PRESENTATION, false),
                 MeetingSetup.ResultDelivery.valueOf(intent.getStringExtra(EXTRA_RESULT_DELIVERY)),
-                intent.getStringExtra(EXTRA_RESULT_WEB));
+                intent.getStringExtra(EXTRA_RESULT_WEB),
+                emails == null ? java.util.List.of() : java.util.Arrays.asList(emails));
         if (requested.presentationCapture()) {
             projectionData = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
                     ? intent.getParcelableExtra(EXTRA_PROJECTION_DATA, Intent.class)
@@ -658,10 +661,22 @@ public final class MeetingService extends Service {
                         .appendQueryParameter("meetingId", meetingId)
                         .appendQueryParameter("genTime", Long.toString(System.currentTimeMillis()))
                         .build().toString();
-                main.post(() -> {
-                    resultUrl = finishedUrl;
-                    finishWithStatus("会议已结束，可查看结果页");
-                });
+                if (setup.resultDelivery() == MeetingSetup.ResultDelivery.EMAIL) {
+                    try {
+                        client.sendResultEmail(meetingId, setup.resultEmails(), finishedUrl);
+                        main.post(() -> finishWithStatus("会议已结束，结果链接已发送到邮箱"));
+                    } catch (IOException failure) {
+                        main.post(() -> {
+                            resultUrl = finishedUrl;
+                            finishWithStatus("会议已结束，邮件发送失败，可先查看网页结果");
+                        });
+                    }
+                } else {
+                    main.post(() -> {
+                        resultUrl = finishedUrl;
+                        finishWithStatus("会议已结束，可查看结果页");
+                    });
+                }
             }
         } catch (IOException failure) {
             completionQueued.set(false);

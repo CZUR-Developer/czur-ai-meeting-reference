@@ -595,6 +595,49 @@ paths:
                 $ref: "#/components/schemas/MeetingStatus"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/meetings/{meetingId}:sendResultEmail:
+    post:
+      tags: [Meetings]
+      operationId: sendMeetingResultEmail
+      summary: 向会前选定邮箱发送本场结果链接
+      description: 仅部署方启用邮件通道时可用。核对登录用户的会议归属、Stop 输入接管状态及同一 genTime 结果链接有效期；正文只含链接，不附 PDF。
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/MeetingId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [recipients, resultUrl]
+              properties:
+                recipients:
+                  type: array
+                  minItems: 1
+                  maxItems: 10
+                  items:
+                    type: string
+                    format: email
+                resultUrl:
+                  type: string
+                  format: uri
+      responses:
+        "200":
+          description: 结果链接已交给邮件通道发送
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [sent]
+                properties:
+                  sent:
+                    const: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/artifacts/{artifactId}:
     get:
       tags: [Artifacts]
@@ -739,7 +782,7 @@ components:
     CapabilitiesResponse:
       type: object
       additionalProperties: false
-      required: [specVersion, capabilities, languages, audioProfiles, limits]
+      required: [specVersion, capabilities, languages, audioProfiles, limits, resultEmailEnabled]
       properties:
         specVersion:
           type: string
@@ -755,6 +798,13 @@ components:
           type: array
           items:
             type: string
+        resultLinkTtlMs:
+          type: integer
+          minimum: 1
+          description: 部署结果链接有效期；未开启匿名结果读取时省略。
+        resultEmailEnabled:
+          type: boolean
+          description: 部署方已配置 SMTP 且邮箱交付可用。
         limits:
           $ref: "#/components/schemas/Limits"
     RealtimeDescriptor:

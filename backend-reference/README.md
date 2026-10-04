@@ -89,6 +89,15 @@ Android SDK 调用应用 completion，App 归一化后在 Stop 前提交标准�
 此接口不签发凭据，也不代表某位用户或某一场会议已获准能力；Create 的
 `capabilityDecisions` 仍是本场权威结果。
 
+## P5-6 邮箱结果链接
+
+部署者配置 `AI_MEETING_RESULT_EMAIL_ENABLED=true` 及 `.env.example` 中的 SMTP
+地址、端口、账号、密码和发件地址后，`/v1/capabilities` 才报告
+`resultEmailEnabled=true`。已登录 App 在 Stop 完成后调用
+`POST /v1/meetings/{meetingId}:sendResultEmail`，后端核对本场归属、输入已接管、
+结果 `genTime` 在统一有效期内，再向会前选定的 1～10 个邮箱发送同一结果页链接。
+邮件没有 PDF 附件；未配置 SMTP 时接口保持关闭。
+
 ## P3-T05 会议应用切片
 
 会议应用切片同步自 `czur-cloud` 固定提交

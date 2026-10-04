@@ -62,13 +62,17 @@ public final class HttpReferenceSessionClientTest {
                     + "\"specVersion\":\"v1\","
                     + "\"capabilities\":[\"transcript.realtime\",\"summary.structured\"],"
                     + "\"languages\":[\"zh-CN\"],\"audioProfiles\":[\"PCM_S16LE\"],"
+                    + "\"resultLinkTtlMs\":86400000,\"resultEmailEnabled\":true,"
                     + "\"limits\":{\"maxMeetingDurationMs\":600000,"
                     + "\"maxAudioFrameBytes\":32000,\"eventReplayWindow\":100}}"));
             server.start();
-            Set<String> capabilities = new HttpReferenceSessionClient(server.url("/").toString())
-                    .capabilities();
+            var options = new HttpReferenceSessionClient(server.url("/").toString())
+                    .deploymentOptions();
+            Set<String> capabilities = options.capabilities();
             assertEquals(Set.of(MeetingCapabilityState.TRANSCRIPT,
                     MeetingCapabilityState.SUMMARY), capabilities);
+            assertEquals(86400000, options.resultLinkTtlMs());
+            assertEquals(true, options.resultEmailEnabled());
             RecordedRequest discovery = server.takeRequest();
             assertEquals("GET", discovery.getMethod());
             assertEquals("/v1/capabilities", discovery.getPath());
