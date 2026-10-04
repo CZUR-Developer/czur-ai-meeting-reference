@@ -638,7 +638,9 @@ public final class MeetingService extends Service {
             }
             session.close();
             Log.i(TAG, "会议结束，结果已就绪 meetingId=" + meetingId);
-            if (setup.resultDelivery() == MeetingSetup.ResultDelivery.LOCAL) {
+            if (setup.resultDelivery() == MeetingSetup.ResultDelivery.TRACELESS) {
+                main.post(() -> finishWithStatus("会议已结束；无痕互译不主动交付结果"));
+            } else if (setup.resultDelivery() == MeetingSetup.ResultDelivery.LOCAL) {
                 try {
                     LocalMeetingResult local = client.readLocalResult(meetingId,
                             System.currentTimeMillis());

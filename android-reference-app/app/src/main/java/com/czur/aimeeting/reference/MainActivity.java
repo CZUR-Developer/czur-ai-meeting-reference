@@ -95,6 +95,7 @@ public final class MainActivity extends Activity {
     private RadioButton webResultView;
     private RadioButton localResultView;
     private RadioButton emailResultView;
+    private RadioButton tracelessResultView;
     private Button startButton;
     private Button recentPdfButton;
     private Button stopButton;
@@ -199,7 +200,14 @@ public final class MainActivity extends Activity {
         presentationCaptureView.setText("演示文稿（每10秒采集屏幕，开始时需系统授权）");
         layout.addView(presentationCaptureView);
         modeGroup.setOnCheckedChangeListener((group, checkedId) -> {
-            targetLanguageView.setEnabled(checkedId == translationModeView.getId());
+            boolean translation = checkedId == translationModeView.getId();
+            targetLanguageView.setEnabled(translation);
+            if (tracelessResultView != null) {
+                tracelessResultView.setEnabled(translation);
+                if (!translation && tracelessResultView.isChecked()) {
+                    webResultView.setChecked(true);
+                }
+            }
             boolean transcript = checkedId == transcriptModeView.getId();
             if (!transcript) presentationCaptureView.setChecked(false);
             presentationCaptureView.setEnabled(transcript);
@@ -223,12 +231,15 @@ public final class MainActivity extends Activity {
         emailResultView.setText("邮箱（当前部署不可用）");
         emailResultView.setEnabled(false);
         resultGroup.addView(emailResultView);
-        for (String unavailable : new String[] {"二维码", "无痕"}) {
-            RadioButton option = new RadioButton(this);
-            option.setText(unavailable + "（交付流程待接入，暂不可用）");
-            option.setEnabled(false);
-            resultGroup.addView(option);
-        }
+        tracelessResultView = new RadioButton(this);
+        tracelessResultView.setId(View.generateViewId());
+        tracelessResultView.setText("无痕（仅现场互译）");
+        tracelessResultView.setEnabled(false);
+        resultGroup.addView(tracelessResultView);
+        RadioButton qrPlaceholder = new RadioButton(this);
+        qrPlaceholder.setText("二维码（交付流程待接入，暂不可用）");
+        qrPlaceholder.setEnabled(false);
+        resultGroup.addView(qrPlaceholder);
         resultGroup.check(webResultView.getId());
         layout.addView(resultGroup);
 
@@ -245,7 +256,8 @@ public final class MainActivity extends Activity {
         resultEmailsView.setVisibility(View.GONE);
         layout.addView(resultEmailsView);
         resultGroup.setOnCheckedChangeListener((group, checkedId) -> {
-            resultWebUrlView.setEnabled(checkedId != localResultView.getId());
+            resultWebUrlView.setEnabled(checkedId != localResultView.getId()
+                    && checkedId != tracelessResultView.getId());
             resultEmailsView.setVisibility(checkedId == emailResultView.getId()
                     ? View.VISIBLE : View.GONE);
         });
@@ -488,6 +500,7 @@ public final class MainActivity extends Activity {
             return;
         }
         if (setup.resultDelivery() != MeetingSetup.ResultDelivery.LOCAL
+                && setup.resultDelivery() != MeetingSetup.ResultDelivery.TRACELESS
                 && setup.resultWebUrl().isEmpty()) {
             statusView.setText("请填写网页结果地址");
             return;
@@ -546,6 +559,9 @@ public final class MainActivity extends Activity {
         begin.putExtra(MeetingService.EXTRA_RESULT_DELIVERY, setup.resultDelivery().name());
         begin.putExtra(MeetingService.EXTRA_RESULT_EMAILS,
                 setup.resultEmails().toArray(new String[0]));
+        if (setup.resultDelivery() == MeetingSetup.ResultDelivery.TRACELESS) {
+            stopButton.setText("结束无痕互译");
+        }
         try {
             // 用户仍在前台点击开始时启动 microphone 前台 Service，再由 Service 建会/开 MIC。
             startForegroundService(begin);
@@ -573,6 +589,8 @@ public final class MainActivity extends Activity {
                         && presentationCaptureView.isChecked(), localResultView.isChecked()
                                 ? MeetingSetup.ResultDelivery.LOCAL
                                 : emailResultView.isChecked() ? MeetingSetup.ResultDelivery.EMAIL
+                                : tracelessResultView.isChecked()
+                                        ? MeetingSetup.ResultDelivery.TRACELESS
                                 : MeetingSetup.ResultDelivery.WEB,
                 resultWebUrlView.getText().toString().trim(), emails);
     }
