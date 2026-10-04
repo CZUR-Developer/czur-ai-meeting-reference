@@ -12,17 +12,20 @@ import android.view.Gravity;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import com.czur.aimeeting.model.ModelSession;
 import com.czur.aimeeting.model.ModelSessionGrant;
 import com.czur.aimeeting.model.ModelSessionListener;
 import com.czur.aimeeting.model.TranscriptEvent;
 import com.czur.aimeeting.reference.meeting.HttpReferenceMeetingClient;
+import com.czur.aimeeting.reference.meeting.HttpReferenceSessionClient;
 import com.czur.aimeeting.reference.meeting.CreatedMeeting;
 import com.czur.aimeeting.reference.meeting.MeetingRuntimeBridge;
 import com.czur.aimeeting.reference.meeting.MeetingRuntimeFactory;
 import com.czur.aimeeting.reference.meeting.MeetingCapabilityState;
 import com.czur.aimeeting.reference.meeting.ReferenceMeetingClient;
+import com.czur.aimeeting.reference.meeting.ReferenceLoginSession;
 import java.io.IOException;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
@@ -41,13 +44,17 @@ public final class MainActivity extends Activity {
     private volatile boolean modelFinished;
     private volatile String activeResultWebUrl;
     private EditText backendUrlView;
-    private EditText tokenView;
+    private EditText usernameView;
+    private EditText passwordView;
     private EditText resultWebUrlView;
     private TextView transcriptView;
     private TextView statusView;
     private TextView capabilityView;
     private Button startButton;
     private Button stopButton;
+    private Button loginButton;
+    private String sessionToken;
+    private String sessionBackendUrl;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -58,19 +65,35 @@ public final class MainActivity extends Activity {
         layout.setOrientation(LinearLayout.VERTICAL);
         layout.setGravity(Gravity.CENTER);
         layout.setPadding(40, 40, 40, 40);
+        ScrollView scrollView = new ScrollView(this);
+        scrollView.setFillViewport(true);
+        scrollView.addView(layout);
 
         backendUrlView = new EditText(this);
         backendUrlView.setSingleLine(true);
         backendUrlView.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        backendUrlView.setHint("后端地址，例如 http://192.168.1.10:8080");
+        backendUrlView.setHint("后端地址，例如 https://meeting.example.com");
         layout.addView(backendUrlView);
 
-        tokenView = new EditText(this);
-        tokenView.setSingleLine(true);
-        tokenView.setInputType(InputType.TYPE_CLASS_TEXT
+        usernameView = new EditText(this);
+        usernameView.setSingleLine(true);
+        usernameView.setHint("终端用户账号");
+        layout.addView(usernameView);
+
+        passwordView = new EditText(this);
+        passwordView.setSingleLine(true);
+        passwordView.setInputType(InputType.TYPE_CLASS_TEXT
                 | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        tokenView.setHint("reference-dev 演示 Token");
-        layout.addView(tokenView);
+        passwordView.setHint("密码");
+        layout.addView(passwordView);
+
+        loginButton = new Button(this);
+        loginButton.setText("登录");
+        loginButton.setOnClickListener(view -> {
+            if (sessionToken == null) login();
+            else logout();
+        });
+        layout.addView(loginButton);
 
         resultWebUrlView = new EditText(this);
         resultWebUrlView.setSingleLine(true);
@@ -81,11 +104,12 @@ public final class MainActivity extends Activity {
 
         transcriptView = new TextView(this);
         transcriptView.setTextSize(28);
-        transcriptView.setText("填写后端地址和演示 Token，再开始" + runtime.displayName() + "会议");
+        transcriptView.setText("请先登录，再开始" + runtime.displayName() + "会议");
         layout.addView(transcriptView);
 
         startButton = new Button(this);
         startButton.setText("开始会议");
+        startButton.setEnabled(false);
         startButton.setOnClickListener(view -> {
             if (runtime.waitsForModelFinish()
                     && checkSelfPermission(Manifest.permission.RECORD_AUDIO)
@@ -104,13 +128,67 @@ public final class MainActivity extends Activity {
         layout.addView(stopButton);
 
         statusView = new TextView(this);
-        statusView.setText("地址须由设备访问，设备上的 localhost 不是开发机");
+        statusView.setText("填写 HTTPS 后端地址和部署者预置的账号");
         layout.addView(statusView);
 
         capabilityView = new TextView(this);
         capabilityView.setText("本场功能将在创建会议后按后端能力显示");
         layout.addView(capabilityView);
-        setContentView(layout);
+        setContentView(scrollView);
+    }
+
+    /**
+     * 登录仅用于参考会议后端。凭据直接从输入框取出发送，后端令牌留在内存中；
+     * CZUR 系统账号、设备登录与这个会话互不依赖。
+     */
+    private void login() {
+        String baseUrl = backendUrlView.getText().toString().trim();
+        String username = usernameView.getText().toString().trim();
+        String password = passwordView.getText().toString();
+        if (baseUrl.isEmpty() || username.isEmpty() || password.isEmpty()) {
+            statusView.setText("请填写后端地址、账号和密码");
+            return;
+        }
+        loginButton.setEnabled(false);
+        statusView.setText("正在登录…");
+        network.execute(() -> {
+            try {
+                ReferenceLoginSession loginSession = new HttpReferenceSessionClient(baseUrl)
+                        .login(username, password);
+                Log.i(TAG, "参考账号登录成功");
+                runOnUiThread(() -> {
+                    sessionToken = loginSession.accessToken();
+                    sessionBackendUrl = baseUrl;
+                    passwordView.setText("");
+                    backendUrlView.setEnabled(false);
+                    usernameView.setEnabled(false);
+                    passwordView.setEnabled(false);
+                    loginButton.setText("切换账号");
+                    loginButton.setEnabled(true);
+                    startButton.setEnabled(true);
+                    statusView.setText("登录成功，可开始会议");
+                });
+            } catch (IOException failure) {
+                Log.w(TAG, "参考账号登录失败：" + failure.getClass().getSimpleName());
+                runOnUiThread(() -> {
+                    loginButton.setEnabled(true);
+                    statusView.setText(failure.getMessage());
+                });
+            }
+        });
+    }
+
+    /** 退出当前参考账号并允许重新配置后端；正在进行的会议不提供账号切换。 */
+    private void logout() {
+        sessionToken = null;
+        sessionBackendUrl = null;
+        backendUrlView.setEnabled(true);
+        usernameView.setEnabled(true);
+        passwordView.setEnabled(true);
+        loginButton.setText("登录");
+        startButton.setEnabled(false);
+        statusView.setText("已退出，请重新登录");
+        Log.i(TAG, "参考账号已退出");
     }
 
     @Override
@@ -126,14 +204,14 @@ public final class MainActivity extends Activity {
     }
 
     private void createAndStartMeeting() {
-        String baseUrl = backendUrlView.getText().toString().trim();
-        String token = tokenView.getText().toString().trim();
-        if (baseUrl.isEmpty() || token.isEmpty()) {
-            statusView.setText("请填写后端地址和演示 Token");
+        if (sessionToken == null) {
+            statusView.setText("请先登录");
             return;
         }
-        ReferenceMeetingClient client = new HttpReferenceMeetingClient(baseUrl, token);
+        ReferenceMeetingClient client = new HttpReferenceMeetingClient(sessionBackendUrl,
+                sessionToken);
         startButton.setEnabled(false);
+        loginButton.setEnabled(false);
         statusView.setText("正在创建会议…");
         network.execute(() -> {
             try {
@@ -153,6 +231,7 @@ public final class MainActivity extends Activity {
                 runOnUiThread(() -> {
                     statusView.setText(failure.getMessage());
                     startButton.setEnabled(true);
+                    loginButton.setEnabled(true);
                 });
             }
         });
@@ -201,7 +280,10 @@ public final class MainActivity extends Activity {
                 @Override
                 public void onError(String message) {
                     Log.e(TAG, "模型会话失败 meetingId=" + meetingId);
-                    runOnUiThread(() -> statusView.setText("模型会话失败，请检查连接与模型配置"));
+                    runOnUiThread(() -> {
+                        statusView.setText("模型会话失败，请检查连接与模型配置");
+                        loginButton.setEnabled(true);
+                    });
                 }
             });
             Log.i(TAG, "开始模型会话 runtime=" + runtime.displayName()
@@ -213,6 +295,7 @@ public final class MainActivity extends Activity {
                     + " errorType=" + failure.getClass().getSimpleName());
             statusView.setText("打开模型会话失败，请检查模型接入配置");
             startButton.setEnabled(true);
+            loginButton.setEnabled(true);
         }
     }
 
@@ -298,6 +381,8 @@ public final class MainActivity extends Activity {
             Log.i(TAG, "会议结束，打开会后结果 meetingId=" + meetingId);
             runOnUiThread(() -> {
                 statusView.setText("会议已结束，正在打开结果页");
+                startButton.setEnabled(true);
+                loginButton.setEnabled(true);
                 Intent intent = new Intent(this, ResultActivity.class);
                 intent.putExtra(ResultActivity.EXTRA_RESULT_URL, resultUri.toString());
                 startActivity(intent);

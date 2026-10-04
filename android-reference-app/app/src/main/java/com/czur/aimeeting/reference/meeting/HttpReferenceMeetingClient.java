@@ -14,7 +14,7 @@ import java.util.UUID;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-/** 本地演示后端的最小 HTTP 实现；Token 由页面输入，不写入 APK 或日志。 */
+/** 参考会议后端的最小 HTTP 实现；Token 由登录接口签发，不写入 APK 或日志。 */
 public final class HttpReferenceMeetingClient implements ReferenceMeetingClient {
     private final String baseUrl;
     private final String bearerToken;

@@ -45,10 +45,13 @@ SDK 从公共 `model-runtime-contract-0.2.0.jar` 编译，参考 App 只打包�
 `model-runtime-contract` 的同版类，避免重复类。SDK 模式的最终验收还需要设备说话
 产生真实字幕，并确认音频送达模型端点、后端只接收标准事件。
 
-点击开始会先用后端地址和本地 `reference-dev` 演示 Token 创建会议，
-再把标准字幕修订按顺序送到后端。地址应填设备可达的局域网地址，不能在设备上
-填写开发机的 `localhost`；Token 取自后端部署时自行设置的
-`REFERENCE_DEV_IDENTITY_BEARER_TOKEN`，不写入 APK、日志或持久化配置。
+P5-4 的会前入口先填写设备可达的后端地址，以及部署者预置的终端用户账号和密码。
+App 调用 `POST /v1/reference/session:login` 取得访问令牌，再以该令牌创建会议、
+提交标准字幕事件和结束会议。令牌仅保存在本次进程内，切换账号时清除；账号密码和
+令牌均不写入 APK、日志或持久化配置。登录地址须使用设备可访问的 HTTPS；本机调试
+可以通过 `adb reverse tcp:8080 tcp:8080`，在设备上填写 `http://127.0.0.1:8080`
+访问开发机。未做端口转发时，设备上的 `localhost` 不是开发机。参考账号与 CZUR
+系统账号相互独立。
 Mock 模式三次字幕都保存后可停止；SDK 模式随时可请求停止输入，等待模型最后一条
 字幕后再向后端结束会议。结果页地址单独填写
 已部署的静态 Web `index.html` 地址；Stop 返回已受理后，App 在内置 WebView
