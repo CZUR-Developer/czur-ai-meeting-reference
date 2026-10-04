@@ -18,6 +18,7 @@ import com.czur.reference.application.port.OwnedMeetingStopUnitOfWork;
 import com.czur.reference.application.port.RenewRealtimeTokenUnitOfWork;
 import com.czur.reference.protocol.json.MeetingManifestJson;
 import com.czur.reference.protocol.realtime.RealtimeTranscriptEventMapper;
+import com.czur.reference.protocol.realtime.RealtimeTranslationEventMapper;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -132,6 +133,9 @@ public final class HttpErrorMapper {
             case INVALID_STATE, INPUT_SOURCE_CONFLICT, EVENT_CONFLICT -> error(409,
                     HttpErrorEnvelope.Domain.CONTRACT, reason.name(), false,
                     HttpErrorEnvelope.UserAction.NONE, "ai_meeting.contract.input_conflict");
+            case CAPABILITY_NOT_GRANTED -> error(422, HttpErrorEnvelope.Domain.ENTITLEMENT,
+                    "TRANSLATION_NOT_GRANTED", false, HttpErrorEnvelope.UserAction.NONE,
+                    "ai_meeting.entitlement.translation_not_granted");
             case STORAGE_UNAVAILABLE -> error(503, HttpErrorEnvelope.Domain.STORAGE,
                     "CLIENT_INPUT_UNAVAILABLE", true, HttpErrorEnvelope.UserAction.RETRY,
                     "ai_meeting.storage.input_unavailable");
@@ -264,7 +268,11 @@ public final class HttpErrorMapper {
             ArrayNode items = body.putArray("items");
             for (var event : page.items()) {
                 // 验证正文、oneof、序号、类型和外层列；只解析已验证的规范 JSON。
-                RealtimeTranscriptEventMapper.fromStored(event);
+                if (RealtimeTranslationEventMapper.EVENT_TYPE.equals(event.eventType())) {
+                    RealtimeTranslationEventMapper.fromStored(event);
+                } else {
+                    RealtimeTranscriptEventMapper.fromStored(event);
+                }
                 items.add(EVENT_JSON.readTree(event.canonicalPayloadJson()));
             }
             body.put("lastSequence", page.lastSequence());

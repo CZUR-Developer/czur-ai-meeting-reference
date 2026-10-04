@@ -16,6 +16,7 @@ import com.czur.reference.application.port.MeetingQueryPort;
 import com.czur.reference.application.port.MeetingEventLogPort;
 import com.czur.reference.application.port.ClientMeetingInputPort;
 import com.czur.reference.application.port.model.CanonicalTranscriptEvent;
+import com.czur.reference.application.port.model.CanonicalTranslationEvent;
 import com.czur.reference.application.port.identity.IdentityVerificationRequest;
 import com.czur.reference.domain.meeting.MeetingIdPolicy;
 
@@ -25,6 +26,8 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.util.Objects;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -504,9 +507,9 @@ public final class MeetingHttpAdapter {
             if (!request.query().isEmpty()) {
                 throw new IllegalArgumentException("client event query is invalid");
             }
-            ClientMeetingInputPort.ClientTranscript transcript = decodeClientTranscript(request);
+            ClientMeetingInputPort.ClientEvent event = decodeClientEvent(request);
             return errors.clientAppend(clientInputPort.append(
-                    context, clientAppend.group(1), transcript));
+                    context, clientAppend.group(1), event));
         }
 
         if ("POST".equals(method) && MEETINGS_PATH.equals(path)) {
@@ -694,8 +697,11 @@ public final class MeetingHttpAdapter {
         }
     }
 
-    /** P4 只接一条标准字幕；模型原始响应及服务端 envelope 字段均不在请求中。 */
-    private static ClientMeetingInputPort.ClientTranscript decodeClientTranscript(
+    /**
+     * 仅接收一条标准字幕或译文；模型原始响应、服务端 Envelope 字段及混合 body
+     * 均不在客户端请求中。译文的本场能力许可由持久输入端口核验。
+     */
+    private static ClientMeetingInputPort.ClientEvent decodeClientEvent(
             HttpRequest request) {
         String contentType = request.header("content-type");
         if (contentType == null || !contentType.matches(
@@ -705,22 +711,44 @@ public final class MeetingHttpAdapter {
         try {
             JsonNode root = JSON.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
                     .readTree(request.body());
+            if (root != null && root.has("translationUpsert")) {
+                requireFields(root, Set.of("clientEventId", "clientSequence", "translationUpsert"));
+                JsonNode item = root.get("translationUpsert");
+                requireFields(item, Set.of("translationId", "sourceSegmentId", "revision",
+                        "operation", "sourceLanguage", "targetLanguage", "text", "final",
+                        "supersedesTranslationIds"));
+                JsonNode finalNode = item.get("final");
+                JsonNode supersedes = item.get("supersedesTranslationIds");
+                if (!finalNode.isBoolean() || !supersedes.isArray()) {
+                    throw new IllegalArgumentException("client translation fields are invalid");
+                }
+                List<String> ids = new ArrayList<>();
+                for (JsonNode id : supersedes) {
+                    if (!id.isTextual() || id.asText().isBlank()) {
+                        throw new IllegalArgumentException("client translation fields are invalid");
+                    }
+                    ids.add(id.asText());
+                }
+                var translation = new CanonicalTranslationEvent(
+                        textField(item, "translationId"),
+                        textField(item, "sourceSegmentId"), intField(item, "revision"),
+                        upsertOperation(item), textField(item, "sourceLanguage"),
+                        textField(item, "targetLanguage"), textField(item, "text"),
+                        finalNode.booleanValue(), ids);
+                return new ClientMeetingInputPort.ClientTranslation(
+                        textField(root, "clientEventId"), longField(root, "clientSequence"),
+                        translation);
+            }
             requireFields(root, Set.of("clientEventId", "clientSequence", "transcriptUpsert"));
             JsonNode body = root.get("transcriptUpsert");
             requireFields(body, Set.of("segmentId", "revision", "operation", "startMs",
                     "endMs", "language", "text", "final"));
-            String operation = textField(body, "operation");
-            CanonicalTranscriptEvent.Operation mapped = switch (operation) {
-                case "UPSERT_OPERATION_UPSERT" -> CanonicalTranscriptEvent.Operation.UPSERT;
-                case "UPSERT_OPERATION_REPLACE" -> CanonicalTranscriptEvent.Operation.REPLACE;
-                default -> throw new IllegalArgumentException("client event operation is invalid");
-            };
             JsonNode finalNode = body.get("final");
             if (!finalNode.isBoolean()) {
                 throw new IllegalArgumentException("client event final is invalid");
             }
             CanonicalTranscriptEvent transcript = new CanonicalTranscriptEvent(
-                    textField(body, "segmentId"), intField(body, "revision"), mapped,
+                    textField(body, "segmentId"), intField(body, "revision"), upsertOperation(body),
                     longField(body, "startMs"), longField(body, "endMs"),
                     textField(body, "language"), textField(body, "text"),
                     finalNode.booleanValue(), null, 1.0, java.util.List.of(),
@@ -731,6 +759,14 @@ public final class MeetingHttpAdapter {
         } catch (JsonProcessingException failure) {
             throw new IllegalArgumentException("client event JSON is invalid");
         }
+    }
+
+    private static CanonicalTranscriptEvent.Operation upsertOperation(JsonNode body) {
+        return switch (textField(body, "operation")) {
+            case "UPSERT_OPERATION_UPSERT" -> CanonicalTranscriptEvent.Operation.UPSERT;
+            case "UPSERT_OPERATION_REPLACE" -> CanonicalTranscriptEvent.Operation.REPLACE;
+            default -> throw new IllegalArgumentException("client event operation is invalid");
+        };
     }
 
     private static void requireFields(JsonNode node, Set<String> expected) {

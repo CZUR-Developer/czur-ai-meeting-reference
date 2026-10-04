@@ -6,10 +6,13 @@ import com.czur.reference.application.port.ClientMeetingInputPort;
 import com.czur.reference.application.port.EventLog;
 import com.czur.reference.application.port.EventLogStore;
 import com.czur.reference.application.port.MeetingStartExecutionUnitOfWork;
+import com.czur.reference.domain.capability.CapabilityDecision;
+import com.czur.reference.domain.capability.CapabilityIds;
 import com.czur.reference.application.realtime.RealtimeMeetingStartCoordinator;
 import com.czur.reference.domain.meeting.MeetingIdPolicy;
 import com.czur.reference.domain.meeting.MeetingState;
 import com.czur.reference.protocol.realtime.RealtimeTranscriptEventMapper;
+import com.czur.reference.protocol.realtime.RealtimeTranslationEventMapper;
 
 import javax.sql.DataSource;
 import java.nio.charset.StandardCharsets;
@@ -28,7 +31,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * 客户端字幕的 PostgreSQL 输入边界，复用原有 meeting_event 作为唯一标准事件源。
+ * 客户端字幕和译文的 PostgreSQL 输入边界，复用 meeting_event 作为唯一标准事件源。
  *
  * <p>存在 meeting_client_input 行表示本场由 App 提交事件；缺行表示旧后端音频链路。
  * 首次 start 先持久登记输入来源，再复用现有 Start 协调器冻结执行事实，避免把
@@ -73,7 +76,7 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
 
     @Override
     public AppendResult append(MeetingCommandContext context, String meetingId,
-            ClientTranscript request) {
+            ClientEvent request) {
         Objects.requireNonNull(context, "context");
         MeetingIdPolicy.requireValid(meetingId);
         Objects.requireNonNull(request, "request");
@@ -90,6 +93,10 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
                         && meeting.state() != MeetingState.RUNNING) {
                     return rollback(connection, new Rejected(Reason.INVALID_STATE));
                 }
+                if (request instanceof ClientTranslation
+                        && !translationEnabled(connection, meetingId)) {
+                    return rollback(connection, new Rejected(Reason.CAPABILITY_NOT_GRANTED));
+                }
 
                 ClientEventRow previous = findClientEvent(connection, meetingId,
                         request.clientEventId());
@@ -97,8 +104,7 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
                     EventLog winner = JdbcMeetingEventLogStore.findByEventId(
                             connection, previous.eventId()).orElse(null);
                     if (winner == null || previous.clientSequence() != request.clientSequence()
-                            || !RealtimeTranscriptEventMapper.sameTranscript(
-                                    winner, request.transcript())) {
+                            || !sameEvent(winner, request)) {
                         return rollback(connection, new Rejected(Reason.EVENT_CONFLICT));
                     }
                     connection.rollback();
@@ -110,9 +116,8 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
                 long sequence = Math.addExact(
                         JdbcMeetingEventLogStore.currentSequence(connection, meetingId), 1);
                 String eventId = eventId(meetingId, request.clientEventId());
-                EventLog event = RealtimeTranscriptEventMapper.event(meetingId, eventId,
-                        sequence, clock.instant().truncatedTo(ChronoUnit.MICROS),
-                        request.transcript());
+                EventLog event = createEvent(meetingId, eventId, sequence,
+                        clock.instant().truncatedTo(ChronoUnit.MICROS), request);
                 EventLogStore.AppendResult appended = JdbcMeetingEventLogStore.append(
                         connection, event);
                 if (appended.status() != EventLogStore.AppendStatus.APPENDED) {
@@ -130,18 +135,47 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
                     statement.executeUpdate();
                 }
                 connection.commit();
-                LOGGER.log(Level.FINE, "客户端字幕事件已保存 revision={0} final={1}",
-                        new Object[]{request.transcript().revision(), request.transcript().isFinal()});
+                LOGGER.log(Level.FINE, "客户端标准事件已保存 type={0}", event.eventType());
                 return new Appended(event, true);
             } catch (SQLException | RuntimeException failure) {
                 rollbackQuietly(connection);
-                LOGGER.log(Level.WARNING, "客户端字幕写入失败 reason={0}",
+                LOGGER.log(Level.WARNING, "客户端标准事件写入失败 reason={0}",
                         failure.getClass().getSimpleName());
                 return new Rejected(Reason.STORAGE_UNAVAILABLE);
             }
         } catch (SQLException failure) {
             return new Rejected(Reason.STORAGE_UNAVAILABLE);
         }
+    }
+
+    /** 能力以本场首次持久化 Create 决策为准；全局配置变动不改变既有会议。 */
+    private static boolean translationEnabled(Connection connection, String meetingId) {
+        var first = new JdbcCreateMeetingFactStore(connection)
+                .findByMeetingIdReadOnly(meetingId).orElse(null);
+        if (first == null || !first.request().requestSnapshot().requestedCapabilities()
+                .contains(CapabilityIds.TRANSLATION_REALTIME)) return false;
+        return first.response().capabilityDecisions().stream().anyMatch(decision ->
+                CapabilityIds.TRANSLATION_REALTIME.equals(decision.capability())
+                && decision.action() == CapabilityDecision.Action.ENABLE);
+    }
+
+    private static boolean sameEvent(EventLog winner, ClientEvent request) {
+        return switch (request) {
+            case ClientTranscript transcript -> RealtimeTranscriptEventMapper.sameTranscript(
+                    winner, transcript.transcript());
+            case ClientTranslation translation -> RealtimeTranslationEventMapper.sameTranslation(
+                    winner, translation.translation());
+        };
+    }
+
+    private static EventLog createEvent(String meetingId, String eventId, long sequence,
+            java.time.Instant at, ClientEvent request) {
+        return switch (request) {
+            case ClientTranscript transcript -> RealtimeTranscriptEventMapper.event(
+                    meetingId, eventId, sequence, at, transcript.transcript());
+            case ClientTranslation translation -> RealtimeTranslationEventMapper.event(
+                    meetingId, eventId, sequence, at, translation.translation());
+        };
     }
 
     private Rejected markClientSource(MeetingCommandContext context, String meetingId) {

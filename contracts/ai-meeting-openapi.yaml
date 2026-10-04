@@ -288,8 +288,8 @@ paths:
     post:
       tags: [Meetings]
       operationId: appendClientMeetingEvent
-      summary: App 提交一条已归一化的字幕事件
-      description: P4 首版仅接受 transcriptUpsert；App 提供稳定客户端事件 ID 和顺序，后端分配权威 eventId、eventSequence 和 emittedAt。模型原始响应不进入此接口。
+      summary: App 提交一条已归一化的字幕或译文事件
+      description: 接受 transcriptUpsert；本场翻译能力获准时也接受 translationUpsert。App 提供稳定客户端事件 ID 和共同顺序，后端分配权威 eventId、eventSequence 和 emittedAt。模型原始响应不进入此接口。
       security:
         - bearerAuth: []
       parameters:
@@ -299,7 +299,9 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/AppendClientTranscriptRequest"
+                oneOf:
+                  - $ref: "#/components/schemas/AppendClientTranscriptRequest"
+                  - $ref: "#/components/schemas/AppendClientTranslationRequest"
       responses:
         "201":
           description: 字幕事件已持久化
@@ -967,6 +969,38 @@ components:
           minimum: 1
         transcriptUpsert:
           $ref: "#/components/schemas/ClientTranscriptUpsert"
+    AppendClientTranslationRequest:
+      type: object
+      additionalProperties: false
+      required: [clientEventId, clientSequence, translationUpsert]
+      properties:
+        clientEventId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        clientSequence:
+          type: integer
+          format: int64
+          minimum: 1
+        translationUpsert:
+          $ref: "#/components/schemas/ClientTranslationUpsert"
+    ClientTranslationUpsert:
+      type: object
+      additionalProperties: false
+      required: [translationId, sourceSegmentId, revision, operation, sourceLanguage, targetLanguage, text, final, supersedesTranslationIds]
+      properties:
+        translationId: { type: string, minLength: 1 }
+        sourceSegmentId: { type: string, minLength: 1 }
+        revision: { type: integer, minimum: 1 }
+        operation:
+          enum: [UPSERT_OPERATION_UPSERT, UPSERT_OPERATION_REPLACE]
+        sourceLanguage: { type: string, minLength: 1 }
+        targetLanguage: { type: string, minLength: 1 }
+        text: { type: string }
+        final: { type: boolean }
+        supersedesTranslationIds:
+          type: array
+          items: { type: string, minLength: 1 }
     ClientTranscriptUpsert:
       type: object
       additionalProperties: false

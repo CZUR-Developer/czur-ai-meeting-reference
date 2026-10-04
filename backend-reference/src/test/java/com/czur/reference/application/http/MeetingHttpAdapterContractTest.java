@@ -282,10 +282,12 @@ class MeetingHttpAdapterContractTest {
         HttpResponse created = adapter.handle(append, context());
         assertEquals(201, created.status());
         assertTrue(created.body().contains("\"eventSequence\":\"1\""));
-        assertEquals("mock-segment-1-r1", client.request.clientEventId());
-        assertEquals(1, client.request.clientSequence());
-        assertEquals("模拟字幕", client.request.transcript().text());
-        assertEquals(0, client.request.transcript().endMs());
+        ClientMeetingInputPort.ClientTranscript sent =
+                (ClientMeetingInputPort.ClientTranscript) client.request;
+        assertEquals("mock-segment-1-r1", sent.clientEventId());
+        assertEquals(1, sent.clientSequence());
+        assertEquals("模拟字幕", sent.transcript().text());
+        assertEquals(0, sent.transcript().endMs());
         client.created = false;
         assertEquals(200, adapter.handle(append, context()).status());
 
@@ -294,6 +296,34 @@ class MeetingHttpAdapterContractTest {
                 "/v1/meetings/mtg_client/events:append",
                 Map.of("content-type", "application/json"),
                 body.replace("\"clientSequence\":1", "\"clientSequence\":0")),
+                context()).status());
+    }
+
+    @Test
+    void clientAppendAcceptsStandardTranslationAndRejectsMixedBody() {
+        RecordingClientInput client = new RecordingClientInput();
+        adapter = new MeetingHttpAdapter(query, deletion, decoder,
+                new HttpErrorMapper(() -> "client-diagnostic"), stopService(),
+                null, null, false, null, null, null, null, client);
+        String body = """
+                {"clientEventId":"translation-1-r1","clientSequence":2,
+                 "translationUpsert":{"translationId":"translation-1",
+                 "sourceSegmentId":"segment-1","revision":1,
+                 "operation":"UPSERT_OPERATION_UPSERT",
+                 "sourceLanguage":"zh-CN","targetLanguage":"en-US",
+                 "text":"Hello","final":true,"supersedesTranslationIds":[]}}
+                """;
+        HttpRequest append = new HttpRequest("POST",
+                "/v1/meetings/mtg_client/events:append",
+                Map.of("content-type", "application/json"), body);
+        assertEquals(201, adapter.handle(append, context()).status());
+        var sent = (ClientMeetingInputPort.ClientTranslation) client.request;
+        assertEquals("segment-1", sent.translation().sourceSegmentId());
+        assertEquals("en-US", sent.translation().targetLanguage());
+        assertEquals(400, adapter.handle(new HttpRequest("POST",
+                "/v1/meetings/mtg_client/events:append",
+                Map.of("content-type", "application/json"),
+                body.replace("\"translationUpsert\"", "\"transcriptUpsert\"")),
                 context()).status());
     }
 
@@ -777,7 +807,7 @@ class MeetingHttpAdapterContractTest {
 
     private static final class RecordingClientInput implements ClientMeetingInputPort {
         private String meetingId;
-        private ClientTranscript request;
+        private ClientEvent request;
         private boolean created = true;
 
         @Override public StartResult start(MeetingCommandContext context, String meetingId) {
@@ -786,11 +816,15 @@ class MeetingHttpAdapterContractTest {
         }
 
         @Override public AppendResult append(MeetingCommandContext context, String meetingId,
-                ClientTranscript request) {
+                ClientEvent eventRequest) {
             this.meetingId = meetingId;
-            this.request = request;
-            EventLog event = RealtimeTranscriptEventMapper.event(meetingId,
-                    "evt_client_test", 1, NOW, request.transcript());
+            this.request = eventRequest;
+            EventLog event = eventRequest instanceof ClientTranscript transcript
+                    ? RealtimeTranscriptEventMapper.event(meetingId,
+                            "evt_client_test", 1, NOW, transcript.transcript())
+                    : com.czur.reference.protocol.realtime.RealtimeTranslationEventMapper.event(
+                            meetingId, "evt_client_test", 1, NOW,
+                            ((ClientTranslation) eventRequest).translation());
             return new Appended(event, created);
         }
     }

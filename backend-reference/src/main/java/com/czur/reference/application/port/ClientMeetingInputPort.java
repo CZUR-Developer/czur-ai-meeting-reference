@@ -2,6 +2,7 @@ package com.czur.reference.application.port;
 
 import com.czur.reference.application.command.MeetingCommandContext;
 import com.czur.reference.application.port.model.CanonicalTranscriptEvent;
+import com.czur.reference.application.port.model.CanonicalTranslationEvent;
 import com.czur.reference.domain.meeting.MeetingState;
 
 import java.util.Objects;
@@ -9,7 +10,7 @@ import java.util.Objects;
 /**
  * Android 直连模型后向参考后端提交标准事件的最小入口。
  *
- * <p>App 只提交客户端事件身份和规范化字幕；服务端负责会议归属、输入来源、
+ * <p>App 只提交客户端事件身份和规范化字幕或译文；服务端负责会议归属、输入来源、
  * 全局事件序号及完整 ServerEnvelope。此端口不接收音频或模型厂商原始响应。
  * 无客户端输入标记的旧会议仍使用 WSS 音频链路。</p>
  */
@@ -17,13 +18,22 @@ public interface ClientMeetingInputPort {
     /** 首次启动客户端事件链路，或读取同一链路已完成的启动。 */
     StartResult start(MeetingCommandContext context, String meetingId);
 
-    /** 按客户端稳定身份提交一条标准字幕，返回已持久化的服务端事件。 */
+    /**
+     * 按客户端稳定身份与连续顺序提交一条标准字幕或译文。译文须经本场冻结能力
+     * 决策许可；实现分配权威事件 ID/序号并保存完整 ServerEnvelope。
+     */
     AppendResult append(MeetingCommandContext context, String meetingId,
-            ClientTranscript request);
+            ClientEvent request);
+
+    /** 两种事件共用客户端去重身份和顺序；内容保持强类型。 */
+    sealed interface ClientEvent permits ClientTranscript, ClientTranslation {
+        String clientEventId();
+        long clientSequence();
+    }
 
     /** 客户端顺序和 ID 只用于去重；权威事件序号由后端另行分配。 */
     record ClientTranscript(String clientEventId, long clientSequence,
-            CanonicalTranscriptEvent transcript) {
+            CanonicalTranscriptEvent transcript) implements ClientEvent {
         public ClientTranscript {
             if (clientEventId == null || clientEventId.isBlank()
                     || clientEventId.length() > 128) {
@@ -33,6 +43,21 @@ public interface ClientMeetingInputPort {
                 throw new IllegalArgumentException("clientSequence must be positive");
             }
             Objects.requireNonNull(transcript, "transcript");
+        }
+    }
+
+    /** 与字幕共享同一序号空间的标准译文修订。 */
+    record ClientTranslation(String clientEventId, long clientSequence,
+            CanonicalTranslationEvent translation) implements ClientEvent {
+        public ClientTranslation {
+            if (clientEventId == null || clientEventId.isBlank()
+                    || clientEventId.length() > 128) {
+                throw new IllegalArgumentException("clientEventId is invalid");
+            }
+            if (clientSequence <= 0) {
+                throw new IllegalArgumentException("clientSequence must be positive");
+            }
+            Objects.requireNonNull(translation, "translation");
         }
     }
 
@@ -56,5 +81,5 @@ public interface ClientMeetingInputPort {
     }
 
     enum Reason { NOT_FOUND, ACCESS_DENIED, INVALID_STATE, INPUT_SOURCE_CONFLICT,
-        EVENT_CONFLICT, STORAGE_UNAVAILABLE }
+        EVENT_CONFLICT, CAPABILITY_NOT_GRANTED, STORAGE_UNAVAILABLE }
 }
