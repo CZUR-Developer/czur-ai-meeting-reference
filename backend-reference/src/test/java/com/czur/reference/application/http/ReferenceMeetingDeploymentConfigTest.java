@@ -7,6 +7,7 @@ import com.czur.reference.application.finalization.FinalizationExecutionFact;
 import com.czur.reference.application.finalization.ProductProfileSnapshot;
 import com.czur.reference.application.identity.referencedev.ReferenceDevIdentityConfig;
 import com.czur.reference.application.identity.referencedev.ReferenceDevIdentityProvider;
+import com.czur.reference.application.identity.referencedev.ReferenceDevLoginConfig;
 import com.czur.reference.application.persistence.jdbc.DatabaseRuntimeConfig;
 import com.czur.reference.application.port.FinalizationInputFact;
 import com.czur.reference.application.port.entitlement.MeetingGrant;
@@ -17,6 +18,7 @@ import com.czur.reference.domain.capability.CapabilityIds;
 import com.czur.reference.domain.capability.CapabilityDecision;
 import com.czur.reference.domain.capability.CapabilityPlanner;
 import org.junit.jupiter.api.Test;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
@@ -38,6 +40,46 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ReferenceMeetingDeploymentConfigTest {
     private static final String TOKEN = "local-test-token-0123456789-abcdefgh";
     private static final String SECRET = "page-secret-0123456789-abcdefghijkl";
+
+    @Test
+    void preconfiguredUserLogsInAndReceivesTheExistingMeetingBearer() throws Exception {
+        Map<String, String> values = valid();
+        assertTrue(ReferenceMeetingDeploymentConfig.fromEnvironment(values).login().isEmpty());
+        values.put(ReferenceDevLoginConfig.USERNAME, "meeting-user");
+        values.put(ReferenceDevLoginConfig.PASSWORD, "local-password");
+        var config = ReferenceMeetingDeploymentConfig.fromEnvironment(values);
+        Clock clock = Clock.fixed(Instant.parse("2026-10-01T00:00:00Z"), ZoneOffset.UTC);
+        var endpoint = new ReferenceDevSessionLoginEndpoint(config.login().orElseThrow(),
+                new HttpErrorMapper(), clock);
+        HttpResponse response = endpoint.handle(new HttpRequest("POST",
+                ReferenceDevSessionLoginEndpoint.PATH,
+                Map.of("content-type", "application/json"),
+                "{\"username\":\"meeting-user\",\"password\":\"local-password\"}"));
+        assertEquals(200, response.status());
+        var body = new ObjectMapper().readTree(response.body());
+        assertEquals("2027-01-01T00:00:00Z", body.get("expiresAt").textValue());
+        String token = body.get("accessToken").textValue();
+        try (SecretCredential credential = SecretCredential.copyOf(
+                token.getBytes(StandardCharsets.UTF_8))) {
+            var verification = new IdentityVerificationRequest(
+                    IdentityVerificationRequest.CredentialType.BEARER_TOKEN,
+                    credential, config.audience(), config.clientId());
+            assertTrue(new ReferenceDevIdentityProvider(config.identity(), clock)
+                    .verifyCredential(verification).isSuccess());
+        }
+        assertEquals(401, endpoint.handle(new HttpRequest("POST",
+                ReferenceDevSessionLoginEndpoint.PATH, Map.of(),
+                "{\"username\":\"meeting-user\",\"password\":\"wrong\"}"))
+                .status());
+        assertEquals(400, endpoint.handle(new HttpRequest("POST",
+                ReferenceDevSessionLoginEndpoint.PATH, Map.of(), "{}"))
+                .status());
+        assertFalse(config.login().orElseThrow().toString().contains("local-password"));
+
+        Map<String, String> incomplete = valid();
+        incomplete.put(ReferenceDevLoginConfig.USERNAME, "meeting-user");
+        rejects(incomplete, "预置登录");
+    }
 
     @Test
     void asrOnlyUsesOneTrustedProfileAndIdentitySourceWithoutOpeningDatabase() {

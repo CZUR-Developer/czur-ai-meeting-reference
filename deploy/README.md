@@ -10,12 +10,21 @@
 | --- | --- |
 | `REFERENCE_DEV_IDENTITY_ENABLED`、`AI_MEETING_CREATE_ENABLED` | 演示时都设为 `true`。 |
 | `REFERENCE_DEV_IDENTITY_BEARER_TOKEN` | 自行指定不少于 32 字节的演示登录 Token；调用会议接口时作为 Bearer Token。 |
+| `REFERENCE_DEV_LOGIN_USERNAME`、`REFERENCE_DEV_LOGIN_PASSWORD` | 同时填写一个部署者预置的终端用户账号，参考 App 登录成功后取得上述 Token；不提供自助注册。 |
 | `AI_MEETING_PAGE_TOKEN_SECRET` | 自行指定不少于 32 字节的分页密钥。 |
 | `AI_MEETING_TLS_KEYSTORE_FILE`、`AI_MEETING_TLS_KEYSTORE_PASSWORD` | 可读取的 PKCS#12 文件路径及其密码；Compose 将文件只读挂载给 WSS。 |
 | `AI_MEETING_WSS_ORIGIN` | App 可访问的 `wss://主机:端口`；端口须与 `WSS_PORT` 一致。 |
 | `AI_MEETING_ARTIFACT_STORE` | `file`（默认）或 `s3`，决定结果正文的存放位置。 |
 
 示例已经给出 24 小时的结果链接有效期；如需调整，修改 `AI_MEETING_RESULT_LINK_TTL_MS`。保持该项为正数，才能读取结果页使用的 Manifest。
+
+参考 App 调用 `POST /v1/reference/session:login`，发送
+`{"username":"meeting-user","password":"..."}`，成功响应中的 `accessToken`
+用于后续会议 API，`expiresAt` 取自同一 reference-dev 身份配置。这个单账号入口
+仅供开源参考部署演示；合作伙伴自行实现其终端用户身份体系。
+设备跨网络访问该登录接口时，应在参考后端前使用 HTTPS 反向代理；本机调试可用
+`adb reverse` 将设备端 loopback 端口映射到开发机，再用 loopback HTTP。参考后端
+本身仍只监听 HTTP，不在此阶段增加 TLS 服务或账号管理框架。
 
 本地演示证书可用 `keytool -genkeypair -alias meeting -keyalg RSA -storetype PKCS12 -keystore local-meeting.p12 -validity 30 -dname CN=localhost -ext SAN=dns:localhost,ip:127.0.0.1` 生成，按提示输入密码，再填入 `.env`。使用自签名证书的客户端需要信任该证书。`.env` 和证书不入库。
 

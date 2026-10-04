@@ -44,6 +44,7 @@ public final class MeetingHttpRuntime implements AutoCloseable {
 
     private final MeetingHttpAdapter adapter;
     private final HttpErrorMapper errors;
+    private final ReferenceDevSessionLoginEndpoint referenceLogin;
     private final AtomicBoolean closed = new AtomicBoolean(false);
 
     /**
@@ -193,9 +194,32 @@ public final class MeetingHttpRuntime implements AutoCloseable {
             MeetingEventLogPort eventLogPort,
             ClientMeetingInputPort clientInputPort,
             ModelSessionIssuer modelSessions) {
+        this(queryPort, deletionPort, decoder, errors, stopService, createService,
+                createDecoder, createEnabled, manifestPort, renewService, artifactPort,
+                eventLogPort, clientInputPort, modelSessions, null);
+    }
+
+    /** 显式装配参考部署的预置账号登录；null 保持原有路由行为。 */
+    public MeetingHttpRuntime(
+            MeetingQueryPort queryPort,
+            MeetingDeletionPort deletionPort,
+            MeetingHttpAdapter.RequestDecoder decoder,
+            HttpErrorMapper errors,
+            AuthenticatedMeetingStopApplicationService stopService,
+            AuthenticatedCompleteMeetingApplicationService createService,
+            CreateMeetingHttpRequestDecoder createDecoder,
+            boolean createEnabled,
+            MeetingManifestPort manifestPort,
+            AuthenticatedRealtimeTokenRenewApplicationService renewService,
+            MeetingArtifactContentPort artifactPort,
+            MeetingEventLogPort eventLogPort,
+            ClientMeetingInputPort clientInputPort,
+            ModelSessionIssuer modelSessions,
+            ReferenceDevSessionLoginEndpoint referenceLogin) {
         this(new MeetingHttpAdapter(queryPort, deletionPort, decoder, errors, stopService,
                 createService, createDecoder, createEnabled, manifestPort, renewService,
-                artifactPort, eventLogPort, clientInputPort, modelSessions), errors);
+                artifactPort, eventLogPort, clientInputPort, modelSessions), errors,
+                referenceLogin);
     }
 
     /** 使用默认错误映射器创建已认证 Stop 运行时。 */
@@ -214,8 +238,14 @@ public final class MeetingHttpRuntime implements AutoCloseable {
      * 关闭响应和 adapter 内的业务错误使用同一套 envelope 版本与诊断 ID 策略。</p>
      */
     public MeetingHttpRuntime(MeetingHttpAdapter adapter, HttpErrorMapper errors) {
+        this(adapter, errors, null);
+    }
+
+    private MeetingHttpRuntime(MeetingHttpAdapter adapter, HttpErrorMapper errors,
+            ReferenceDevSessionLoginEndpoint referenceLogin) {
         this.adapter = Objects.requireNonNull(adapter, "adapter");
         this.errors = Objects.requireNonNull(errors, "errors");
+        this.referenceLogin = referenceLogin;
         LOGGER.log(Level.INFO, "meeting HTTP 运行时装配完成");
     }
 
@@ -236,6 +266,10 @@ public final class MeetingHttpRuntime implements AutoCloseable {
         if (closed.get()) {
             LOGGER.log(Level.WARNING, "meeting HTTP 运行时拒绝请求 reason=RUNTIME_CLOSED");
             return errors.runtimeUnavailable();
+        }
+        if (referenceLogin != null
+                && ReferenceDevSessionLoginEndpoint.PATH.equals(request.path())) {
+            return referenceLogin.handle(request);
         }
         return adapter.handle(request, context);
     }

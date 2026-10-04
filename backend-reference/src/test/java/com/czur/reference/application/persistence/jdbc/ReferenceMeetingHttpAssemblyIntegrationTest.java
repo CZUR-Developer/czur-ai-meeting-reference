@@ -12,6 +12,7 @@ import com.czur.reference.application.finalization.MockFinalizationWorker;
 import com.czur.reference.application.http.AuthenticatedMeetingHttpContextResolver;
 import com.czur.reference.application.http.HttpRequest;
 import com.czur.reference.application.http.MeetingJdkHttpServer;
+import com.czur.reference.application.http.ReferenceDevSessionLoginEndpoint;
 import com.czur.reference.application.command.MeetingPermissions;
 import com.czur.reference.application.port.OwnedMeetingCreationUnitOfWork;
 import com.czur.reference.application.port.IdempotencyScopeCodec;
@@ -34,6 +35,7 @@ import com.czur.reference.application.port.entitlement.UsageOperationResult;
 import com.czur.reference.application.port.entitlement.UsageReservation;
 import com.czur.reference.application.port.entitlement.UsageUnit;
 import com.czur.reference.application.identity.referencedev.ReferenceDevIdentityConfig;
+import com.czur.reference.application.identity.referencedev.ReferenceDevLoginConfig;
 import com.czur.reference.application.manifest.ManifestResultAccessPolicy;
 import com.czur.reference.domain.meeting.MeetingState;
 import com.czur.reference.domain.meeting.MeetingAggregate;
@@ -139,6 +141,40 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
 
     private String schema;
     private PGSimpleDataSource fixtureDataSource;
+
+    @Test
+    void preconfiguredLoginTokenCanCreateAndStartClientMeetingOverHttp() throws Exception {
+        migrate(1);
+        Map<String, String> settings = enabledConfig();
+        settings.put(ReferenceDevLoginConfig.USERNAME, "meeting-user");
+        settings.put(ReferenceDevLoginConfig.PASSWORD, "local-password");
+        try (var assembly = ReferenceMeetingHttpAssembly.start(settings, CLOCK);
+             var network = assembly.newJdkHttpServer(
+                     new InetSocketAddress("127.0.0.1", 0))) {
+            network.start();
+            int port = network.address().getPort();
+            String login = exchange(port, "POST", ReferenceDevSessionLoginEndpoint.PATH,
+                    "{\"username\":\"meeting-user\",\"password\":\"local-password\"}",
+                    "Content-Type: application/json\r\n");
+            assertEquals(200, status(login));
+            JsonNode session = ERROR_JSON.readTree(responseBody(login));
+            String issuedToken = session.path("accessToken").asText();
+            assertEquals(TOKEN, issuedToken);
+            assertEquals("2027-01-01T00:00:00Z", session.path("expiresAt").asText());
+
+            String key = "login-create-key-123456789";
+            String create = exchange(port, "POST", "/v1/meetings",
+                    createRequest(key, "login-session").body(),
+                    networkHeaders(issuedToken, key, true));
+            assertEquals(201, status(create));
+            String meetingId = ERROR_JSON.readTree(responseBody(create))
+                    .path("meetingId").asText();
+            String start = exchange(port, "POST", "/v1/meetings/" + meetingId
+                    + ":startClient", "", networkHeaders(issuedToken, null, false));
+            assertEquals(200, status(start));
+            assertEquals("RUNNING", meetingState(meetingId));
+        }
+    }
 
     @BeforeEach
     void createOwnSchema() throws Exception {

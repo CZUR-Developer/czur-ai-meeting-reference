@@ -5,6 +5,7 @@ import com.czur.reference.application.entitlement.referencedev.ReferenceDevEntit
 import com.czur.reference.application.finalization.MockFinalizationArtifactContent;
 import com.czur.reference.application.finalization.ProductProfileSnapshot;
 import com.czur.reference.application.identity.referencedev.ReferenceDevIdentityConfig;
+import com.czur.reference.application.identity.referencedev.ReferenceDevLoginConfig;
 import com.czur.reference.application.model.SampleJsonWsModelSessionIssuer;
 import com.czur.reference.application.model.TingwuModelSessionConfig;
 import com.czur.reference.application.persistence.jdbc.DatabaseRuntimeConfig;
@@ -81,6 +82,7 @@ public final class ReferenceMeetingDeploymentConfig {
 
     private final DatabaseRuntimeConfig database;
     private final ReferenceDevIdentityConfig identity;
+    private final ReferenceDevLoginConfig login;
     private final String deploymentScope;
     private final String audience;
     private final String clientId;
@@ -102,6 +104,7 @@ public final class ReferenceMeetingDeploymentConfig {
     private ReferenceMeetingDeploymentConfig(
             DatabaseRuntimeConfig database,
             ReferenceDevIdentityConfig identity,
+            ReferenceDevLoginConfig login,
             String deploymentScope, String audience, String clientId,
             ProductProfile profile, ReferenceDevEntitlementPolicyConfig entitlement,
             CapabilityDescriptor mockCapabilities, DeploymentLimits capabilityLimits,
@@ -111,6 +114,7 @@ public final class ReferenceMeetingDeploymentConfig {
             TingwuModelSessionConfig tingwuModelSession, URI sampleJsonWsEndpoint) {
         this.database = database;
         this.identity = identity;
+        this.login = login;
         this.deploymentScope = deploymentScope;
         this.audience = audience;
         this.clientId = clientId;
@@ -154,6 +158,8 @@ public final class ReferenceMeetingDeploymentConfig {
         if (!identity.enabled()) {
             throw invalid(ReferenceDevIdentityConfig.ENABLED);
         }
+        ReferenceDevLoginConfig login = ReferenceDevLoginConfig.fromEnvironment(
+                environment, identity);
         String scope = required(environment, DEPLOYMENT_SCOPE);
         // IdentityConfig 已用同一映射验证这两个必填字段；不需要修改其包内 API。
         String audience = required(environment, ReferenceDevIdentityConfig.AUDIENCE);
@@ -287,7 +293,7 @@ public final class ReferenceMeetingDeploymentConfig {
             } else {
                 throw invalid(MODEL_ADAPTER);
             }
-            return new ReferenceMeetingDeploymentConfig(database, identity, scope,
+            return new ReferenceMeetingDeploymentConfig(database, identity, login, scope,
                     audience, clientId, profile, entitlement, mock, limits, estimate,
                     runtimeLimits, secret, wssOrigin, tokenTtl,
                     enabled, renewEnabled, resultLinkTtl,
@@ -299,6 +305,8 @@ public final class ReferenceMeetingDeploymentConfig {
 
     public DatabaseRuntimeConfig database() { return database; }
     public ReferenceDevIdentityConfig identity() { return identity; }
+    /** 仅当部署者同时预置用户名和密码时开放参考登录；不用于伙伴生产认证。 */
+    public Optional<ReferenceDevLoginConfig> login() { return Optional.ofNullable(login); }
     public String deploymentScope() { return deploymentScope; }
     /** Create/Stop/GET/DELETE 身份验证共用的服务端受众。 */
     public String audience() { return audience; }

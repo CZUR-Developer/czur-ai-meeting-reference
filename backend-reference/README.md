@@ -118,8 +118,12 @@ Profile 切换实现。
 启用。启用后必须完整配置 `.env.example` 中的 Token、稳定主体、角色、权限、
 audience、client 和有效期；缺失或非法配置会在装配阶段失败，不会静默匿名登录。
 配置对象只保存固定 Token 的 SHA-256 摘要，诊断文本和日志不会输出 Token、摘要、
-主体或完整请求。它不提供登录页面、用户注册、管理员后台、Token 刷新或生产认证，
-部署方不得把该固定凭据方案作为正式合作伙伴身份系统。
+主体或完整请求。部署者可额外配置 `REFERENCE_DEV_LOGIN_USERNAME` 和
+`REFERENCE_DEV_LOGIN_PASSWORD`，开放参考 App 使用的
+`POST /v1/reference/session:login`：提交 `{"username":"...","password":"..."}`，
+成功返回 `{"accessToken":"...","expiresAt":"..."}`，其中 Token 与上述固定
+Bearer Token 相同。该演示入口只有一个预置账号，不提供自助注册、管理员后台、
+Token 刷新或生产认证；合作伙伴应替换身份实现，不把它当作正式账号体系。
 
 ## P3-T04 Driver 契约测试
 

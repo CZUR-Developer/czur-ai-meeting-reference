@@ -15,6 +15,7 @@ import com.czur.reference.application.http.HttpErrorMapper;
 import com.czur.reference.application.http.MeetingJdkHttpServer;
 import com.czur.reference.application.http.MeetingHttpRuntime;
 import com.czur.reference.application.http.ReferenceMeetingHttpRequestDecoder;
+import com.czur.reference.application.http.ReferenceDevSessionLoginEndpoint;
 import com.czur.reference.application.identity.referencedev.ReferenceDevIdentityProvider;
 import com.czur.reference.application.manifest.ManifestResultAccessPolicy;
 import com.czur.reference.application.model.ModelSessionIssuer;
@@ -187,6 +188,9 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
             var deletion = new JdbcMeetingDeletionAdmissionUnitOfWork(dataSource, clock);
             var identity = new ReferenceDevIdentityProvider(config.identity(), clock);
             var errors = new HttpErrorMapper();
+            var referenceLogin = config.login()
+                    .map(login -> new ReferenceDevSessionLoginEndpoint(login, errors, clock))
+                    .orElse(null);
             var decoder = new ReferenceMeetingHttpRequestDecoder(
                     config.audience(), config.clientId());
             var resolver = new AuthenticatedMeetingHttpContextResolver(
@@ -272,11 +276,12 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                 runtime = new MeetingHttpRuntime(query, deletion, decoder, errors, stopService,
                         create, new CreateMeetingHttpRequestDecoder(
                                 config.audience(), config.clientId()), true, manifest,
-                        renewService, artifact, events, clientInput, modelSessions);
+                        renewService, artifact, events, clientInput, modelSessions,
+                        referenceLogin);
             } else {
                 runtime = new MeetingHttpRuntime(query, deletion, decoder, errors, stopService,
                         null, null, false, manifest, renewService, artifact, events,
-                        clientInput, modelSessions);
+                        clientInput, modelSessions, referenceLogin);
             }
             LOGGER.log(Level.INFO,
                     "reference meeting HTTP 装配完成 createEnabled={0} realtimeRenewEnabled={1}",
