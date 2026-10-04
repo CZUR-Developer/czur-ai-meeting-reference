@@ -27,6 +27,10 @@ public interface ReferenceMeetingClient {
     void appendTranslation(String meetingId, int clientSequence, TranslationEvent event)
             throws IOException;
 
+    /** 演示截图与字幕事件使用独立的包序号；每包至少一帧。 */
+    void appendPresentation(String meetingId, int chunkSequence, long offsetMs, byte[] jpeg)
+            throws IOException;
+
     /**
      * 请求结束会议。返回 true 表示后端已受理完整输入（HTTP 200）；
      * 返回 false 表示 Stop 已记录但仍在收口（HTTP 202）。

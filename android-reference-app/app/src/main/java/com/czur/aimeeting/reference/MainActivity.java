@@ -7,7 +7,10 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
+import android.media.projection.MediaProjectionConfig;
+import android.media.projection.MediaProjectionManager;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.provider.Settings;
@@ -42,6 +45,7 @@ import java.util.concurrent.Executors;
 public final class MainActivity extends Activity {
     private static final String TAG = "AiMeetingReference";
     private static final int MIC_PERMISSION_REQUEST = 1001;
+    private static final int PRESENTATION_PERMISSION_REQUEST = 1002;
     private final ExecutorService network = Executors.newSingleThreadExecutor();
     private final MeetingService.Observer observer = this::renderMeetingState;
     private final ServiceConnection serviceConnection = new ServiceConnection() {
@@ -90,6 +94,7 @@ public final class MainActivity extends Activity {
     private Button loginButton;
     private String sessionToken;
     private String sessionBackendUrl;
+    private MeetingSetup pendingPresentationSetup;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -187,13 +192,15 @@ public final class MainActivity extends Activity {
         targetLanguageView.setSelection(1);
         targetLanguageView.setEnabled(false);
         layout.addView(targetLanguageView);
-        modeGroup.setOnCheckedChangeListener((group, checkedId) ->
-                targetLanguageView.setEnabled(checkedId == translationModeView.getId()));
-
         presentationCaptureView = new CheckBox(this);
-        presentationCaptureView.setText("演示文稿（会中采集待接入，暂不可用）");
-        presentationCaptureView.setEnabled(false);
+        presentationCaptureView.setText("演示文稿（每10秒采集屏幕，开始时需系统授权）");
         layout.addView(presentationCaptureView);
+        modeGroup.setOnCheckedChangeListener((group, checkedId) -> {
+            targetLanguageView.setEnabled(checkedId == translationModeView.getId());
+            boolean transcript = checkedId == transcriptModeView.getId();
+            if (!transcript) presentationCaptureView.setChecked(false);
+            presentationCaptureView.setEnabled(transcript);
+        });
 
         TextView resultTitle = new TextView(this);
         resultTitle.setText("结果获取方式");
@@ -368,6 +375,22 @@ public final class MainActivity extends Activity {
         }
     }
 
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != PRESENTATION_PERMISSION_REQUEST) return;
+        MeetingSetup approved = pendingPresentationSetup;
+        pendingPresentationSetup = null;
+        if (approved == null) return;
+        if (resultCode != RESULT_OK || data == null) {
+            statusView.setText("未授予系统屏幕采集权限，会议未开始");
+            startButton.setEnabled(true);
+            loginButton.setEnabled(true);
+            return;
+        }
+        startMeeting(approved, resultCode, data);
+    }
+
     private void createAndStartMeeting() {
         if (sessionToken == null) {
             statusView.setText("请先登录");
@@ -384,6 +407,32 @@ public final class MainActivity extends Activity {
             statusView.setText("当前仅支持网页查看，请填写网页结果地址");
             return;
         }
+        if (setup.presentationCapture()) {
+            pendingPresentationSetup = setup;
+            startButton.setEnabled(false);
+            loginButton.setEnabled(false);
+            statusView.setText("请在系统弹窗中授权共享整个屏幕");
+            try {
+                MediaProjectionManager manager = getSystemService(MediaProjectionManager.class);
+                Intent permission = Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE
+                        ? manager.createScreenCaptureIntent(
+                                MediaProjectionConfig.createConfigForDefaultDisplay())
+                        : manager.createScreenCaptureIntent();
+                startActivityForResult(permission, PRESENTATION_PERMISSION_REQUEST);
+            } catch (RuntimeException failure) {
+                pendingPresentationSetup = null;
+                startButton.setEnabled(true);
+                loginButton.setEnabled(true);
+                statusView.setText("无法打开系统屏幕采集授权弹窗");
+                Log.e(TAG, "请求屏幕采集授权失败", failure);
+            }
+            return;
+        }
+        startMeeting(setup, 0, null);
+    }
+
+    private void startMeeting(MeetingSetup setup, int projectionResultCode,
+            Intent projectionData) {
         startButton.setEnabled(false);
         loginButton.setEnabled(false);
         statusView.setText("正在创建会议…");
@@ -395,6 +444,10 @@ public final class MainActivity extends Activity {
         begin.putExtra(MeetingService.EXTRA_SOURCE, setup.sourceLanguage());
         begin.putExtra(MeetingService.EXTRA_TARGET, setup.targetLanguage());
         begin.putExtra(MeetingService.EXTRA_PRESENTATION, setup.presentationCapture());
+        if (projectionData != null) {
+            begin.putExtra(MeetingService.EXTRA_PROJECTION_RESULT_CODE, projectionResultCode);
+            begin.putExtra(MeetingService.EXTRA_PROJECTION_DATA, projectionData);
+        }
         begin.putExtra(MeetingService.EXTRA_RESULT_WEB, setup.resultWebUrl());
         try {
             // 用户仍在前台点击开始时启动 microphone 前台 Service，再由 Service 建会/开 MIC。
@@ -415,7 +468,8 @@ public final class MainActivity extends Activity {
         String[] codes = {"zh-CN", "en-US"};
         return new MeetingSetup(mode, codes[sourceLanguageView.getSelectedItemPosition()],
                 codes[targetLanguageView.getSelectedItemPosition()],
-                presentationCaptureView.isChecked(), MeetingSetup.ResultDelivery.WEB,
+                mode == MeetingSetup.Mode.LIVE_TRANSCRIPT
+                        && presentationCaptureView.isChecked(), MeetingSetup.ResultDelivery.WEB,
                 resultWebUrlView.getText().toString().trim());
     }
 

@@ -1,11 +1,13 @@
 package com.czur.aimeeting.reference.meeting;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertTrue;
 
 import com.czur.aimeeting.model.TranscriptEvent;
 import com.czur.aimeeting.model.TranslationEvent;
 import java.util.List;
+import java.util.Base64;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import okhttp3.mockwebserver.RecordedRequest;
@@ -181,6 +183,38 @@ public final class HttpReferenceMeetingClientTest {
             assertTrue(!partial.has("transcriptUpsert"));
             assertTrue(finalTranslation.getJSONObject("translationUpsert").getBoolean("final"));
             assertEquals("/v1/meetings/mtg_translation:stop", stop.getPath());
+        }
+    }
+
+    @Test
+    public void uploadsOrderedPresentationJpegsBeforeStop() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setResponseCode(201).setBody("{}"));
+            server.enqueue(new MockResponse().setResponseCode(201).setBody("{}"));
+            server.enqueue(new MockResponse().setResponseCode(200).setBody("{}"));
+            server.start();
+            ReferenceMeetingClient client = new HttpReferenceMeetingClient(
+                    server.url("/").toString(), "local-demo-token");
+            byte[] firstJpeg = {(byte) 0xff, (byte) 0xd8, 1, (byte) 0xff, (byte) 0xd9};
+            byte[] secondJpeg = {(byte) 0xff, (byte) 0xd8, 2, (byte) 0xff, (byte) 0xd9};
+            client.appendPresentation("mtg_slides", 1, 10_000L, firstJpeg);
+            client.appendPresentation("mtg_slides", 2, 20_000L, secondJpeg);
+            assertTrue(client.stopMeeting("mtg_slides"));
+
+            for (int expected = 1; expected <= 2; expected++) {
+                RecordedRequest request = server.takeRequest();
+                assertEquals("/v1/meetings/mtg_slides/presentation-captures:append",
+                        request.getPath());
+                assertEquals("Bearer local-demo-token", request.getHeader("Authorization"));
+                JSONObject body = new JSONObject(request.getBody().readUtf8());
+                assertEquals(expected, body.getInt("chunkSequence"));
+                assertEquals(1, body.getJSONArray("frames").length());
+                JSONObject frame = body.getJSONArray("frames").getJSONObject(0);
+                assertEquals(expected * 10_000L, frame.getLong("offsetMs"));
+                assertArrayEquals(expected == 1 ? firstJpeg : secondJpeg,
+                        Base64.getDecoder().decode(frame.getString("jpegBase64")));
+            }
+            assertEquals("/v1/meetings/mtg_slides:stop", server.takeRequest().getPath());
         }
     }
 }

@@ -48,10 +48,13 @@ public final class MeetingService extends Service {
     static final String EXTRA_SOURCE = "source";
     static final String EXTRA_TARGET = "target";
     static final String EXTRA_PRESENTATION = "presentation";
+    static final String EXTRA_PROJECTION_RESULT_CODE = "projectionResultCode";
+    static final String EXTRA_PROJECTION_DATA = "projectionData";
     static final String EXTRA_RESULT_WEB = "resultWeb";
     private static final String TAG = "AiMeetingReference";
     private static final String CHANNEL = "ai_meeting_active";
     private static final int NOTIFICATION_ID = 100;
+    private static final long PRESENTATION_INTERVAL_MS = 10_000L;
 
     /** UI 订阅回调只在主线程调用；重新绑定时立即收到当前整场快照。 */
     interface Observer { void onMeetingState(State state); }
@@ -98,6 +101,7 @@ public final class MeetingService extends Service {
     private final AtomicInteger saved = new AtomicInteger();
     private final AtomicBoolean appendFailed = new AtomicBoolean();
     private final AtomicBoolean completionQueued = new AtomicBoolean();
+    private final AtomicBoolean stopInputSent = new AtomicBoolean();
     private final Runnable clockTick = new Runnable() {
         @Override public void run() {
             if (active && timing != null) {
@@ -123,12 +127,20 @@ public final class MeetingService extends Service {
             if (active) main.postDelayed(this, 1000L);
         }
     };
+    private final Runnable presentationTick = new Runnable() {
+        @Override public void run() {
+            if (!active || stopRequested || presentation == null) return;
+            network.execute(MeetingService.this::captureAndAppend);
+            main.postDelayed(this, PRESENTATION_INTERVAL_MS);
+        }
+    };
     private MeetingRuntimeBridge runtime;
     private MeetingOverlay overlay;
     private Observer observer;
     private ReferenceMeetingClient client;
     private ModelSession session;
     private MeetingTimeRule timing;
+    private volatile PresentationCapture presentation;
     private MeetingSetup setup;
     private String meetingId;
     private String status = "请先登录，再开始会议";
@@ -142,6 +154,10 @@ public final class MeetingService extends Service {
     private volatile boolean modelFinished;
     private boolean limitReminderLogged;
     private boolean idleReminderLogged;
+    private Intent projectionData;
+    private int projectionResultCode;
+    /** 只在单线程网络队列访问，独立于字幕/译文 clientSequence。 */
+    private int presentationSequence;
 
     @Override public void onCreate() {
         super.onCreate();
@@ -157,17 +173,29 @@ public final class MeetingService extends Service {
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null || !ACTION_BEGIN.equals(intent.getAction())) return START_NOT_STICKY;
         if (busy) return START_NOT_STICKY;
-        startForegroundForMeeting();
         MeetingSetup requested = new MeetingSetup(MeetingSetup.Mode.valueOf(
                 intent.getStringExtra(EXTRA_MODE)), intent.getStringExtra(EXTRA_SOURCE),
                 intent.getStringExtra(EXTRA_TARGET),
                 intent.getBooleanExtra(EXTRA_PRESENTATION, false),
                 MeetingSetup.ResultDelivery.WEB, intent.getStringExtra(EXTRA_RESULT_WEB));
+        if (requested.presentationCapture()) {
+            projectionData = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                    ? intent.getParcelableExtra(EXTRA_PROJECTION_DATA, Intent.class)
+                    : intent.getParcelableExtra(EXTRA_PROJECTION_DATA);
+            projectionResultCode = intent.getIntExtra(EXTRA_PROJECTION_RESULT_CODE, 0);
+            if (projectionData == null) {
+                status = "缺少本场系统屏幕采集授权，会议未创建";
+                publish();
+                stopSelf();
+                return START_NOT_STICKY;
+            }
+        }
+        startForegroundForMeeting(requested.presentationCapture());
         begin(intent.getStringExtra(EXTRA_BACKEND), intent.getStringExtra(EXTRA_TOKEN), requested);
         return START_NOT_STICKY;
     }
 
-    private void startForegroundForMeeting() {
+    private void startForegroundForMeeting(boolean withPresentation) {
         Intent open = new Intent(this, MainActivity.class);
         open.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
         PendingIntent pending = PendingIntent.getActivity(this, 0, open,
@@ -183,6 +211,7 @@ public final class MeetingService extends Service {
             int type = runtime.waitsForModelFinish()
                     ? ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
                     : ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC;
+            if (withPresentation) type |= ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION;
             startForeground(NOTIFICATION_ID, notification, type);
         } else {
             startForeground(NOTIFICATION_ID, notification);
@@ -295,8 +324,10 @@ public final class MeetingService extends Service {
         saved.set(0);
         appendFailed.set(false);
         completionQueued.set(false);
+        stopInputSent.set(false);
         stopRequested = false;
         modelFinished = false;
+        presentationSequence = 0;
         long startedAtMs = SystemClock.elapsedRealtime();
         timing = new MeetingTimeRule(startedAtMs, created.maxMeetingDurationMs());
         limitReminderLogged = false;
@@ -332,7 +363,7 @@ public final class MeetingService extends Service {
                 @Override public void onFinished() {
                     modelFinished = true;
                     Log.i(TAG, "模型最终输出已接收 meetingId=" + created.meetingId());
-                    if (stopRequested) scheduleComplete();
+                    if (stopRequested && stopInputSent.get()) scheduleComplete();
                     else main.post(() -> {
                         status = "模型已完成，可结束会议";
                         publish();
@@ -351,6 +382,19 @@ public final class MeetingService extends Service {
             active = true;
             canStop = runtime.waitsForModelFinish();
             status = "会议 " + meetingId + " 已开始，正在接收" + runtime.displayName() + "字幕";
+            if (requested.presentationCapture()) {
+                try {
+                    presentation = new PresentationCapture(this, projectionResultCode,
+                            projectionData, startedAtMs, this::onPresentationStopped);
+                    main.postDelayed(presentationTick, PRESENTATION_INTERVAL_MS);
+                    Log.i(TAG, "演示文稿屏幕采集已开始 meetingId=" + meetingId);
+                } catch (RuntimeException failure) {
+                    Log.e(TAG, "演示文稿屏幕采集启动失败 meetingId=" + meetingId, failure);
+                    status = "屏幕采集启动失败；字幕会议继续，可停止后重试";
+                } finally {
+                    projectionData = null;
+                }
+            }
             Log.i(TAG, "开始模型会话 runtime=" + runtime.displayName() + " meetingId=" + meetingId);
             main.removeCallbacks(clockTick);
             main.post(clockTick);
@@ -439,6 +483,44 @@ public final class MeetingService extends Service {
         }
     }
 
+    private void captureAndAppend() {
+        if (appendFailed.get()) return;
+        PresentationCapture current = presentation;
+        if (current == null) return;
+        try {
+            PresentationCapture.Frame frame = current.capture(SystemClock.elapsedRealtime());
+            if (frame == null) return;
+            int chunkSequence = ++presentationSequence;
+            client.appendPresentation(meetingId, chunkSequence,
+                    frame.offsetMs(), frame.jpeg());
+            Log.i(TAG, "演示截图包已保存 meetingId=" + meetingId
+                    + " chunkSequence=" + chunkSequence + " offsetMs=" + frame.offsetMs());
+        } catch (IOException failure) {
+            appendFailed.set(true);
+            Log.e(TAG, "演示截图提交失败 meetingId=" + meetingId, failure);
+            main.post(() -> {
+                main.removeCallbacks(presentationTick);
+                status = "演示截图提交失败：" + failure.getMessage();
+                publish();
+            });
+        }
+    }
+
+    private void onPresentationStopped() {
+        presentation = null;
+        main.removeCallbacks(presentationTick);
+        if (active && !stopRequested) {
+            status = "系统已结束屏幕共享，字幕会议继续";
+            publish();
+        }
+    }
+
+    private void closePresentation() {
+        PresentationCapture current = presentation;
+        presentation = null;
+        if (current != null) current.close();
+    }
+
     /** 页面和悬浮窗使用同一停止入口，Service 决定模型与后端收口顺序。 */
     void requestStop() {
         requestStop("正在等待模型最终字幕…");
@@ -449,11 +531,15 @@ public final class MeetingService extends Service {
         if (!active || !canStop) return;
         stopRequested = true;
         canStop = false;
+        main.removeCallbacks(presentationTick);
         status = progressText;
         publish();
         network.execute(() -> {
             try {
+                // 已排队的截图包先上传；停止采集后不会再有新包排在后端 Stop 后面。
+                closePresentation();
                 session.stopInput();
+                stopInputSent.set(true);
                 if (!runtime.waitsForModelFinish() || modelFinished) scheduleComplete();
             } catch (RuntimeException failure) {
                 Log.e(TAG, "停止模型输入失败 meetingId=" + meetingId
@@ -477,7 +563,7 @@ public final class MeetingService extends Service {
     private void completeMeeting() {
         if (appendFailed.get()) {
             main.post(() -> {
-                status = "标准事件提交失败，无法完成会议";
+                status = "标准事件或演示截图提交失败，无法完成会议";
                 publish();
             });
             return;
@@ -519,6 +605,8 @@ public final class MeetingService extends Service {
         canStop = false;
         status = message;
         main.removeCallbacks(clockTick);
+        main.removeCallbacks(presentationTick);
+        closePresentation();
         overlay.dismiss();
         if (session != null) {
             session.close();
@@ -551,6 +639,8 @@ public final class MeetingService extends Service {
 
     @Override public void onDestroy() {
         main.removeCallbacks(clockTick);
+        main.removeCallbacks(presentationTick);
+        closePresentation();
         overlay.dismiss();
         if (session != null) session.close();
         network.shutdownNow();

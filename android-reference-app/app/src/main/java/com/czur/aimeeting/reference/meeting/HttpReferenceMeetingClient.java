@@ -9,6 +9,7 @@ import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -138,6 +139,23 @@ public final class HttpReferenceMeetingClient implements ReferenceMeetingClient 
                     200, 201);
         } catch (JSONException invalidEvent) {
             throw new IOException("译文事件格式错误", invalidEvent);
+        }
+    }
+
+    @Override
+    public void appendPresentation(String meetingId, int chunkSequence, long offsetMs, byte[] jpeg)
+            throws IOException {
+        try {
+            JSONObject frame = new JSONObject()
+                    .put("offsetMs", offsetMs)
+                    .put("jpegBase64", Base64.getEncoder().encodeToString(jpeg));
+            JSONObject body = new JSONObject()
+                    .put("chunkSequence", chunkSequence)
+                    .put("frames", new JSONArray().put(frame));
+            post("/v1/meetings/" + meetingId + "/presentation-captures:append",
+                    body.toString(), null, 200, 201);
+        } catch (JSONException invalidFrame) {
+            throw new IOException("演示截图格式错误", invalidFrame);
         }
     }
 
