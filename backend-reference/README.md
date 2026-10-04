@@ -61,8 +61,8 @@ AI_MEETING_MODEL_CAPABILITIES=transcript.realtime
 
 本场 Create 的 `requestedCapabilities` 显式传入上述三项时，后两项返回
 `UNAVAILABLE / PROVIDER_CAPABILITY_MISSING`；参考 App 默认只请求实时字幕，
-因此默认请求里的后两项是 `NOT_REQUESTED`。当前参考后端没有翻译、总结
-执行映射，不能把它们也声明为模型已支持，否则部署配置会拒绝假启用。
+因此默认请求里的后两项是 `NOT_REQUESTED`。P5-5 已建立可选翻译和总结的
+产物执行映射；是否启用仍由本场请求、权益、模型能力和部署许可共同决定。
 
 设置 `AI_MEETING_MODEL_ADAPTER=sample-json-ws` 和
 `AI_MEETING_SAMPLE_JSON_WS_ENDPOINT=ws://...` 后，原 `:modelSession` 接口
@@ -70,6 +70,18 @@ AI_MEETING_MODEL_CAPABILITIES=transcript.realtime
 `initParams`。这个接口只提供模型连接材料；部署方须另行提供遵循样例 JSON
 格式的 WebSocket 模型服务。参考 App 按 `adapterId` 选择已注册 Adapter，
 Create v1 的旧 `realtime` 字段与 P2 音频链路不变。
+
+## P5-5 百炼文本总结临时材料
+
+显式配置 `AI_MEETING_BAILIAN_SUMMARY_ENABLED=true`、部署方的
+`DASHSCOPE_API_KEY` 与 `AI_MEETING_BAILIAN_APP_ID` 后，认证 App 在本场
+RUNNING 且首次 Create 已获准 `summary.structured` 时可调用
+`POST /v1/meetings/{meetingId}:summarySession`。后端向百炼
+`POST /api/v1/tokens?expire_in_seconds=...` 换取短期 Key，只将短期 Bearer、
+应用 completion 地址与过期时间交给 App；永久 Key 不进入响应、日志或结果。
+TTL 默认 300 秒，允许 1–1800 秒；地区地址可由 `.env.example` 中的变量配置。
+Android SDK 调用应用 completion，App 归一化后在 Stop 前提交标准纪要。
+未配置时旧会、Mock 纪要和 ASR-only 部署保持原行为。
 
 ## P3-T05 会议应用切片
 

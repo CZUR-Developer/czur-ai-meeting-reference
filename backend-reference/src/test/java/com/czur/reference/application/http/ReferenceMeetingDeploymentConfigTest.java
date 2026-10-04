@@ -1,6 +1,7 @@
 package com.czur.reference.application.http;
 
 import com.czur.reference.application.bootstrap.ReferenceMeetingDeploymentConfig;
+import com.czur.reference.application.model.BailianSummarySessionConfig;
 import com.czur.reference.application.finalization.MockFinalizationArtifactContent;
 import com.czur.reference.application.finalization.DeterministicMockFinalizationPlanner;
 import com.czur.reference.application.finalization.FinalizationExecutionFact;
@@ -40,6 +41,23 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ReferenceMeetingDeploymentConfigTest {
     private static final String TOKEN = "local-test-token-0123456789-abcdefgh";
     private static final String SECRET = "page-secret-0123456789-abcdefghijkl";
+
+    @Test
+    void bailianSummaryIsOptionalAndPermanentKeyRemainsBackendOnly() {
+        Map<String, String> values = valid();
+        assertTrue(ReferenceMeetingDeploymentConfig.fromEnvironment(values)
+                .bailianSummarySession().isEmpty());
+        values.put(BailianSummarySessionConfig.ENABLED, "true");
+        values.put(BailianSummarySessionConfig.APP_ID, "app-local");
+        values.put(BailianSummarySessionConfig.API_KEY, "permanent-local-only");
+        var config = ReferenceMeetingDeploymentConfig.fromEnvironment(values);
+        assertEquals("https://dashscope.aliyuncs.com/api/v1/apps/app-local/completion",
+                config.bailianSummarySession().orElseThrow().completionUrl().toString());
+        assertFalse(config.toString().contains("permanent-local-only"));
+        values.remove(BailianSummarySessionConfig.API_KEY);
+        assertThrows(IllegalArgumentException.class,
+                () -> ReferenceMeetingDeploymentConfig.fromEnvironment(values));
+    }
 
     @Test
     void preconfiguredUserLogsInAndReceivesTheExistingMeetingBearer() throws Exception {

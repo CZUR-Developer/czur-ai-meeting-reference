@@ -5,6 +5,7 @@ import com.czur.reference.application.command.AuthenticatedCompleteMeetingApplic
 import com.czur.reference.application.command.AuthenticatedRealtimeTokenRenewApplicationService;
 import com.czur.reference.application.model.ModelSessionIssuer;
 import com.czur.reference.application.model.ModelSessionLanguageLookup;
+import com.czur.reference.application.model.BailianSummarySessionIssuer;
 import com.czur.reference.application.port.MeetingDeletionPort;
 import com.czur.reference.application.port.MeetingQueryPort;
 import com.czur.reference.application.port.MeetingManifestPort;
@@ -235,10 +236,29 @@ public final class MeetingHttpRuntime implements AutoCloseable {
             ClientMeetingInputPort clientInputPort, ModelSessionIssuer modelSessions,
             ModelSessionLanguageLookup modelSessionLanguages,
             ReferenceDevSessionLoginEndpoint referenceLogin) {
+        this(queryPort, deletionPort, decoder, errors, stopService, createService,
+                createDecoder, createEnabled, manifestPort, renewService, artifactPort,
+                eventLogPort, clientInputPort, modelSessions, modelSessionLanguages,
+                null, referenceLogin);
+    }
+
+    public MeetingHttpRuntime(
+            MeetingQueryPort queryPort, MeetingDeletionPort deletionPort,
+            MeetingHttpAdapter.RequestDecoder decoder, HttpErrorMapper errors,
+            AuthenticatedMeetingStopApplicationService stopService,
+            AuthenticatedCompleteMeetingApplicationService createService,
+            CreateMeetingHttpRequestDecoder createDecoder, boolean createEnabled,
+            MeetingManifestPort manifestPort,
+            AuthenticatedRealtimeTokenRenewApplicationService renewService,
+            MeetingArtifactContentPort artifactPort, MeetingEventLogPort eventLogPort,
+            ClientMeetingInputPort clientInputPort, ModelSessionIssuer modelSessions,
+            ModelSessionLanguageLookup modelSessionLanguages,
+            BailianSummarySessionIssuer summarySessions,
+            ReferenceDevSessionLoginEndpoint referenceLogin) {
         this(new MeetingHttpAdapter(queryPort, deletionPort, decoder, errors, stopService,
                 createService, createDecoder, createEnabled, manifestPort, renewService,
                 artifactPort, eventLogPort, clientInputPort, modelSessions,
-                modelSessionLanguages), errors,
+                modelSessionLanguages, summarySessions), errors,
                 referenceLogin);
     }
 

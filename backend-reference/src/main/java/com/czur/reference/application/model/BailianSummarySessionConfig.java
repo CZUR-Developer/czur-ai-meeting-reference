@@ -38,19 +38,16 @@ public record BailianSummarySessionConfig(URI tokenUrl, URI completionBaseUrl,
         String enabled = values.getOrDefault(ENABLED, "false");
         if ("false".equals(enabled)) return null;
         if (!"true".equals(enabled)) throw new IllegalArgumentException(ENABLED);
+        int ttl;
         try {
-            return new BailianSummarySessionConfig(
-                    URI.create(values.getOrDefault(TOKEN_URL, DEFAULT_TOKEN_URL)),
-                    URI.create(values.getOrDefault(COMPLETION_BASE_URL,
-                            DEFAULT_COMPLETION_BASE_URL)),
-                    values.get(APP_ID), values.get(API_KEY),
-                    Integer.parseInt(values.getOrDefault(TTL_SECONDS, "300")));
-        } catch (RuntimeException invalid) {
-            if (invalid instanceof IllegalArgumentException field
-                    && field.getMessage() != null
-                    && field.getMessage().startsWith("AI_MEETING_BAILIAN_")) throw field;
-            throw new IllegalArgumentException(ENABLED);
+            ttl = Integer.parseInt(values.getOrDefault(TTL_SECONDS, "300"));
+        } catch (NumberFormatException invalid) {
+            throw new IllegalArgumentException(TTL_SECONDS);
         }
+        return new BailianSummarySessionConfig(
+                configuredUri(values, TOKEN_URL, DEFAULT_TOKEN_URL),
+                configuredUri(values, COMPLETION_BASE_URL, DEFAULT_COMPLETION_BASE_URL),
+                values.get(APP_ID), values.get(API_KEY), ttl);
     }
 
     public URI tokenRequestUrl() {
@@ -69,6 +66,14 @@ public record BailianSummarySessionConfig(URI tokenUrl, URI completionBaseUrl,
                 || ("http".equals(endpoint.getScheme())
                 && ("127.0.0.1".equals(endpoint.getHost())
                 || "localhost".equals(endpoint.getHost()))))) {
+            throw new IllegalArgumentException(field);
+        }
+    }
+
+    private static URI configuredUri(Map<String, String> values, String field, String fallback) {
+        try {
+            return URI.create(values.getOrDefault(field, fallback));
+        } catch (RuntimeException invalid) {
             throw new IllegalArgumentException(field);
         }
     }

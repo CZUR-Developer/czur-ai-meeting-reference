@@ -8,6 +8,9 @@ import com.czur.reference.application.command.TrustedCreateRuntimeLimits;
 import com.czur.reference.application.command.MeetingCommandResult;
 import com.czur.reference.application.command.StopMeetingIntent;
 import com.czur.reference.application.model.ModelSessionIssuer;
+import com.czur.reference.application.model.ModelSessionLanguageLookup;
+import com.czur.reference.application.model.BailianSummarySessionConfig;
+import com.czur.reference.application.model.BailianSummarySessionIssuer;
 import com.czur.reference.application.model.SampleJsonWsModelSessionIssuer;
 import com.czur.reference.application.port.DeleteRequest;
 import com.czur.reference.application.port.DeleteResult;
@@ -48,8 +51,10 @@ import com.czur.reference.domain.meeting.MeetingAggregate;
 import com.czur.reference.domain.meeting.MeetingState;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import com.sun.net.httpserver.HttpServer;
 
 import java.net.URI;
+import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
@@ -57,6 +62,7 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.logging.Handler;
 import java.util.logging.LogRecord;
@@ -147,6 +153,63 @@ class MeetingHttpAdapterContractTest {
         assertTrue(response.body().contains("\"adapterId\":\"sample-json-ws\""));
         assertTrue(response.body().contains("\"initParams\":{}"));
         assertFalse(response.body().contains("\"realtime\""));
+    }
+
+    @Test
+    void summarySessionRequiresFrozenGrantBeforeIssuingTemporaryKey() throws Exception {
+        Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
+        AtomicInteger tokenRequests = new AtomicInteger();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/api/v1/tokens", exchange -> {
+            tokenRequests.incrementAndGet();
+            byte[] body = ("{\"token\":\"st-local-only\",\"expires_at\":"
+                    + NOW.plusSeconds(300).getEpochSecond() + "}")
+                    .getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            try (var output = exchange.getResponseBody()) { output.write(body); }
+        });
+        server.start();
+        try {
+            URI base = URI.create("http://127.0.0.1:" + server.getAddress().getPort());
+            var issuer = new BailianSummarySessionIssuer(new BailianSummarySessionConfig(
+                    base.resolve("/api/v1/tokens"), base.resolve("/api/v1/apps"),
+                    "app-local", "permanent-local-only", 300), clock);
+            boolean[] granted = {false};
+            ModelSessionLanguageLookup lookup = new ModelSessionLanguageLookup() {
+                @Override public ModelSessionIssuer.Request load(MeetingCommandContext context,
+                        String meetingId) {
+                    return new ModelSessionIssuer.Request("zh-CN", List.of(), false);
+                }
+                @Override public boolean summaryEnabled(MeetingCommandContext context,
+                        String meetingId) {
+                    return granted[0];
+                }
+            };
+            adapter = new MeetingHttpAdapter(query, deletion, decoder,
+                    new HttpErrorMapper(() -> "summary-diagnostic"), stopService(),
+                    null, null, false, null, null, null, null, null, null, lookup, issuer);
+            var request = new HttpRequest("POST", "/v1/meetings/mtg_detail:summarySession",
+                    Map.of(), "");
+            assertEquals(MeetingHttpAdapter.AuthenticationRoute.CLIENT_WRITE,
+                    MeetingHttpAdapter.authenticationRoute(request));
+            assertEquals(401, adapter.handle(request, null).status());
+            query.getResult = new MeetingQueryPort.AccessDenied();
+            assertEquals(403, adapter.handle(request, context()).status());
+            query.getResult = new MeetingQueryPort.Found(status(MeetingState.CREATED));
+            assertEquals(409, adapter.handle(request, context()).status());
+            query.getResult = new MeetingQueryPort.Found(status(MeetingState.RUNNING));
+            assertEquals(422, adapter.handle(request, context()).status());
+            assertEquals(0, tokenRequests.get());
+            granted[0] = true;
+            HttpResponse response = adapter.handle(request, context());
+            assertEquals(200, response.status());
+            assertEquals(1, tokenRequests.get());
+            assertTrue(response.body().contains("\"adapterId\":\"bailian-summary\""));
+            assertTrue(response.body().contains("\"token\":\"st-local-only\""));
+            assertFalse(response.body().contains("permanent-local-only"));
+        } finally {
+            server.stop(0);
+        }
     }
 
     @Test

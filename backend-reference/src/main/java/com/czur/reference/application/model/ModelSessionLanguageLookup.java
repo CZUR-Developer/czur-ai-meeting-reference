@@ -10,4 +10,9 @@ public interface ModelSessionLanguageLookup {
      * 持久快照中取得语言选择与首次服务端能力决策。不能从当前部署配置重算本场能力。
      */
     ModelSessionIssuer.Request load(MeetingCommandContext context, String meetingId);
+
+    /** 文本总结材料只能依据首次 Create 冻结且获准的本场能力签发。 */
+    default boolean summaryEnabled(MeetingCommandContext context, String meetingId) {
+        return false;
+    }
 }

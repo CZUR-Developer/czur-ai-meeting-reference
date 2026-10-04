@@ -284,6 +284,25 @@ paths:
                 $ref: "#/components/schemas/StartClientMeetingResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/meetings/{meetingId}:summarySession:
+    post:
+      tags: [Meetings]
+      operationId: issueSummarySession
+      summary: 为本场获准的结构化纪要签发百炼短期文本材料
+      description: 仅当前用户所属且 RUNNING 的会议可申请；首次 Create 必须请求并获准 summary.structured。后端用永久 DASHSCOPE_API_KEY 向百炼签发临时 API Key，响应只含短期 Key 与应用 completion 地址；Android SDK 直连百炼，后端只接收 App 提交的标准纪要。不记录请求或响应中的密钥。
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/MeetingId"
+      responses:
+        "200":
+          description: 本场一次性文本模型材料
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SummarySessionGrant"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/meetings/{meetingId}/events:append:
     post:
       tags: [Meetings]
@@ -1088,6 +1107,29 @@ components:
             taskId:
               type: string
               description: 听悟 StartTranscription/StopTranscription 的 header.task_id。
+    SummarySessionGrant:
+      type: object
+      additionalProperties: false
+      required: [meetingId, adapterId, endpoint, expiresAt, token]
+      properties:
+        meetingId:
+          type: string
+          pattern: "^mtg_[A-Za-z0-9_-]+$"
+        adapterId:
+          type: string
+          const: bailian-summary
+        endpoint:
+          type: string
+          format: uri
+          description: 百炼应用 completion 地址；正式部署须为 HTTPS。
+        expiresAt:
+          type: string
+          format: date-time
+          description: 百炼临时 API Key 的服务端过期时间。
+        token:
+          type: string
+          readOnly: true
+          description: 百炼临时 API Key；仅交给认证 App，不入日志或持久化。
     RealtimeTokenGrant:
       type: object
       additionalProperties: false

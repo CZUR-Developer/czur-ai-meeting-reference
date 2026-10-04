@@ -12,6 +12,7 @@ import com.czur.reference.application.port.MeetingQueryPort;
 import com.czur.reference.application.port.MeetingEventLogPort;
 import com.czur.reference.application.port.ClientMeetingInputPort;
 import com.czur.reference.application.model.ModelSessionIssuer;
+import com.czur.reference.application.model.BailianSummarySessionIssuer;
 import com.czur.reference.application.port.MeetingManifestPort;
 import com.czur.reference.application.port.MeetingArtifactContentPort;
 import com.czur.reference.application.port.OwnedMeetingStopUnitOfWork;
@@ -111,6 +112,30 @@ public final class HttpErrorMapper {
         return error(503, HttpErrorEnvelope.Domain.MODEL, "MODEL_SESSION_UNAVAILABLE",
                 true, HttpErrorEnvelope.UserAction.RETRY,
                 "ai_meeting.model.session_unavailable");
+    }
+
+    /** 永久 Key 不进入响应；只把本场短期材料交给已认证 App。 */
+    public HttpResponse summarySession(String meetingId,
+            BailianSummarySessionIssuer.Session session) {
+        return success(200, Map.of("meetingId", meetingId, "adapterId", session.adapterId(),
+                "endpoint", session.endpoint(), "expiresAt", session.expiresAt().toString(),
+                "token", session.token()));
+    }
+
+    public HttpResponse summaryNotGranted() {
+        return clientInputFailure(ClientMeetingInputPort.Reason.SUMMARY_NOT_GRANTED);
+    }
+
+    public HttpResponse summarySessionInvalidState() {
+        return error(409, HttpErrorEnvelope.Domain.SESSION, "SUMMARY_SESSION_INVALID_STATE",
+                false, HttpErrorEnvelope.UserAction.NONE,
+                "ai_meeting.session.summary_session_invalid_state");
+    }
+
+    public HttpResponse summarySessionUnavailable() {
+        return error(503, HttpErrorEnvelope.Domain.MODEL, "SUMMARY_SESSION_UNAVAILABLE",
+                true, HttpErrorEnvelope.UserAction.RETRY,
+                "ai_meeting.model.summary_session_unavailable");
     }
 
     public HttpResponse clientAppend(ClientMeetingInputPort.AppendResult result) {

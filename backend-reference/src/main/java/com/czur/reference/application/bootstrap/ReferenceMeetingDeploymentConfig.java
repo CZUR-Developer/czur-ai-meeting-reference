@@ -7,6 +7,7 @@ import com.czur.reference.application.finalization.ProductProfileSnapshot;
 import com.czur.reference.application.identity.referencedev.ReferenceDevIdentityConfig;
 import com.czur.reference.application.identity.referencedev.ReferenceDevLoginConfig;
 import com.czur.reference.application.model.SampleJsonWsModelSessionIssuer;
+import com.czur.reference.application.model.BailianSummarySessionConfig;
 import com.czur.reference.application.model.TingwuModelSessionConfig;
 import com.czur.reference.application.persistence.jdbc.DatabaseRuntimeConfig;
 import com.czur.reference.application.port.entitlement.UsageEstimate;
@@ -105,6 +106,7 @@ public final class ReferenceMeetingDeploymentConfig {
     private final Duration resultLinkTtl;
     private final TingwuModelSessionConfig tingwuModelSession;
     private final URI sampleJsonWsEndpoint;
+    private final BailianSummarySessionConfig bailianSummarySession;
 
     private ReferenceMeetingDeploymentConfig(
             DatabaseRuntimeConfig database,
@@ -116,7 +118,8 @@ public final class ReferenceMeetingDeploymentConfig {
             UsageEstimate trustedEstimate, TrustedCreateRuntimeLimits runtimeLimits,
             byte[] pageTokenSecret, URI wssOrigin, Duration wssTokenTtl,
             boolean createEnabled, boolean realtimeRenewEnabled, Duration resultLinkTtl,
-            TingwuModelSessionConfig tingwuModelSession, URI sampleJsonWsEndpoint) {
+            TingwuModelSessionConfig tingwuModelSession, URI sampleJsonWsEndpoint,
+            BailianSummarySessionConfig bailianSummarySession) {
         this.database = database;
         this.identity = identity;
         this.login = login;
@@ -137,6 +140,7 @@ public final class ReferenceMeetingDeploymentConfig {
         this.resultLinkTtl = resultLinkTtl;
         this.tingwuModelSession = tingwuModelSession;
         this.sampleJsonWsEndpoint = sampleJsonWsEndpoint;
+        this.bailianSummarySession = bailianSummarySession;
     }
 
     /**
@@ -321,11 +325,13 @@ public final class ReferenceMeetingDeploymentConfig {
             } else {
                 throw invalid(MODEL_ADAPTER);
             }
+            BailianSummarySessionConfig bailian =
+                    BailianSummarySessionConfig.fromEnvironment(environment);
             return new ReferenceMeetingDeploymentConfig(database, identity, login, scope,
                     audience, clientId, profile, entitlement, mock, limits, estimate,
                     runtimeLimits, secret, wssOrigin, tokenTtl,
                     enabled, renewEnabled, resultLinkTtl,
-                    tingwu, sampleEndpoint);
+                    tingwu, sampleEndpoint, bailian);
         } finally {
             Arrays.fill(secret, (byte) 0);
         }
@@ -364,6 +370,10 @@ public final class ReferenceMeetingDeploymentConfig {
     /** 配置为第二格式样例时返回其 WebSocket 模型端点。 */
     public Optional<URI> sampleJsonWsEndpoint() {
         return Optional.ofNullable(sampleJsonWsEndpoint);
+    }
+    /** 仅显式启用且注入永久 Key 时装配百炼临时 Key 签发。 */
+    public Optional<BailianSummarySessionConfig> bailianSummarySession() {
+        return Optional.ofNullable(bailianSummarySession);
     }
 
     @Override
