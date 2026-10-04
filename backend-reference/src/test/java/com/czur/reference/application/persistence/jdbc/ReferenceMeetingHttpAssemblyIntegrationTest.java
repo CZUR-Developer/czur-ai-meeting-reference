@@ -172,7 +172,9 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
             String start = exchange(port, "POST", "/v1/meetings/" + meetingId
                     + ":startClient", "", networkHeaders(issuedToken, null, false));
             assertEquals(200, status(start));
-            assertEquals("RUNNING", meetingState(meetingId));
+            assertEquals("STARTING", ERROR_JSON.readTree(responseBody(start))
+                    .path("state").asText());
+            assertEquals("STARTING", meetingState(meetingId));
         }
     }
 
