@@ -109,12 +109,66 @@ test('READY 演示截图包按修订顺序读取，包内画面顺序保持不�
   ]);
 });
 
+test('本场发言人随最终字幕产物读取，逐段展示真实 ID 且缺失时显示未知', async () => {
+  const requests = [];
+  const manifest = { title: '发言人会议', artifacts: [
+    { type: 'transcript.final', status: 'READY', artifactId: 'art_speaker' }
+  ] };
+  const artifact = { schemaVersion: 'client-transcript/v1', artifactType: 'transcript.final',
+    text: '你好。\n继续。', segments: [
+      { segmentId: 'seg-1', text: '你好。', sessionSpeakerId: 'speaker-2' },
+      { segmentId: 'seg-2', text: '继续。' }
+    ] };
+  const fetcher = async url => {
+    requests.push(url);
+    return { ok: true, status: 200,
+      json: async () => requests.length === 1 ? manifest : artifact };
+  };
+  const result = await readFinalTranscript('http://api.test', 'mtg_speaker', '123', fetcher);
+  assert.deepEqual(requests, [
+    'http://api.test/v1/meetings/mtg_speaker/manifest?genTime=123',
+    'http://api.test/v1/artifacts/art_speaker?genTime=123'
+  ]);
+  assert.deepEqual(result.segments, artifact.segments);
+
+  const node = () => ({ hidden: true, textContent: '', children: [],
+    append(...items) { this.children.push(...items); } });
+  const nodes = Object.fromEntries([
+    '#status', '#title', '#transcript', '#transcript-segments', '#result',
+    '#translations', '#translation-result', '#presentation-result', '#presentation-frames'
+  ].map(selector => [selector, node()]));
+  renderFinalResult(result, { querySelector: selector => nodes[selector], createElement: node });
+  assert.equal(nodes['#result'].hidden, false);
+  assert.equal(nodes['#transcript'].hidden, true);
+  assert.equal(nodes['#transcript-segments'].hidden, false);
+  assert.deepEqual(nodes['#transcript-segments'].children.map(row =>
+    [row.children[0].textContent, row.children[1].textContent]), [
+    ['本场发言人 ID：speaker-2', '你好。'], ['发言人未知', '继续。']
+  ]);
+  assert.equal(nodes['#status'].textContent, '结果已生成');
+});
+
+test('没有真实发言人 ID 的分段产物仍展示原有纯文字', () => {
+  const node = () => ({ hidden: true, textContent: '', children: [],
+    append(...items) { this.children.push(...items); } });
+  const nodes = Object.fromEntries([
+    '#status', '#title', '#transcript', '#transcript-segments', '#result',
+    '#translations', '#translation-result', '#presentation-result', '#presentation-frames'
+  ].map(selector => [selector, node()]));
+  renderFinalResult({ text: '你好。\n继续。', segments: [
+    { text: '你好。' }, { text: '继续。', sessionSpeakerId: '  ' }
+  ] }, { querySelector: selector => nodes[selector], createElement: node });
+  assert.equal(nodes['#transcript'].textContent, '你好。\n继续。');
+  assert.equal(nodes['#transcript'].hidden, false);
+  assert.equal(nodes['#transcript-segments'].hidden, true);
+});
+
 test('纯字幕隐藏译文区，双向译文显示两个语言方向', () => {
   const node = () => ({ hidden: true, textContent: '', children: [],
     append(...items) { this.children.push(...items); } });
   const page = () => {
     const nodes = Object.fromEntries([
-      '#status', '#title', '#transcript', '#result', '#translations',
+      '#status', '#title', '#transcript', '#transcript-segments', '#result', '#translations',
       '#translation-result', '#presentation-result', '#presentation-frames'
     ].map(selector => [selector, node()]));
     return { nodes, querySelector: selector => nodes[selector], createElement: node };
@@ -142,7 +196,7 @@ test('只有演示画面也显示结果，字幕与译文缺席不误报空会�
   const node = () => ({ hidden: true, textContent: '', children: [],
     append(...items) { this.children.push(...items); } });
   const nodes = Object.fromEntries([
-    '#status', '#title', '#transcript', '#result', '#translations',
+    '#status', '#title', '#transcript', '#transcript-segments', '#result', '#translations',
     '#translation-result', '#presentation-result', '#presentation-frames'
   ].map(selector => [selector, node()]));
   const page = { querySelector: selector => nodes[selector], createElement: node };

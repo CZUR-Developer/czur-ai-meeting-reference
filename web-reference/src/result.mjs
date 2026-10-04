@@ -32,6 +32,7 @@ export async function readFinalTranscript(apiBaseUrl, meetingId, genTime,
     if (!response.ok) throw new Error(`读取最终转写失败：HTTP ${response.status}`);
     const content = await response.json();
     result.text = content.text;
+    if (Array.isArray(content.segments)) result.segments = content.segments;
   }
   if (translation) {
     const response = await fetcher(
@@ -68,7 +69,8 @@ function meetingTime(offsetMs) {
 export function renderFinalResult(result, page) {
   const status = page.querySelector('#status');
   if (result.title) page.querySelector('#title').textContent = result.title;
-  const hasTranscript = typeof result.text === 'string';
+  const hasSegments = Array.isArray(result.segments) && result.segments.length > 0;
+  const hasTranscript = typeof result.text === 'string' || hasSegments;
   const hasTranslation = Array.isArray(result.translations)
     && result.translations.length > 0;
   const hasPresentation = Array.isArray(result.presentationFrames)
@@ -78,7 +80,29 @@ export function renderFinalResult(result, page) {
     return;
   }
   if (hasTranscript) {
-    page.querySelector('#transcript').textContent = result.text;
+    const transcript = page.querySelector('#transcript');
+    const speakerSegments = hasSegments && result.segments.some(item =>
+      typeof item.sessionSpeakerId === 'string' && item.sessionSpeakerId.trim() !== '');
+    if (speakerSegments) {
+      const entries = page.querySelector('#transcript-segments');
+      for (const item of result.segments) {
+        const row = page.createElement('article');
+        row.className = 'transcript-segment';
+        const speaker = page.createElement('h3');
+        const id = typeof item.sessionSpeakerId === 'string'
+          ? item.sessionSpeakerId.trim() : '';
+        speaker.textContent = id ? `本场发言人 ID：${id}` : '发言人未知';
+        const text = page.createElement('p');
+        text.textContent = item.text || '';
+        row.append(speaker, text);
+        entries.append(row);
+      }
+      entries.hidden = false;
+    } else {
+      transcript.textContent = typeof result.text === 'string'
+        ? result.text : result.segments.map(item => item.text || '').join('\n');
+      transcript.hidden = false;
+    }
     page.querySelector('#result').hidden = false;
   }
   if (hasTranslation) {

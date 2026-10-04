@@ -8,6 +8,10 @@
     body { font-family: sans-serif; margin: 0; color: #202124; background: #f7f8fa; }
     main { max-width: 760px; margin: 48px auto; padding: 24px; background: white; }
     #transcript { white-space: pre-wrap; line-height: 1.7; }
+    #transcript-segments:not([hidden]) { display: grid; gap: 12px; }
+    .transcript-segment { border-left: 3px solid #637383; padding: 8px 12px; background: #f7f8fa; }
+    .transcript-segment h3 { font-size: 0.95rem; margin: 0 0 6px; color: #455563; }
+    .transcript-segment p { white-space: pre-wrap; line-height: 1.7; margin: 0; }
     #translations { display: grid; gap: 12px; }
     .translation-item { border-left: 3px solid #4f7ed7; padding: 8px 12px; background: #f7f9ff; }
     .translation-item h3 { font-size: 0.95rem; margin: 0 0 6px; color: #3158a5; }
@@ -24,7 +28,8 @@
     <p id="status">正在读取会议结果…</p>
     <section id="result" hidden aria-label="最终转写">
       <h2>最终转写</h2>
-      <p id="transcript"></p>
+      <p id="transcript" hidden></p>
+      <div id="transcript-segments" hidden></div>
     </section>
     <section id="translation-result" hidden aria-label="最终译文">
       <h2>最终译文</h2>
