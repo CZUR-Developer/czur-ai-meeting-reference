@@ -8,7 +8,8 @@ test('生成中的结果完成后只读取最终转写', async () => {
     { status: 202 },
     { status: 200, body: { title: '参考模拟会议', artifacts: [
       { type: 'transcript.final', status: 'READY', artifactId: 'art_final' },
-      { type: 'translation.final', status: 'PENDING', artifactId: 'art_not_ready' }
+      { type: 'translation.final', status: 'PENDING', artifactId: 'art_not_ready' },
+      { type: 'summary.structured', status: 'PENDING', artifactId: 'art_summary_pending' }
     ] } },
     { status: 200, body: { text: '今天我们讨论 AI 会议纪要。' } }
   ];
@@ -61,6 +62,46 @@ test('READY 译文按原产物顺序展示双向语言，纯字幕请求链不�
     'http://api.test/v1/meetings/mtg_bilingual/manifest?genTime=456',
     'http://api.test/v1/artifacts/art_transcript?genTime=456',
     'http://api.test/v1/artifacts/art_translation?genTime=456'
+  ]);
+});
+
+test('只有 READY 结构化纪要时读取并展示纪要，不误报无字幕', async () => {
+  const requests = [];
+  const summary = { schemaVersion: 'client-summary/v1', artifactType: 'summary.structured',
+    language: 'zh-CN', title: '项目讨论', overview: '确认下周方案。',
+    keyPoints: ['需要保留现有流程'], actionItems: ['周五前完成评审'] };
+  const fetcher = async url => {
+    requests.push(url);
+    return { ok: true, status: 200, json: async () => requests.length === 1
+      ? { title: '会议', artifacts: [
+        { type: 'summary.structured', status: 'READY', artifactId: 'art_summary' }
+      ] } : summary };
+  };
+  const result = await readFinalTranscript('http://api.test', 'mtg_summary', '321', fetcher);
+  assert.deepEqual(requests, [
+    'http://api.test/v1/meetings/mtg_summary/manifest?genTime=321',
+    'http://api.test/v1/artifacts/art_summary?genTime=321'
+  ]);
+  assert.deepEqual(result.summary, summary);
+
+  const node = tagName => ({ tagName, hidden: true, textContent: '', children: [],
+    append(...items) { this.children.push(...items); } });
+  const nodes = Object.fromEntries([
+    '#status', '#title', '#transcript', '#transcript-segments', '#result', '#translations',
+    '#translation-result', '#summary-result', '#summary-content',
+    '#presentation-result', '#presentation-frames'
+  ].map(selector => [selector, node()]));
+  renderFinalResult(result, { querySelector: selector => nodes[selector], createElement: node });
+  assert.equal(nodes['#status'].textContent, '结果已生成');
+  assert.equal(nodes['#result'].hidden, true);
+  assert.equal(nodes['#translation-result'].hidden, true);
+  assert.equal(nodes['#presentation-result'].hidden, true);
+  assert.equal(nodes['#summary-result'].hidden, false);
+  assert.deepEqual(nodes['#summary-content'].children.map(item =>
+    [item.tagName, item.textContent || item.children.map(child => child.textContent)]), [
+    ['h3', '项目讨论'], ['p', '确认下周方案。'],
+    ['h4', '关键要点'], ['ul', ['需要保留现有流程']],
+    ['h4', '待办事项'], ['ul', ['周五前完成评审']]
   ]);
 });
 
@@ -211,4 +252,38 @@ test('只有演示画面也显示结果，字幕与译文缺席不误报空会�
   assert.equal(figure.children[0].src, 'data:image/jpeg;base64,/9j/2Q==');
   assert.equal(figure.children[0].alt, '会议 01:05 的演示画面');
   assert.equal(figure.children[1].textContent, '会议 01:05');
+});
+
+test('结构化纪要与字幕、译文和演示画面正交展示，缺席时模块仍隐藏', () => {
+  const node = () => ({ hidden: true, textContent: '', children: [],
+    append(...items) { this.children.push(...items); } });
+  const page = () => {
+    const nodes = Object.fromEntries([
+      '#status', '#title', '#transcript', '#transcript-segments', '#result', '#translations',
+      '#translation-result', '#summary-result', '#summary-content',
+      '#presentation-result', '#presentation-frames'
+    ].map(selector => [selector, node()]));
+    return { nodes, querySelector: selector => nodes[selector], createElement: node };
+  };
+  const withoutSummary = page();
+  renderFinalResult({ text: '原文', translations: [
+    { sourceLanguage: 'zh-CN', targetLanguage: 'en-US', text: 'Translation' }
+  ], presentationFrames: [{ offsetMs: 0, jpegBase64: '/9j/2Q==' }] }, withoutSummary);
+  assert.equal(withoutSummary.nodes['#summary-result'].hidden, true);
+  assert.equal(withoutSummary.nodes['#result'].hidden, false);
+  assert.equal(withoutSummary.nodes['#translation-result'].hidden, false);
+  assert.equal(withoutSummary.nodes['#presentation-result'].hidden, false);
+
+  const withSummary = page();
+  renderFinalResult({ text: '原文', translations: [
+    { sourceLanguage: 'zh-CN', targetLanguage: 'en-US', text: 'Translation' }
+  ], presentationFrames: [{ offsetMs: 0, jpegBase64: '/9j/2Q==' }],
+  summary: { title: '纪要标题', overview: '概述', keyPoints: [], actionItems: [] }
+  }, withSummary);
+  assert.equal(withSummary.nodes['#summary-result'].hidden, false);
+  assert.equal(withSummary.nodes['#result'].hidden, false);
+  assert.equal(withSummary.nodes['#translation-result'].hidden, false);
+  assert.equal(withSummary.nodes['#presentation-result'].hidden, false);
+  assert.deepEqual(withSummary.nodes['#summary-content'].children.map(item => item.textContent),
+    ['纪要标题', '概述']);
 });

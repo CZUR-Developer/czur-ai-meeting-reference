@@ -4,6 +4,7 @@
 `index.html?meetingId=<会议ID>&genTime=<链接生成时间毫秒>`。页面读取 Manifest，
 结果生成中时短暂等待；完成后展示 Manifest 中 READY 的 `transcript.final`，
 仅当同一 Manifest 还含 READY 的 `translation.final` 时追加最终译文区；
+仅当有 READY 的 `summary.structured` 时展示结构化纪要的标题、概述、要点和待办；
 READY 的 `presentation.capture` 截图包按修订序号读取，画面按会议时间展示。
 纯字幕结果保持原页面；不会预览会议中的字幕或演示画面，也不要求 Web 单独登录。
 

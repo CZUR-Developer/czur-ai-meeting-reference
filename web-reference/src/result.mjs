@@ -23,6 +23,8 @@ export async function readFinalTranscript(apiBaseUrl, meetingId, genTime,
     && item.status === 'READY');
   const translation = artifacts.find(item => item.type === 'translation.final'
     && item.status === 'READY');
+  const summary = artifacts.find(item => item.type === 'summary.structured'
+    && item.status === 'READY');
   const presentation = artifacts.filter(item => item.type === 'presentation.capture'
     && item.status === 'READY').sort((a, b) => a.revision - b.revision);
   const result = { title: manifest.title, text: null };
@@ -40,6 +42,12 @@ export async function readFinalTranscript(apiBaseUrl, meetingId, genTime,
     if (!response.ok) throw new Error(`读取最终译文失败：HTTP ${response.status}`);
     const content = await response.json();
     result.translations = content.translations;
+  }
+  if (summary) {
+    const response = await fetcher(
+      `${base}/v1/artifacts/${encodeURIComponent(summary.artifactId)}?${query}`);
+    if (!response.ok) throw new Error(`读取结构化纪要失败：HTTP ${response.status}`);
+    result.summary = await response.json();
   }
   if (presentation.length > 0) {
     result.presentationFrames = [];
@@ -73,9 +81,10 @@ export function renderFinalResult(result, page) {
   const hasTranscript = typeof result.text === 'string' || hasSegments;
   const hasTranslation = Array.isArray(result.translations)
     && result.translations.length > 0;
+  const hasSummary = result.summary != null;
   const hasPresentation = Array.isArray(result.presentationFrames)
     && result.presentationFrames.length > 0;
-  if (!hasTranscript && !hasTranslation && !hasPresentation) {
+  if (!hasTranscript && !hasTranslation && !hasSummary && !hasPresentation) {
     status.textContent = '本场会议没有识别到字幕';
     return;
   }
@@ -118,6 +127,30 @@ export function renderFinalResult(result, page) {
       entries.append(row);
     }
     page.querySelector('#translation-result').hidden = false;
+  }
+  if (hasSummary) {
+    const content = page.querySelector('#summary-content');
+    const title = page.createElement('h3');
+    title.textContent = result.summary.title;
+    const overview = page.createElement('p');
+    overview.textContent = result.summary.overview;
+    content.append(title, overview);
+    for (const [label, items] of [
+      ['关键要点', result.summary.keyPoints],
+      ['待办事项', result.summary.actionItems]
+    ]) {
+      if (!Array.isArray(items) || items.length === 0) continue;
+      const heading = page.createElement('h4');
+      heading.textContent = label;
+      const list = page.createElement('ul');
+      for (const item of items) {
+        const entry = page.createElement('li');
+        entry.textContent = item;
+        list.append(entry);
+      }
+      content.append(heading, list);
+    }
+    page.querySelector('#summary-result').hidden = false;
   }
   if (hasPresentation) {
     const entries = page.querySelector('#presentation-frames');

@@ -16,6 +16,9 @@
     .translation-item { border-left: 3px solid #4f7ed7; padding: 8px 12px; background: #f7f9ff; }
     .translation-item h3 { font-size: 0.95rem; margin: 0 0 6px; color: #3158a5; }
     .translation-item p { white-space: pre-wrap; line-height: 1.7; margin: 0; }
+    #summary-content { line-height: 1.7; }
+    #summary-content h3, #summary-content h4 { margin-bottom: 6px; }
+    #summary-content p { white-space: pre-wrap; }
     #presentation-frames { display: grid; gap: 20px; }
     .presentation-frame { margin: 0; }
     .presentation-frame img { display: block; width: 100%; height: auto; }
@@ -34,6 +37,10 @@
     <section id="translation-result" hidden aria-label="最终译文">
       <h2>最终译文</h2>
       <div id="translations"></div>
+    </section>
+    <section id="summary-result" hidden aria-label="结构化纪要">
+      <h2>结构化纪要</h2>
+      <div id="summary-content"></div>
     </section>
     <section id="presentation-result" hidden aria-label="演示文稿">
       <h2>演示文稿</h2>
