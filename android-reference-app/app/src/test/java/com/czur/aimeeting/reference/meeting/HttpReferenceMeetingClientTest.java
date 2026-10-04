@@ -4,6 +4,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 import com.czur.aimeeting.model.TranscriptEvent;
+import com.czur.aimeeting.model.TranslationEvent;
 import java.util.List;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
@@ -131,6 +132,53 @@ public final class HttpReferenceMeetingClientTest {
                     request.getJSONArray("requestedCapabilities").getString(1));
             assertTrue(request.getJSONObject("artifactPolicy").getBoolean("presentationCapture"));
             assertTrue(!request.has("resultDelivery"));
+        }
+    }
+
+    @Test
+    public void translationUsesSameEventSequenceAndOpenApiShapeBeforeStop() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setResponseCode(201).setBody("{}"));
+            server.enqueue(new MockResponse().setResponseCode(201).setBody("{}"));
+            server.enqueue(new MockResponse().setResponseCode(201).setBody("{}"));
+            server.enqueue(new MockResponse().setResponseCode(200).setBody("{}"));
+            server.start();
+            ReferenceMeetingClient client = new HttpReferenceMeetingClient(
+                    server.url("/").toString(), "local-demo-token");
+            client.appendTranscript("mtg_translation", 1, new TranscriptEvent(
+                    "source-1", 1, 0, 100, "en-US", "Hello", true));
+            client.appendTranslation("mtg_translation", 2, new TranslationEvent(
+                    "translation-1", "source-1", 1, "en-US", "zh-CN", "你好", false));
+            client.appendTranslation("mtg_translation", 3, new TranslationEvent(
+                    "translation-1", "source-1", 2, "en-US", "zh-CN", "你好。", true));
+            assertTrue(client.stopMeeting("mtg_translation"));
+
+            JSONObject transcript = new JSONObject(server.takeRequest().getBody().readUtf8());
+            RecordedRequest partialRequest = server.takeRequest();
+            JSONObject partial = new JSONObject(partialRequest.getBody().readUtf8());
+            JSONObject finalTranslation = new JSONObject(server.takeRequest().getBody().readUtf8());
+            RecordedRequest stop = server.takeRequest();
+            assertEquals(1, transcript.getInt("clientSequence"));
+            assertEquals(2, partial.getInt("clientSequence"));
+            assertEquals(3, finalTranslation.getInt("clientSequence"));
+            assertEquals("translation:translation-1:r1", partial.getString("clientEventId"));
+            assertEquals("translation:translation-1:r2",
+                    finalTranslation.getString("clientEventId"));
+            assertEquals("/v1/meetings/mtg_translation/events:append", partialRequest.getPath());
+            assertEquals("Bearer local-demo-token", partialRequest.getHeader("Authorization"));
+            JSONObject upsert = partial.getJSONObject("translationUpsert");
+            assertEquals("translation-1", upsert.getString("translationId"));
+            assertEquals("source-1", upsert.getString("sourceSegmentId"));
+            assertEquals(1, upsert.getInt("revision"));
+            assertEquals("UPSERT_OPERATION_UPSERT", upsert.getString("operation"));
+            assertEquals("en-US", upsert.getString("sourceLanguage"));
+            assertEquals("zh-CN", upsert.getString("targetLanguage"));
+            assertEquals("你好", upsert.getString("text"));
+            assertTrue(!upsert.getBoolean("final"));
+            assertEquals(0, upsert.getJSONArray("supersedesTranslationIds").length());
+            assertTrue(!partial.has("transcriptUpsert"));
+            assertTrue(finalTranslation.getJSONObject("translationUpsert").getBoolean("final"));
+            assertEquals("/v1/meetings/mtg_translation:stop", stop.getPath());
         }
     }
 }

@@ -2,6 +2,7 @@ package com.czur.aimeeting.reference.meeting;
 
 import com.czur.aimeeting.model.ModelSessionGrant;
 import com.czur.aimeeting.model.TranscriptEvent;
+import com.czur.aimeeting.model.TranslationEvent;
 import java.io.IOException;
 
 /**
@@ -20,6 +21,10 @@ public interface ReferenceMeetingClient {
 
     /** 提交一次字幕修订；调用方负责按 clientSequence 顺序提交。 */
     void appendTranscript(String meetingId, int clientSequence, TranscriptEvent event)
+            throws IOException;
+
+    /** 与字幕共用 clientSequence，提交已归一化译文；仅本场获准互译时调用。 */
+    void appendTranslation(String meetingId, int clientSequence, TranslationEvent event)
             throws IOException;
 
     /**

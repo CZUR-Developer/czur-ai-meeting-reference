@@ -289,8 +289,13 @@ public final class MeetingService extends Service {
                         clientSequence, event));
             }, new ModelSessionListener() {
                 @Override public void onTranslation(TranslationEvent event) {
-                    // 译文只进入会中显示快照；后端目前只接收标准字幕事件。
                     main.post(() -> showTranslation(event));
+                    if (requested.mode() == MeetingSetup.Mode.LIVE_TRANSLATION) {
+                        // 字幕与译文共用序号和单线程网络队列，模型完成后 Stop 排在所有事件之后。
+                        int clientSequence = sequence.incrementAndGet();
+                        network.execute(() -> appendTranslation(nextClient, created.meetingId(),
+                                clientSequence, event));
+                    }
                 }
 
                 @Override public void onFinished() {
@@ -376,6 +381,24 @@ public final class MeetingService extends Service {
         }
     }
 
+    private void appendTranslation(ReferenceMeetingClient nextClient, String id,
+            int clientSequence, TranslationEvent event) {
+        try {
+            nextClient.appendTranslation(id, clientSequence, event);
+            Log.i(TAG, "标准译文事件已保存 meetingId=" + id + " clientSequence="
+                    + clientSequence + " translationId=" + event.translationId()
+                    + " revision=" + event.revision());
+        } catch (IOException failure) {
+            appendFailed.set(true);
+            Log.e(TAG, "译文事件提交失败 meetingId=" + id
+                    + " clientSequence=" + clientSequence, failure);
+            main.post(() -> {
+                status = "译文提交失败：" + failure.getMessage();
+                publish();
+            });
+        }
+    }
+
     /** 页面和悬浮窗使用同一停止入口，Service 决定模型与后端收口顺序。 */
     void requestStop() {
         if (!active || !canStop) return;
@@ -401,7 +424,7 @@ public final class MeetingService extends Service {
 
     private void scheduleComplete() {
         if (completionQueued.compareAndSet(false, true)) {
-            // 同一单线程队列先提交已收到的字幕，再请求后端 Stop。
+            // 同一单线程队列先提交模型完成前收到的字幕与译文，再请求后端 Stop。
             network.execute(this::completeMeeting);
         }
     }
@@ -409,7 +432,7 @@ public final class MeetingService extends Service {
     private void completeMeeting() {
         if (appendFailed.get()) {
             main.post(() -> {
-                status = "字幕提交失败，无法完成会议";
+                status = "标准事件提交失败，无法完成会议";
                 publish();
             });
             return;

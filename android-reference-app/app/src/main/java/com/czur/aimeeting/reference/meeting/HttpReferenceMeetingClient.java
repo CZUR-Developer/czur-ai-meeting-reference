@@ -2,6 +2,7 @@ package com.czur.aimeeting.reference.meeting;
 
 import com.czur.aimeeting.model.ModelSessionGrant;
 import com.czur.aimeeting.model.TranscriptEvent;
+import com.czur.aimeeting.model.TranslationEvent;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -110,6 +111,32 @@ public final class HttpReferenceMeetingClient implements ReferenceMeetingClient 
                     200, 201);
         } catch (JSONException invalidEvent) {
             throw new IOException("字幕事件格式错误", invalidEvent);
+        }
+    }
+
+    @Override
+    public void appendTranslation(String meetingId, int clientSequence, TranslationEvent event)
+            throws IOException {
+        try {
+            // 客户端事件 ID 与字幕命名空间分开，重试同一修订时仍保持同一个 ID。
+            JSONObject body = new JSONObject()
+                    .put("clientEventId", "translation:" + event.translationId()
+                            + ":r" + event.revision())
+                    .put("clientSequence", clientSequence)
+                    .put("translationUpsert", new JSONObject()
+                            .put("translationId", event.translationId())
+                            .put("sourceSegmentId", event.sourceSegmentId())
+                            .put("revision", event.revision())
+                            .put("operation", "UPSERT_OPERATION_UPSERT")
+                            .put("sourceLanguage", event.sourceLanguage())
+                            .put("targetLanguage", event.targetLanguage())
+                            .put("text", event.text())
+                            .put("final", event.isFinal())
+                            .put("supersedesTranslationIds", new JSONArray()));
+            post("/v1/meetings/" + meetingId + "/events:append", body.toString(), null,
+                    200, 201);
+        } catch (JSONException invalidEvent) {
+            throw new IOException("译文事件格式错误", invalidEvent);
         }
     }
 
