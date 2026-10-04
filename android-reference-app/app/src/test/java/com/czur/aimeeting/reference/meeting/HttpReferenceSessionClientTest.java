@@ -21,7 +21,7 @@ public final class HttpReferenceSessionClientTest {
                     + "\"accessToken\":\"meeting-token\","
                     + "\"expiresAt\":\"2030-01-01T00:00:00Z\"}"));
             server.enqueue(new MockResponse().setResponseCode(201)
-                    .setBody("{\"meetingId\":\"mtg_login\"}"));
+                    .setBody("{\"meetingId\":\"mtg_login\",\"limits\":{\"maxMeetingDurationMs\":600000}}"));
             server.start();
 
             String backendUrl = server.url("/").toString();

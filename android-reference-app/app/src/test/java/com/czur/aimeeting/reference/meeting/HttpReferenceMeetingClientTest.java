@@ -18,7 +18,8 @@ public final class HttpReferenceMeetingClientTest {
     public void createsStartsAndAppendsOneCanonicalTranscript() throws Exception {
         try (MockWebServer server = new MockWebServer()) {
             server.enqueue(new MockResponse().setResponseCode(201)
-                    .setBody("{\"meetingId\":\"mtg_test\",\"capabilityDecisions\":["
+                    .setBody("{\"meetingId\":\"mtg_test\",\"limits\":{\"maxMeetingDurationMs\":600000},"
+                            + "\"capabilityDecisions\":["
                             + "{\"capability\":\"transcript.realtime\",\"availability\":\"AVAILABLE\"},"
                             + "{\"capability\":\"translation.realtime\",\"availability\":\"UNAVAILABLE\","
                             + "\"reasonCode\":\"PROVIDER_CAPABILITY_MISSING\"},"
@@ -44,6 +45,7 @@ public final class HttpReferenceMeetingClientTest {
             RecordedRequest appendRequest = server.takeRequest();
             RecordedRequest stopRequest = server.takeRequest();
             assertEquals("mtg_test", meetingId);
+            assertEquals(600000L, created.maxMeetingDurationMs());
             assertTrue(created.capabilities().canUse(MeetingCapabilityState.TRANSCRIPT,
                     java.util.Set.of(MeetingCapabilityState.TRANSCRIPT)));
             assertTrue(!created.capabilities().canUse(MeetingCapabilityState.TRANSLATION,
@@ -83,7 +85,7 @@ public final class HttpReferenceMeetingClientTest {
     public void requestsSeparateModelSessionGrantAfterCreate() throws Exception {
         try (MockWebServer server = new MockWebServer()) {
             server.enqueue(new MockResponse().setResponseCode(201)
-                    .setBody("{\"meetingId\":\"mtg_real\"}"));
+                    .setBody("{\"meetingId\":\"mtg_real\",\"limits\":{\"maxMeetingDurationMs\":600000}}"));
             server.enqueue(new MockResponse().setResponseCode(200).setBody("{"
                     + "\"meetingId\":\"mtg_real\","
                     + "\"adapterId\":\"tingwu-realtime\","
@@ -115,7 +117,7 @@ public final class HttpReferenceMeetingClientTest {
     public void serializesFutureModeSettingsWithoutInventingResultDeliveryFields() throws Exception {
         try (MockWebServer server = new MockWebServer()) {
             server.enqueue(new MockResponse().setResponseCode(201)
-                    .setBody("{\"meetingId\":\"mtg_translation\"}"));
+                    .setBody("{\"meetingId\":\"mtg_translation\",\"limits\":{\"maxMeetingDurationMs\":600000}}"));
             server.start();
             HttpReferenceMeetingClient client = new HttpReferenceMeetingClient(
                     server.url("/").toString(), "local-demo-token");

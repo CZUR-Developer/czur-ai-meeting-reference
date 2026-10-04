@@ -27,6 +27,7 @@ import com.czur.aimeeting.reference.meeting.MeetingDisplayState;
 import com.czur.aimeeting.reference.meeting.MeetingRuntimeBridge;
 import com.czur.aimeeting.reference.meeting.MeetingRuntimeFactory;
 import com.czur.aimeeting.reference.meeting.MeetingSetup;
+import com.czur.aimeeting.reference.meeting.MeetingTimeRule;
 import com.czur.aimeeting.reference.meeting.ReferenceMeetingClient;
 import java.io.IOException;
 import java.util.Set;
@@ -65,10 +66,12 @@ public final class MeetingService extends Service {
         final boolean overlayShowing;
         final int transcriptVersion;
         final String resultUrl;
+        final String timeText;
+        final String reminderText;
 
         State(MeetingDisplayState display, String status, String capabilityText, boolean busy,
                 boolean active, boolean canStop, boolean overlayShowing,
-                int transcriptVersion, String resultUrl) {
+                int transcriptVersion, String resultUrl, String timeText, String reminderText) {
             this.display = display;
             this.status = status;
             this.capabilityText = capabilityText;
@@ -78,6 +81,8 @@ public final class MeetingService extends Service {
             this.overlayShowing = overlayShowing;
             this.transcriptVersion = transcriptVersion;
             this.resultUrl = resultUrl;
+            this.timeText = timeText;
+            this.reminderText = reminderText;
         }
     }
 
@@ -95,7 +100,26 @@ public final class MeetingService extends Service {
     private final AtomicBoolean completionQueued = new AtomicBoolean();
     private final Runnable clockTick = new Runnable() {
         @Override public void run() {
-            publish();
+            if (active && timing != null) {
+                MeetingTimeRule.Snapshot now = timing.at(SystemClock.elapsedRealtime());
+                if (now.limitWarning() && !limitReminderLogged) {
+                    limitReminderLogged = true;
+                    Log.i(TAG, "本场剩余20分钟提醒 meetingId=" + meetingId);
+                }
+                if (now.noTranscriptWarning() && !idleReminderLogged) {
+                    idleReminderLogged = true;
+                    Log.i(TAG, "连续4分钟无转写提醒 meetingId=" + meetingId);
+                }
+                if (canStop && now.stopCause() != MeetingTimeRule.StopCause.NONE) {
+                    Log.i(TAG, "自动停止会议 meetingId=" + meetingId
+                            + " cause=" + now.stopCause());
+                    requestStop(now.stopCause() == MeetingTimeRule.StopCause.TIME_LIMIT
+                            ? "已到本场时长上限，正在等待模型最终字幕…"
+                            : "连续5分钟无转写，正在等待模型最终字幕…");
+                } else {
+                    publish();
+                }
+            }
             if (active) main.postDelayed(this, 1000L);
         }
     };
@@ -104,6 +128,7 @@ public final class MeetingService extends Service {
     private Observer observer;
     private ReferenceMeetingClient client;
     private ModelSession session;
+    private MeetingTimeRule timing;
     private MeetingSetup setup;
     private String meetingId;
     private String status = "请先登录，再开始会议";
@@ -115,6 +140,8 @@ public final class MeetingService extends Service {
     private boolean canStop;
     private volatile boolean stopRequested;
     private volatile boolean modelFinished;
+    private boolean limitReminderLogged;
+    private boolean idleReminderLogged;
 
     @Override public void onCreate() {
         super.onCreate();
@@ -270,7 +297,11 @@ public final class MeetingService extends Service {
         completionQueued.set(false);
         stopRequested = false;
         modelFinished = false;
-        display.start(SystemClock.elapsedRealtime(),
+        long startedAtMs = SystemClock.elapsedRealtime();
+        timing = new MeetingTimeRule(startedAtMs, created.maxMeetingDurationMs());
+        limitReminderLogged = false;
+        idleReminderLogged = false;
+        display.start(startedAtMs,
                 requested.mode() == MeetingSetup.Mode.LIVE_TRANSLATION,
                 requested.sourceLanguage(), requested.targetLanguage());
         transcriptVersion++;
@@ -332,6 +363,13 @@ public final class MeetingService extends Service {
     }
 
     private void showTranscript(TranscriptEvent event) {
+        if (timing != null && event.text() != null && !event.text().isBlank()) {
+            timing.onTranscript(SystemClock.elapsedRealtime(), event.text());
+            if (idleReminderLogged) {
+                idleReminderLogged = false;
+                Log.i(TAG, "转写恢复，无转写提醒已解除 meetingId=" + meetingId);
+            }
+        }
         boolean firstRoute = display.isBilingual() && display.route(event.segmentId()) == null;
         display.apply(event);
         if (firstRoute && display.route(event.segmentId()) != null)
@@ -403,10 +441,15 @@ public final class MeetingService extends Service {
 
     /** 页面和悬浮窗使用同一停止入口，Service 决定模型与后端收口顺序。 */
     void requestStop() {
+        requestStop("正在等待模型最终字幕…");
+    }
+
+    /** 自动停止和用户点击停止都进入同一模型完成、事件提交、后端 Stop 顺序。 */
+    private void requestStop(String progressText) {
         if (!active || !canStop) return;
         stopRequested = true;
         canStop = false;
-        status = "正在等待模型最终字幕…";
+        status = progressText;
         publish();
         network.execute(() -> {
             try {
@@ -487,9 +530,22 @@ public final class MeetingService extends Service {
     }
 
     private void publish() {
+        MeetingTimeRule.Snapshot clock = timing == null ? null
+                : timing.at(SystemClock.elapsedRealtime());
+        String timeText = clock == null ? "" : "已进行 " + MeetingTimeRule.format(clock.elapsedMs())
+                + " · 剩余 " + MeetingTimeRule.format(clock.remainingMs());
+        String reminderText = "";
+        if (clock != null) {
+            if (clock.limitWarning()) reminderText = "本场会议剩余不足20分钟";
+            if (clock.noTranscriptWarning()) {
+                if (!reminderText.isEmpty()) reminderText += "\n";
+                reminderText += "连续4分钟无转写，距自动结束还剩 "
+                        + MeetingTimeRule.format(clock.noTranscriptRemainingMs());
+            }
+        }
         State state = new State(display, status, capabilityText, busy, active, canStop,
-                overlay.isShowing(), transcriptVersion, resultUrl);
-        overlay.render(display, SystemClock.elapsedRealtime(), canStop);
+                overlay.isShowing(), transcriptVersion, resultUrl, timeText, reminderText);
+        overlay.render(display, timeText, reminderText, canStop);
         if (observer != null) observer.onMeetingState(state);
     }
 

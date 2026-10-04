@@ -56,7 +56,8 @@ public final class HttpReferenceMeetingClient implements ReferenceMeetingClient 
                     UUID.randomUUID().toString(), 201).body;
             JSONObject created = new JSONObject(response);
             return new CreatedMeeting(created.getString("meetingId"), null,
-                    MeetingCapabilityState.fromCreateResponse(created));
+                    MeetingCapabilityState.fromCreateResponse(created),
+                    created.getJSONObject("limits").getLong("maxMeetingDurationMs"));
         } catch (JSONException invalidResponse) {
             throw new IOException("创建会议响应格式错误", invalidResponse);
         }

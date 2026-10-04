@@ -10,7 +10,6 @@ import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.IBinder;
-import android.os.SystemClock;
 import android.provider.Settings;
 import android.text.InputType;
 import android.util.Log;
@@ -74,6 +73,7 @@ public final class MainActivity extends Activity {
     private TextView rightLanguageTitle;
     private final Map<String, TextView> transcriptRows = new LinkedHashMap<>();
     private TextView elapsedView;
+    private TextView reminderView;
     private TextView statusView;
     private TextView capabilityView;
     private Spinner sourceLanguageView;
@@ -226,8 +226,12 @@ public final class MainActivity extends Activity {
         meetingLayout.addView(meetingTitle);
 
         elapsedView = new TextView(this);
-        elapsedView.setText("已进行 00:00:00");
+        elapsedView.setText("已进行 00:00:00 · 剩余 00:00:00");
         meetingLayout.addView(elapsedView);
+        reminderView = new TextView(this);
+        reminderView.setTextColor(0xFFB45309);
+        reminderView.setVisibility(View.GONE);
+        meetingLayout.addView(reminderView);
 
         transcriptView = new TextView(this);
         transcriptView.setTextSize(28);
@@ -432,7 +436,9 @@ public final class MainActivity extends Activity {
         stopButton.setEnabled(state.canStop);
         overlayButton.setText(state.overlayShowing
                 ? "关闭跨应用悬浮字幕" : "显示跨应用悬浮字幕");
-        elapsedView.setText("已进行 " + state.display.elapsed(SystemClock.elapsedRealtime()));
+        elapsedView.setText(state.timeText);
+        reminderView.setText(state.reminderText);
+        reminderView.setVisibility(state.reminderText.isEmpty() ? View.GONE : View.VISIBLE);
         if (renderedTranscriptVersion != state.transcriptVersion) {
             if (state.display.segments().isEmpty()) {
                 transcriptRows.clear();

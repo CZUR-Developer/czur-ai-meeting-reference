@@ -26,6 +26,7 @@ final class MeetingOverlay {
     private TextView leftView;
     private TextView rightView;
     private TextView elapsedView;
+    private TextView reminderView;
     private Button stopButton;
     private Button swapButton;
 
@@ -58,6 +59,10 @@ final class MeetingOverlay {
         elapsedView.setTextColor(Color.WHITE);
         controls.addView(elapsedView);
         panel.addView(controls);
+        reminderView = new TextView(context);
+        reminderView.setTextColor(0xFFFFD166);
+        reminderView.setVisibility(View.GONE);
+        panel.addView(reminderView);
 
         transcriptView = new TextView(context);
         transcriptView.setTextSize(22);
@@ -109,7 +114,8 @@ final class MeetingOverlay {
         root = panel;
     }
 
-    void render(MeetingDisplayState state, long elapsedRealtimeMs, boolean canStop) {
+    void render(MeetingDisplayState state, String timeText, String reminderText,
+            boolean canStop) {
         if (root == null) return;
         boolean bilingual = state.isBilingual();
         MeetingDisplayState.BilingualRow current = bilingual ? state.latestBilingualRow() : null;
@@ -133,7 +139,9 @@ final class MeetingOverlay {
                 rightView.setText("");
             }
         }
-        elapsedView.setText(state.elapsed(elapsedRealtimeMs));
+        elapsedView.setText(timeText);
+        reminderView.setText(reminderText);
+        reminderView.setVisibility(reminderText.isEmpty() ? View.GONE : View.VISIBLE);
         stopButton.setEnabled(canStop);
     }
 
@@ -147,6 +155,7 @@ final class MeetingOverlay {
         leftView = null;
         rightView = null;
         elapsedView = null;
+        reminderView = null;
         stopButton = null;
         swapButton = null;
     }
