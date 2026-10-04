@@ -41,11 +41,11 @@ P5-2 增加 `sample-json-ws` 第二格式样例：它的模型消息使用顶层
 # 从 starry 构建或交付渠道取得对应版本 AAR 后，在本机注入
 ./gradlew :app:assembleDebug :app:testDebugUnitTest \
   -PmeetingRuntime=sdk \
-  -PmeetingSdkAar=/absolute/path/ai-meeting-sdk-0.2.0-release.aar
+  -PmeetingSdkAar=/absolute/path/ai-meeting-sdk-0.3.0-release.aar
 ```
 
 排查真实模型字幕但设备 MIC 声学入口不确定时，可将同一 SDK Module 的
-`ai-meeting-sdk-0.2.0-debug.aar` 注入上面的 `meetingSdkAar` 参数。调试 AAR 若在
+`ai-meeting-sdk-0.3.0-debug.aar` 注入上面的 `meetingSdkAar` 参数。调试 AAR 若在
 参考 App 私有外部目录找到 `meeting-debug.wav`，会按实时节奏把该 16 kHz、单声道、
 PCM16 WAV 发往模型；没有该文件就继续使用 MIC。录音仅通过设备调试工具临时放在
 `/sdcard/Android/data/com.czur.aimeeting.reference/files/meeting-debug.wav`，
@@ -53,7 +53,7 @@ PCM16 WAV 发往模型；没有该文件就继续使用 MIC。录音仅通过设
 后端签发、听悟 Adapter、标准事件提交与结果页面；WAV 读完后在 App 点击停止。
 
 裸 AAR 不传递依赖元数据，`sdk` 模式显式添加 SDK 所需的 OkHttp 运行依赖。
-SDK 从公共 `model-runtime-contract-0.3.0.jar` 编译，参考 App 只打包本工程
+SDK 从公共 `model-runtime-contract-0.4.0.jar` 编译，参考 App 只打包本工程
 `model-runtime-contract` 的同版类，避免重复类。SDK 模式的最终验收还需要设备说话
 产生真实字幕，并确认音频送达模型端点、后端只接收标准事件。
 
