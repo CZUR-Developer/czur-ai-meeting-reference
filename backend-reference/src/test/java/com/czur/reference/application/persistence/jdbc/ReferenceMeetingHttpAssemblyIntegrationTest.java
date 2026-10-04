@@ -217,6 +217,9 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
                  var network = assembly.newJdkHttpServer(new InetSocketAddress("127.0.0.1", 0))) {
                 network.start();
                 int port = network.address().getPort();
+                String discovered = exchange(port, "GET", "/v1/capabilities", "");
+                assertEquals(200, status(discovered));
+                assertTrue(responseBody(discovered).contains("summary.structured"));
                 String key = "summary-session-starting-key-123456789";
                 String create = createRequest(key, "summary-session-starting").body()
                         .replace("[\"transcript.realtime\"]",
