@@ -47,8 +47,9 @@ import java.util.logging.Logger;
  *
  * <p>Stop 命令先独立提交。此实现随后锁定同一会议，读取客户端标准事件，按
  * segmentId 采用最后修订，先通过 ArtifactStore 发布不可变正文，再在一个数据库事务
- * 中保存 READY metadata、Manifest 和会议终态。若最后
- * 修订尚非 final，保持 Stop 的 202 等待状态；App 应先提交最终修订再停止。
+ * 中保存 READY metadata、Manifest 和会议终态。Stop 后客户端不能继续 append，
+ * 因此只冻结最终修订；未完成片段不被当作最终文字。若没有任何最终字幕，直接
+ * 冻结无 Artifact 的 READY Manifest，不制造空字幕事件或空的最终字幕产物。
  * 本类只处理客户端事件链，不改变旧音频 Worker 的收口流程。</p>
  */
 public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResultFinalizer {
@@ -90,37 +91,39 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
                     return true;
                 }
                 Projection projection = project(connection, meetingId);
-                if (projection == null) {
-                    connection.rollback();
-                    return true;
-                }
-                if (artifactStore == null) {
+                if (projection.segmentCount() > 0 && artifactStore == null) {
                     throw new IllegalStateException("client result artifact store is unavailable");
                 }
                 Instant endedAt = clock.instant().truncatedTo(ChronoUnit.MICROS);
                 if (endedAt.isBefore(locked.snapshot().updatedAt())) {
                     endedAt = locked.snapshot().updatedAt();
                 }
-                String artifactId = "art_client_" + sha256(meetingId.getBytes(
-                        StandardCharsets.UTF_8));
-                ObjectNode artifact = JSON.createObjectNode();
-                artifact.put("schemaVersion", "client-transcript/v1");
-                artifact.put("artifactType", "transcript.final");
-                artifact.put("language", projection.language());
-                artifact.put("text", projection.text());
-                String artifactJson = artifact.toString();
-                byte[] content = artifactJson.getBytes(StandardCharsets.UTF_8);
-                String checksum = "sha256:" + sha256(content);
-                WriteIntentSpec spec = new WriteIntentSpec(artifactId, meetingId,
-                        "transcript.final", "application/json", projection.language(),
-                        1, content.length, checksum);
-                ArtifactDescriptor descriptor = publish(spec, content);
-                ArtifactReadyMetadataStore.PersistResult persisted =
-                        new JdbcArtifactReadyMetadataStore(connection).persistReady(descriptor);
-                if (persisted.status() == ArtifactReadyMetadataStore.PersistStatus.CONFLICT) {
-                    throw new IllegalStateException("client result artifact metadata conflict");
+                String artifactId = null;
+                List<MeetingManifest.ArtifactRef> artifactRefs = List.of();
+                if (projection.segmentCount() > 0) {
+                    artifactId = "art_client_" + sha256(meetingId.getBytes(
+                            StandardCharsets.UTF_8));
+                    ObjectNode artifact = JSON.createObjectNode();
+                    artifact.put("schemaVersion", "client-transcript/v1");
+                    artifact.put("artifactType", "transcript.final");
+                    artifact.put("language", projection.language());
+                    artifact.put("text", projection.text());
+                    byte[] content = artifact.toString().getBytes(StandardCharsets.UTF_8);
+                    String checksum = "sha256:" + sha256(content);
+                    WriteIntentSpec spec = new WriteIntentSpec(artifactId, meetingId,
+                            "transcript.final", "application/json", projection.language(),
+                            1, content.length, checksum);
+                    ArtifactDescriptor descriptor = publish(spec, content);
+                    ArtifactReadyMetadataStore.PersistResult persisted =
+                            new JdbcArtifactReadyMetadataStore(connection).persistReady(descriptor);
+                    if (persisted.status() == ArtifactReadyMetadataStore.PersistStatus.CONFLICT) {
+                        throw new IllegalStateException("client result artifact metadata conflict");
+                    }
+                    artifactRefs = List.of(new MeetingManifest.ArtifactRef(artifactId,
+                            "transcript.final", "application/json", projection.language(),
+                            1, content.length, checksum, MeetingManifest.ArtifactStatus.READY,
+                            persisted.metadata().recordedAt(), null, null));
                 }
-                Instant recordedAt = persisted.metadata().recordedAt();
                 MeetingManifest manifest = new MeetingManifest(
                         "0.1", meetingId, 1,
                         new MeetingManifest.Profile(locked.snapshot().profileId(),
@@ -128,17 +131,14 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
                         null, com.czur.reference.application.port.ManifestStatus.READY,
                         locked.snapshot().createdAt(), endedAt, projection.durationMs(),
                         new MeetingManifest.Languages(projection.language(), List.of()),
-                        List.of(new MeetingManifest.ArtifactRef(artifactId,
-                                "transcript.final", "application/json", projection.language(),
-                                1, content.length, checksum,
-                                MeetingManifest.ArtifactStatus.READY, recordedAt, null, null)),
-                        List.of());
+                        artifactRefs, List.of());
                 try (PreparedStatement statement = connection.prepareStatement("""
                         INSERT INTO meeting_client_result
                             (meeting_id, artifact_id, manifest_json)
                         VALUES (?, ?, ?)
                         """)) {
                     statement.setString(1, meetingId);
+                    // 零字幕结果只有 Manifest；artifact_id 留空，不指向不存在的正文。
                     statement.setString(2, artifactId);
                     statement.setString(3, MeetingManifestJson.encode(manifest));
                     statement.executeUpdate();
@@ -166,7 +166,7 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
                     }
                 }
                 connection.commit();
-                LOGGER.log(Level.INFO, "客户端最终字幕已生成 segments={0}",
+                LOGGER.log(Level.INFO, "客户端结果已生成 segments={0}",
                         projection.segmentCount());
                 return true;
             } catch (SQLException | ArtifactStoreException | RuntimeException failure) {
@@ -229,10 +229,14 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
                 }
             }
         }
-        if (latest.isEmpty() || latest.values().stream().anyMatch(item -> !item.getFinal())) {
-            return null;
+        // Stop 后 append 已关闭，等待 partial 变成 final 只会永久停在 STOPPING。
+        // 未完成片段不进入结果；即使一场会议仅有 partial，也能以无字幕结果收口。
+        List<TranscriptUpsert> ordered = new ArrayList<>(latest.values().stream()
+                .filter(TranscriptUpsert::getFinal).toList());
+        if (ordered.isEmpty()) {
+            // und 表示实际说话语种未知，不能用会前配置猜测识别结果。
+            return new Projection("", "und", 0, 0);
         }
-        List<TranscriptUpsert> ordered = new ArrayList<>(latest.values());
         ordered.sort(Comparator.comparingLong(TranscriptUpsert::getStartMs)
                 .thenComparing(TranscriptUpsert::getSegmentId));
         String language = ordered.getFirst().getLanguage();
@@ -240,7 +244,7 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
             throw new IllegalStateException("mixed source languages are not supported in P4");
         }
         String text = String.join("\n", ordered.stream().map(TranscriptUpsert::getText).toList());
-        if (text.isBlank()) return null;
+        if (text.isBlank()) return new Projection("", "und", 0, 0);
         long durationMs = ordered.stream().mapToLong(TranscriptUpsert::getEndMs)
                 .max().orElse(0);
         return new Projection(text, language, durationMs, ordered.size());

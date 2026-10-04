@@ -285,7 +285,8 @@ CREATE TABLE meeting_client_event (
 -- READY binding 和内容摘要沿用 artifact 表。
 CREATE TABLE meeting_client_result (
     meeting_id text PRIMARY KEY REFERENCES meeting_client_input(meeting_id),
-    artifact_id text NOT NULL UNIQUE,
+    -- 零字幕会议有 READY Manifest，但没有 transcript.final Artifact。
+    artifact_id text UNIQUE,
     manifest_json text NOT NULL
 );
 

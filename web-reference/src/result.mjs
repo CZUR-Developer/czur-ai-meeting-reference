@@ -49,7 +49,7 @@ async function showResult() {
       () => { status.textContent = '结果生成中…'; });
     if (result.title) document.querySelector('#title').textContent = result.title;
     if (typeof result.text !== 'string') {
-      status.textContent = '本场会议没有最终转写';
+      status.textContent = '本场会议没有识别到字幕';
       return;
     }
     document.querySelector('#transcript').textContent = result.text;

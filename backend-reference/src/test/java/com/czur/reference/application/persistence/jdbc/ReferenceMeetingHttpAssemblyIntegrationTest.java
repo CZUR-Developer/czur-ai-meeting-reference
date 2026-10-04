@@ -268,6 +268,91 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
     }
 
     @Test
+    void clientStopWithoutRecognizedSubtitleReturnsEmptyReadyResult(
+            @TempDir Path artifactRoot) throws Exception {
+        migrate(1);
+        String meetingId = clientMeeting("no_subtitles");
+        Map<String, String> enabled = config();
+        enabled.put(ReferenceMeetingDeploymentConfig.RESULT_LINK_TTL_MS, "60000");
+        var artifacts = new PersistentFileSystemMockArtifactStore(artifactRoot, 1024 * 1024);
+        try (var assembly = ReferenceMeetingHttpAssembly.start(enabled, CLOCK, artifacts)) {
+            HttpRequest stop = new HttpRequest("POST", "/v1/meetings/" + meetingId + ":stop",
+                    headers("client-empty-stop-key-123456789"), "");
+            assertEquals(200, assembly.runtime().handle(stop, null).status());
+            assertEquals("READY", meetingState(meetingId));
+            assertEquals(200, assembly.runtime().handle(stop, null).status());
+            assertEquals(1, count("meeting_client_result WHERE artifact_id IS NULL"));
+            assertEquals(0, count("meeting_client_event"));
+            assertEquals(0, count("artifact"));
+            Map<String, String> query = Map.of("genTime", Long.toString(NOW.toEpochMilli()));
+            var result = assembly.runtime().handle(new HttpRequest("GET",
+                    "/v1/meetings/" + meetingId + "/manifest", Map.of(), query, ""), null);
+            assertEquals(200, result.status());
+            MeetingManifest manifest = MeetingManifestJson.decode(result.body());
+            assertEquals(MeetingState.READY.name(), manifest.status().name());
+            assertTrue(manifest.artifacts().isEmpty());
+            assertEquals("und", manifest.languages().source());
+        }
+    }
+
+    @Test
+    void clientStopWithOnlyPartialSubtitleDoesNotWaitForever(
+            @TempDir Path artifactRoot) throws Exception {
+        migrate(1);
+        String meetingId = clientMeeting("partial_only");
+        var event = RealtimeTranscriptEventMapper.event(meetingId,
+                "evt_client_partial_only", 1, NOW.minusSeconds(30),
+                new CanonicalTranscriptEvent("segment-1", 1,
+                        CanonicalTranscriptEvent.Operation.UPSERT, 0, 1200, "zh-CN",
+                        "未确认初稿", false, null, 0, List.of(), List.of()));
+        new JdbcMeetingEventLogStore(fixtureDataSource).append(event);
+        try (Connection connection = fixtureDataSource.getConnection();
+             PreparedStatement identity = connection.prepareStatement("""
+                     INSERT INTO meeting_client_event
+                         (meeting_id, client_event_id, client_sequence, event_id)
+                     VALUES (?, ?, ?, ?)
+                     """)) {
+            identity.setString(1, meetingId);
+            identity.setString(2, "client-partial-1");
+            identity.setInt(3, 1);
+            identity.setString(4, event.eventId());
+            identity.executeUpdate();
+        }
+        Map<String, String> enabled = config();
+        enabled.put(ReferenceMeetingDeploymentConfig.RESULT_LINK_TTL_MS, "60000");
+        try (var assembly = ReferenceMeetingHttpAssembly.start(enabled, CLOCK,
+                new PersistentFileSystemMockArtifactStore(artifactRoot, 1024 * 1024))) {
+            var stopped = assembly.runtime().handle(new HttpRequest("POST",
+                    "/v1/meetings/" + meetingId + ":stop",
+                    headers("client-partial-stop-key-123456789"), ""), null);
+            assertEquals(200, stopped.status());
+            assertEquals("READY", meetingState(meetingId));
+            assertEquals(1, count("meeting_client_event"));
+            assertEquals(0, count("artifact"));
+            Map<String, String> query = Map.of("genTime", Long.toString(NOW.toEpochMilli()));
+            var result = assembly.runtime().handle(new HttpRequest("GET",
+                    "/v1/meetings/" + meetingId + "/manifest", Map.of(), query, ""), null);
+            assertEquals(200, result.status());
+            assertTrue(MeetingManifestJson.decode(result.body()).artifacts().isEmpty());
+        }
+    }
+
+    private String clientMeeting(String suffix) throws Exception {
+        createOwned(suffix);
+        startOwned(suffix);
+        String meetingId = "mtg_" + suffix;
+        try (Connection connection = fixtureDataSource.getConnection();
+             PreparedStatement marker = connection.prepareStatement("""
+                     INSERT INTO meeting_client_input(meeting_id, started_at) VALUES (?, ?)
+                     """)) {
+            marker.setString(1, meetingId);
+            marker.setTimestamp(2, java.sql.Timestamp.from(NOW.minusSeconds(60)));
+            marker.executeUpdate();
+        }
+        return meetingId;
+    }
+
+    @Test
     void closedAssemblyUsesRealQueryStopAndT14DeletionPorts() throws Exception {
         migrate(13);
         createOwned("stop");

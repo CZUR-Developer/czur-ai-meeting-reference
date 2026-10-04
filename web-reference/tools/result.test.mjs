@@ -29,3 +29,17 @@ test('生成中的结果完成后只读取最终转写', async () => {
     'http://api.test/v1/artifacts/art_final?genTime=12345'
   ]);
 });
+
+test('无字幕结果只读取空产物清单，不请求不存在的正文', async () => {
+  const requests = [];
+  const fetcher = async url => {
+    requests.push(url);
+    return { ok: true, status: 200,
+      json: async () => ({ title: null, artifacts: [] }) };
+  };
+  const result = await readFinalTranscript('http://api.test', 'mtg_empty', '12345',
+    fetcher);
+  assert.deepEqual(result, { title: null, text: null });
+  assert.deepEqual(requests,
+    ['http://api.test/v1/meetings/mtg_empty/manifest?genTime=12345']);
+});
