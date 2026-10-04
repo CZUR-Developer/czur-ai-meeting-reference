@@ -25,7 +25,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * 按同一匿名 Manifest 访问决定读取客户端字幕/译文或 Mock 最终转写的持久字节。
+ * 按同一匿名 Manifest 访问决定读取客户端字幕/译文/纪要或 Mock 最终转写的持久字节。
  *
  * <p>artifactId 只用于从 V011 READY metadata 找到所属会议，不当作存储路径。
  * 在任何内容读取前，先由既有 {@link MeetingManifestPort} 对该会议执行 genTime、
@@ -97,7 +97,9 @@ public final class JdbcMeetingArtifactContentQueryPort
                         || (request.artifactId().startsWith("art_client_presentation_")
                             && "presentation.capture".equals(reference.type()))
                         || (request.artifactId().startsWith("art_client_translation_")
-                            && "translation.final".equals(reference.type())))) {
+                            && "translation.final".equals(reference.type()))
+                        || (request.artifactId().startsWith("art_client_summary_")
+                            && "summary.structured".equals(reference.type())))) {
                 return new NotFound();
             }
             Optional<ReadyMetadata> metadata = findMetadata(request.artifactId());

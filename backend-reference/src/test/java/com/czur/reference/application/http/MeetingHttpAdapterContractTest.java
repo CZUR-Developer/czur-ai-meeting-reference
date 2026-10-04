@@ -256,6 +256,36 @@ class MeetingHttpAdapterContractTest {
     }
 
     @Test
+    void clientSummaryAcceptsOnlyStructuredTextAndRequiresAuthenticatedWrite() {
+        RecordingClientInput client = new RecordingClientInput();
+        adapter = new MeetingHttpAdapter(query, deletion, decoder,
+                new HttpErrorMapper(() -> "summary-diagnostic"), stopService(),
+                null, null, false, null, null, null, null, client);
+        String body = """
+                {"language":"zh-CN","title":"会议纪要","overview":"讨论了方案",
+                 "keyPoints":["确定范围"],"actionItems":["继续验证"]}
+                """;
+        HttpRequest submit = new HttpRequest("POST",
+                "/v1/meetings/mtg_client/summary:submit",
+                Map.of("content-type", "application/json"), body);
+        assertEquals(MeetingHttpAdapter.AuthenticationRoute.CLIENT_WRITE,
+                MeetingHttpAdapter.authenticationRoute(submit));
+        assertEquals(201, adapter.handle(submit, context()).status());
+        assertEquals("会议纪要", client.summary.title());
+        assertEquals(List.of("继续验证"), client.summary.actionItems());
+        client.created = false;
+        assertEquals(200, adapter.handle(submit, context()).status());
+        assertEquals(401, adapter.handle(submit, null).status());
+        assertEquals(400, adapter.handle(new HttpRequest("POST", submit.path(),
+                submit.headers(), body.replace("\"title\"", "\"rawModel\":{},\"title\"")),
+                context()).status());
+        assertEquals(400, adapter.handle(new HttpRequest("POST", submit.path(),
+                submit.headers(), body.replace("\"title\":\"会议纪要\"",
+                        "\"title\":\"重复\",\"title\":\"会议纪要\"")),
+                context()).status());
+    }
+
+    @Test
     void clientStartAndAppendAcceptOnlyCanonicalTranscriptAndReturnServerEnvelope() {
         RecordingClientInput client = new RecordingClientInput();
         adapter = new MeetingHttpAdapter(query, deletion, decoder,
@@ -862,6 +892,13 @@ class MeetingHttpAdapterContractTest {
         private ClientEvent request;
         private boolean created = true;
         private PresentationChunk capture;
+        private StructuredSummary summary;
+
+        @Override public SummarySubmitResult submitSummary(MeetingCommandContext context,
+                String meetingId, StructuredSummary request) {
+            this.summary = request;
+            return new SummarySubmitted(created);
+        }
 
         @Override public CaptureAppendResult appendPresentation(MeetingCommandContext context,
                 String meetingId, PresentationChunk request) {

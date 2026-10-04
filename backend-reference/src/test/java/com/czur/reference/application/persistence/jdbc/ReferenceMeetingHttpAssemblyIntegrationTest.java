@@ -519,6 +519,81 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
     }
 
     @Test
+    void clientSummaryIsSubmittedBeforeStopAndPublishedAsReadyArtifact(
+            @TempDir Path artifactRoot) throws Exception {
+        migrate(1);
+        Map<String, String> enabled = enabledConfig();
+        enabled.put(ReferenceMeetingDeploymentConfig.PROFILE_OPTIONAL_CAPABILITIES,
+                "summary.structured");
+        enabled.put(ReferenceMeetingDeploymentConfig.ENTITLEMENT_SUPPORTED_CAPABILITIES,
+                "transcript.realtime,summary.structured");
+        enabled.put(ReferenceMeetingDeploymentConfig.MOCK_CAPABILITIES,
+                "transcript.realtime,summary.structured");
+        enabled.put(ReferenceMeetingDeploymentConfig.RESULT_LINK_TTL_MS, "60000");
+        try (var assembly = ReferenceMeetingHttpAssembly.start(enabled, CLOCK,
+                new PersistentFileSystemMockArtifactStore(artifactRoot, 1024 * 1024));
+             var network = assembly.newJdkHttpServer(new InetSocketAddress("127.0.0.1", 0))) {
+            network.start();
+            int port = network.address().getPort();
+            String key = "summary-create-key-123456789";
+            String create = createRequest(key, "summary-client-session").body()
+                    .replace("[\"transcript.realtime\"]",
+                            "[\"transcript.realtime\",\"summary.structured\"]");
+            String created = exchange(port, "POST", "/v1/meetings", create,
+                    networkHeaders(TOKEN, key, true));
+            assertEquals(201, status(created));
+            String meetingId = ERROR_JSON.readTree(responseBody(created))
+                    .path("meetingId").asText();
+            assertEquals(200, status(exchange(port, "POST", "/v1/meetings/" + meetingId
+                    + ":startClient", "", networkHeaders(TOKEN, null, false))));
+            String transcript = """
+                    {"clientEventId":"summary-final-1","clientSequence":1,
+                     "transcriptUpsert":{"segmentId":"summary-segment-1","revision":1,
+                     "operation":"UPSERT_OPERATION_UPSERT","startMs":0,"endMs":1000,
+                     "language":"zh-CN","text":"今天确认了计划","final":true}}
+                    """;
+            assertEquals(201, status(exchange(port, "POST", "/v1/meetings/" + meetingId
+                    + "/events:append", transcript, networkHeaders(TOKEN, null, true))));
+            String path = "/v1/meetings/" + meetingId + "/summary:submit";
+            String summary = """
+                    {"language":"zh-CN","title":"项目会议","overview":"确认了计划",
+                     "keyPoints":["先交付 Mock 闭环"],"actionItems":["检查结果页面"]}
+                    """;
+            assertNetworkError(exchange(port, "POST", path,
+                    summary.replace("\"title\"", "\"providerSecret\":\"x\",\"title\""),
+                    networkHeaders(TOKEN, null, true)), 400, "INVALID_REQUEST");
+            assertEquals(201, status(exchange(port, "POST", path, summary,
+                    networkHeaders(TOKEN, null, true))));
+            assertEquals(200, status(exchange(port, "POST", path, summary,
+                    networkHeaders(TOKEN, null, true))));
+            assertNetworkError(exchange(port, "POST", path,
+                    summary.replace("项目会议", "另一标题"),
+                    networkHeaders(TOKEN, null, true)), 409, "EVENT_CONFLICT");
+            assertEquals(1, count("meeting_client_summary"));
+            assertEquals(200, status(exchange(port, "POST", "/v1/meetings/" + meetingId
+                    + ":stop", "", networkHeaders(TOKEN,
+                            "summary-stop-key-123456789", false))));
+            String manifestResponse = exchange(port, "GET", "/v1/meetings/" + meetingId
+                    + "/manifest?genTime=" + NOW.toEpochMilli(), "",
+                    networkHeaders(TOKEN, null, false));
+            assertEquals(200, status(manifestResponse));
+            JsonNode manifest = ERROR_JSON.readTree(responseBody(manifestResponse));
+            assertEquals("项目会议", manifest.path("title").asText());
+            assertEquals(2, manifest.path("artifacts").size());
+            JsonNode ref = manifest.path("artifacts").get(1);
+            assertEquals("summary.structured", ref.path("type").asText());
+            assertEquals("READY", ref.path("status").asText());
+            String artifact = exchange(port, "GET", "/v1/artifacts/"
+                    + ref.path("artifactId").asText() + "?genTime=" + NOW.toEpochMilli(),
+                    "", networkHeaders(TOKEN, null, false));
+            assertEquals(200, status(artifact));
+            JsonNode body = ERROR_JSON.readTree(responseBody(artifact));
+            assertEquals("client-summary/v1", body.path("schemaVersion").asText());
+            assertEquals("检查结果页面", body.path("actionItems").get(0).asText());
+        }
+    }
+
+    @Test
     void clientStopWithoutRecognizedSubtitleReturnsEmptyReadyResult(
             @TempDir Path artifactRoot) throws Exception {
         migrate(1);

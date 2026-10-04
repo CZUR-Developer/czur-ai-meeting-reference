@@ -6,6 +6,7 @@ import com.czur.reference.application.port.model.CanonicalTranslationEvent;
 import com.czur.reference.domain.meeting.MeetingState;
 
 import java.util.Objects;
+import java.util.List;
 
 /**
  * Android 直连模型后向参考后端提交标准事件的最小入口。
@@ -24,6 +25,37 @@ public interface ClientMeetingInputPort {
      */
     AppendResult append(MeetingCommandContext context, String meetingId,
             ClientEvent request);
+
+    /** Stop 前提交本场唯一的标准纪要；相同正文重放安全，不能用新正文覆盖。 */
+    default SummarySubmitResult submitSummary(MeetingCommandContext context,
+            String meetingId, StructuredSummary summary) {
+        return new Rejected(Reason.STORAGE_UNAVAILABLE);
+    }
+
+    record StructuredSummary(String language, String title, String overview,
+            List<String> keyPoints, List<String> actionItems) {
+        public StructuredSummary {
+            if (language == null || language.isBlank() || language.length() > 64
+                    || title == null || title.isBlank() || title.length() > 512
+                    || overview == null || overview.isBlank() || overview.length() > 16_384) {
+                throw new IllegalArgumentException("summary text is invalid");
+            }
+            keyPoints = checkedItems(keyPoints);
+            actionItems = checkedItems(actionItems);
+        }
+
+        private static List<String> checkedItems(List<String> items) {
+            if (items == null || items.size() > 100 || items.stream().anyMatch(
+                    item -> item == null || item.isBlank() || item.length() > 4096)) {
+                throw new IllegalArgumentException("summary items are invalid");
+            }
+            return List.copyOf(items);
+        }
+    }
+
+    sealed interface SummarySubmitResult permits SummarySubmitted, Rejected { }
+
+    record SummarySubmitted(boolean created) implements SummarySubmitResult { }
 
     /** 上传一个不可变的有序演示截图包；正文为规范化 JSON，内容由 ArtifactStore 保存。 */
     default CaptureAppendResult appendPresentation(MeetingCommandContext context,
@@ -98,12 +130,13 @@ public interface ClientMeetingInputPort {
     }
 
     /** 当前会议不可接受客户端事件；不会包含身份或正文。 */
-    record Rejected(Reason reason) implements StartResult, AppendResult, CaptureAppendResult {
+    record Rejected(Reason reason) implements StartResult, AppendResult,
+            CaptureAppendResult, SummarySubmitResult {
         public Rejected { Objects.requireNonNull(reason, "reason"); }
     }
 
     enum Reason { NOT_FOUND, ACCESS_DENIED, INVALID_STATE, INPUT_SOURCE_CONFLICT,
         EVENT_CONFLICT, CAPABILITY_NOT_GRANTED, SPEAKER_NOT_GRANTED,
-        PRESENTATION_NOT_REQUESTED,
+        PRESENTATION_NOT_REQUESTED, SUMMARY_NOT_GRANTED,
         STORAGE_UNAVAILABLE }
 }

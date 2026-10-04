@@ -348,6 +348,37 @@ paths:
                 $ref: "#/components/schemas/AppendPresentationCaptureChunkResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/meetings/{meetingId}/summary:submit:
+    post:
+      tags: [Meetings]
+      operationId: submitClientMeetingSummary
+      summary: App 在 Stop 前提交标准结构化纪要
+      description: 仅客户端事件会议可用，且首次 Create 冻结的 summary.structured 能力须获准。规范化 JSON 正文最多 256 KiB；首次提交后不可覆盖，相同正文重放返回 200。后端在 Stop 收口时将其发布为 READY summary.structured Artifact，不调用模型。
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/MeetingId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubmitClientSummaryRequest"
+      responses:
+        "201":
+          description: 标准纪要已暂存
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubmitClientSummaryResponse"
+        "200":
+          description: 相同标准纪要的幂等重放
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubmitClientSummaryResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/meetings/{meetingId}:renewRealtimeToken:
     post:
       tags: [Meetings]
@@ -899,6 +930,48 @@ components:
         frameCount:
           type: integer
           minimum: 1
+    SubmitClientSummaryRequest:
+      type: object
+      additionalProperties: false
+      required: [language, title, overview, keyPoints, actionItems]
+      properties:
+        language:
+          type: string
+          minLength: 1
+          maxLength: 64
+        title:
+          type: string
+          minLength: 1
+          maxLength: 512
+        overview:
+          type: string
+          minLength: 1
+          maxLength: 16384
+        keyPoints:
+          type: array
+          maxItems: 100
+          items:
+            type: string
+            minLength: 1
+            maxLength: 4096
+        actionItems:
+          type: array
+          maxItems: 100
+          items:
+            type: string
+            minLength: 1
+            maxLength: 4096
+    SubmitClientSummaryResponse:
+      type: object
+      additionalProperties: false
+      required: [meetingId, accepted]
+      properties:
+        meetingId:
+          type: string
+          pattern: "^mtg_[A-Za-z0-9_-]+$"
+        accepted:
+          type: boolean
+          const: true
     PresentationCaptureArtifact:
       description: presentation.capture 产物正文；由服务端规范化生成，不暴露对象存储位置。
       type: object

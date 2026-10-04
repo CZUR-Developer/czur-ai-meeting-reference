@@ -133,6 +133,16 @@ public final class HttpErrorMapper {
         return clientInputFailure(((ClientMeetingInputPort.Rejected) result).reason());
     }
 
+    public HttpResponse summarySubmit(String meetingId,
+            ClientMeetingInputPort.SummarySubmitResult result) {
+        Objects.requireNonNull(result, "result");
+        if (result instanceof ClientMeetingInputPort.SummarySubmitted submitted) {
+            return success(submitted.created() ? 201 : 200,
+                    Map.of("meetingId", meetingId, "accepted", true));
+        }
+        return clientInputFailure(((ClientMeetingInputPort.Rejected) result).reason());
+    }
+
     private HttpResponse clientInputFailure(ClientMeetingInputPort.Reason reason) {
         return switch (reason) {
             case NOT_FOUND -> error(404, HttpErrorEnvelope.Domain.SESSION,
@@ -153,6 +163,9 @@ public final class HttpErrorMapper {
             case SPEAKER_NOT_GRANTED -> error(422, HttpErrorEnvelope.Domain.ENTITLEMENT,
                     "SPEAKER_NOT_GRANTED", false, HttpErrorEnvelope.UserAction.NONE,
                     "ai_meeting.entitlement.speaker_not_granted");
+            case SUMMARY_NOT_GRANTED -> error(422, HttpErrorEnvelope.Domain.ENTITLEMENT,
+                    "SUMMARY_NOT_GRANTED", false, HttpErrorEnvelope.UserAction.NONE,
+                    "ai_meeting.entitlement.summary_not_granted");
             case STORAGE_UNAVAILABLE -> error(503, HttpErrorEnvelope.Domain.STORAGE,
                     "CLIENT_INPUT_UNAVAILABLE", true, HttpErrorEnvelope.UserAction.RETRY,
                     "ai_meeting.storage.input_unavailable");

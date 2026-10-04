@@ -17,6 +17,8 @@ import com.czur.reference.domain.meeting.MeetingIdPolicy;
 import com.czur.reference.domain.meeting.MeetingState;
 import com.czur.reference.protocol.realtime.RealtimeTranscriptEventMapper;
 import com.czur.reference.protocol.realtime.RealtimeTranslationEventMapper;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import javax.sql.DataSource;
 import java.io.ByteArrayInputStream;
@@ -45,10 +47,81 @@ import java.util.logging.Logger;
  */
 public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort {
     private static final Logger LOGGER = Logger.getLogger(JdbcClientMeetingInputPort.class.getName());
+    private static final ObjectMapper JSON = new ObjectMapper();
+    private static final int MAX_SUMMARY_JSON_BYTES = 256 * 1024;
     private final DataSource dataSource;
     private final RealtimeMeetingStartCoordinator startCoordinator;
     private final Clock clock;
     private final ArtifactStore artifactStore;
+
+    @Override
+    public SummarySubmitResult submitSummary(MeetingCommandContext context,
+            String meetingId, StructuredSummary summary) {
+        Objects.requireNonNull(context, "context");
+        MeetingIdPolicy.requireValid(meetingId);
+        Objects.requireNonNull(summary, "summary");
+        final String content;
+        try {
+            content = JSON.writeValueAsString(summary);
+        } catch (JsonProcessingException impossible) {
+            throw new IllegalStateException("summary serialization unavailable", impossible);
+        }
+        if (content.getBytes(StandardCharsets.UTF_8).length > MAX_SUMMARY_JSON_BYTES) {
+            throw new IllegalArgumentException("summary is too large");
+        }
+        try (Connection connection = dataSource.getConnection()) {
+            connection.setAutoCommit(false);
+            try {
+                MeetingRow meeting = lockMeeting(connection, meetingId);
+                Rejected rejected = checkOwner(context, meeting);
+                if (rejected != null) return rollback(connection, rejected);
+                if (!clientSourceExists(connection, meetingId)) {
+                    return rollback(connection, new Rejected(Reason.INPUT_SOURCE_CONFLICT));
+                }
+                if (!capabilityEnabled(connection, meetingId,
+                        CapabilityIds.SUMMARY_STRUCTURED)) {
+                    return rollback(connection, new Rejected(Reason.SUMMARY_NOT_GRANTED));
+                }
+                String previous = null;
+                try (PreparedStatement statement = connection.prepareStatement(
+                        "SELECT summary_json FROM meeting_client_summary WHERE meeting_id=?")) {
+                    statement.setString(1, meetingId);
+                    try (ResultSet rows = statement.executeQuery()) {
+                        if (rows.next()) previous = rows.getString(1);
+                    }
+                }
+                if (previous != null) {
+                    connection.rollback();
+                    return previous.equals(content) ? new SummarySubmitted(false)
+                            : new Rejected(Reason.EVENT_CONFLICT);
+                }
+                if (meeting.state() != MeetingState.STARTING
+                        && meeting.state() != MeetingState.RUNNING) {
+                    return rollback(connection, new Rejected(Reason.INVALID_STATE));
+                }
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        INSERT INTO meeting_client_summary
+                            (meeting_id, summary_json, submitted_at) VALUES (?, ?, ?)
+                        """)) {
+                    statement.setString(1, meetingId);
+                    statement.setString(2, content);
+                    statement.setTimestamp(3, Timestamp.from(
+                            clock.instant().truncatedTo(ChronoUnit.MICROS)));
+                    statement.executeUpdate();
+                }
+                connection.commit();
+                LOGGER.log(Level.FINE, "客户端标准纪要已保存");
+                return new SummarySubmitted(true);
+            } catch (SQLException | RuntimeException failure) {
+                rollbackQuietly(connection);
+                LOGGER.log(Level.WARNING, "客户端标准纪要保存失败 reason={0}",
+                        failure.getClass().getSimpleName());
+                return new Rejected(Reason.STORAGE_UNAVAILABLE);
+            }
+        } catch (SQLException failure) {
+            return new Rejected(Reason.STORAGE_UNAVAILABLE);
+        }
+    }
 
     public JdbcClientMeetingInputPort(DataSource dataSource,
             RealtimeMeetingStartCoordinator startCoordinator, Clock clock) {

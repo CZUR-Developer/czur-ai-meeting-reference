@@ -235,7 +235,7 @@ class ReferenceMeetingDeploymentConfigTest {
     }
 
     @Test
-    void optionalMayDisableButCannotFakeEnabledExecutionMapping() {
+    void optionalSummaryRequiresProviderAndHasClientArtifactMappingWhenEnabled() {
         Map<String, String> optional = valid();
         optional.put(ReferenceMeetingDeploymentConfig.PROFILE_OPTIONAL_CAPABILITIES,
                 CapabilityIds.SUMMARY_STRUCTURED);
@@ -249,7 +249,14 @@ class ReferenceMeetingDeploymentConfigTest {
                 plan.decisionFor(CapabilityIds.SUMMARY_STRUCTURED).action());
         optional.put(ReferenceMeetingDeploymentConfig.MOCK_CAPABILITIES,
                 CapabilityIds.TRANSCRIPT_REALTIME + "," + CapabilityIds.SUMMARY_STRUCTURED);
-        rejects(optional, ReferenceMeetingDeploymentConfig.PROFILE_OPTIONAL_CAPABILITIES);
+        var enabled = ReferenceMeetingDeploymentConfig.fromEnvironment(optional);
+        var enabledPlan = new CapabilityPlanner().plan(enabled.mockCapabilities(),
+                enabled.profile(), Set.of(CapabilityIds.SUMMARY_STRUCTURED),
+                enabled.entitlement().supportedCapabilities(), enabled.capabilityLimits());
+        var summary = enabledPlan.decisionFor(CapabilityIds.SUMMARY_STRUCTURED);
+        assertEquals(CapabilityDecision.Action.ENABLE, summary.action());
+        assertEquals(List.of("model.summary.text"), summary.affectedWorkflows());
+        assertEquals(List.of("summary.structured"), summary.producedArtifacts());
     }
 
     @Test

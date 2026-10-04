@@ -19,6 +19,7 @@ import com.czur.reference.protocol.json.MeetingManifestJson;
 import com.czur.reference.protocol.realtime.RealtimeTranscriptEventMapper;
 import com.czur.reference.protocol.realtime.RealtimeTranslationEventMapper;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
@@ -47,12 +48,13 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * 将 App 已保存的最终字幕与译文写入可替换存储，再冻结为参考结果。
+ * 将 App 已保存的最终字幕、译文与结构化纪要写入可替换存储，再冻结为参考结果。
  *
  * <p>Stop 命令先独立提交。此实现随后锁定同一会议，读取客户端标准事件，按
- * 原文 segmentId、译文 translationId 各取最后修订，先通过 ArtifactStore 发布不可变正文，再在一个数据库事务
+ * 原文 segmentId、译文 translationId 各取最后修订，并读取 Stop 前提交的唯一纪要，
+ * 先通过 ArtifactStore 发布不可变正文，再在一个数据库事务
  * 中保存 READY metadata、Manifest 和会议终态。Stop 后客户端不能继续 append，
- * 因此只冻结最终修订；未完成片段不被当作最终文字。若没有任何最终字幕或译文，直接
+ * 因此只冻结最终修订；未完成片段不被当作最终文字。若没有任何最终字幕、译文或纪要，直接
  * 冻结无 Artifact 的 READY Manifest，不制造空字幕事件或空的最终字幕产物。
  * 本类只处理客户端事件链，不改变旧音频 Worker 的收口流程。</p>
  */
@@ -147,6 +149,17 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
                     artifactRefs.add(publishReady(connection, translationId, meetingId,
                             "translation.final", projection.translationLanguage(), artifact));
                 }
+                if (projection.summary() != null) {
+                    ObjectNode artifact = JSON.createObjectNode();
+                    artifact.put("schemaVersion", "client-summary/v1");
+                    artifact.put("artifactType", "summary.structured");
+                    artifact.setAll(projection.summary());
+                    String summaryId = "art_client_summary_" + sha256(
+                            meetingId.getBytes(StandardCharsets.UTF_8));
+                    artifactRefs.add(publishReady(connection, summaryId, meetingId,
+                            "summary.structured", projection.summary().path("language").asText(),
+                            artifact));
+                }
                 List<ArtifactReadyMetadataStore.ReadyMetadata> captures =
                         new JdbcArtifactReadyMetadataStore(connection).findByMeetingId(meetingId)
                                 .stream().filter(item -> "presentation.capture".equals(
@@ -173,7 +186,9 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
                         "0.1", meetingId, 1,
                         new MeetingManifest.Profile(locked.snapshot().profileId(),
                                 locked.snapshot().profileRevision()),
-                        null, com.czur.reference.application.port.ManifestStatus.READY,
+                        projection.summary() == null ? null
+                                : projection.summary().path("title").asText(),
+                        com.czur.reference.application.port.ManifestStatus.READY,
                         locked.snapshot().createdAt(), endedAt, projection.durationMs(),
                         new MeetingManifest.Languages(projection.language(),
                                 projection.targetLanguages()),
@@ -212,8 +227,10 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
                     }
                 }
                 connection.commit();
-                LOGGER.log(Level.INFO, "客户端结果已生成 segments={0} translations={1}",
-                        new Object[]{projection.segmentCount(), projection.translations().size()});
+                LOGGER.log(Level.INFO,
+                        "客户端结果已生成 segments={0} translations={1} summary={2}",
+                        new Object[]{projection.segmentCount(), projection.translations().size(),
+                                projection.summary() != null});
                 return true;
             } catch (SQLException | ArtifactStoreException | RuntimeException failure) {
                 connection.rollback();
@@ -338,8 +355,26 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
         LinkedHashSet<String> targets = new LinkedHashSet<>();
         finalTranslations.forEach(item -> targets.add(item.getTargetLanguage()));
         String translationLanguage = targets.size() == 1 ? targets.iterator().next() : "mul";
+        ObjectNode summary = null;
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT summary_json FROM meeting_client_summary WHERE meeting_id=?")) {
+            statement.setString(1, meetingId);
+            try (ResultSet rows = statement.executeQuery()) {
+                if (rows.next()) {
+                    try {
+                        JsonNode parsed = JSON.readTree(rows.getString(1));
+                        if (!(parsed instanceof ObjectNode object)) {
+                            throw new IllegalStateException("stored summary is invalid");
+                        }
+                        summary = object;
+                    } catch (com.fasterxml.jackson.core.JsonProcessingException invalid) {
+                        throw new IllegalStateException("stored summary is invalid", invalid);
+                    }
+                }
+            }
+        }
         return new Projection(text, language, durationMs, ordered, finalTranslations,
-                List.copyOf(targets), translationLanguage);
+                List.copyOf(targets), translationLanguage, summary);
     }
 
     private static String sha256(byte[] bytes) {
@@ -354,8 +389,10 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
 
     private record Projection(String text, String language, long durationMs,
             List<TranscriptUpsert> transcripts, List<TranslationUpsert> translations,
-            List<String> targetLanguages, String translationLanguage) {
+            List<String> targetLanguages, String translationLanguage, ObjectNode summary) {
         int segmentCount() { return transcripts.size(); }
-        boolean hasArtifacts() { return !transcripts.isEmpty() || !translations.isEmpty(); }
+        boolean hasArtifacts() {
+            return !transcripts.isEmpty() || !translations.isEmpty() || summary != null;
+        }
     }
 }

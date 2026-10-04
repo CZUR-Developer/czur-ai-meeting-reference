@@ -281,6 +281,14 @@ CREATE TABLE meeting_client_event (
     UNIQUE (meeting_id, client_sequence)
 );
 
+-- P5 App 在 Stop 前提交一次标准纪要；结构化正文暂存为本场不可覆盖的事实。
+-- Stop Finalizer 将其写入 ArtifactStore 后再发布 READY Manifest。
+CREATE TABLE meeting_client_summary (
+    meeting_id text PRIMARY KEY REFERENCES meeting_client_input(meeting_id),
+    summary_json text NOT NULL CHECK (jsonb_typeof(summary_json::jsonb) = 'object'),
+    submitted_at timestamp with time zone NOT NULL
+);
+
 -- 客户端会议只记录结果身份与 Manifest；正文由可替换 ArtifactStore 保存，
 -- READY binding 和内容摘要沿用 artifact 表。
 CREATE TABLE meeting_client_result (

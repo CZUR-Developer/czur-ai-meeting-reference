@@ -47,6 +47,8 @@ public final class ReferenceMeetingDeploymentConfig {
     private static final String MOCK_TRANSCRIPT_ARTIFACT = "transcript.final";
     private static final String MODEL_TRANSLATION_WORKFLOW = "model.translation.realtime";
     private static final String MODEL_TRANSLATION_ARTIFACT = "translation.final";
+    private static final String MODEL_SUMMARY_WORKFLOW = "model.summary.text";
+    private static final String MODEL_SUMMARY_ARTIFACT = "summary.structured";
     private static final String MODEL_SPEAKER_WORKFLOW = "model.speaker.session";
     public static final String DEPLOYMENT_SCOPE = "AI_MEETING_DEPLOYMENT_SCOPE";
     public static final String PROFILE_ID = "AI_MEETING_PROFILE_ID";
@@ -190,6 +192,12 @@ public final class ReferenceMeetingDeploymentConfig {
                         List.of(MODEL_TRANSLATION_WORKFLOW));
                 artifacts.put(CapabilityIds.TRANSLATION_REALTIME,
                         List.of(MODEL_TRANSLATION_ARTIFACT));
+            }
+            if (optional.contains(CapabilityIds.SUMMARY_STRUCTURED)) {
+                workflows.put(CapabilityIds.SUMMARY_STRUCTURED,
+                        List.of(MODEL_SUMMARY_WORKFLOW));
+                artifacts.put(CapabilityIds.SUMMARY_STRUCTURED,
+                        List.of(MODEL_SUMMARY_ARTIFACT));
             }
             workflows.put(CapabilityIds.SPEAKER_DIARIZATION_SESSION,
                     List.of(MODEL_SPEAKER_WORKFLOW));

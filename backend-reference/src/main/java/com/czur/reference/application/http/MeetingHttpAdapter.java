@@ -22,6 +22,7 @@ import com.czur.reference.application.port.identity.IdentityVerificationRequest;
 import com.czur.reference.domain.meeting.MeetingIdPolicy;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -72,6 +73,8 @@ public final class MeetingHttpAdapter {
             "^/v1/meetings/(mtg_[A-Za-z0-9_-]+)/events:append$");
     private static final Pattern PRESENTATION_APPEND_PATH = Pattern.compile(
             "^/v1/meetings/(mtg_[A-Za-z0-9_-]+)/presentation-captures:append$");
+    private static final Pattern SUMMARY_SUBMIT_PATH = Pattern.compile(
+            "^/v1/meetings/(mtg_[A-Za-z0-9_-]+)/summary:submit$");
     private static final Pattern RENEW_PATH = Pattern.compile(
             "^/v1/meetings/(mtg_[A-Za-z0-9_-]+):renewRealtimeToken$");
     private static final Pattern MANIFEST_PATH = Pattern.compile(
@@ -379,7 +382,8 @@ public final class MeetingHttpAdapter {
         if ("POST".equals(request.method())
                 && (CLIENT_START_PATH.matcher(request.path()).matches()
                 || CLIENT_APPEND_PATH.matcher(request.path()).matches()
-                || PRESENTATION_APPEND_PATH.matcher(request.path()).matches())) {
+                || PRESENTATION_APPEND_PATH.matcher(request.path()).matches()
+                || SUMMARY_SUBMIT_PATH.matcher(request.path()).matches())) {
             return AuthenticationRoute.CLIENT_WRITE;
         }
         if ("POST".equals(request.method())
@@ -526,6 +530,18 @@ public final class MeetingHttpAdapter {
             }
             return errors.presentationAppend(clientInputPort.appendPresentation(context,
                     presentationAppend.group(1), decodePresentationChunk(request)));
+        }
+
+        Matcher summarySubmit = SUMMARY_SUBMIT_PATH.matcher(path);
+        if ("POST".equals(method) && summarySubmit.matches()) {
+            if (clientInputPort == null) return errors.notImplemented();
+            if (context == null) return errors.missingContext();
+            if (!request.query().isEmpty()) {
+                throw new IllegalArgumentException("summary query is invalid");
+            }
+            return errors.summarySubmit(summarySubmit.group(1),
+                    clientInputPort.submitSummary(context, summarySubmit.group(1),
+                            decodeSummary(request)));
         }
 
         if ("POST".equals(method) && MEETINGS_PATH.equals(path)) {
@@ -845,6 +861,41 @@ public final class MeetingHttpAdapter {
         };
     }
 
+    private static ClientMeetingInputPort.StructuredSummary decodeSummary(HttpRequest request) {
+        String contentType = request.header("content-type");
+        if (contentType == null || !contentType.matches(
+                "(?i)application/json(?:[ \\t]*;[ \\t]*charset=utf-8)?")) {
+            throw new IllegalArgumentException("summary content-type is invalid");
+        }
+        try {
+            JsonNode root = JSON.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                    .with(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+                    .readTree(request.body());
+            requireFields(root, Set.of("language", "title", "overview", "keyPoints",
+                    "actionItems"));
+            return new ClientMeetingInputPort.StructuredSummary(
+                    textField(root, "language"), textField(root, "title"),
+                    textField(root, "overview"), summaryItems(root.get("keyPoints")),
+                    summaryItems(root.get("actionItems")));
+        } catch (JsonProcessingException failure) {
+            throw new IllegalArgumentException("summary JSON is invalid");
+        }
+    }
+
+    private static List<String> summaryItems(JsonNode node) {
+        if (node == null || !node.isArray()) {
+            throw new IllegalArgumentException("summary items are invalid");
+        }
+        List<String> items = new ArrayList<>();
+        node.forEach(item -> {
+            if (!item.isTextual()) {
+                throw new IllegalArgumentException("summary items are invalid");
+            }
+            items.add(item.textValue());
+        });
+        return items;
+    }
+
     private static void requireFields(JsonNode node, Set<String> expected) {
         if (node == null || !node.isObject() || node.size() != expected.size()) {
             throw new IllegalArgumentException("client event fields are invalid");
@@ -903,6 +954,8 @@ public final class MeetingHttpAdapter {
         if ("POST".equals(request.method())
                 && PRESENTATION_APPEND_PATH.matcher(request.path()).matches())
             return "appendPresentation";
+        if ("POST".equals(request.method())
+                && SUMMARY_SUBMIT_PATH.matcher(request.path()).matches()) return "submitSummary";
         if ("POST".equals(request.method()) && MEETINGS_PATH.equals(request.path())) {
             return "create";
         }
