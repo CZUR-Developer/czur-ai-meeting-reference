@@ -2,8 +2,9 @@
 
 这是一个最小的静态**会后结果页**。Android App 停止会议后打开
 `index.html?meetingId=<会议ID>&genTime=<链接生成时间毫秒>`。页面读取 Manifest，
-结果生成中时短暂等待；完成后只展示 Manifest 中存在的 `transcript.final`，
-不会预览会议中的字幕，也不要求 Web 单独登录。
+结果生成中时短暂等待；完成后展示 Manifest 中 READY 的 `transcript.final`，
+仅当同一 Manifest 还含 READY 的 `translation.final` 时追加最终译文区。
+纯字幕结果保持原页面；不会预览会议中的字幕，也不要求 Web 单独登录。
 
 部署使用合作伙伴已有的静态 Web 服务器；本仓库不提供 Web Docker 镜像。
 
