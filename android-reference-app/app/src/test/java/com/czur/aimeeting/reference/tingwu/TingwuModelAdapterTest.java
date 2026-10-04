@@ -7,6 +7,7 @@ import static org.junit.Assert.assertTrue;
 import com.czur.aimeeting.model.ModelSessionGrant;
 import com.czur.aimeeting.model.ModelSignal;
 import com.czur.aimeeting.model.TranscriptEvent;
+import com.czur.aimeeting.model.TranslationEvent;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -64,5 +65,54 @@ public final class TingwuModelAdapterTest {
         assertTrue(events.get(2).isFinal());
         JSONObject stop = new JSONObject(adapter.stopMessage(grant));
         assertEquals("StopTranscription", stop.getJSONObject("header").getString("name"));
+    }
+
+    /** 按国内版字段解析路径重建固定样例；不代表已通过真实听悟互译会话。 */
+    @Test
+    public void translationPartialAndFinalLinkToSourceAndUseDetectedLanguage() {
+        TingwuModelAdapter adapter = new TingwuModelAdapter();
+        List<TranscriptEvent> transcripts = new ArrayList<>();
+        List<TranslationEvent> translations = new ArrayList<>();
+        adapter.onServerMessage("{\"header\":{\"name\":\"SentenceEnd\"},"
+                + "\"payload\":{\"index\":7,\"result\":\"Hello.\","
+                + "\"detected_source_lang\":\"EN\"}}", transcripts::add,
+                translations::add);
+        adapter.onServerMessage("{\"header\":{\"name\":\"TranslationResultChanged\"},"
+                + "\"payload\":{\"source_lang\":\"multilingual\",\"target_lang\":\"CN\","
+                + "\"translate_result\":[{\"index\":7,\"text\":\"你\","
+                + "\"partial\":true,\"detected_source_lang\":\"EN\"}]}}",
+                transcripts::add, translations::add);
+        adapter.onServerMessage("{\"header\":{\"name\":\"TranslationResultChanged\"},"
+                + "\"payload\":{\"source_lang\":\"multilingual\",\"target_lang\":\"CN\","
+                + "\"translate_result\":[{\"index\":7,\"text\":\"你好。\","
+                + "\"partial\":false,\"detected_source_lang\":\"EN\"}]}}",
+                transcripts::add, translations::add);
+        assertEquals(1, transcripts.size());
+        assertEquals(2, translations.size());
+        assertEquals("tingwu-7", translations.get(0).sourceSegmentId());
+        assertEquals(translations.get(0).translationId(), translations.get(1).translationId());
+        assertEquals(1, translations.get(0).revision());
+        assertEquals(2, translations.get(1).revision());
+        assertEquals("en-US", translations.get(1).sourceLanguage());
+        assertEquals("zh-CN", translations.get(1).targetLanguage());
+        assertFalse(translations.get(0).isFinal());
+        assertTrue(translations.get(1).isFinal());
+    }
+
+    @Test
+    public void ignoresUnknownAndSameLanguageTranslation() {
+        TingwuModelAdapter adapter = new TingwuModelAdapter();
+        List<TranslationEvent> translations = new ArrayList<>();
+        adapter.onServerMessage("{\"payload\":{\"source_lang\":\"multilingual\","
+                + "\"target_lang\":\"EN\",\"translate_result\":["
+                + "{\"index\":1,\"text\":\"unknown\",\"partial\":true},"
+                + "{\"index\":2,\"text\":\"same\",\"detected_source_lang\":\"EN\"},"
+                + "{\"index\":3,\"text\":\"Good morning.\","
+                + "\"detected_source_lang\":\"CN\"}]}}",
+                event -> {}, translations::add);
+        assertEquals(1, translations.size());
+        assertEquals("tingwu-3", translations.get(0).sourceSegmentId());
+        assertEquals("zh-CN", translations.get(0).sourceLanguage());
+        assertEquals("en-US", translations.get(0).targetLanguage());
     }
 }

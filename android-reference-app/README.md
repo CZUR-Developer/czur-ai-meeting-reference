@@ -13,6 +13,9 @@ integration.
 `sdk` 模式把 `starry` 独立 SDK Module 产出的版本化 AAR 从仓外注入。SDK 使用普通
 Android 麦克风和 WebSocket 直连模型；本仓公开的 `TingwuModelAdapter` 编码
 `StartTranscription`/`StopTranscription`，把模型 partial/final 消息归一化为标准字幕。
+当前还可解析按国内版字段路径重建的听悟 `translate_result` 固定样例，并将译文与
+原文片段关联，在应用内中英双栏和悬浮窗显示。听悟启动消息仍关闭实时翻译，会前互译
+入口仍禁用；真实译文链路和译文后端保存尚未验收或接入。
 真实模式在创建并启动会议后调用独立的
 `POST /v1/meetings/{meetingId}:modelSession` 领取材料：`adapterId`、完整的临时签名
 `endpoint`、`expiresAt`、`initParams.taskId`，可选 `token`。Create 的 `realtime`
@@ -37,11 +40,11 @@ P5-2 增加 `sample-json-ws` 第二格式样例：它的模型消息使用顶层
 # 从 starry 构建或交付渠道取得对应版本 AAR 后，在本机注入
 ./gradlew :app:assembleDebug :app:testDebugUnitTest \
   -PmeetingRuntime=sdk \
-  -PmeetingSdkAar=/absolute/path/ai-meeting-sdk-0.1.0-release.aar
+  -PmeetingSdkAar=/absolute/path/ai-meeting-sdk-0.2.0-release.aar
 ```
 
 裸 AAR 不传递依赖元数据，`sdk` 模式显式添加 SDK 所需的 OkHttp 运行依赖。
-SDK 从公共 `model-runtime-contract-0.2.0.jar` 编译，参考 App 只打包本工程
+SDK 从公共 `model-runtime-contract-0.3.0.jar` 编译，参考 App 只打包本工程
 `model-runtime-contract` 的同版类，避免重复类。SDK 模式的最终验收还需要设备说话
 产生真实字幕，并确认音频送达模型端点、后端只接收标准事件。
 

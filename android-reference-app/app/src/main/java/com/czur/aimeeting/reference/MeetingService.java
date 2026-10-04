@@ -19,6 +19,7 @@ import com.czur.aimeeting.model.ModelSession;
 import com.czur.aimeeting.model.ModelSessionGrant;
 import com.czur.aimeeting.model.ModelSessionListener;
 import com.czur.aimeeting.model.TranscriptEvent;
+import com.czur.aimeeting.model.TranslationEvent;
 import com.czur.aimeeting.reference.meeting.CreatedMeeting;
 import com.czur.aimeeting.reference.meeting.HttpReferenceMeetingClient;
 import com.czur.aimeeting.reference.meeting.MeetingCapabilityState;
@@ -265,6 +266,11 @@ public final class MeetingService extends Service {
                 network.execute(() -> appendTranscript(nextClient, created.meetingId(),
                         clientSequence, event));
             }, new ModelSessionListener() {
+                @Override public void onTranslation(TranslationEvent event) {
+                    // 译文只进入会中显示快照；后端目前只接收标准字幕事件。
+                    main.post(() -> showTranslation(event));
+                }
+
                 @Override public void onFinished() {
                     modelFinished = true;
                     Log.i(TAG, "模型最终输出已接收 meetingId=" + created.meetingId());
@@ -302,6 +308,15 @@ public final class MeetingService extends Service {
         display.apply(event);
         transcriptVersion++;
         Log.d(TAG, "字幕片段=" + event.segmentId() + " 修订=" + event.revision()
+                + " 最终=" + event.isFinal());
+        publish();
+    }
+
+    private void showTranslation(TranslationEvent event) {
+        display.apply(event);
+        transcriptVersion++;
+        Log.d(TAG, "译文片段=" + event.translationId() + " 原文片段="
+                + event.sourceSegmentId() + " 修订=" + event.revision()
                 + " 最终=" + event.isFinal());
         publish();
     }

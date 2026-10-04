@@ -66,7 +66,10 @@ public final class MainActivity extends Activity {
     private EditText passwordView;
     private EditText resultWebUrlView;
     private TextView transcriptView;
+    private TextView meetingTitle;
     private LinearLayout transcriptList;
+    private LinearLayout bilingualHeader;
+    private LinearLayout bilingualList;
     private final Map<String, TextView> transcriptRows = new LinkedHashMap<>();
     private TextView elapsedView;
     private TextView statusView;
@@ -214,7 +217,7 @@ public final class MainActivity extends Activity {
         resultWebUrlView.setHint("网页结果地址，例如 http://192.168.1.10:8081/index.html");
         layout.addView(resultWebUrlView);
 
-        TextView meetingTitle = new TextView(this);
+        meetingTitle = new TextView(this);
         meetingTitle.setText("实时字幕 · 会议中");
         meetingTitle.setTextSize(26);
         meetingLayout.addView(meetingTitle);
@@ -231,6 +234,21 @@ public final class MainActivity extends Activity {
         transcriptList = new LinearLayout(this);
         transcriptList.setOrientation(LinearLayout.VERTICAL);
         meetingLayout.addView(transcriptList);
+
+        bilingualHeader = new LinearLayout(this);
+        bilingualHeader.setOrientation(LinearLayout.HORIZONTAL);
+        TextView chineseTitle = new TextView(this);
+        chineseTitle.setText("中文");
+        bilingualHeader.addView(chineseTitle, new LinearLayout.LayoutParams(0, -2, 1));
+        TextView englishTitle = new TextView(this);
+        englishTitle.setText("English");
+        bilingualHeader.addView(englishTitle, new LinearLayout.LayoutParams(0, -2, 1));
+        bilingualHeader.setVisibility(View.GONE);
+        meetingLayout.addView(bilingualHeader);
+        bilingualList = new LinearLayout(this);
+        bilingualList.setOrientation(LinearLayout.VERTICAL);
+        bilingualList.setVisibility(View.GONE);
+        meetingLayout.addView(bilingualList);
 
         startButton = new Button(this);
         startButton.setText("开始会议");
@@ -423,9 +441,35 @@ public final class MainActivity extends Activity {
                 row.setText(segment.text());
                 row.setAlpha(segment.alpha());
             }
+            if (state.display.hasTranslation()) {
+                bilingualList.removeAllViews();
+                for (MeetingDisplayState.BilingualRow segment : state.display.bilingualRows()) {
+                    LinearLayout row = new LinearLayout(this);
+                    row.setOrientation(LinearLayout.HORIZONTAL);
+                    TextView chinese = new TextView(this);
+                    chinese.setTextSize(26);
+                    chinese.setText(segment.chinese());
+                    chinese.setAlpha(segment.chineseAlpha());
+                    chinese.setPadding(0, 8, 12, 8);
+                    row.addView(chinese, new LinearLayout.LayoutParams(0, -2, 1));
+                    TextView english = new TextView(this);
+                    english.setTextSize(26);
+                    english.setText(segment.english());
+                    english.setAlpha(segment.englishAlpha());
+                    english.setPadding(12, 8, 0, 8);
+                    row.addView(english, new LinearLayout.LayoutParams(0, -2, 1));
+                    bilingualList.addView(row);
+                }
+            }
             renderedTranscriptVersion = state.transcriptVersion;
         }
-        transcriptView.setVisibility(transcriptRows.isEmpty() ? View.VISIBLE : View.GONE);
+        boolean bilingual = state.display.hasTranslation();
+        meetingTitle.setText(bilingual ? "双语互译 · 会议中" : "实时字幕 · 会议中");
+        bilingualHeader.setVisibility(bilingual ? View.VISIBLE : View.GONE);
+        bilingualList.setVisibility(bilingual ? View.VISIBLE : View.GONE);
+        transcriptList.setVisibility(bilingual ? View.GONE : View.VISIBLE);
+        transcriptView.setVisibility(!bilingual && transcriptRows.isEmpty()
+                ? View.VISIBLE : View.GONE);
         if (state.resultUrl != null && meetingService != null) {
             String resultUrl = meetingService.takeResultUrl();
             Intent result = new Intent(this, ResultActivity.class);

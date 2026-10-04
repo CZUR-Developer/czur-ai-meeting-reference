@@ -20,7 +20,11 @@ final class MeetingOverlay {
     private final Context context;
     private final WindowManager windowManager;
     private View root;
+    private TextView titleView;
     private TextView transcriptView;
+    private LinearLayout bilingualRow;
+    private TextView chineseView;
+    private TextView englishView;
     private TextView elapsedView;
     private Button stopButton;
 
@@ -43,11 +47,11 @@ final class MeetingOverlay {
 
         LinearLayout controls = new LinearLayout(context);
         controls.setGravity(Gravity.CENTER_VERTICAL);
-        TextView title = new TextView(context);
-        title.setText("实时字幕");
-        title.setTextColor(Color.WHITE);
-        title.setTypeface(null, Typeface.BOLD);
-        controls.addView(title, new LinearLayout.LayoutParams(0,
+        titleView = new TextView(context);
+        titleView.setText("实时字幕");
+        titleView.setTextColor(Color.WHITE);
+        titleView.setTypeface(null, Typeface.BOLD);
+        controls.addView(titleView, new LinearLayout.LayoutParams(0,
                 LinearLayout.LayoutParams.WRAP_CONTENT, 1));
         elapsedView = new TextView(context);
         elapsedView.setTextColor(Color.WHITE);
@@ -59,6 +63,21 @@ final class MeetingOverlay {
         transcriptView.setTextColor(Color.WHITE);
         transcriptView.setPadding(0, 10, 0, 10);
         panel.addView(transcriptView);
+
+        bilingualRow = new LinearLayout(context);
+        bilingualRow.setOrientation(LinearLayout.HORIZONTAL);
+        chineseView = new TextView(context);
+        chineseView.setTextColor(Color.WHITE);
+        chineseView.setTextSize(22);
+        chineseView.setPadding(0, 10, 12, 10);
+        bilingualRow.addView(chineseView, new LinearLayout.LayoutParams(0, -2, 1));
+        englishView = new TextView(context);
+        englishView.setTextColor(Color.WHITE);
+        englishView.setTextSize(22);
+        englishView.setPadding(12, 10, 0, 10);
+        bilingualRow.addView(englishView, new LinearLayout.LayoutParams(0, -2, 1));
+        bilingualRow.setVisibility(View.GONE);
+        panel.addView(bilingualRow);
 
         LinearLayout actions = new LinearLayout(context);
         actions.setGravity(Gravity.END);
@@ -87,8 +106,21 @@ final class MeetingOverlay {
 
     void render(MeetingDisplayState state, long elapsedRealtimeMs, boolean canStop) {
         if (root == null) return;
+        boolean bilingual = state.hasTranslation();
+        titleView.setText(bilingual ? "双语互译  中文 / English" : "实时字幕");
+        transcriptView.setVisibility(bilingual ? View.GONE : View.VISIBLE);
+        bilingualRow.setVisibility(bilingual ? View.VISIBLE : View.GONE);
         transcriptView.setText(state.transcript());
         transcriptView.setAlpha(state.transcriptAlpha());
+        if (bilingual) {
+            MeetingDisplayState.BilingualRow current = state.latestBilingualRow();
+            if (current != null) {
+                chineseView.setText(current.chinese());
+                chineseView.setAlpha(current.chineseAlpha());
+                englishView.setText(current.english());
+                englishView.setAlpha(current.englishAlpha());
+            }
+        }
         elapsedView.setText(state.elapsed(elapsedRealtimeMs));
         stopButton.setEnabled(canStop);
     }
@@ -97,7 +129,11 @@ final class MeetingOverlay {
         if (root == null) return;
         windowManager.removeView(root);
         root = null;
+        titleView = null;
         transcriptView = null;
+        bilingualRow = null;
+        chineseView = null;
+        englishView = null;
         elapsedView = null;
         stopButton = null;
     }

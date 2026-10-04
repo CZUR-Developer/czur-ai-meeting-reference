@@ -5,9 +5,12 @@ import com.czur.aimeeting.model.ModelSessionGrant;
 import com.czur.aimeeting.model.ModelSignal;
 import com.czur.aimeeting.model.TranscriptEvent;
 import com.czur.aimeeting.model.TranscriptListener;
+import com.czur.aimeeting.model.TranslationEvent;
+import com.czur.aimeeting.model.TranslationListener;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
+import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
@@ -21,6 +24,7 @@ public final class TingwuModelAdapter implements ModelAdapter {
     public static final String ID = "tingwu-realtime";
 
     private final Map<String, SegmentState> segments = new HashMap<>();
+    private final Map<String, SegmentState> translations = new HashMap<>();
     private final Map<Integer, Long> sentenceStarts = new HashMap<>();
     private int fallbackIndex;
 
@@ -53,6 +57,12 @@ public final class TingwuModelAdapter implements ModelAdapter {
 
     @Override
     public ModelSignal onServerMessage(String message, TranscriptListener listener) {
+        return onServerMessage(message, listener, event -> {});
+    }
+
+    @Override
+    public ModelSignal onServerMessage(String message, TranscriptListener transcriptListener,
+            TranslationListener translationListener) {
         try {
             JSONObject root = new JSONObject(message);
             JSONObject header = root.optJSONObject("header");
@@ -65,6 +75,7 @@ public final class TingwuModelAdapter implements ModelAdapter {
 
             JSONObject payload = root.optJSONObject("payload");
             if (payload != null) {
+                emitTranslations(payload, translationListener);
                 if ("SentenceBegin".equals(name) && payload.has("index")) {
                     sentenceStarts.put(payload.optInt("index"),
                             Math.max(0, payload.optLong("time", 0)));
@@ -73,7 +84,7 @@ public final class TingwuModelAdapter implements ModelAdapter {
                 if (!text.isEmpty() && ("TranscriptionResultChanged".equals(name)
                         || "SentenceEnd".equals(name))) {
                     boolean isFinal = "SentenceEnd".equals(name);
-                    emit(payload, text, isFinal, listener);
+                    emit(payload, text, isFinal, transcriptListener);
                 }
             }
             if ("TranscriptionCompleted".equals(name) || "Completed".equals(name)) {
@@ -82,6 +93,38 @@ public final class TingwuModelAdapter implements ModelAdapter {
             return ModelSignal.NONE;
         } catch (JSONException invalid) {
             throw new IllegalArgumentException("听悟消息格式错误", invalid);
+        }
+    }
+
+    /**
+     * 听悟译文是独立的 translate_result 列表；其 index 对应原文片段的 index。
+     * 固定样例字段来自现有国内版 TingwuProvider 的解析路径，真实会话还需设备验证。
+     */
+    private void emitTranslations(JSONObject payload, TranslationListener listener) {
+        JSONArray results = payload.optJSONArray("translate_result");
+        if (results == null) return;
+        String declaredSource = payload.optString("source_lang", "");
+        String declaredTarget = payload.optString("target_lang", "");
+        for (int i = 0; i < results.length(); i++) {
+            JSONObject item = results.optJSONObject(i);
+            if (item == null) continue;
+            int index = item.optInt("index", -1);
+            String text = item.optString("text", "").trim();
+            String source = translationLanguage(item.optString("detected_source_lang", ""));
+            if (source.isEmpty()) source = translationLanguage(declaredSource);
+            String target = translationLanguage(declaredTarget);
+            if (index < 0 || text.isEmpty() || source.isEmpty() || target.isEmpty()
+                    || source.equalsIgnoreCase(target)) continue;
+            boolean isFinal = !item.optBoolean("partial", false);
+            String id = "tingwu-translation-" + index + "-" + target;
+            SegmentState previous = translations.get(id);
+            if (previous != null && (previous.isFinal || (!isFinal && previous.text.equals(text)))) {
+                continue;
+            }
+            int revision = previous == null ? 1 : previous.revision + 1;
+            listener.onTranslation(new TranslationEvent(id, "tingwu-" + index, revision,
+                    source, target, text, isFinal));
+            translations.put(id, new SegmentState(revision, text, isFinal));
         }
     }
 
@@ -110,7 +153,7 @@ public final class TingwuModelAdapter implements ModelAdapter {
         }
         int revision = previous == null ? 1 : previous.revision + 1;
         String language = language(payload.optString("detected_source_lang",
-                payload.optString("source_language", "")));
+                payload.optString("source_lang", payload.optString("source_language", ""))));
         listener.onTranscript(new TranscriptEvent(segmentId, revision, startMs, endMs,
                 language, text, isFinal));
         segments.put(segmentId, new SegmentState(revision, text, isFinal));
@@ -140,6 +183,14 @@ public final class TingwuModelAdapter implements ModelAdapter {
             case "EN", "EN-US" -> "en-US";
             default -> raw.trim().isEmpty() ? "zh-CN" : raw;
         };
+    }
+
+    /** 译文不能把未检测到的语种默认成中文，否则会错误地进入中英分栏。 */
+    private static String translationLanguage(String raw) {
+        String trimmed = raw.trim();
+        if (trimmed.isEmpty() || "auto".equalsIgnoreCase(trimmed)
+                || "multilingual".equalsIgnoreCase(trimmed)) return "";
+        return language(trimmed);
     }
 
     private static final class SegmentState {

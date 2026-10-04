@@ -19,6 +19,16 @@ public interface ModelAdapter {
      */
     ModelSignal onServerMessage(String message, TranscriptListener listener);
 
+    /**
+     * 同时接收字幕与译文的模型消息。现有仅转写的 Adapter 无需修改；支持互译的
+     * Adapter 覆盖此方法，并为同一原文片段提供稳定的 sourceSegmentId。SDK 仅转发
+     * 已归一化事件，不解释供应商原始回包；译文是否持久化由应用业务层决定。
+     */
+    default ModelSignal onServerMessage(String message, TranscriptListener transcriptListener,
+            TranslationListener translationListener) {
+        return onServerMessage(message, transcriptListener);
+    }
+
     /** 停止输入后的协议收尾消息；不需要文本收尾的协议可以返回 null。 */
     default String stopMessage(ModelSessionGrant grant) { return null; }
 }

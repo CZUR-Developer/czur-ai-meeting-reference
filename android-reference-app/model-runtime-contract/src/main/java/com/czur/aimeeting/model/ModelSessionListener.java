@@ -2,6 +2,9 @@ package com.czur.aimeeting.model;
 
 /** 模型会话生命周期回调；可发生在非 UI 线程。 */
 public interface ModelSessionListener {
+    /** 已归一化译文修订；默认空实现保留现有仅字幕会话的行为。 */
+    default void onTranslation(TranslationEvent event) {}
+
     /** 模型已确认结束，之前收到的标准字幕可以提交后端并完成会议。 */
     void onFinished();
 
