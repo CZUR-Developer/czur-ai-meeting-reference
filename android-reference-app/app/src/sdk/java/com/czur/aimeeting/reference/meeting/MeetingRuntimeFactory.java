@@ -10,6 +10,7 @@ import com.czur.aimeeting.model.SummaryResult;
 import com.czur.aimeeting.model.SummarySessionGrant;
 import com.czur.aimeeting.model.TranscriptListener;
 import com.czur.aimeeting.sdk.AndroidModelRuntime;
+import com.czur.aimeeting.sdk.AndroidSummaryRuntime;
 import java.io.IOException;
 import java.util.Set;
 
@@ -19,6 +20,7 @@ public final class MeetingRuntimeFactory {
 
     public static MeetingRuntimeBridge create(Context context) {
         ModelRuntime runtime = new AndroidModelRuntime(context);
+        AndroidSummaryRuntime summaryRuntime = new AndroidSummaryRuntime();
         ModelAdapterRegistry adapters = new ModelAdapterRegistry();
         return new MeetingRuntimeBridge() {
             @Override
@@ -50,7 +52,9 @@ public final class MeetingRuntimeFactory {
 
             @Override public SummaryResult summarize(SummaryInput input,
                     SummarySessionGrant grant) throws IOException {
-                throw new IOException("当前真实模型尚未登记文本总结 Adapter");
+                if (grant == null) throw new IOException("本场缺少文本总结材料");
+                return summaryRuntime.summarize(grant,
+                        adapters.createSummary(grant.adapterId()), input);
             }
         };
     }

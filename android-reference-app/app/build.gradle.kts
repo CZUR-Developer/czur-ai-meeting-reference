@@ -31,6 +31,7 @@ android {
     }
 
     sourceSets.getByName("main").java.srcDir("src/$meetingRuntime/java")
+    sourceSets.getByName("test").java.srcDir("src/test/$meetingRuntime/java")
 }
 
 dependencies {

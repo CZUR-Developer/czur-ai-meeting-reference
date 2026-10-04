@@ -7,6 +7,7 @@ import static org.junit.Assert.assertTrue;
 
 import com.czur.aimeeting.reference.sample.SampleJsonModelAdapter;
 import com.czur.aimeeting.reference.tingwu.TingwuModelAdapter;
+import com.czur.aimeeting.reference.bailian.BailianSummaryAdapter;
 import org.junit.Test;
 
 /** 两种协议只在注册表分流，每场取得全新 Adapter 状态。 */
@@ -21,7 +22,9 @@ public final class ModelAdapterRegistryTest {
                 registry.create(SampleJsonModelAdapter.ID));
         assertTrue(registry.setupCapabilities().contains(MeetingCapabilityState.TRANSCRIPT));
         assertTrue(registry.setupCapabilities().contains(MeetingCapabilityState.TRANSLATION));
-        assertFalse(registry.setupCapabilities().contains(MeetingCapabilityState.SUMMARY));
+        assertTrue(registry.setupCapabilities().contains(MeetingCapabilityState.SUMMARY));
+        assertEquals(BailianSummaryAdapter.ID,
+                registry.createSummary(BailianSummaryAdapter.ID).id());
         assertTrue(registry.realtimeCapabilities(TingwuModelAdapter.ID)
                 .contains(MeetingCapabilityState.TRANSLATION));
         assertFalse(registry.realtimeCapabilities(SampleJsonModelAdapter.ID)

@@ -49,7 +49,8 @@ public final class MeetingCapabilityState {
 
     /**
      * 只显示该能力本身的入口。若后端降级到了另一能力，不能把字幕冒充实时翻译；
-     * App 还必须有本地实时协议实现。会后纪要由后端生成，无须 Adapter 解析。
+     * App 还必须有本地实时协议实现。纪要模式另由 SummaryAdapter 注册表开放，
+     * 标准纪要由 App 在 Stop 前提交，后端不调用文本模型。
      */
     public boolean canUse(String capability, Set<String> adapterRealtimeCapabilities) {
         String effective = effectiveCapabilities.get(capability);

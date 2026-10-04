@@ -1,9 +1,12 @@
 package com.czur.aimeeting.reference.meeting;
 
 import com.czur.aimeeting.model.ModelAdapter;
+import com.czur.aimeeting.model.SummaryAdapter;
+import com.czur.aimeeting.reference.bailian.BailianSummaryAdapter;
 import com.czur.aimeeting.reference.sample.SampleJsonModelAdapter;
 import com.czur.aimeeting.reference.tingwu.TingwuModelAdapter;
 import java.util.Map;
+import java.util.HashSet;
 import java.util.Set;
 import java.util.function.Supplier;
 
@@ -22,6 +25,8 @@ public final class ModelAdapterRegistry {
                             MeetingCapabilityState.SPEAKER)),
             SampleJsonModelAdapter.ID, new Entry(SampleJsonModelAdapter::new,
                     Set.of(MeetingCapabilityState.TRANSCRIPT)));
+    private final Map<String, Supplier<SummaryAdapter>> summaryAdapters = Map.of(
+            BailianSummaryAdapter.ID, BailianSummaryAdapter::new);
 
     public ModelAdapter create(String adapterId) {
         return entry(adapterId).factory.get();
@@ -34,9 +39,20 @@ public final class ModelAdapterRegistry {
 
     /** 会前仅开放已接通的模式；当前只有听悟 Adapter 登记实时翻译能力。 */
     public Set<String> setupCapabilities() {
-        return entries.values().stream().flatMap(entry -> entry.capabilities.stream())
+        Set<String> ready = entries.values().stream()
+                .flatMap(entry -> entry.capabilities.stream())
                 .filter(READY_MEETING_CAPABILITIES::contains)
-                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+                .collect(java.util.stream.Collectors.toCollection(HashSet::new));
+        if (!summaryAdapters.isEmpty()) ready.add(MeetingCapabilityState.SUMMARY);
+        return Set.copyOf(ready);
+    }
+
+    public SummaryAdapter createSummary(String adapterId) {
+        Supplier<SummaryAdapter> factory = summaryAdapters.get(adapterId);
+        if (factory == null) {
+            throw new IllegalArgumentException("参考 App 未注册文本总结 Adapter: " + adapterId);
+        }
+        return factory.get();
     }
 
     private Entry entry(String adapterId) {
