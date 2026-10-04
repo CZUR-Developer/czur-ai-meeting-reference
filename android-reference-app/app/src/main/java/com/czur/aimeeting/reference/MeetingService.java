@@ -211,7 +211,7 @@ public final class MeetingService extends Service {
             overlay.dismiss();
             Log.i(TAG, "跨应用字幕窗已关闭");
         } else {
-            overlay.show(this::openMeetingPage, this::swapDisplayColumns, () -> {
+            overlay.show(display, this::openMeetingPage, this::swapDisplayColumns, () -> {
                 if (canStop) {
                     openMeetingPage();
                     requestStop();

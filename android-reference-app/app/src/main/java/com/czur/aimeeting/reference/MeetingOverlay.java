@@ -4,22 +4,31 @@ import android.content.Context;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import com.czur.aimeeting.reference.meeting.MeetingDisplayState;
+import com.czur.aimeeting.reference.meeting.OverlayLayoutState;
+import java.util.List;
 
 /**
  * 参考 App 的最小跨应用字幕窗。只负责展示和转发停止点击；模型连接、会议收口和
  * 字幕修订由前台会议 Service 管理。窗口只在用户主动打开且授予悬浮窗权限后创建。
  */
 final class MeetingOverlay {
+    private static final String TAG = "AiMeetingReference";
     private final Context context;
     private final WindowManager windowManager;
     private View root;
+    private WindowManager.LayoutParams params;
+    private OverlayLayoutState layout;
+    private LinearLayout expandedPanel;
+    private Button miniButton;
     private TextView titleView;
     private TextView transcriptView;
     private LinearLayout bilingualRow;
@@ -29,6 +38,13 @@ final class MeetingOverlay {
     private TextView reminderView;
     private Button stopButton;
     private Button swapButton;
+    private Button sizeButton;
+    private ScrollView historyScroll;
+    private LinearLayout historyRows;
+    private MeetingDisplayState lastDisplay;
+    private String lastTimeText = "";
+    private String lastReminderText = "";
+    private boolean lastCanStop;
 
     MeetingOverlay(Context context) {
         this.context = context;
@@ -37,15 +53,30 @@ final class MeetingOverlay {
 
     boolean isShowing() { return root != null; }
 
-    void show(Runnable onOpenApp, Runnable onSwapColumns, Runnable onStop) {
+    void show(MeetingDisplayState state, Runnable onOpenApp, Runnable onSwapColumns,
+            Runnable onStop) {
         if (root != null) return;
+        layout = new OverlayLayoutState(state.isBilingual());
         LinearLayout panel = new LinearLayout(context);
         panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setPadding(24, 18, 24, 18);
         GradientDrawable background = new GradientDrawable();
         background.setColor(0xE6222933);
         background.setCornerRadius(18);
         panel.setBackground(background);
+        expandedPanel = new LinearLayout(context);
+        expandedPanel.setOrientation(LinearLayout.VERTICAL);
+        expandedPanel.setPadding(24, 18, 24, 18);
+        panel.addView(expandedPanel);
+        miniButton = new Button(context);
+        miniButton.setText("AI 会议 · 恢复");
+        miniButton.setOnClickListener(view -> {
+            layout.restore();
+            Log.i(TAG, "悬浮窗已从 Mini 恢复为 " + layout.current());
+            applyLayout();
+            renderLastState();
+        });
+        miniButton.setVisibility(View.GONE);
+        panel.addView(miniButton);
 
         LinearLayout controls = new LinearLayout(context);
         controls.setGravity(Gravity.CENTER_VERTICAL);
@@ -58,17 +89,17 @@ final class MeetingOverlay {
         elapsedView = new TextView(context);
         elapsedView.setTextColor(Color.WHITE);
         controls.addView(elapsedView);
-        panel.addView(controls);
+        expandedPanel.addView(controls);
         reminderView = new TextView(context);
         reminderView.setTextColor(0xFFFFD166);
         reminderView.setVisibility(View.GONE);
-        panel.addView(reminderView);
+        expandedPanel.addView(reminderView);
 
         transcriptView = new TextView(context);
         transcriptView.setTextSize(22);
         transcriptView.setTextColor(Color.WHITE);
         transcriptView.setPadding(0, 10, 0, 10);
-        panel.addView(transcriptView);
+        expandedPanel.addView(transcriptView);
 
         bilingualRow = new LinearLayout(context);
         bilingualRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -83,7 +114,14 @@ final class MeetingOverlay {
         rightView.setPadding(12, 10, 0, 10);
         bilingualRow.addView(rightView, new LinearLayout.LayoutParams(0, -2, 1));
         bilingualRow.setVisibility(View.GONE);
-        panel.addView(bilingualRow);
+        expandedPanel.addView(bilingualRow);
+
+        historyRows = new LinearLayout(context);
+        historyRows.setOrientation(LinearLayout.VERTICAL);
+        historyScroll = new ScrollView(context);
+        historyScroll.addView(historyRows);
+        historyScroll.setVisibility(View.GONE);
+        expandedPanel.addView(historyScroll, new LinearLayout.LayoutParams(-1, dp(400)));
 
         LinearLayout actions = new LinearLayout(context);
         actions.setGravity(Gravity.END);
@@ -95,13 +133,30 @@ final class MeetingOverlay {
         swapButton.setText("交换左右");
         swapButton.setOnClickListener(view -> onSwapColumns.run());
         actions.addView(swapButton);
+        sizeButton = new Button(context);
+        sizeButton.setOnClickListener(view -> {
+            if (layout.current() == OverlayLayoutState.Type.TRANSLATION_NORMAL) layout.showLarge();
+            else layout.showNormal();
+            Log.i(TAG, "互译悬浮窗切换为 " + layout.current());
+            applyLayout();
+            renderLastState();
+        });
+        actions.addView(sizeButton);
+        Button collapseButton = new Button(context);
+        collapseButton.setText("收起");
+        collapseButton.setOnClickListener(view -> {
+            layout.collapse();
+            Log.i(TAG, "悬浮窗已收起到 Mini");
+            applyLayout();
+        });
+        actions.addView(collapseButton);
         stopButton = new Button(context);
         stopButton.setText("停止");
         stopButton.setOnClickListener(view -> onStop.run());
         actions.addView(stopButton);
-        panel.addView(actions);
+        expandedPanel.addView(actions);
 
-        WindowManager.LayoutParams params = new WindowManager.LayoutParams(
+        params = new WindowManager.LayoutParams(
                 WindowManager.LayoutParams.MATCH_PARENT,
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
@@ -117,15 +172,25 @@ final class MeetingOverlay {
     void render(MeetingDisplayState state, String timeText, String reminderText,
             boolean canStop) {
         if (root == null) return;
+        lastDisplay = state;
+        lastTimeText = timeText;
+        lastReminderText = reminderText;
+        lastCanStop = canStop;
+        if (layout.current() == OverlayLayoutState.Type.MINI) return;
         boolean bilingual = state.isBilingual();
+        boolean large = layout.current() == OverlayLayoutState.Type.TRANSLATION_LARGE;
         MeetingDisplayState.BilingualRow current = bilingual ? state.latestBilingualRow() : null;
         titleView.setText(bilingual ? "双语互译  " + state.leftLabel() + " / "
                 + state.rightLabel()
+                + (large ? " · 大窗" : " · 普通窗")
                 + (current != null && current.languageFallback() ? "（语种降级）" : "")
                 : "实时字幕");
         transcriptView.setVisibility(bilingual ? View.GONE : View.VISIBLE);
-        bilingualRow.setVisibility(bilingual ? View.VISIBLE : View.GONE);
+        bilingualRow.setVisibility(bilingual && !large ? View.VISIBLE : View.GONE);
+        historyScroll.setVisibility(bilingual && large ? View.VISIBLE : View.GONE);
         swapButton.setVisibility(bilingual ? View.VISIBLE : View.GONE);
+        sizeButton.setVisibility(bilingual ? View.VISIBLE : View.GONE);
+        sizeButton.setText(large ? "普通窗" : "大窗");
         transcriptView.setText(state.transcript());
         transcriptView.setAlpha(state.transcriptAlpha());
         if (bilingual) {
@@ -138,6 +203,7 @@ final class MeetingOverlay {
                 leftView.setText("等待字幕…");
                 rightView.setText("");
             }
+            if (large) renderHistory(state.bilingualRows());
         }
         elapsedView.setText(timeText);
         reminderView.setText(reminderText);
@@ -145,10 +211,67 @@ final class MeetingOverlay {
         stopButton.setEnabled(canStop);
     }
 
+    /** 大窗展示最近几行；行数据始终取自 Service 的同一份已路由会议状态。 */
+    private void renderHistory(List<MeetingDisplayState.BilingualRow> rows) {
+        historyRows.removeAllViews();
+        if (rows.isEmpty()) {
+            TextView waiting = new TextView(context);
+            waiting.setText("等待字幕…");
+            waiting.setTextColor(Color.WHITE);
+            historyRows.addView(waiting);
+            return;
+        }
+        for (int index = Math.max(0, rows.size() - 8); index < rows.size(); index++) {
+            MeetingDisplayState.BilingualRow segment = rows.get(index);
+            LinearLayout row = new LinearLayout(context);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            TextView left = historyCell(segment.left(), segment.leftAlpha());
+            TextView right = historyCell(segment.right(), segment.rightAlpha());
+            row.addView(left, new LinearLayout.LayoutParams(0, -2, 1));
+            row.addView(right, new LinearLayout.LayoutParams(0, -2, 1));
+            historyRows.addView(row);
+        }
+    }
+
+    private TextView historyCell(String text, float alpha) {
+        TextView cell = new TextView(context);
+        cell.setText(text);
+        cell.setTextColor(Color.WHITE);
+        cell.setTextSize(20);
+        cell.setAlpha(alpha);
+        cell.setPadding(0, 8, 12, 8);
+        return cell;
+    }
+
+    private void renderLastState() {
+        if (lastDisplay != null) render(lastDisplay, lastTimeText, lastReminderText, lastCanStop);
+    }
+
+    /** Mini 调整成右上角的小入口；展开后仍使用原会话窗口和最近的字幕快照。 */
+    private void applyLayout() {
+        boolean mini = layout.current() == OverlayLayoutState.Type.MINI;
+        expandedPanel.setVisibility(mini ? View.GONE : View.VISIBLE);
+        miniButton.setVisibility(mini ? View.VISIBLE : View.GONE);
+        params.width = mini ? dp(180) : WindowManager.LayoutParams.MATCH_PARENT;
+        params.height = WindowManager.LayoutParams.WRAP_CONTENT;
+        params.gravity = mini ? Gravity.TOP | Gravity.END : Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
+        params.x = mini ? dp(16) : 0;
+        params.y = dp(24);
+        windowManager.updateViewLayout(root, params);
+    }
+
+    private int dp(int value) {
+        return Math.round(value * context.getResources().getDisplayMetrics().density);
+    }
+
     void dismiss() {
         if (root == null) return;
         windowManager.removeView(root);
         root = null;
+        params = null;
+        layout = null;
+        expandedPanel = null;
+        miniButton = null;
         titleView = null;
         transcriptView = null;
         bilingualRow = null;
@@ -158,5 +281,9 @@ final class MeetingOverlay {
         reminderView = null;
         stopButton = null;
         swapButton = null;
+        sizeButton = null;
+        historyScroll = null;
+        historyRows = null;
+        lastDisplay = null;
     }
 }
