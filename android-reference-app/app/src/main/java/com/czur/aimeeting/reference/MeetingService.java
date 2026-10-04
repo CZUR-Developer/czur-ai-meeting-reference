@@ -31,6 +31,7 @@ import com.czur.aimeeting.reference.meeting.MeetingRuntimeBridge;
 import com.czur.aimeeting.reference.meeting.MeetingRuntimeFactory;
 import com.czur.aimeeting.reference.meeting.MeetingSetup;
 import com.czur.aimeeting.reference.meeting.MeetingTimeRule;
+import com.czur.aimeeting.reference.meeting.MeetingReminderPresentation;
 import com.czur.aimeeting.reference.meeting.ReferenceMeetingClient;
 import java.io.IOException;
 import java.util.Set;
@@ -73,11 +74,12 @@ public final class MeetingService extends Service {
         final int transcriptVersion;
         final String resultUrl;
         final String timeText;
-        final String reminderText;
+        final MeetingReminderPresentation.Notice reminder;
 
         State(MeetingDisplayState display, String status, String capabilityText, boolean busy,
                 boolean active, boolean canStop, boolean overlayShowing,
-                int transcriptVersion, String resultUrl, String timeText, String reminderText) {
+                int transcriptVersion, String resultUrl, String timeText,
+                MeetingReminderPresentation.Notice reminder) {
             this.display = display;
             this.status = status;
             this.capabilityText = capabilityText;
@@ -88,7 +90,7 @@ public final class MeetingService extends Service {
             this.transcriptVersion = transcriptVersion;
             this.resultUrl = resultUrl;
             this.timeText = timeText;
-            this.reminderText = reminderText;
+            this.reminder = reminder;
         }
     }
 
@@ -101,6 +103,8 @@ public final class MeetingService extends Service {
     private final ExecutorService network = Executors.newSingleThreadExecutor();
     private final MeetingDisplayState display = new MeetingDisplayState();
     private final FinalTranscriptCollector finalTranscript = new FinalTranscriptCollector();
+    private MeetingReminderPresentation reminderPresentation =
+            new MeetingReminderPresentation();
     private final AtomicInteger sequence = new AtomicInteger();
     private final AtomicInteger saved = new AtomicInteger();
     private final AtomicBoolean appendFailed = new AtomicBoolean();
@@ -230,7 +234,15 @@ public final class MeetingService extends Service {
     }
 
     void unobserve(Observer old) {
-        if (observer == old) observer = null;
+        if (observer == old) {
+            observer = null;
+            publish();
+        }
+    }
+
+    void confirmReminder() {
+        reminderPresentation.confirm();
+        publish();
     }
 
     String takeResultUrl() {
@@ -245,7 +257,8 @@ public final class MeetingService extends Service {
             overlay.dismiss();
             Log.i(TAG, "跨应用字幕窗已关闭");
         } else {
-            overlay.show(display, this::openMeetingPage, this::swapDisplayColumns, () -> {
+            overlay.show(display, this::openMeetingPage, this::swapDisplayColumns,
+                    this::confirmReminder, () -> {
                 if (canStop) {
                     openMeetingPage();
                     requestStop();
@@ -337,6 +350,7 @@ public final class MeetingService extends Service {
         presentationSequence = 0;
         long startedAtMs = SystemClock.elapsedRealtime();
         timing = new MeetingTimeRule(startedAtMs, created.maxMeetingDurationMs());
+        reminderPresentation = new MeetingReminderPresentation();
         limitReminderLogged = false;
         idleReminderLogged = false;
         display.start(startedAtMs,
@@ -647,18 +661,11 @@ public final class MeetingService extends Service {
                 : timing.at(SystemClock.elapsedRealtime());
         String timeText = clock == null ? "" : "已进行 " + MeetingTimeRule.format(clock.elapsedMs())
                 + " · 剩余 " + MeetingTimeRule.format(clock.remainingMs());
-        String reminderText = "";
-        if (clock != null) {
-            if (clock.limitWarning()) reminderText = "本场会议剩余不足20分钟";
-            if (clock.noTranscriptWarning()) {
-                if (!reminderText.isEmpty()) reminderText += "\n";
-                reminderText += "连续4分钟无转写，距自动结束还剩 "
-                        + MeetingTimeRule.format(clock.noTranscriptRemainingMs());
-            }
-        }
+        MeetingReminderPresentation.Notice reminder = active && clock != null
+                ? reminderPresentation.at(clock) : MeetingReminderPresentation.Notice.NONE;
         State state = new State(display, status, capabilityText, busy, active, canStop,
-                overlay.isShowing(), transcriptVersion, resultUrl, timeText, reminderText);
-        overlay.render(display, timeText, reminderText, canStop);
+                overlay.isShowing(), transcriptVersion, resultUrl, timeText, reminder);
+        overlay.render(display, timeText, reminder, canStop, observer == null);
         if (observer != null) observer.onMeetingState(state);
     }
 

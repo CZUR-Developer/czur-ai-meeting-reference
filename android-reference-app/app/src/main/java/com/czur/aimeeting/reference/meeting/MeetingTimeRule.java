@@ -20,7 +20,6 @@ public final class MeetingTimeRule {
     private final long startedAtMs;
     private final long maxDurationMs;
     private long lastTranscriptAtMs;
-    private boolean hasTranscript;
 
     public MeetingTimeRule(long startedAtMs, long maxDurationMs) {
         if (maxDurationMs <= 0) throw new IllegalArgumentException("会议时长上限必须大于零");
@@ -33,7 +32,6 @@ public final class MeetingTimeRule {
     public void onTranscript(long nowMs, String text) {
         if (text != null && !text.isBlank()) {
             lastTranscriptAtMs = nowMs;
-            hasTranscript = true;
         }
     }
 
@@ -46,7 +44,7 @@ public final class MeetingTimeRule {
                 : idle >= NO_TEXT_STOP_MS ? StopCause.NO_TRANSCRIPT : StopCause.NONE;
         return new Snapshot(elapsed, remaining,
                 maxDurationMs > LIMIT_WARNING_MS && remaining <= LIMIT_WARNING_MS,
-                hasTranscript && idle >= NO_TEXT_WARNING_MS && idle < NO_TEXT_STOP_MS,
+                idle >= NO_TEXT_WARNING_MS && idle < NO_TEXT_STOP_MS,
                 Math.max(0L, NO_TEXT_STOP_MS - idle), stop);
     }
 

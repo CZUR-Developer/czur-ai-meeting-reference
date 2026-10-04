@@ -13,6 +13,7 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import com.czur.aimeeting.reference.meeting.MeetingDisplayState;
+import com.czur.aimeeting.reference.meeting.MeetingReminderPresentation;
 import com.czur.aimeeting.reference.meeting.OverlayLayoutState;
 import java.util.List;
 
@@ -35,7 +36,9 @@ final class MeetingOverlay {
     private TextView leftView;
     private TextView rightView;
     private TextView elapsedView;
-    private TextView reminderView;
+    private View reminderScrim;
+    private MeetingReminderPopup reminderPopup;
+    private Runnable onConfirmReminder;
     private Button stopButton;
     private Button swapButton;
     private Button sizeButton;
@@ -43,7 +46,9 @@ final class MeetingOverlay {
     private LinearLayout historyRows;
     private MeetingDisplayState lastDisplay;
     private String lastTimeText = "";
-    private String lastReminderText = "";
+    private MeetingReminderPresentation.Notice lastReminder =
+            MeetingReminderPresentation.Notice.NONE;
+    private boolean lastAllowReminder;
     private boolean lastCanStop;
 
     MeetingOverlay(Context context) {
@@ -54,8 +59,9 @@ final class MeetingOverlay {
     boolean isShowing() { return root != null; }
 
     void show(MeetingDisplayState state, Runnable onOpenApp, Runnable onSwapColumns,
-            Runnable onStop) {
+            Runnable onConfirmReminder, Runnable onStop) {
         if (root != null) return;
+        this.onConfirmReminder = onConfirmReminder;
         layout = new OverlayLayoutState(state.isBilingual());
         LinearLayout panel = new LinearLayout(context);
         panel.setOrientation(LinearLayout.VERTICAL);
@@ -90,11 +96,6 @@ final class MeetingOverlay {
         elapsedView.setTextColor(Color.WHITE);
         controls.addView(elapsedView);
         expandedPanel.addView(controls);
-        reminderView = new TextView(context);
-        reminderView.setTextColor(0xFFFFD166);
-        reminderView.setVisibility(View.GONE);
-        expandedPanel.addView(reminderView);
-
         transcriptView = new TextView(context);
         transcriptView.setTextSize(22);
         transcriptView.setTextColor(Color.WHITE);
@@ -169,13 +170,16 @@ final class MeetingOverlay {
         root = panel;
     }
 
-    void render(MeetingDisplayState state, String timeText, String reminderText,
-            boolean canStop) {
+    void render(MeetingDisplayState state, String timeText,
+            MeetingReminderPresentation.Notice reminder, boolean canStop,
+            boolean allowOverlayReminder) {
         if (root == null) return;
         lastDisplay = state;
         lastTimeText = timeText;
-        lastReminderText = reminderText;
+        lastReminder = reminder;
+        lastAllowReminder = allowOverlayReminder;
         lastCanStop = canStop;
+        renderReminder(reminder, allowOverlayReminder);
         if (layout.current() == OverlayLayoutState.Type.MINI) return;
         boolean bilingual = state.isBilingual();
         boolean large = layout.current() == OverlayLayoutState.Type.TRANSLATION_LARGE;
@@ -206,9 +210,55 @@ final class MeetingOverlay {
             if (large) renderHistory(state.bilingualRows());
         }
         elapsedView.setText(timeText);
-        reminderView.setText(reminderText);
-        reminderView.setVisibility(reminderText.isEmpty() ? View.GONE : View.VISIBLE);
         stopButton.setEnabled(canStop);
+    }
+
+    private void renderReminder(MeetingReminderPresentation.Notice notice, boolean allowed) {
+        if (!allowed || notice.kind() == MeetingReminderPresentation.Kind.NONE) {
+            clearReminder();
+            return;
+        }
+        if (reminderPopup == null) {
+            try {
+                reminderScrim = new View(context);
+                reminderScrim.setBackgroundColor(0xB8000000);
+                windowManager.addView(reminderScrim, new WindowManager.LayoutParams(
+                        -1, -1, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+                        android.graphics.PixelFormat.TRANSLUCENT));
+                reminderPopup = new MeetingReminderPopup(context, true, onConfirmReminder);
+                WindowManager.LayoutParams cardParams = new WindowManager.LayoutParams(
+                        Math.min(context.getResources().getDisplayMetrics().widthPixels - dp(48),
+                                dp(440)), WindowManager.LayoutParams.WRAP_CONTENT,
+                        WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                        android.graphics.PixelFormat.TRANSLUCENT);
+                cardParams.gravity = Gravity.CENTER;
+                reminderPopup.render(notice);
+                windowManager.addView(reminderPopup.view(), cardParams);
+            } catch (RuntimeException unavailable) {
+                clearReminder();
+                Log.w(TAG, "跨应用提醒窗不可用 reason="
+                        + unavailable.getClass().getSimpleName());
+            }
+        } else {
+            reminderPopup.render(notice);
+        }
+    }
+
+    private void clearReminder() {
+        if (reminderPopup != null) {
+            if (reminderPopup.view().getParent() != null) {
+                windowManager.removeView(reminderPopup.view());
+            }
+            reminderPopup = null;
+        }
+        if (reminderScrim != null) {
+            if (reminderScrim.getParent() != null) windowManager.removeView(reminderScrim);
+            reminderScrim = null;
+        }
     }
 
     /** 大窗展示最近几行；行数据始终取自 Service 的同一份已路由会议状态。 */
@@ -244,7 +294,8 @@ final class MeetingOverlay {
     }
 
     private void renderLastState() {
-        if (lastDisplay != null) render(lastDisplay, lastTimeText, lastReminderText, lastCanStop);
+        if (lastDisplay != null) render(lastDisplay, lastTimeText, lastReminder,
+                lastCanStop, lastAllowReminder);
     }
 
     /** Mini 调整成右上角的小入口；展开后仍使用原会话窗口和最近的字幕快照。 */
@@ -266,6 +317,7 @@ final class MeetingOverlay {
 
     void dismiss() {
         if (root == null) return;
+        clearReminder();
         windowManager.removeView(root);
         root = null;
         params = null;
@@ -278,7 +330,7 @@ final class MeetingOverlay {
         leftView = null;
         rightView = null;
         elapsedView = null;
-        reminderView = null;
+        onConfirmReminder = null;
         stopButton = null;
         swapButton = null;
         sizeButton = null;

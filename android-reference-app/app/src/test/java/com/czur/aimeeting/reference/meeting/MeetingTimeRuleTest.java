@@ -23,9 +23,9 @@ public final class MeetingTimeRuleTest {
     }
 
     @Test
-    public void warnsAfterFourMinutesOnlyIfMeetingHadTextAndStopsAfterFive() {
+    public void warnsAfterFourMinutesEvenBeforeFirstTextAndStopsAfterFive() {
         MeetingTimeRule empty = new MeetingTimeRule(0L, 60 * MINUTE);
-        assertFalse(empty.at(4 * MINUTE).noTranscriptWarning());
+        assertTrue(empty.at(4 * MINUTE).noTranscriptWarning());
         assertEquals(MeetingTimeRule.StopCause.NO_TRANSCRIPT,
                 empty.at(5 * MINUTE).stopCause());
 

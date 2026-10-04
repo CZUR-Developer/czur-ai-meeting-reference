@@ -22,6 +22,7 @@ import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
@@ -77,7 +78,7 @@ public final class MainActivity extends Activity {
     private TextView rightLanguageTitle;
     private final Map<String, TextView> transcriptRows = new LinkedHashMap<>();
     private TextView elapsedView;
-    private TextView reminderView;
+    private MeetingReminderPopup reminderPopup;
     private TextView statusView;
     private TextView capabilityView;
     private Spinner sourceLanguageView;
@@ -235,10 +236,6 @@ public final class MainActivity extends Activity {
         elapsedView = new TextView(this);
         elapsedView.setText("已进行 00:00:00 · 剩余 00:00:00");
         meetingLayout.addView(elapsedView);
-        reminderView = new TextView(this);
-        reminderView.setTextColor(0xFFB45309);
-        reminderView.setVisibility(View.GONE);
-        meetingLayout.addView(reminderView);
 
         transcriptView = new TextView(this);
         transcriptView.setTextSize(28);
@@ -306,7 +303,13 @@ public final class MainActivity extends Activity {
         statusView.setText("填写 HTTPS 后端地址和部署者预置的账号");
         statusView.setPadding(40, 12, 40, 24);
         root.addView(statusView);
-        setContentView(root);
+        FrameLayout screen = new FrameLayout(this);
+        screen.addView(root, new FrameLayout.LayoutParams(-1, -1));
+        reminderPopup = new MeetingReminderPopup(this, false, () -> {
+            if (meetingService != null) meetingService.confirmReminder();
+        });
+        screen.addView(reminderPopup.view(), new FrameLayout.LayoutParams(-1, -1));
+        setContentView(screen);
     }
 
     /**
@@ -491,8 +494,7 @@ public final class MainActivity extends Activity {
         overlayButton.setText(state.overlayShowing
                 ? "关闭跨应用悬浮字幕" : "显示跨应用悬浮字幕");
         elapsedView.setText(state.timeText);
-        reminderView.setText(state.reminderText);
-        reminderView.setVisibility(state.reminderText.isEmpty() ? View.GONE : View.VISIBLE);
+        reminderPopup.render(state.reminder);
         if (renderedTranscriptVersion != state.transcriptVersion) {
             if (state.display.segments().isEmpty()) {
                 transcriptRows.clear();
