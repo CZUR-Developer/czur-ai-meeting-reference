@@ -324,6 +324,8 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
                     Map.of(), query, ""), null);
             assertEquals(200, manifestResponse.status());
             MeetingManifest manifest = MeetingManifestJson.decode(manifestResponse.body());
+            assertEquals(NOW.minusSeconds(60), manifest.startedAt());
+            assertEquals(60_000, manifest.durationMs());
             assertEquals("transcript.final", manifest.artifacts().getFirst().type());
             String artifactId = manifest.artifacts().getFirst().artifactId();
             var artifactResponse = assembly.runtime().handle(new HttpRequest("GET",

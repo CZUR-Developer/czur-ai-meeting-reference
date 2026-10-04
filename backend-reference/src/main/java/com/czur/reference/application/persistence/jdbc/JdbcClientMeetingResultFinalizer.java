@@ -34,6 +34,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -84,7 +85,8 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
                 JdbcMeetingRepository.VersionedMeeting locked =
                         JdbcMeetingRepository.findVersionedForUpdate(connection, meetingId)
                                 .orElse(null);
-                if (locked == null || !isClient(connection, meetingId)) {
+                Instant startedAt = locked == null ? null : clientStartedAt(connection, meetingId);
+                if (startedAt == null) {
                     connection.rollback();
                     return false;
                 }
@@ -189,7 +191,8 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
                         projection.summary() == null ? null
                                 : projection.summary().path("title").asText(),
                         com.czur.reference.application.port.ManifestStatus.READY,
-                        locked.snapshot().createdAt(), endedAt, projection.durationMs(),
+                        startedAt, endedAt,
+                        durationMs(startedAt, endedAt, projection.durationMs()),
                         new MeetingManifest.Languages(projection.language(),
                                 projection.targetLanguages()),
                         artifactRefs, List.of());
@@ -274,12 +277,21 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
                 persisted.metadata().recordedAt(), null, null);
     }
 
-    private static boolean isClient(Connection connection, String meetingId) throws SQLException {
+    private static Instant clientStartedAt(Connection connection, String meetingId)
+            throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT 1 FROM meeting_client_input WHERE meeting_id=?")) {
+                "SELECT started_at FROM meeting_client_input WHERE meeting_id=?")) {
             statement.setString(1, meetingId);
-            try (ResultSet rows = statement.executeQuery()) { return rows.next(); }
+            try (ResultSet rows = statement.executeQuery()) {
+                return rows.next() ? rows.getTimestamp(1).toInstant() : null;
+            }
         }
+    }
+
+    /** 会议时长取实际客户端起止，且不能短于最终字幕的媒体时间轴。 */
+    static long durationMs(Instant startedAt, Instant endedAt, long transcriptEndMs) {
+        return Math.max(transcriptEndMs,
+                Math.max(0, Duration.between(startedAt, endedAt).toMillis()));
     }
 
     private static boolean resultExists(Connection connection, String meetingId)
