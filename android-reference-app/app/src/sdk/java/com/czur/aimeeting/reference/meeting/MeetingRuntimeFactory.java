@@ -35,6 +35,11 @@ public final class MeetingRuntimeFactory {
             public String displayName() { return "模型"; }
 
             @Override
+            public Set<String> setupCapabilities() {
+                return adapters.setupCapabilities();
+            }
+
+            @Override
             public Set<String> realtimeCapabilities(CreatedMeeting created) {
                 return adapters.realtimeCapabilities(created.modelSession().adapterId());
             }

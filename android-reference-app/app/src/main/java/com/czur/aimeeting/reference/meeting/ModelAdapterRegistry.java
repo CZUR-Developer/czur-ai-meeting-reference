@@ -27,6 +27,12 @@ public final class ModelAdapterRegistry {
         return entry(adapterId).capabilities;
     }
 
+    /** 会前只展示 App 已注册 Adapter 能处理的模式；本场仍以 Create 决策为准。 */
+    public Set<String> setupCapabilities() {
+        return entries.values().stream().flatMap(entry -> entry.capabilities.stream())
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+    }
+
     private Entry entry(String adapterId) {
         Entry entry = entries.get(adapterId);
         if (entry == null) {

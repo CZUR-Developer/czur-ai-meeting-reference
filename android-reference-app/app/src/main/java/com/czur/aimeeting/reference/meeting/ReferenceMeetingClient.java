@@ -10,7 +10,7 @@ import java.io.IOException;
  */
 public interface ReferenceMeetingClient {
     /** 鉴权并创建会议，返回会议 ID 与后端冻结的能力决策。 */
-    CreatedMeeting createMeeting() throws IOException;
+    CreatedMeeting createMeeting(MeetingSetup setup) throws IOException;
 
     /** 告知后端本场由 App 提交标准事件，并进入可接收字幕的状态。 */
     void startClient(String meetingId) throws IOException;

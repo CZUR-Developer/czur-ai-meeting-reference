@@ -9,10 +9,16 @@ import android.os.Bundle;
 import android.text.InputType;
 import android.util.Log;
 import android.view.Gravity;
+import android.view.View;
+import android.widget.ArrayAdapter;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.RadioButton;
+import android.widget.RadioGroup;
 import android.widget.ScrollView;
+import android.widget.Spinner;
 import android.widget.TextView;
 import com.czur.aimeeting.model.ModelSession;
 import com.czur.aimeeting.model.ModelSessionGrant;
@@ -24,6 +30,7 @@ import com.czur.aimeeting.reference.meeting.CreatedMeeting;
 import com.czur.aimeeting.reference.meeting.MeetingRuntimeBridge;
 import com.czur.aimeeting.reference.meeting.MeetingRuntimeFactory;
 import com.czur.aimeeting.reference.meeting.MeetingCapabilityState;
+import com.czur.aimeeting.reference.meeting.MeetingSetup;
 import com.czur.aimeeting.reference.meeting.ReferenceMeetingClient;
 import com.czur.aimeeting.reference.meeting.ReferenceLoginSession;
 import java.io.IOException;
@@ -43,6 +50,7 @@ public final class MainActivity extends Activity {
     private volatile boolean stopRequested;
     private volatile boolean modelFinished;
     private volatile String activeResultWebUrl;
+    private MeetingSetup activeSetup;
     private EditText backendUrlView;
     private EditText usernameView;
     private EditText passwordView;
@@ -50,6 +58,13 @@ public final class MainActivity extends Activity {
     private TextView transcriptView;
     private TextView statusView;
     private TextView capabilityView;
+    private Spinner sourceLanguageView;
+    private Spinner targetLanguageView;
+    private CheckBox presentationCaptureView;
+    private RadioButton transcriptModeView;
+    private RadioButton minutesModeView;
+    private RadioButton translationModeView;
+    private RadioButton webResultView;
     private Button startButton;
     private Button stopButton;
     private Button loginButton;
@@ -95,11 +110,83 @@ public final class MainActivity extends Activity {
         });
         layout.addView(loginButton);
 
+        TextView modeTitle = new TextView(this);
+        modeTitle.setText("会议模式");
+        layout.addView(modeTitle);
+        RadioGroup modeGroup = new RadioGroup(this);
+        transcriptModeView = new RadioButton(this);
+        transcriptModeView.setId(View.generateViewId());
+        transcriptModeView.setText("实时字幕");
+        transcriptModeView.setChecked(true);
+        modeGroup.addView(transcriptModeView);
+        minutesModeView = new RadioButton(this);
+        minutesModeView.setId(View.generateViewId());
+        boolean minutesAvailable = runtime.setupCapabilities().contains(
+                MeetingCapabilityState.SUMMARY);
+        minutesModeView.setText(minutesAvailable ? "AI 会议纪要"
+                : "AI 会议纪要（当前模型/应用未接入，暂不可用）");
+        minutesModeView.setEnabled(minutesAvailable);
+        modeGroup.addView(minutesModeView);
+        translationModeView = new RadioButton(this);
+        translationModeView.setId(View.generateViewId());
+        boolean translationAvailable = runtime.setupCapabilities().contains(
+                MeetingCapabilityState.TRANSLATION);
+        translationModeView.setText(translationAvailable ? "现场互译"
+                : "现场互译（当前模型/应用未接入，暂不可用）");
+        translationModeView.setEnabled(translationAvailable);
+        modeGroup.addView(translationModeView);
+        modeGroup.check(transcriptModeView.getId());
+        layout.addView(modeGroup);
+
+        TextView sourceTitle = new TextView(this);
+        sourceTitle.setText("源语言");
+        layout.addView(sourceTitle);
+        String[] languages = {"中文（zh-CN）", "英语（en-US）"};
+        sourceLanguageView = new Spinner(this);
+        sourceLanguageView.setAdapter(new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_dropdown_item, languages));
+        layout.addView(sourceLanguageView);
+
+        TextView targetTitle = new TextView(this);
+        targetTitle.setText("互译目标语言（现场互译可用后选择）");
+        layout.addView(targetTitle);
+        targetLanguageView = new Spinner(this);
+        targetLanguageView.setAdapter(new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_dropdown_item, languages));
+        targetLanguageView.setSelection(1);
+        targetLanguageView.setEnabled(false);
+        layout.addView(targetLanguageView);
+        modeGroup.setOnCheckedChangeListener((group, checkedId) ->
+                targetLanguageView.setEnabled(checkedId == translationModeView.getId()));
+
+        presentationCaptureView = new CheckBox(this);
+        presentationCaptureView.setText("演示文稿（会中采集待接入，暂不可用）");
+        presentationCaptureView.setEnabled(false);
+        layout.addView(presentationCaptureView);
+
+        TextView resultTitle = new TextView(this);
+        resultTitle.setText("结果获取方式");
+        layout.addView(resultTitle);
+        RadioGroup resultGroup = new RadioGroup(this);
+        webResultView = new RadioButton(this);
+        webResultView.setId(View.generateViewId());
+        webResultView.setText("网页查看");
+        webResultView.setChecked(true);
+        resultGroup.addView(webResultView);
+        for (String unavailable : new String[] {"本地保存", "二维码", "邮箱", "无痕"}) {
+            RadioButton option = new RadioButton(this);
+            option.setText(unavailable + "（交付流程待接入，暂不可用）");
+            option.setEnabled(false);
+            resultGroup.addView(option);
+        }
+        resultGroup.check(webResultView.getId());
+        layout.addView(resultGroup);
+
         resultWebUrlView = new EditText(this);
         resultWebUrlView.setSingleLine(true);
         resultWebUrlView.setInputType(InputType.TYPE_CLASS_TEXT
                 | InputType.TYPE_TEXT_VARIATION_URI);
-        resultWebUrlView.setHint("结果页地址，例如 http://192.168.1.10:8081/index.html");
+        resultWebUrlView.setHint("网页结果地址，例如 http://192.168.1.10:8081/index.html");
         layout.addView(resultWebUrlView);
 
         transcriptView = new TextView(this);
@@ -123,7 +210,7 @@ public final class MainActivity extends Activity {
         layout.addView(startButton);
 
         stopButton = new Button(this);
-        stopButton.setText("停止会议并查看结果");
+        stopButton.setText("停止会议并查看网页结果");
         stopButton.setEnabled(false);
         layout.addView(stopButton);
 
@@ -208,6 +295,17 @@ public final class MainActivity extends Activity {
             statusView.setText("请先登录");
             return;
         }
+        // 点击开始时读取一次会前设置。会议进行中即使输入框变化，也使用这份快照。
+        MeetingSetup setup = selectedSetup();
+        if (!runtime.setupCapabilities().contains(setup.mode().requiredCapability())) {
+            statusView.setText(setup.mode().displayName() + "当前不可用");
+            return;
+        }
+        if (setup.resultDelivery() != MeetingSetup.ResultDelivery.WEB
+                || !webResultView.isChecked() || setup.resultWebUrl().isEmpty()) {
+            statusView.setText("当前仅支持网页查看，请填写网页结果地址");
+            return;
+        }
         ReferenceMeetingClient client = new HttpReferenceMeetingClient(sessionBackendUrl,
                 sessionToken);
         startButton.setEnabled(false);
@@ -215,16 +313,27 @@ public final class MainActivity extends Activity {
         statusView.setText("正在创建会议…");
         network.execute(() -> {
             try {
-                CreatedMeeting created = client.createMeeting();
+                CreatedMeeting created = client.createMeeting(setup);
                 String meetingId = created.meetingId();
-                Log.i(TAG, "会议已创建 meetingId=" + meetingId);
-                client.startClient(meetingId);
-                Log.i(TAG, "客户端会议已启动 meetingId=" + meetingId);
+                Log.i(TAG, "会议已创建 meetingId=" + meetingId + " mode=" + setup.mode()
+                        + " sourceLanguage=" + setup.sourceLanguage());
+                // Create 只表达请求，必须先核对后端冻结的本场能力，再打开模型/启动计费。
+                if (!created.capabilities().canUse(setup.mode().requiredCapability(),
+                        runtime.setupCapabilities())) {
+                    throw new IOException("本场后端未开放" + setup.mode().displayName());
+                }
                 ModelSessionGrant grant = runtime.waitsForModelFinish()
                         ? client.requestModelSession(meetingId) : null;
                 if (grant != null) Log.i(TAG, "模型会话材料已领取 meetingId=" + meetingId
                         + " adapterId=" + grant.adapterId());
                 CreatedMeeting ready = created.withModelSession(grant);
+                if (!ready.capabilities().canUse(setup.mode().requiredCapability(),
+                        runtime.realtimeCapabilities(ready))) {
+                    throw new IOException("本场模型 Adapter 未开放" + setup.mode().displayName());
+                }
+                client.startClient(meetingId);
+                Log.i(TAG, "客户端会议已启动 meetingId=" + meetingId);
+                activeSetup = setup;
                 runOnUiThread(() -> startModelMeeting(client, ready));
             } catch (IOException failure) {
                 Log.e(TAG, "创建或启动会议失败", failure);
@@ -235,6 +344,18 @@ public final class MainActivity extends Activity {
                 });
             }
         });
+    }
+
+    private MeetingSetup selectedSetup() {
+        MeetingSetup.Mode mode = minutesModeView.isChecked()
+                ? MeetingSetup.Mode.MEETING_MINUTES
+                : translationModeView.isChecked() ? MeetingSetup.Mode.LIVE_TRANSLATION
+                : MeetingSetup.Mode.LIVE_TRANSCRIPT;
+        String[] codes = {"zh-CN", "en-US"};
+        return new MeetingSetup(mode, codes[sourceLanguageView.getSelectedItemPosition()],
+                codes[targetLanguageView.getSelectedItemPosition()],
+                presentationCaptureView.isChecked(), MeetingSetup.ResultDelivery.WEB,
+                resultWebUrlView.getText().toString().trim());
     }
 
     private void startModelMeeting(ReferenceMeetingClient client, CreatedMeeting created) {
@@ -324,12 +445,7 @@ public final class MainActivity extends Activity {
 
     private void requestStop(ReferenceMeetingClient client, String meetingId,
             AtomicBoolean appendFailed, AtomicBoolean completionQueued) {
-        String resultWebUrl = resultWebUrlView.getText().toString().trim();
-        if (resultWebUrl.isEmpty()) {
-            statusView.setText("请填写结果页地址");
-            return;
-        }
-        activeResultWebUrl = resultWebUrl;
+        activeResultWebUrl = activeSetup.resultWebUrl();
         stopRequested = true;
         stopButton.setEnabled(false);
         statusView.setText("正在等待模型最终字幕…");

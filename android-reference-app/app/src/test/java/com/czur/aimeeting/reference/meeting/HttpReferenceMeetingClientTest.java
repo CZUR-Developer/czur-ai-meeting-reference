@@ -29,7 +29,8 @@ public final class HttpReferenceMeetingClientTest {
             server.start();
             ReferenceMeetingClient client = new HttpReferenceMeetingClient(
                     server.url("/").toString(), "local-demo-token");
-            CreatedMeeting created = client.createMeeting();
+            CreatedMeeting created = client.createMeeting(
+                    MeetingSetup.transcript("en-US", "https://result.example.test/index.html"));
             String meetingId = created.meetingId();
             client.startClient(meetingId);
             client.appendTranscript(meetingId, 1,
@@ -57,8 +58,11 @@ public final class HttpReferenceMeetingClientTest {
             assertEquals("Bearer local-demo-token", appendRequest.getHeader("Authorization"));
             JSONObject create = new JSONObject(createRequest.getBody().readUtf8());
             assertEquals("reference-asr", create.getJSONObject("profile").getString("id"));
+            assertEquals("en-US", create.getJSONObject("languages").getString("source"));
+            assertEquals(0, create.getJSONObject("languages").getJSONArray("targets").length());
             assertEquals("transcript.realtime",
                     create.getJSONArray("requestedCapabilities").getString(0));
+            assertTrue(!create.getJSONObject("artifactPolicy").getBoolean("presentationCapture"));
             assertTrue(startRequest.getBody().readUtf8().isEmpty());
             JSONObject append = new JSONObject(appendRequest.getBody().readUtf8());
             assertEquals("mock-segment-1-r1", append.getString("clientEventId"));
@@ -88,7 +92,9 @@ public final class HttpReferenceMeetingClientTest {
             server.start();
             HttpReferenceMeetingClient client = new HttpReferenceMeetingClient(
                     server.url("/").toString(), "local-demo-token");
-            String meetingId = client.createMeeting().meetingId();
+            String meetingId = client.createMeeting(
+                    MeetingSetup.transcript("zh-CN", "https://result.example.test/index.html"))
+                    .meetingId();
             var grant = client.requestModelSession(meetingId);
             assertEquals("mtg_real", meetingId);
             assertEquals("tingwu-realtime", grant.adapterId());
@@ -101,6 +107,30 @@ public final class HttpReferenceMeetingClientTest {
             assertEquals("/v1/meetings/mtg_real:modelSession", grantRequest.getPath());
             assertEquals("Bearer local-demo-token", grantRequest.getHeader("Authorization"));
             assertTrue(grantRequest.getBody().readUtf8().isEmpty());
+        }
+    }
+
+    @Test
+    public void serializesFutureModeSettingsWithoutInventingResultDeliveryFields() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setResponseCode(201)
+                    .setBody("{\"meetingId\":\"mtg_translation\"}"));
+            server.start();
+            HttpReferenceMeetingClient client = new HttpReferenceMeetingClient(
+                    server.url("/").toString(), "local-demo-token");
+            MeetingSetup setup = new MeetingSetup(MeetingSetup.Mode.LIVE_TRANSLATION,
+                    "zh-CN", "en-US", true, MeetingSetup.ResultDelivery.WEB,
+                    "https://result.example.test/index.html");
+            client.createMeeting(setup);
+
+            JSONObject request = new JSONObject(server.takeRequest().getBody().readUtf8());
+            assertEquals("zh-CN", request.getJSONObject("languages").getString("source"));
+            assertEquals("en-US", request.getJSONObject("languages")
+                    .getJSONArray("targets").getString(0));
+            assertEquals("translation.realtime",
+                    request.getJSONArray("requestedCapabilities").getString(1));
+            assertTrue(request.getJSONObject("artifactPolicy").getBoolean("presentationCapture"));
+            assertTrue(!request.has("resultDelivery"));
         }
     }
 }

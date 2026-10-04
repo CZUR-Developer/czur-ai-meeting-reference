@@ -26,6 +26,11 @@ public final class MeetingRuntimeFactory {
             public String displayName() { return "Mock"; }
 
             @Override
+            public Set<String> setupCapabilities() {
+                return Set.of(MeetingCapabilityState.TRANSCRIPT);
+            }
+
+            @Override
             public Set<String> realtimeCapabilities(CreatedMeeting created) {
                 return Set.of(MeetingCapabilityState.TRANSCRIPT);
             }

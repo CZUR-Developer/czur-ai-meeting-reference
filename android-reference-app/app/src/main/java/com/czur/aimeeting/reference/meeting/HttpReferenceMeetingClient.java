@@ -11,6 +11,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
+import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
@@ -27,7 +28,7 @@ public final class HttpReferenceMeetingClient implements ReferenceMeetingClient 
     }
 
     @Override
-    public CreatedMeeting createMeeting() throws IOException {
+    public CreatedMeeting createMeeting(MeetingSetup setup) throws IOException {
         try {
             JSONObject body = new JSONObject()
                     .put("clientSessionId", UUID.randomUUID().toString())
@@ -39,18 +40,17 @@ public final class HttpReferenceMeetingClient implements ReferenceMeetingClient 
                             .put("deviceId", "reference-android"))
                     .put("title", "参考会议")
                     .put("timezone", "Asia/Shanghai")
-                    .put("languages", new JSONObject().put("source", "zh-CN")
-                            .put("targets", new org.json.JSONArray()))
+                    .put("languages", new JSONObject().put("source", setup.sourceLanguage())
+                            .put("targets", new JSONArray(setup.targetLanguages())))
                     .put("audioProfile", new JSONObject()
                             .put("encoding", "PCM_S16LE")
                             .put("sampleRateHz", 16000)
                             .put("channelCount", 1)
                             .put("frameDurationMs", 100))
-                    .put("requestedCapabilities", new org.json.JSONArray()
-                            .put(MeetingCapabilityState.TRANSCRIPT))
+                    .put("requestedCapabilities", new JSONArray(setup.requestedCapabilities()))
                     .put("artifactPolicy", new JSONObject()
                             .put("retainAudio", false)
-                            .put("presentationCapture", false));
+                            .put("presentationCapture", setup.presentationCapture()));
             String response = post("/v1/meetings", body.toString(),
                     UUID.randomUUID().toString(), 201).body;
             JSONObject created = new JSONObject(response);

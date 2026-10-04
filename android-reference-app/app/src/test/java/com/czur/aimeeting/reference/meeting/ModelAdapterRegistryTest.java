@@ -2,6 +2,8 @@ package com.czur.aimeeting.reference.meeting;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 import com.czur.aimeeting.reference.sample.SampleJsonModelAdapter;
 import com.czur.aimeeting.reference.tingwu.TingwuModelAdapter;
@@ -17,5 +19,8 @@ public final class ModelAdapterRegistryTest {
                 registry.create(SampleJsonModelAdapter.ID).id());
         assertNotSame(registry.create(SampleJsonModelAdapter.ID),
                 registry.create(SampleJsonModelAdapter.ID));
+        assertTrue(registry.setupCapabilities().contains(MeetingCapabilityState.TRANSCRIPT));
+        assertFalse(registry.setupCapabilities().contains(MeetingCapabilityState.TRANSLATION));
+        assertFalse(registry.setupCapabilities().contains(MeetingCapabilityState.SUMMARY));
     }
 }

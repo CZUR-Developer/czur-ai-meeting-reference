@@ -27,7 +27,8 @@ public final class HttpReferenceSessionClientTest {
             String backendUrl = server.url("/").toString();
             ReferenceLoginSession session = new HttpReferenceSessionClient(backendUrl)
                     .login("viewer", "test-password");
-            new HttpReferenceMeetingClient(backendUrl, session.accessToken()).createMeeting();
+            new HttpReferenceMeetingClient(backendUrl, session.accessToken()).createMeeting(
+                    MeetingSetup.transcript("zh-CN", "https://result.example.test/index.html"));
 
             RecordedRequest login = server.takeRequest();
             RecordedRequest create = server.takeRequest();

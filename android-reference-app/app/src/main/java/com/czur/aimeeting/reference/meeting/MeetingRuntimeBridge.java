@@ -15,6 +15,9 @@ public interface MeetingRuntimeBridge {
 
     String displayName();
 
+    /** 构建期已接入并能由当前 App 处理的能力，供会前关闭不可用模式。 */
+    Set<String> setupCapabilities();
+
     /** 本场实际被后端选中的 Adapter 能归一化哪些实时模型能力。 */
     Set<String> realtimeCapabilities(CreatedMeeting created);
 }
