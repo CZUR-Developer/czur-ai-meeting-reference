@@ -44,4 +44,7 @@ public interface ReferenceMeetingClient {
      * 返回 false 表示 Stop 已记录但仍在收口（HTTP 202）。
      */
     boolean stopMeeting(String meetingId) throws IOException;
+
+    /** Stop 200 后等待本场 Manifest 就绪，并只读取 READY 最终产物。 */
+    LocalMeetingResult readLocalResult(String meetingId, long genTime) throws IOException;
 }

@@ -19,6 +19,42 @@ import org.junit.Test;
 /** 用本机 HTTP 服务核对 P4-2 的 Create、启动和字幕提交正常路径。 */
 public final class HttpReferenceMeetingClientTest {
     @Test
+    public void localResultReadsOnlyReadyArtifactsAfterManifestBecomesReady() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setResponseCode(202).setBody("{}"));
+            server.enqueue(new MockResponse().setResponseCode(200).setBody("{"
+                    + "\"title\":\"本场会议\",\"artifacts\":["
+                    + "{\"type\":\"presentation.capture\",\"status\":\"READY\",\"revision\":2,\"artifactId\":\"art_slide2\"},"
+                    + "{\"type\":\"transcript.final\",\"status\":\"READY\",\"revision\":1,\"artifactId\":\"art_text\"},"
+                    + "{\"type\":\"summary.structured\",\"status\":\"PENDING\",\"artifactId\":\"art_pending\"},"
+                    + "{\"type\":\"presentation.capture\",\"status\":\"READY\",\"revision\":1,\"artifactId\":\"art_slide1\"}]}"));
+            server.enqueue(new MockResponse().setResponseCode(200)
+                    .setBody("{\"text\":\"你好\",\"segments\":[]}"));
+            server.enqueue(new MockResponse().setResponseCode(200)
+                    .setBody("{\"frames\":[{\"offsetMs\":1000}]}"));
+            server.enqueue(new MockResponse().setResponseCode(200)
+                    .setBody("{\"frames\":[{\"offsetMs\":2000}]}"));
+            server.start();
+            HttpReferenceMeetingClient client = new HttpReferenceMeetingClient(
+                    server.url("/").toString(), "local-demo-token");
+            LocalMeetingResult result = client.readLocalResult("mtg_test", 123L);
+            assertEquals("本场会议", result.title());
+            assertEquals("你好", result.transcript().getString("text"));
+            assertTrue(result.summary() == null);
+            assertEquals(2, result.presentationCaptures().size());
+            assertEquals(1000, result.presentationCaptures().get(0)
+                    .getJSONArray("frames").getJSONObject(0).getInt("offsetMs"));
+            assertEquals("/v1/meetings/mtg_test/manifest?genTime=123",
+                    server.takeRequest().getPath());
+            assertEquals("/v1/meetings/mtg_test/manifest?genTime=123",
+                    server.takeRequest().getPath());
+            assertEquals("/v1/artifacts/art_text?genTime=123", server.takeRequest().getPath());
+            assertEquals("/v1/artifacts/art_slide1?genTime=123", server.takeRequest().getPath());
+            assertEquals("/v1/artifacts/art_slide2?genTime=123", server.takeRequest().getPath());
+        }
+    }
+
+    @Test
     public void createsStartsAndAppendsOneCanonicalTranscript() throws Exception {
         try (MockWebServer server = new MockWebServer()) {
             server.enqueue(new MockResponse().setResponseCode(201)

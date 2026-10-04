@@ -10,9 +10,13 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import org.json.JSONArray;
@@ -202,6 +206,89 @@ public final class HttpReferenceMeetingClient implements ReferenceMeetingClient 
     public boolean stopMeeting(String meetingId) throws IOException {
         return post("/v1/meetings/" + meetingId + ":stop", null, stopKey,
                 200, 202).status == 200;
+    }
+
+    @Override public LocalMeetingResult readLocalResult(String meetingId, long genTime)
+            throws IOException {
+        String query = "?genTime=" + genTime;
+        String encodedMeetingId = URLEncoder.encode(meetingId, StandardCharsets.UTF_8);
+        JSONObject manifest = null;
+        for (int attempt = 0; attempt < 20; attempt++) {
+            Response response = get("/v1/meetings/" + encodedMeetingId + "/manifest" + query,
+                    200, 202);
+            if (response.status == 200) {
+                manifest = parseJson(response.body);
+                break;
+            }
+            try {
+                Thread.sleep(1500L);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IOException("等待本场结果时被中断", interrupted);
+            }
+        }
+        if (manifest == null) throw new IOException("本场结果尚未就绪，请稍后重试");
+        JSONArray artifacts = manifest.optJSONArray("artifacts");
+        JSONObject transcript = null, translation = null, summary = null;
+        List<JSONObject> captures = new ArrayList<>();
+        if (artifacts != null) {
+            List<JSONObject> ready = new ArrayList<>();
+            for (int index = 0; index < artifacts.length(); index++) {
+                JSONObject ref = artifacts.optJSONObject(index);
+                if (ref != null && "READY".equals(ref.optString("status"))) ready.add(ref);
+            }
+            ready.sort(Comparator.comparingInt(ref -> ref.optInt("revision", 0)));
+            for (JSONObject ref : ready) {
+                String type = ref.optString("type");
+                if (!List.of("transcript.final", "translation.final", "summary.structured",
+                        "presentation.capture").contains(type)) continue;
+                String artifactId = ref.optString("artifactId");
+                if (artifactId.isBlank()) throw new IOException("READY 产物缺少 artifactId");
+                JSONObject content = parseJson(get("/v1/artifacts/"
+                        + URLEncoder.encode(artifactId, StandardCharsets.UTF_8) + query,
+                        200).body);
+                switch (type) {
+                    case "transcript.final" -> transcript = content;
+                    case "translation.final" -> translation = content;
+                    case "summary.structured" -> summary = content;
+                    case "presentation.capture" -> captures.add(content);
+                    default -> { }
+                }
+            }
+        }
+        return new LocalMeetingResult(manifest.optString("title", "参考会议"), transcript,
+                translation, summary, captures);
+    }
+
+    private static JSONObject parseJson(String body) throws IOException {
+        try {
+            return new JSONObject(body);
+        } catch (JSONException invalid) {
+            throw new IOException("本场结果 JSON 格式错误", invalid);
+        }
+    }
+
+    private Response get(String path, int... accepted) throws IOException {
+        HttpURLConnection connection = (HttpURLConnection) new URL(baseUrl + path)
+                .openConnection();
+        try {
+            connection.setRequestMethod("GET");
+            connection.setConnectTimeout(10_000);
+            connection.setReadTimeout(10_000);
+            connection.setRequestProperty("Authorization", "Bearer " + bearerToken);
+            connection.setRequestProperty("Accept", "application/json");
+            int status = connection.getResponseCode();
+            for (int expected : accepted) {
+                if (status == expected) {
+                    try (InputStream input = connection.getInputStream()) {
+                        return new Response(status, readUtf8(input));
+                    }
+                }
+            }
+            throw new IOException("读取本场结果失败，HTTP " + status);
+        } finally {
+            connection.disconnect();
+        }
     }
 
     private Response post(String path, String jsonBody, String idempotencyKey, int... accepted)
