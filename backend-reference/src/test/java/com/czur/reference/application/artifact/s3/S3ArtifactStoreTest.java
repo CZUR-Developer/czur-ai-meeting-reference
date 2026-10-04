@@ -3,11 +3,14 @@ package com.czur.reference.application.artifact.s3;
 import com.czur.reference.application.port.artifact.ArtifactStore;
 import com.czur.reference.application.port.artifact.ArtifactStoreException;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
 import java.io.ByteArrayInputStream;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.HexFormat;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -17,6 +20,31 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** S3 状态机的本机定向测试：传输替身保存与真实 S3 相同的对象键和值。 */
 class S3ArtifactStoreTest {
+    /**
+     * 对本机 Moto 等兼容端点运行一次真实 SDK 往返；这能发现把 aws-chunked
+     * 传输帧误存为对象正文的问题。仅显式传入测试端点和测试 Bucket 时启用。
+     */
+    @Test
+    @EnabledIfEnvironmentVariable(named = "REFERENCE_TEST_S3_ENDPOINT", matches = ".+")
+    void compatibleEndpointPreservesRawArtifactBytes() throws Exception {
+        String bucket = System.getenv("REFERENCE_TEST_S3_BUCKET");
+        if (bucket == null || bucket.isBlank()) {
+            throw new IllegalArgumentException("REFERENCE_TEST_S3_BUCKET required");
+        }
+        byte[] content = "S3 兼容端点原始字节往返".getBytes(StandardCharsets.UTF_8);
+        var spec = spec("compat-" + UUID.randomUUID(), content);
+        try (var store = new S3ArtifactStore(
+                URI.create(System.getenv("REFERENCE_TEST_S3_ENDPOINT")),
+                "us-east-1", bucket, "integration-tests/", "test", "test", 1024)) {
+            var intent = store.createWriteIntent(spec).intent();
+            var staged = store.writeContent(intent, new ByteArrayInputStream(content));
+            store.completeWrite(intent, staged.content());
+            try (var read = store.openRead(intent.binding())) {
+                assertArrayEquals(content, read.content().readAllBytes());
+            }
+        }
+    }
+
     @Test
     void stagePublishReadAndDeleteSurviveStoreRecreation() throws Exception {
         InMemoryObjects objects = new InMemoryObjects();

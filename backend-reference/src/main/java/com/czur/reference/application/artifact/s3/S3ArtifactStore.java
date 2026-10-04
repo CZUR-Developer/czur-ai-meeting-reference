@@ -68,7 +68,10 @@ public final class S3ArtifactStore implements ArtifactStore, AutoCloseable {
                 .credentialsProvider(StaticCredentialsProvider.create(
                         AwsBasicCredentials.create(accessKeyId, secretAccessKey)))
                 .serviceConfiguration(S3Configuration.builder()
-                        .pathStyleAccessEnabled(endpoint != null).build());
+                        .pathStyleAccessEnabled(endpoint != null)
+                        // S3 兼容端点可能把 aws-chunked 传输帧直接存成对象内容；
+                        // 发送已知长度的原始字节，保证 intent/blob 读回与写入一致。
+                        .chunkedEncodingEnabled(false).build());
         if (endpoint != null) builder.endpointOverride(endpoint);
         S3Client client = builder.build();
         this.objects = new AwsObjectsApi(client, bucket);
