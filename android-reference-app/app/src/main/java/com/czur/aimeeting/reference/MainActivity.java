@@ -6,6 +6,10 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.SystemClock;
+import android.provider.Settings;
 import android.text.InputType;
 import android.util.Log;
 import android.view.Gravity;
@@ -30,23 +34,39 @@ import com.czur.aimeeting.reference.meeting.CreatedMeeting;
 import com.czur.aimeeting.reference.meeting.MeetingRuntimeBridge;
 import com.czur.aimeeting.reference.meeting.MeetingRuntimeFactory;
 import com.czur.aimeeting.reference.meeting.MeetingCapabilityState;
+import com.czur.aimeeting.reference.meeting.MeetingDisplayState;
 import com.czur.aimeeting.reference.meeting.MeetingSetup;
 import com.czur.aimeeting.reference.meeting.ReferenceMeetingClient;
 import com.czur.aimeeting.reference.meeting.ReferenceLoginSession;
 import java.io.IOException;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/** 参考版最小会议画面：模型事件先显示，再按顺序提交后端标准事件。 */
+/** 参考会议入口：会前设置与会中字幕共用一场模型会话，标准事件按序提交后端。 */
 public final class MainActivity extends Activity {
     private static final String TAG = "AiMeetingReference";
     private static final int MIC_PERMISSION_REQUEST = 1001;
     private final ExecutorService network = Executors.newSingleThreadExecutor();
+    private final Handler clockHandler = new Handler(Looper.getMainLooper());
+    private final MeetingDisplayState displayState = new MeetingDisplayState();
+    private final Runnable clockTick = new Runnable() {
+        @Override public void run() {
+            renderMeetingDisplay();
+            if (meetingScreen != null && meetingScreen.getVisibility() == View.VISIBLE) {
+                clockHandler.postDelayed(this, 1000L);
+            }
+        }
+    };
     private MeetingRuntimeBridge runtime;
     private ModelSession session;
+    private MeetingOverlay overlay;
+    private ScrollView setupScreen;
+    private ScrollView meetingScreen;
     private volatile boolean stopRequested;
     private volatile boolean modelFinished;
     private volatile String activeResultWebUrl;
@@ -56,6 +76,9 @@ public final class MainActivity extends Activity {
     private EditText passwordView;
     private EditText resultWebUrlView;
     private TextView transcriptView;
+    private LinearLayout transcriptList;
+    private final Map<String, TextView> transcriptRows = new LinkedHashMap<>();
+    private TextView elapsedView;
     private TextView statusView;
     private TextView capabilityView;
     private Spinner sourceLanguageView;
@@ -67,6 +90,7 @@ public final class MainActivity extends Activity {
     private RadioButton webResultView;
     private Button startButton;
     private Button stopButton;
+    private Button overlayButton;
     private Button loginButton;
     private String sessionToken;
     private String sessionBackendUrl;
@@ -75,14 +99,26 @@ public final class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         runtime = MeetingRuntimeFactory.create(this);
+        overlay = new MeetingOverlay(this);
 
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
         LinearLayout layout = new LinearLayout(this);
         layout.setOrientation(LinearLayout.VERTICAL);
         layout.setGravity(Gravity.CENTER);
         layout.setPadding(40, 40, 40, 40);
-        ScrollView scrollView = new ScrollView(this);
-        scrollView.setFillViewport(true);
-        scrollView.addView(layout);
+        setupScreen = new ScrollView(this);
+        setupScreen.setFillViewport(true);
+        setupScreen.addView(layout);
+        root.addView(setupScreen, new LinearLayout.LayoutParams(-1, 0, 1));
+
+        LinearLayout meetingLayout = new LinearLayout(this);
+        meetingLayout.setOrientation(LinearLayout.VERTICAL);
+        meetingLayout.setPadding(40, 36, 40, 36);
+        meetingScreen = new ScrollView(this);
+        meetingScreen.addView(meetingLayout);
+        meetingScreen.setVisibility(View.GONE);
+        root.addView(meetingScreen, new LinearLayout.LayoutParams(-1, 0, 1));
 
         backendUrlView = new EditText(this);
         backendUrlView.setSingleLine(true);
@@ -189,10 +225,23 @@ public final class MainActivity extends Activity {
         resultWebUrlView.setHint("网页结果地址，例如 http://192.168.1.10:8081/index.html");
         layout.addView(resultWebUrlView);
 
+        TextView meetingTitle = new TextView(this);
+        meetingTitle.setText("实时字幕 · 会议中");
+        meetingTitle.setTextSize(26);
+        meetingLayout.addView(meetingTitle);
+
+        elapsedView = new TextView(this);
+        elapsedView.setText("已进行 00:00:00");
+        meetingLayout.addView(elapsedView);
+
         transcriptView = new TextView(this);
         transcriptView.setTextSize(28);
-        transcriptView.setText("请先登录，再开始" + runtime.displayName() + "会议");
-        layout.addView(transcriptView);
+        transcriptView.setText("等待字幕…");
+        transcriptView.setPadding(0, 36, 0, 36);
+        meetingLayout.addView(transcriptView);
+        transcriptList = new LinearLayout(this);
+        transcriptList.setOrientation(LinearLayout.VERTICAL);
+        meetingLayout.addView(transcriptList);
 
         startButton = new Button(this);
         startButton.setText("开始会议");
@@ -212,16 +261,22 @@ public final class MainActivity extends Activity {
         stopButton = new Button(this);
         stopButton.setText("停止会议并查看网页结果");
         stopButton.setEnabled(false);
-        layout.addView(stopButton);
+        meetingLayout.addView(stopButton);
 
-        statusView = new TextView(this);
-        statusView.setText("填写 HTTPS 后端地址和部署者预置的账号");
-        layout.addView(statusView);
+        overlayButton = new Button(this);
+        overlayButton.setText("显示跨应用悬浮字幕");
+        overlayButton.setOnClickListener(view -> toggleOverlay());
+        meetingLayout.addView(overlayButton);
 
         capabilityView = new TextView(this);
         capabilityView.setText("本场功能将在创建会议后按后端能力显示");
-        layout.addView(capabilityView);
-        setContentView(scrollView);
+        meetingLayout.addView(capabilityView);
+
+        statusView = new TextView(this);
+        statusView.setText("填写 HTTPS 后端地址和部署者预置的账号");
+        statusView.setPadding(40, 12, 40, 24);
+        root.addView(statusView);
+        setContentView(root);
     }
 
     /**
@@ -358,6 +413,61 @@ public final class MainActivity extends Activity {
                 resultWebUrlView.getText().toString().trim());
     }
 
+    /** 显示会中页时启动单调时钟；退出会中页时移除悬浮窗和定时刷新。 */
+    private void showMeetingScreen(boolean visible) {
+        clockHandler.removeCallbacks(clockTick);
+        if (!visible) {
+            overlay.dismiss();
+            overlayButton.setText("显示跨应用悬浮字幕");
+        }
+        setupScreen.setVisibility(visible ? View.GONE : View.VISIBLE);
+        meetingScreen.setVisibility(visible ? View.VISIBLE : View.GONE);
+        if (visible) clockHandler.post(clockTick);
+    }
+
+    private void renderMeetingDisplay() {
+        transcriptView.setVisibility(transcriptRows.isEmpty() ? View.VISIBLE : View.GONE);
+        long now = SystemClock.elapsedRealtime();
+        elapsedView.setText("已进行 " + displayState.elapsed(now));
+        overlay.render(displayState, now, stopButton.isEnabled());
+    }
+
+    private void setStopEnabled(boolean enabled) {
+        stopButton.setEnabled(enabled);
+        renderMeetingDisplay();
+    }
+
+    private void toggleOverlay() {
+        if (overlay.isShowing()) {
+            overlay.dismiss();
+            overlayButton.setText("显示跨应用悬浮字幕");
+            Log.i(TAG, "跨应用字幕窗已关闭");
+            return;
+        }
+        if (!Settings.canDrawOverlays(this)) {
+            statusView.setText("请授予悬浮窗权限，返回会议页后再次点击显示");
+            Intent request = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:" + getPackageName()));
+            startActivity(request);
+            return;
+        }
+        overlay.show(this::bringMeetingToFront, () -> {
+            if (stopButton.isEnabled()) {
+                bringMeetingToFront();
+                stopButton.performClick();
+            }
+        });
+        overlayButton.setText("关闭跨应用悬浮字幕");
+        renderMeetingDisplay();
+        Log.i(TAG, "跨应用字幕窗已显示");
+    }
+
+    private void bringMeetingToFront() {
+        Intent intent = new Intent(this, MainActivity.class);
+        intent.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        startActivity(intent);
+    }
+
     private void startModelMeeting(ReferenceMeetingClient client, CreatedMeeting created) {
         if (session != null) {
             session.close();
@@ -365,14 +475,16 @@ public final class MainActivity extends Activity {
         String meetingId = created.meetingId();
         stopRequested = false;
         modelFinished = false;
-        transcriptView.setText("等待字幕…");
-        transcriptView.setAlpha(0.8f);
+        displayState.start(SystemClock.elapsedRealtime());
+        transcriptRows.clear();
+        transcriptList.removeAllViews();
+        renderMeetingDisplay();
         statusView.setText("会议 " + meetingId + " 已开始，正在接收" + runtime.displayName() + "字幕");
         AtomicInteger sequence = new AtomicInteger();
         AtomicInteger saved = new AtomicInteger();
         AtomicBoolean appendFailed = new AtomicBoolean();
         AtomicBoolean completionQueued = new AtomicBoolean();
-        stopButton.setEnabled(false);
+        setStopEnabled(false);
         stopButton.setOnClickListener(view -> requestStop(client, meetingId,
                 appendFailed, completionQueued));
         try {
@@ -410,11 +522,13 @@ public final class MainActivity extends Activity {
             Log.i(TAG, "开始模型会话 runtime=" + runtime.displayName()
                     + " meetingId=" + meetingId);
             session.start();
-            if (runtime.waitsForModelFinish()) stopButton.setEnabled(true);
+            showMeetingScreen(true);
+            if (runtime.waitsForModelFinish()) setStopEnabled(true);
         } catch (RuntimeException failure) {
             Log.e(TAG, "打开模型会话失败 meetingId=" + meetingId
                     + " errorType=" + failure.getClass().getSimpleName());
             statusView.setText("打开模型会话失败，请检查模型接入配置");
+            showMeetingScreen(false);
             startButton.setEnabled(true);
             loginButton.setEnabled(true);
         }
@@ -432,7 +546,7 @@ public final class MainActivity extends Activity {
             runOnUiThread(() -> {
                 statusView.setText("字幕已送达后端：" + savedCount);
                 if (!runtime.waitsForModelFinish() && event.isFinal() && savedCount == 3) {
-                    stopButton.setEnabled(true);
+                    setStopEnabled(true);
                 }
             });
         } catch (IOException failure) {
@@ -447,7 +561,7 @@ public final class MainActivity extends Activity {
             AtomicBoolean appendFailed, AtomicBoolean completionQueued) {
         activeResultWebUrl = activeSetup.resultWebUrl();
         stopRequested = true;
-        stopButton.setEnabled(false);
+        setStopEnabled(false);
         statusView.setText("正在等待模型最终字幕…");
         network.execute(() -> {
             try {
@@ -484,7 +598,7 @@ public final class MainActivity extends Activity {
                 completionQueued.set(false);
                 runOnUiThread(() -> {
                     statusView.setText("后端仍在收口，请稍后再点停止");
-                    stopButton.setEnabled(true);
+                    setStopEnabled(true);
                 });
                 return;
             }
@@ -497,6 +611,7 @@ public final class MainActivity extends Activity {
             Log.i(TAG, "会议结束，打开会后结果 meetingId=" + meetingId);
             runOnUiThread(() -> {
                 statusView.setText("会议已结束，正在打开结果页");
+                showMeetingScreen(false);
                 startButton.setEnabled(true);
                 loginButton.setEnabled(true);
                 Intent intent = new Intent(this, ResultActivity.class);
@@ -508,14 +623,25 @@ public final class MainActivity extends Activity {
             Log.e(TAG, "结束会议失败 meetingId=" + meetingId, failure);
             runOnUiThread(() -> {
                 statusView.setText("结束会议失败：" + failure.getMessage());
-                stopButton.setEnabled(true);
+                setStopEnabled(true);
             });
         }
     }
 
     private void showTranscript(TranscriptEvent event) {
-        transcriptView.setText(event.text());
-        transcriptView.setAlpha(event.isFinal() ? 1.0f : 0.8f);
+        displayState.apply(event);
+        MeetingDisplayState.Segment segment = displayState.segment(event.segmentId());
+        TextView row = transcriptRows.get(segment.id());
+        if (row == null) {
+            row = new TextView(this);
+            row.setTextSize(28);
+            row.setPadding(0, 8, 0, 8);
+            transcriptRows.put(segment.id(), row);
+            transcriptList.addView(row);
+        }
+        row.setText(segment.text());
+        row.setAlpha(segment.alpha());
+        renderMeetingDisplay();
         Log.d(TAG, "字幕片段=" + event.segmentId() + " 修订=" + event.revision()
                 + " 最终=" + event.isFinal());
         if (event.isFinal()) {
@@ -525,6 +651,8 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        clockHandler.removeCallbacks(clockTick);
+        overlay.dismiss();
         if (session != null) {
             session.close();
         }
