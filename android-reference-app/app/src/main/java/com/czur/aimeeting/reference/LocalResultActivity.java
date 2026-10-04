@@ -7,10 +7,15 @@ import android.content.Intent;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.ParcelFileDescriptor;
 import android.provider.DocumentsContract;
+import android.graphics.Bitmap;
+import android.graphics.pdf.PdfRenderer;
 import android.view.View;
 import android.widget.Button;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import java.io.File;
 import java.io.FileInputStream;
@@ -25,6 +30,7 @@ public final class LocalResultActivity extends Activity {
     private static final String EXTRA_AUTOMATIC_DOWNLOAD = "automaticDownload";
     private static final String PREFS = "local_pdf_result";
     private static final int CREATE_PDF = 1;
+    private static final String PAGE_INDEX = "pageIndex";
     private Uri pdfUri;
     private String cachePath;
     private String fileName;
@@ -32,6 +38,15 @@ public final class LocalResultActivity extends Activity {
     private Button open;
     private Button locate;
     private Button save;
+    private Button previousPage;
+    private Button nextPage;
+    private TextView pageLabel;
+    private ImageView pageImage;
+    private ScrollView pageScroll;
+    private ParcelFileDescriptor pdfFile;
+    private PdfRenderer pdfRenderer;
+    private Bitmap pageBitmap;
+    private int pageIndex;
     private boolean automaticDownload;
 
     static void remember(Context context, LocalPdfWriter.SavedPdf pdf,
@@ -69,6 +84,7 @@ public final class LocalResultActivity extends Activity {
             String savedUri = savedInstanceState.getString(EXTRA_URI);
             if (savedUri != null) pdfUri = Uri.parse(savedUri);
             cachePath = savedInstanceState.getString(EXTRA_CACHE_PATH);
+            pageIndex = savedInstanceState.getInt(PAGE_INDEX, 0);
         }
         LinearLayout layout = new LinearLayout(this);
         layout.setOrientation(LinearLayout.VERTICAL);
@@ -77,7 +93,7 @@ public final class LocalResultActivity extends Activity {
         status.setTextSize(20);
         layout.addView(status);
         open = new Button(this);
-        open.setText("打开 PDF");
+        open.setText("在应用内预览 PDF");
         open.setOnClickListener(view -> openPdf());
         layout.addView(open);
         locate = new Button(this);
@@ -88,14 +104,37 @@ public final class LocalResultActivity extends Activity {
         save.setText("保存到公共下载目录");
         save.setOnClickListener(view -> saveLegacy());
         layout.addView(save);
+        LinearLayout pages = new LinearLayout(this);
+        pages.setOrientation(LinearLayout.HORIZONTAL);
+        previousPage = new Button(this);
+        previousPage.setText("上一页");
+        previousPage.setOnClickListener(view -> showPage(pageIndex - 1));
+        pages.addView(previousPage, new LinearLayout.LayoutParams(0, -2, 1));
+        pageLabel = new TextView(this);
+        pageLabel.setText("PDF 预览");
+        pageLabel.setGravity(android.view.Gravity.CENTER);
+        pages.addView(pageLabel, new LinearLayout.LayoutParams(0, -1, 1));
+        nextPage = new Button(this);
+        nextPage.setText("下一页");
+        nextPage.setOnClickListener(view -> showPage(pageIndex + 1));
+        pages.addView(nextPage, new LinearLayout.LayoutParams(0, -2, 1));
+        layout.addView(pages);
+        pageScroll = new ScrollView(this);
+        pageImage = new ImageView(this);
+        pageImage.setAdjustViewBounds(true);
+        pageImage.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        pageScroll.addView(pageImage);
+        layout.addView(pageScroll, new LinearLayout.LayoutParams(-1, 0, 1));
         setContentView(layout);
         render();
         if (savedInstanceState == null && pdfUri == null) saveLegacy();
+        else if (pdfUri != null) openPdf();
     }
 
     @Override protected void onSaveInstanceState(Bundle outState) {
         if (pdfUri != null) outState.putString(EXTRA_URI, pdfUri.toString());
         outState.putString(EXTRA_CACHE_PATH, cachePath);
+        outState.putInt(PAGE_INDEX, pageIndex);
         super.onSaveInstanceState(outState);
     }
 
@@ -108,6 +147,10 @@ public final class LocalResultActivity extends Activity {
         open.setEnabled(saved);
         locate.setEnabled(saved);
         save.setVisibility(saved ? View.GONE : View.VISIBLE);
+        if (!saved) {
+            previousPage.setEnabled(false);
+            nextPage.setEnabled(false);
+        }
     }
 
     private void saveLegacy() {
@@ -144,6 +187,7 @@ public final class LocalResultActivity extends Activity {
             cachePath = null;
             remember(this, new LocalPdfWriter.SavedPdf(pdfUri, null, fileName), false);
             render();
+            openPdf();
         } catch (IOException failure) {
             status.setText("PDF 保存失败：" + failure.getMessage() + "；请重试");
         }
@@ -151,14 +195,48 @@ public final class LocalResultActivity extends Activity {
 
     private void openPdf() {
         if (pdfUri == null) return;
-        Intent intent = new Intent(Intent.ACTION_VIEW);
-        intent.setDataAndType(pdfUri, "application/pdf");
-        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
         try {
-            startActivity(intent);
-        } catch (ActivityNotFoundException failure) {
-            status.setText("已保存 PDF，但设备没有可用的 PDF 阅读器");
+            if (pdfRenderer == null) {
+                pdfFile = getContentResolver().openFileDescriptor(pdfUri, "r");
+                if (pdfFile == null) throw new IOException("无法读取已保存 PDF");
+                pdfRenderer = new PdfRenderer(pdfFile);
+            }
+            showPage(Math.min(pageIndex, pdfRenderer.getPageCount() - 1));
+        } catch (IOException | RuntimeException failure) {
+            status.setText("PDF 预览失败：" + failure.getMessage());
         }
+    }
+
+    private void showPage(int index) {
+        if (pdfRenderer == null || index < 0 || index >= pdfRenderer.getPageCount()) return;
+        try (PdfRenderer.Page page = pdfRenderer.openPage(index)) {
+            float scale = Math.min(2.0f, 2048f / Math.max(page.getWidth(), page.getHeight()));
+            Bitmap bitmap = Bitmap.createBitmap(Math.max(1, (int) (page.getWidth() * scale)),
+                    Math.max(1, (int) (page.getHeight() * scale)), Bitmap.Config.ARGB_8888);
+            bitmap.eraseColor(android.graphics.Color.WHITE);
+            page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);
+            Bitmap old = pageBitmap;
+            pageBitmap = bitmap;
+            pageImage.setImageBitmap(bitmap);
+            if (old != null) old.recycle();
+            pageIndex = index;
+            pageLabel.setText((index + 1) + " / " + pdfRenderer.getPageCount());
+            previousPage.setEnabled(index > 0);
+            nextPage.setEnabled(index + 1 < pdfRenderer.getPageCount());
+            pageScroll.post(() -> pageScroll.scrollTo(0, 0));
+        } catch (RuntimeException failure) {
+            status.setText("PDF 第 " + (index + 1) + " 页预览失败：" + failure.getMessage());
+        }
+    }
+
+    @Override protected void onDestroy() {
+        pageImage.setImageDrawable(null);
+        if (pageBitmap != null) pageBitmap.recycle();
+        if (pdfRenderer != null) pdfRenderer.close();
+        if (pdfFile != null) {
+            try { pdfFile.close(); } catch (IOException ignored) { }
+        }
+        super.onDestroy();
     }
 
     private void locatePdf() {
