@@ -2,6 +2,7 @@
 
 这是一个最小的静态**会后结果页**。Android App 停止会议后打开
 `index.html?meetingId=<会议ID>&genTime=<链接生成时间毫秒>`。页面读取 Manifest，
+并从后端公开能力发现读取 `resultLinkTtlMs`，与结果接口使用同一有效期配置；
 结果生成中时短暂等待；完成后展示 Manifest 中 READY 的 `transcript.final`，
 仅当同一 Manifest 还含 READY 的 `translation.final` 时追加最终译文区；
 仅当有 READY 的 `summary.structured` 时展示结构化纪要的标题、概述、要点和待办；

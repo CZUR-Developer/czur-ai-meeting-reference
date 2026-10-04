@@ -44,6 +44,8 @@ public final class ReferenceDeploymentCapabilitiesEndpoint {
         body.put("languages", List.of("zh-CN", "en-US"));
         body.put("audioProfiles", List.of("PCM_S16LE"));
         body.put("limits", publicLimits);
+        config.resultLinkTtl().ifPresent(ttl ->
+                body.put("resultLinkTtlMs", ttl.toMillis()));
         try {
             response = HttpResponse.json(200, JSON.writeValueAsString(body));
         } catch (JsonProcessingException impossible) {

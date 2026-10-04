@@ -62,6 +62,17 @@ export async function readFinalTranscript(apiBaseUrl, meetingId, genTime,
   return result;
 }
 
+/** 与后端公开的同一个有效期配置判断链接展示状态。 */
+export function resultLinkExpired(genTime, ttlMs, now = Date.now()) {
+  if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0) {
+    throw new Error('结果链接有效期未配置');
+  }
+  if (!/^(0|[1-9][0-9]*)$/.test(genTime)) return true;
+  const generatedAt = Number(genTime);
+  return !Number.isSafeInteger(generatedAt) || generatedAt > now
+    || now - generatedAt >= ttlMs;
+}
+
 function languageName(code) {
   if (code?.startsWith('zh')) return '中文';
   if (code?.startsWith('en')) return 'English';
@@ -184,6 +195,14 @@ async function showResult() {
     const configResponse = await fetch('./config.json');
     if (!configResponse.ok) throw new Error('结果页缺少后端配置');
     const config = await configResponse.json();
+    const base = (config.apiBaseUrl || '').replace(/\/+$/, '');
+    const discoveryResponse = await fetch(`${base}/v1/capabilities`);
+    if (!discoveryResponse.ok) throw new Error('无法读取结果链接有效期');
+    const discovery = await discoveryResponse.json();
+    if (resultLinkExpired(genTime, discovery.resultLinkTtlMs)) {
+      status.textContent = '结果链接已过期';
+      return;
+    }
     const result = await readFinalTranscript(config.apiBaseUrl || '', meetingId, genTime,
       globalThis.fetch, ms => new Promise(resolve => setTimeout(resolve, ms)),
       () => { status.textContent = '结果生成中…'; });

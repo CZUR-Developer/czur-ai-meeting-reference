@@ -80,6 +80,13 @@ class ReferenceMeetingDeploymentConfigTest {
         assertTrue(asrOnly.has("languages"));
         assertTrue(asrOnly.has("audioProfiles"));
         assertTrue(asrOnly.has("limits"));
+        assertFalse(asrOnly.has("resultLinkTtlMs"));
+
+        values.put(ReferenceMeetingDeploymentConfig.RESULT_LINK_TTL_MS, "86400000");
+        var withResultLink = new ReferenceDeploymentCapabilitiesEndpoint(
+                ReferenceMeetingDeploymentConfig.fromEnvironment(values), new HttpErrorMapper());
+        assertEquals(86400000L, new ObjectMapper().readTree(withResultLink.handle(request).body())
+                .get("resultLinkTtlMs").asLong());
 
         values.put(BailianSummarySessionConfig.ENABLED, "true");
         values.put(BailianSummarySessionConfig.APP_ID, "app-local");

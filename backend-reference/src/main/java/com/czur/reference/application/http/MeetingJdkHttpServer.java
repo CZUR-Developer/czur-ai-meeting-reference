@@ -406,10 +406,11 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
     }
 
     private static void write(HttpExchange exchange, HttpResponse response) throws IOException {
-        // 参考静态结果页可部署在不同源；只放行两个匿名结果 GET，写接口不开放跨源。
+        // 参考静态结果页可部署在不同源；能力发现提供同一结果链接有效期。
         String resultPath = exchange.getRequestURI().getRawPath();
         if ("GET".equals(exchange.getRequestMethod())
-                && (resultPath.matches("/v1/meetings/mtg_[A-Za-z0-9_-]+/manifest")
+                && (ReferenceDeploymentCapabilitiesEndpoint.PATH.equals(resultPath)
+                || resultPath.matches("/v1/meetings/mtg_[A-Za-z0-9_-]+/manifest")
                 || resultPath.matches("/v1/artifacts/art_[A-Za-z0-9_-]+"))) {
             exchange.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
         }

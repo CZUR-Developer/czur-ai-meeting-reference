@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFinalTranscript, renderFinalResult } from '../src/result.mjs';
+import { readFinalTranscript, renderFinalResult, resultLinkExpired } from '../src/result.mjs';
+
+test('结果链接按后端同一有效期在边界时刻失效', () => {
+  assert.equal(resultLinkExpired('1000', 86400000, 1000 + 86400000 - 1), false);
+  assert.equal(resultLinkExpired('1000', 86400000, 1000 + 86400000), true);
+  assert.equal(resultLinkExpired('-1', 86400000, 2000), true);
+  assert.equal(resultLinkExpired('9999', 86400000, 2000), true);
+  assert.throws(() => resultLinkExpired('1000', undefined), /有效期未配置/);
+});
 
 test('生成中的结果完成后只读取最终转写', async () => {
   const requests = [];
