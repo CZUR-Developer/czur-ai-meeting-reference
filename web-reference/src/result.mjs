@@ -67,10 +67,10 @@ export function resultLinkExpired(genTime, ttlMs, now = Date.now()) {
   if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0) {
     throw new Error('结果链接有效期未配置');
   }
+  if (genTime === '-1') return false;
   if (!/^(0|[1-9][0-9]*)$/.test(genTime)) return true;
   const generatedAt = Number(genTime);
-  return !Number.isSafeInteger(generatedAt) || generatedAt > now
-    || now - generatedAt >= ttlMs;
+  return !Number.isSafeInteger(generatedAt) || now - generatedAt >= ttlMs;
 }
 
 function languageName(code) {

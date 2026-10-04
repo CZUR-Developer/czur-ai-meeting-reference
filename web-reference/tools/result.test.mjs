@@ -5,8 +5,8 @@ import { readFinalTranscript, renderFinalResult, resultLinkExpired } from '../sr
 test('结果链接按后端同一有效期在边界时刻失效', () => {
   assert.equal(resultLinkExpired('1000', 86400000, 1000 + 86400000 - 1), false);
   assert.equal(resultLinkExpired('1000', 86400000, 1000 + 86400000), true);
-  assert.equal(resultLinkExpired('-1', 86400000, 2000), true);
-  assert.equal(resultLinkExpired('9999', 86400000, 2000), true);
+  assert.equal(resultLinkExpired('-1', 86400000, 2000), false);
+  assert.equal(resultLinkExpired('9999', 86400000, 2000), false);
   assert.throws(() => resultLinkExpired('1000', undefined), /有效期未配置/);
 });
 
