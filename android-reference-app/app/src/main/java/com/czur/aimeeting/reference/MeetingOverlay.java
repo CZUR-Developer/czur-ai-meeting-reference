@@ -14,7 +14,7 @@ import com.czur.aimeeting.reference.meeting.MeetingDisplayState;
 
 /**
  * 参考 App 的最小跨应用字幕窗。只负责展示和转发停止点击；模型连接、会议收口和
- * 字幕修订仍由会议页面管理。窗口只在用户主动打开且授予悬浮窗权限后创建。
+ * 字幕修订由前台会议 Service 管理。窗口只在用户主动打开且授予悬浮窗权限后创建。
  */
 final class MeetingOverlay {
     private final Context context;
