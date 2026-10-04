@@ -89,7 +89,9 @@ public final class MainActivity extends Activity {
     private RadioButton minutesModeView;
     private RadioButton translationModeView;
     private RadioButton webResultView;
+    private RadioButton localResultView;
     private Button startButton;
+    private Button recentPdfButton;
     private Button stopButton;
     private Button overlayButton;
     private Button swapColumnsButton;
@@ -205,7 +207,11 @@ public final class MainActivity extends Activity {
         webResultView.setText("网页查看");
         webResultView.setChecked(true);
         resultGroup.addView(webResultView);
-        for (String unavailable : new String[] {"本地保存", "二维码", "邮箱", "无痕"}) {
+        localResultView = new RadioButton(this);
+        localResultView.setId(View.generateViewId());
+        localResultView.setText("本地保存 PDF（下载/AI会议纪要）");
+        resultGroup.addView(localResultView);
+        for (String unavailable : new String[] {"二维码", "邮箱", "无痕"}) {
             RadioButton option = new RadioButton(this);
             option.setText(unavailable + "（交付流程待接入，暂不可用）");
             option.setEnabled(false);
@@ -220,6 +226,15 @@ public final class MainActivity extends Activity {
                 | InputType.TYPE_TEXT_VARIATION_URI);
         resultWebUrlView.setHint("网页结果地址，例如 http://192.168.1.10:8081/index.html");
         layout.addView(resultWebUrlView);
+        resultGroup.setOnCheckedChangeListener((group, checkedId) ->
+                resultWebUrlView.setEnabled(checkedId == webResultView.getId()));
+        recentPdfButton = new Button(this);
+        recentPdfButton.setText("打开最近本地 PDF");
+        recentPdfButton.setOnClickListener(view -> {
+            Intent recent = LocalResultActivity.recentIntent(this);
+            if (recent != null) startActivity(recent);
+        });
+        layout.addView(recentPdfButton);
 
         meetingTitle = new TextView(this);
         meetingTitle.setText("实时字幕 · 会议中");
@@ -434,9 +449,9 @@ public final class MainActivity extends Activity {
             statusView.setText(setup.mode().displayName() + "当前不可用");
             return;
         }
-        if (setup.resultDelivery() != MeetingSetup.ResultDelivery.WEB
-                || !webResultView.isChecked() || setup.resultWebUrl().isEmpty()) {
-            statusView.setText("当前仅支持网页查看，请填写网页结果地址");
+        if (setup.resultDelivery() == MeetingSetup.ResultDelivery.WEB
+                && setup.resultWebUrl().isEmpty()) {
+            statusView.setText("请填写网页结果地址，或选择本地保存 PDF");
             return;
         }
         if (setup.presentationCapture()) {
@@ -481,6 +496,7 @@ public final class MainActivity extends Activity {
             begin.putExtra(MeetingService.EXTRA_PROJECTION_DATA, projectionData);
         }
         begin.putExtra(MeetingService.EXTRA_RESULT_WEB, setup.resultWebUrl());
+        begin.putExtra(MeetingService.EXTRA_RESULT_DELIVERY, setup.resultDelivery().name());
         try {
             // 用户仍在前台点击开始时启动 microphone 前台 Service，再由 Service 建会/开 MIC。
             startForegroundService(begin);
@@ -501,7 +517,9 @@ public final class MainActivity extends Activity {
         return new MeetingSetup(mode, codes[sourceLanguageView.getSelectedItemPosition()],
                 codes[targetLanguageView.getSelectedItemPosition()],
                 mode == MeetingSetup.Mode.LIVE_TRANSCRIPT
-                        && presentationCaptureView.isChecked(), MeetingSetup.ResultDelivery.WEB,
+                        && presentationCaptureView.isChecked(), localResultView.isChecked()
+                                ? MeetingSetup.ResultDelivery.LOCAL
+                                : MeetingSetup.ResultDelivery.WEB,
                 resultWebUrlView.getText().toString().trim());
     }
 
@@ -584,6 +602,15 @@ public final class MainActivity extends Activity {
             result.putExtra(ResultActivity.EXTRA_RESULT_URL, resultUrl);
             startActivity(result);
         }
+        if (state.resultPdf != null && meetingService != null) {
+            LocalPdfWriter.SavedPdf pdf = meetingService.takeResultPdf();
+            Intent result = new Intent(this, LocalResultActivity.class);
+            if (pdf.uri() != null) result.putExtra(LocalResultActivity.EXTRA_URI,
+                    pdf.uri().toString());
+            result.putExtra(LocalResultActivity.EXTRA_CACHE_PATH, pdf.cachePath());
+            result.putExtra(LocalResultActivity.EXTRA_FILE_NAME, pdf.displayName());
+            startActivity(result);
+        }
     }
 
     private void toggleOverlay() {
@@ -605,6 +632,12 @@ public final class MainActivity extends Activity {
         super.onStart();
         serviceBound = bindService(new Intent(this, MeetingService.class),
                 serviceConnection, Context.BIND_AUTO_CREATE);
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        if (recentPdfButton != null) recentPdfButton.setVisibility(
+                LocalResultActivity.recentIntent(this) == null ? View.GONE : View.VISIBLE);
     }
 
     @Override protected void onStop() {

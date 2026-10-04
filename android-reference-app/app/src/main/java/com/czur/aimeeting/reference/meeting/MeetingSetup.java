@@ -4,7 +4,7 @@ import java.util.List;
 
 /**
  * 用户在点击“开始会议”时冻结的本场会前设置。模型能力和结果交付能力彼此独立：
- * 前者进入 Create 的能力请求，后者留在 App 内，待相应交付流程真正实现后使用。
+ * 前者进入 Create 的能力请求，后者留在 App 内决定网页或本地 PDF 交付。
  */
 public record MeetingSetup(Mode mode, String sourceLanguage, String targetLanguage,
         boolean presentationCapture, ResultDelivery resultDelivery, String resultWebUrl) {
