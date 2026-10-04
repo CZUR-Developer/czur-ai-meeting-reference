@@ -70,6 +70,8 @@ public final class MainActivity extends Activity {
     private LinearLayout transcriptList;
     private LinearLayout bilingualHeader;
     private LinearLayout bilingualList;
+    private TextView leftLanguageTitle;
+    private TextView rightLanguageTitle;
     private final Map<String, TextView> transcriptRows = new LinkedHashMap<>();
     private TextView elapsedView;
     private TextView statusView;
@@ -84,6 +86,7 @@ public final class MainActivity extends Activity {
     private Button startButton;
     private Button stopButton;
     private Button overlayButton;
+    private Button swapColumnsButton;
     private Button loginButton;
     private String sessionToken;
     private String sessionBackendUrl;
@@ -237,18 +240,24 @@ public final class MainActivity extends Activity {
 
         bilingualHeader = new LinearLayout(this);
         bilingualHeader.setOrientation(LinearLayout.HORIZONTAL);
-        TextView chineseTitle = new TextView(this);
-        chineseTitle.setText("中文");
-        bilingualHeader.addView(chineseTitle, new LinearLayout.LayoutParams(0, -2, 1));
-        TextView englishTitle = new TextView(this);
-        englishTitle.setText("English");
-        bilingualHeader.addView(englishTitle, new LinearLayout.LayoutParams(0, -2, 1));
+        leftLanguageTitle = new TextView(this);
+        bilingualHeader.addView(leftLanguageTitle, new LinearLayout.LayoutParams(0, -2, 1));
+        rightLanguageTitle = new TextView(this);
+        bilingualHeader.addView(rightLanguageTitle, new LinearLayout.LayoutParams(0, -2, 1));
         bilingualHeader.setVisibility(View.GONE);
         meetingLayout.addView(bilingualHeader);
         bilingualList = new LinearLayout(this);
         bilingualList.setOrientation(LinearLayout.VERTICAL);
         bilingualList.setVisibility(View.GONE);
         meetingLayout.addView(bilingualList);
+
+        swapColumnsButton = new Button(this);
+        swapColumnsButton.setText("交换左右栏");
+        swapColumnsButton.setOnClickListener(view -> {
+            if (meetingService != null) meetingService.swapDisplayColumns();
+        });
+        swapColumnsButton.setVisibility(View.GONE);
+        meetingLayout.addView(swapColumnsButton);
 
         startButton = new Button(this);
         startButton.setText("开始会议");
@@ -441,32 +450,39 @@ public final class MainActivity extends Activity {
                 row.setText(segment.text());
                 row.setAlpha(segment.alpha());
             }
-            if (state.display.hasTranslation()) {
+            if (state.display.isBilingual()) {
                 bilingualList.removeAllViews();
                 for (MeetingDisplayState.BilingualRow segment : state.display.bilingualRows()) {
                     LinearLayout row = new LinearLayout(this);
                     row.setOrientation(LinearLayout.HORIZONTAL);
-                    TextView chinese = new TextView(this);
-                    chinese.setTextSize(26);
-                    chinese.setText(segment.chinese());
-                    chinese.setAlpha(segment.chineseAlpha());
-                    chinese.setPadding(0, 8, 12, 8);
-                    row.addView(chinese, new LinearLayout.LayoutParams(0, -2, 1));
-                    TextView english = new TextView(this);
-                    english.setTextSize(26);
-                    english.setText(segment.english());
-                    english.setAlpha(segment.englishAlpha());
-                    english.setPadding(12, 8, 0, 8);
-                    row.addView(english, new LinearLayout.LayoutParams(0, -2, 1));
+                    TextView left = new TextView(this);
+                    left.setTextSize(26);
+                    left.setText(segment.left());
+                    left.setAlpha(segment.leftAlpha());
+                    left.setPadding(0, 8, 12, 8);
+                    row.addView(left, new LinearLayout.LayoutParams(0, -2, 1));
+                    TextView right = new TextView(this);
+                    right.setTextSize(26);
+                    right.setText(segment.right());
+                    right.setAlpha(segment.rightAlpha());
+                    right.setPadding(12, 8, 0, 8);
+                    row.addView(right, new LinearLayout.LayoutParams(0, -2, 1));
                     bilingualList.addView(row);
                 }
             }
             renderedTranscriptVersion = state.transcriptVersion;
         }
-        boolean bilingual = state.display.hasTranslation();
-        meetingTitle.setText(bilingual ? "双语互译 · 会议中" : "实时字幕 · 会议中");
+        boolean bilingual = state.display.isBilingual();
+        MeetingDisplayState.BilingualRow latest = bilingual
+                ? state.display.latestBilingualRow() : null;
+        meetingTitle.setText(bilingual ? "双语互译 · 会议中"
+                + (latest != null && latest.languageFallback() ? "（语种分栏降级）" : "")
+                : "实时字幕 · 会议中");
+        leftLanguageTitle.setText(state.display.leftLabel());
+        rightLanguageTitle.setText(state.display.rightLabel());
         bilingualHeader.setVisibility(bilingual ? View.VISIBLE : View.GONE);
         bilingualList.setVisibility(bilingual ? View.VISIBLE : View.GONE);
+        swapColumnsButton.setVisibility(bilingual ? View.VISIBLE : View.GONE);
         transcriptList.setVisibility(bilingual ? View.GONE : View.VISIBLE);
         transcriptView.setVisibility(!bilingual && transcriptRows.isEmpty()
                 ? View.VISIBLE : View.GONE);

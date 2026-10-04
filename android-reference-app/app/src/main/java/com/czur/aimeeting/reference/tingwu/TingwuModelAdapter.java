@@ -150,16 +150,16 @@ public final class TingwuModelAdapter implements ModelAdapter {
             if (isFinal) fallbackIndex++;
         }
         SegmentState previous = segments.get(segmentId);
-        if (previous != null) {
-            if (previous.isFinal) return;
-            if (!isFinal && previous.text.equals(text)) return;
-        }
-        int revision = previous == null ? 1 : previous.revision + 1;
         String language = language(payload.optString("detected_source_lang",
                 payload.optString("source_lang", payload.optString("source_language", ""))));
+        if (previous != null) {
+            if (previous.isFinal) return;
+            if (!isFinal && previous.text.equals(text) && previous.language.equals(language)) return;
+        }
+        int revision = previous == null ? 1 : previous.revision + 1;
         listener.onTranscript(new TranscriptEvent(segmentId, revision, startMs, endMs,
                 language, text, isFinal));
-        segments.put(segmentId, new SegmentState(revision, text, isFinal));
+        segments.put(segmentId, new SegmentState(revision, text, isFinal, language));
     }
 
     private static String taskId(ModelSessionGrant grant) {
@@ -184,7 +184,9 @@ public final class TingwuModelAdapter implements ModelAdapter {
         return switch (raw.toUpperCase(java.util.Locale.ROOT)) {
             case "CN", "ZH", "ZH-CN" -> "zh-CN";
             case "EN", "EN-US" -> "en-US";
-            default -> raw.trim().isEmpty() ? "zh-CN" : raw;
+            // 听悟源语种可能晚于第一条 partial；保留未知，不能伪装成中文让分栏误锁 A。
+            default -> raw.trim().isEmpty() || "auto".equalsIgnoreCase(raw)
+                    || "multilingual".equalsIgnoreCase(raw) ? "und" : raw;
         };
     }
 
@@ -200,11 +202,17 @@ public final class TingwuModelAdapter implements ModelAdapter {
         private final int revision;
         private final String text;
         private final boolean isFinal;
+        private final String language;
 
         private SegmentState(int revision, String text, boolean isFinal) {
+            this(revision, text, isFinal, "");
+        }
+
+        private SegmentState(int revision, String text, boolean isFinal, String language) {
             this.revision = revision;
             this.text = text;
             this.isFinal = isFinal;
+            this.language = language;
         }
     }
 }

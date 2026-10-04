@@ -59,7 +59,7 @@ public final class TingwuModelAdapterTest {
         assertEquals(events.get(0).segmentId(), events.get(2).segmentId());
         assertEquals(1, events.get(0).revision());
         assertEquals(3, events.get(2).revision());
-        assertEquals("zh-CN", events.get(2).language());
+        assertEquals("und", events.get(2).language());
         assertEquals(100, events.get(2).startMs());
         assertEquals(620, events.get(2).endMs());
         assertFalse(events.get(0).isFinal());
@@ -123,6 +123,21 @@ public final class TingwuModelAdapterTest {
         assertEquals("tingwu-3", translations.get(0).sourceSegmentId());
         assertEquals("zh-CN", translations.get(0).sourceLanguage());
         assertEquals("en-US", translations.get(0).targetLanguage());
+    }
+
+    @Test
+    public void lateSourceLanguageWithSameTextIsNotDiscarded() {
+        TingwuModelAdapter adapter = new TingwuModelAdapter();
+        List<TranscriptEvent> events = new ArrayList<>();
+        adapter.onServerMessage("{\"header\":{\"name\":\"TranscriptionResultChanged\"},"
+                + "\"payload\":{\"index\":2,\"result\":\"Hello\"}}", events::add);
+        adapter.onServerMessage("{\"header\":{\"name\":\"TranscriptionResultChanged\"},"
+                + "\"payload\":{\"index\":2,\"result\":\"Hello\","
+                + "\"detected_source_lang\":\"EN\"}}", events::add);
+        assertEquals(2, events.size());
+        assertEquals("und", events.get(0).language());
+        assertEquals("en-US", events.get(1).language());
+        assertEquals(2, events.get(1).revision());
     }
 
     @Test

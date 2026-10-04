@@ -184,7 +184,7 @@ public final class MeetingService extends Service {
             overlay.dismiss();
             Log.i(TAG, "跨应用字幕窗已关闭");
         } else {
-            overlay.show(this::openMeetingPage, () -> {
+            overlay.show(this::openMeetingPage, this::swapDisplayColumns, () -> {
                 if (canStop) {
                     openMeetingPage();
                     requestStop();
@@ -200,6 +200,26 @@ public final class MeetingService extends Service {
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP
                 | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
         startActivity(intent);
+    }
+
+    /** 页面和悬浮窗共用本场显示状态；交换仅影响呈现位置。 */
+    void swapDisplayColumns() {
+        if (!active || !display.isBilingual()) return;
+        display.swapColumns();
+        transcriptVersion++;
+        Log.i(TAG, "双语分栏左右显示已交换 meetingId=" + meetingId);
+        publish();
+    }
+
+    /** P6 音频 SDK 的稳定方向角输入口；P5 标准 MIC 无有效角度时不会调用它。 */
+    void onStableAudioDirection(float angle) {
+        display.updateStableDirection(angle);
+        Log.d(TAG, "方向角样本已更新 angle=" + angle);
+    }
+
+    /** P6 可在对应片段首次显示前提交与 ASR 片段关联的方向侧。 */
+    void onSegmentAudioDirection(String segmentId, int side) {
+        display.setSegmentDirection(segmentId, side);
     }
 
     private void begin(String backend, String token, MeetingSetup requested) {
@@ -250,7 +270,9 @@ public final class MeetingService extends Service {
         completionQueued.set(false);
         stopRequested = false;
         modelFinished = false;
-        display.start(SystemClock.elapsedRealtime());
+        display.start(SystemClock.elapsedRealtime(),
+                requested.mode() == MeetingSetup.Mode.LIVE_TRANSLATION,
+                requested.sourceLanguage(), requested.targetLanguage());
         transcriptVersion++;
         Set<String> local = runtime.realtimeCapabilities(created);
         MeetingCapabilityState capabilities = created.capabilities();
@@ -305,7 +327,10 @@ public final class MeetingService extends Service {
     }
 
     private void showTranscript(TranscriptEvent event) {
+        boolean firstRoute = display.isBilingual() && display.route(event.segmentId()) == null;
         display.apply(event);
+        if (firstRoute) Log.i(TAG, "互译片段分栏 segmentId=" + event.segmentId()
+                + " route=" + display.route(event.segmentId()));
         transcriptVersion++;
         Log.d(TAG, "字幕片段=" + event.segmentId() + " 修订=" + event.revision()
                 + " 最终=" + event.isFinal());
@@ -313,7 +338,11 @@ public final class MeetingService extends Service {
     }
 
     private void showTranslation(TranslationEvent event) {
+        boolean firstRoute = display.isBilingual()
+                && display.route(event.sourceSegmentId()) == null;
         display.apply(event);
+        if (firstRoute) Log.i(TAG, "译文先到时锁定分栏 segmentId=" + event.sourceSegmentId()
+                + " route=" + display.route(event.sourceSegmentId()));
         transcriptVersion++;
         Log.d(TAG, "译文片段=" + event.translationId() + " 原文片段="
                 + event.sourceSegmentId() + " 修订=" + event.revision()

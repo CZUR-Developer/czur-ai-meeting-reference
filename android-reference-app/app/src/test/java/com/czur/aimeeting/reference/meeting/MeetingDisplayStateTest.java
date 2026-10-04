@@ -33,28 +33,48 @@ public final class MeetingDisplayStateTest {
     @Test
     public void bilingualRowsPairBySourceAndPlaceEnglishSpeechOnRight() {
         MeetingDisplayState state = new MeetingDisplayState();
-        state.start(0L);
+        state.start(0L, true, "zh-CN", "en-US");
         state.apply(new TranscriptEvent("speech-1", 1, 0, 100, "en-US", "Hello", false));
         state.apply(new TranslationEvent("translation-1", "speech-1", 1,
                 "en-US", "zh-CN", "你", false));
         assertEquals(1, state.bilingualRows().size());
-        assertEquals("你", state.bilingualRows().get(0).chinese());
-        assertEquals("Hello", state.bilingualRows().get(0).english());
-        assertEquals(0.8f, state.bilingualRows().get(0).chineseAlpha(), 0.0f);
+        assertEquals("你", state.bilingualRows().get(0).left());
+        assertEquals("Hello", state.bilingualRows().get(0).right());
+        assertEquals(0.8f, state.bilingualRows().get(0).leftAlpha(), 0.0f);
         state.apply(new TranslationEvent("translation-1", "speech-1", 2,
                 "en-US", "zh-CN", "你好", true));
         state.apply(new TranslationEvent("translation-1", "speech-1", 1,
                 "en-US", "zh-CN", "旧译文", false));
-        assertEquals("你好", state.bilingualRows().get(0).chinese());
-        assertEquals(1.0f, state.bilingualRows().get(0).chineseAlpha(), 0.0f);
+        assertEquals("你好", state.bilingualRows().get(0).left());
+        assertEquals(1.0f, state.bilingualRows().get(0).leftAlpha(), 0.0f);
         state.apply(new TranscriptEvent("speech-2", 1, 100, 200,
                 "zh-CN", "早上好", true));
         state.apply(new TranslationEvent("translation-2", "speech-2", 1,
                 "zh-CN", "en-US", "Good morning", true));
-        assertEquals("早上好", state.bilingualRows().get(1).chinese());
-        assertEquals("Good morning", state.bilingualRows().get(1).english());
+        assertEquals("早上好", state.bilingualRows().get(1).left());
+        assertEquals("Good morning", state.bilingualRows().get(1).right());
         state.start(200L);
         assertEquals(0, state.bilingualRows().size());
         assertFalse(state.hasTranslation());
+    }
+
+    @Test
+    public void bilingualModeStartsInTwoColumnsAndBothSurfacesReadSameRoutedRow() {
+        MeetingDisplayState state = new MeetingDisplayState();
+        state.start(0L, true, "en-US", "zh-CN");
+        assertEquals(true, state.isBilingual());
+        assertEquals("en-US", state.leftLanguage());
+        assertEquals("zh-CN", state.rightLanguage());
+        assertEquals("English", state.leftLabel());
+        assertEquals("中文", state.rightLabel());
+        assertEquals(0, state.bilingualRows().size());
+        state.apply(new TranscriptEvent("speech", 1, 0, 100, "en-US", "Hello", false));
+        assertEquals("Hello", state.latestBilingualRow().left());
+        assertEquals(state.bilingualRows().get(0).left(), state.latestBilingualRow().left());
+        state.swapColumns();
+        assertEquals("zh-CN", state.leftLanguage());
+        assertEquals("中文", state.leftLabel());
+        assertEquals("Hello", state.latestBilingualRow().right());
+        assertEquals(state.bilingualRows().get(0).right(), state.latestBilingualRow().right());
     }
 }
