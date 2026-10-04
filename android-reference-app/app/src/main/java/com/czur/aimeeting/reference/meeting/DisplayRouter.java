@@ -7,7 +7,8 @@ import java.util.Map;
 /**
  * 一场双语会议的左右分栏决策。栏位 1/2 对应会前语言 A/B；方向明确区优先，方向
  * 模糊或不可用时才按模型语种、原文字形降级。首次显示后按 segmentId 锁定，后续
- * partial/final 不搬栏；交换按钮只改变左右呈现，不改变已锁定的语义栏位。
+ * partial/final 不搬栏。模型语种与文本都无法判断时返回未定侧但不锁定，允许同一
+ * 片段后续修订或方向样本再定栏；交换按钮只改变呈现，不改变已锁定的语义栏位。
  *
  * <p>P5 使用可控输入验证本规则；设备真实方向角由 P6 SDK 在字幕事件到达前调用
  * {@link #updateStableAngle(float)} 或 {@link #setSegmentDirection(String, int)} 提供。
@@ -17,6 +18,7 @@ public final class DisplayRouter {
     public enum Basis { SEGMENT_DIRECTION, STABLE_DIRECTION, MODEL_LANGUAGE,
         TEXT_LANGUAGE, LANGUAGE_UNRESOLVED }
 
+    /** side 0=暂未定栏，1=语言 A 栏，2=语言 B 栏；只有 1/2 会被锁定。 */
     public record Route(int side, Basis basis) {
         /** 无有效方向区参与本次分栏，属于语种降级或语种未知兜底。 */
         public boolean languageFallback() {
@@ -64,9 +66,9 @@ public final class DisplayRouter {
             int byText = textSide(sourceText);
             decided = byModel != 0 ? new Route(byModel, Basis.MODEL_LANGUAGE)
                     : byText != 0 ? new Route(byText, Basis.TEXT_LANGUAGE)
-                    : new Route(1, Basis.LANGUAGE_UNRESOLVED);
+                    : new Route(0, Basis.LANGUAGE_UNRESOLVED);
         }
-        locked.put(segmentId, decided);
+        if (decided.side() != 0) locked.put(segmentId, decided);
         return decided;
     }
 

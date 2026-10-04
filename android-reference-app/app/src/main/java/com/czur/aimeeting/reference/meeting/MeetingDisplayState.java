@@ -197,6 +197,11 @@ public final class MeetingDisplayState {
         String sourceLanguage = translation == null
                 ? (source == null ? "" : source.language) : translation.sourceLanguage;
         DisplayRouter.Route route = router.route(id, sourceLanguage, sourceText);
+        if (route.side() == 0) {
+            // 尚无可信语种/方向时显示占位，保留原文与译文快照；下一次修订可真正定栏。
+            return new BilingualRow(id, "语言识别中：" + sourceText, "", sourceAlpha,
+                    1.0f, route.basis());
+        }
         boolean sourceOnLeft = (route.side() == 1) != swapped;
         return sourceOnLeft
                 ? new BilingualRow(id, sourceText, translatedText, sourceAlpha,

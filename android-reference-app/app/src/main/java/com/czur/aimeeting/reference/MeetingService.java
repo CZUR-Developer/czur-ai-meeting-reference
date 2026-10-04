@@ -334,7 +334,8 @@ public final class MeetingService extends Service {
     private void showTranscript(TranscriptEvent event) {
         boolean firstRoute = display.isBilingual() && display.route(event.segmentId()) == null;
         display.apply(event);
-        if (firstRoute) Log.i(TAG, "互译片段分栏 segmentId=" + event.segmentId()
+        if (firstRoute && display.route(event.segmentId()) != null)
+            Log.i(TAG, "互译片段分栏 segmentId=" + event.segmentId()
                 + " route=" + display.route(event.segmentId()));
         transcriptVersion++;
         Log.d(TAG, "字幕片段=" + event.segmentId() + " 修订=" + event.revision()
@@ -346,7 +347,8 @@ public final class MeetingService extends Service {
         boolean firstRoute = display.isBilingual()
                 && display.route(event.sourceSegmentId()) == null;
         display.apply(event);
-        if (firstRoute) Log.i(TAG, "译文先到时锁定分栏 segmentId=" + event.sourceSegmentId()
+        if (firstRoute && display.route(event.sourceSegmentId()) != null)
+            Log.i(TAG, "译文先到时锁定分栏 segmentId=" + event.sourceSegmentId()
                 + " route=" + display.route(event.sourceSegmentId()));
         transcriptVersion++;
         Log.d(TAG, "译文片段=" + event.translationId() + " 原文片段="

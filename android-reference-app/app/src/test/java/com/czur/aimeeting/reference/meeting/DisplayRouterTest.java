@@ -1,6 +1,7 @@
 package com.czur.aimeeting.reference.meeting;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import com.czur.aimeeting.model.TranscriptEvent;
 import com.czur.aimeeting.model.TranslationEvent;
@@ -49,6 +50,8 @@ public final class DisplayRouterTest {
                 router.route("chinese", "zh-CN", "你好").basis());
         assertEquals(DisplayRouter.Basis.LANGUAGE_UNRESOLVED,
                 router.route("digits", "und", "123").basis());
+        assertEquals(0, router.route("digits", "und", "123").side());
+        assertNull(router.existingRoute("digits"));
     }
 
     @Test
@@ -63,5 +66,32 @@ public final class DisplayRouterTest {
         assertEquals("你好", state.latestBilingualRow().right());
         assertEquals("你", state.latestBilingualRow().left());
         assertTrue(state.latestBilingualRow().languageFallback());
+    }
+
+    @Test
+    public void unknownNumericPartialWaitsForLaterLanguageBeforeLocking() {
+        MeetingDisplayState state = new MeetingDisplayState();
+        state.start(0L, true, "zh-CN", "en-US");
+        state.updateStableDirection(-1f);
+        state.apply(new TranscriptEvent("numbers", 1, 0, 100, "und", "123", false));
+        assertNull(state.route("numbers"));
+        assertEquals("语言识别中：123", state.latestBilingualRow().left());
+        assertEquals("", state.latestBilingualRow().right());
+        state.apply(new TranscriptEvent("numbers", 2, 0, 200, "en-US", "123 people", false));
+        assertEquals(2, state.route("numbers").side());
+        assertEquals("123 people", state.latestBilingualRow().right());
+        state.updateStableDirection(220f);
+        state.apply(new TranscriptEvent("numbers", 3, 0, 300, "en-US", "123 people.", true));
+        assertEquals(2, state.route("numbers").side());
+    }
+
+    @Test
+    public void unknownPartialCanUseLaterSegmentDirection() {
+        DisplayRouter router = new DisplayRouter("zh-CN", "en-US");
+        assertEquals(0, router.route("numbers", "und", "123").side());
+        router.setSegmentDirection("numbers", 2);
+        assertEquals(DisplayRouter.Basis.SEGMENT_DIRECTION,
+                router.route("numbers", "und", "123").basis());
+        assertEquals(2, router.existingRoute("numbers").side());
     }
 }
