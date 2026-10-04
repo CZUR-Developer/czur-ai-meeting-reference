@@ -15,7 +15,7 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 /**
- * 听悟实时转写的公开协议 Adapter。只负责启动/停止消息及字幕映射，不持有网络或 MIC。
+ * 听悟实时转写的公开协议 Adapter。只负责启动/停止消息及字幕、译文映射，不持有网络或 MIC。
  *
  * <p>一个实例只用于一场会议；听悟的 index 是该场字幕片段标识，partial 与 SentenceEnd
  * 按同一片段递增修订号。模型原始消息和会话材料不进入日志或标准结果。
@@ -27,6 +27,7 @@ public final class TingwuModelAdapter implements ModelAdapter {
     private final Map<String, SegmentState> translations = new HashMap<>();
     private final Map<Integer, Long> sentenceStarts = new HashMap<>();
     private int fallbackIndex;
+    private volatile boolean translationEnabled;
 
     @Override
     public String id() {
@@ -36,10 +37,12 @@ public final class TingwuModelAdapter implements ModelAdapter {
     @Override
     public String startMessage(ModelSessionGrant grant) {
         try {
+            // 本场开关由后端按已保存的能力决策签发，不能从目标语言或模型全局配置推断。
+            translationEnabled = "true".equals(grant.initParams().get("translationEnabled"));
             return command("StartTranscription", taskId(grant))
                     .put("payload", new JSONObject()
                             .put("enable_intermediate_result", true)
-                            .put("enable_translate_result", false))
+                            .put("enable_translate_result", translationEnabled))
                     .toString();
         } catch (JSONException invalid) {
             throw new IllegalStateException("无法构造听悟启动消息", invalid);
@@ -75,7 +78,7 @@ public final class TingwuModelAdapter implements ModelAdapter {
 
             JSONObject payload = root.optJSONObject("payload");
             if (payload != null) {
-                emitTranslations(payload, translationListener);
+                if (translationEnabled) emitTranslations(payload, translationListener);
                 if ("SentenceBegin".equals(name) && payload.has("index")) {
                     sentenceStarts.put(payload.optInt("index"),
                             Math.max(0, payload.optLong("time", 0)));

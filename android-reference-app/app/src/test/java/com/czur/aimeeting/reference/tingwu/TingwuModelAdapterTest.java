@@ -26,6 +26,7 @@ public final class TingwuModelAdapterTest {
         assertEquals("task-1", start.getJSONObject("header").getString("task_id"));
         assertEquals("StartTranscription", start.getJSONObject("header").getString("name"));
         assertTrue(start.getJSONObject("payload").getBoolean("enable_intermediate_result"));
+        assertFalse(start.getJSONObject("payload").getBoolean("enable_translate_result"));
         assertFalse(start.toString().contains("wss://"));
 
         List<TranscriptEvent> events = new ArrayList<>();
@@ -69,8 +70,13 @@ public final class TingwuModelAdapterTest {
 
     /** 按国内版字段解析路径重建固定样例；不代表已通过真实听悟互译会话。 */
     @Test
-    public void translationPartialAndFinalLinkToSourceAndUseDetectedLanguage() {
+    public void translationPartialAndFinalLinkToSourceAndUseDetectedLanguage() throws Exception {
         TingwuModelAdapter adapter = new TingwuModelAdapter();
+        ModelSessionGrant grant = new ModelSessionGrant("mtg_translation", TingwuModelAdapter.ID,
+                "wss://example.test/signed", "2030-01-01T00:01:00Z", null,
+                Map.of("taskId", "task-translation", "translationEnabled", "true"));
+        assertTrue(new JSONObject(adapter.startMessage(grant)).getJSONObject("payload")
+                .getBoolean("enable_translate_result"));
         List<TranscriptEvent> transcripts = new ArrayList<>();
         List<TranslationEvent> translations = new ArrayList<>();
         adapter.onServerMessage("{\"header\":{\"name\":\"SentenceEnd\"},"
@@ -102,6 +108,9 @@ public final class TingwuModelAdapterTest {
     @Test
     public void ignoresUnknownAndSameLanguageTranslation() {
         TingwuModelAdapter adapter = new TingwuModelAdapter();
+        adapter.startMessage(new ModelSessionGrant("mtg_translation", TingwuModelAdapter.ID,
+                "wss://example.test/signed", "2030-01-01T00:01:00Z", null,
+                Map.of("taskId", "task-translation", "translationEnabled", "true")));
         List<TranslationEvent> translations = new ArrayList<>();
         adapter.onServerMessage("{\"payload\":{\"source_lang\":\"multilingual\","
                 + "\"target_lang\":\"EN\",\"translate_result\":["
@@ -114,5 +123,21 @@ public final class TingwuModelAdapterTest {
         assertEquals("tingwu-3", translations.get(0).sourceSegmentId());
         assertEquals("zh-CN", translations.get(0).sourceLanguage());
         assertEquals("en-US", translations.get(0).targetLanguage());
+    }
+
+    @Test
+    public void singleLanguageGrantDoesNotEmitUnexpectedTranslation() throws Exception {
+        TingwuModelAdapter adapter = new TingwuModelAdapter();
+        ModelSessionGrant grant = new ModelSessionGrant("mtg_transcript", TingwuModelAdapter.ID,
+                "wss://example.test/signed", "2030-01-01T00:01:00Z", null,
+                Map.of("taskId", "task-transcript"));
+        assertFalse(new JSONObject(adapter.startMessage(grant)).getJSONObject("payload")
+                .getBoolean("enable_translate_result"));
+        List<TranslationEvent> translations = new ArrayList<>();
+        adapter.onServerMessage("{\"payload\":{\"source_lang\":\"EN\",\"target_lang\":\"CN\","
+                + "\"translate_result\":[{\"index\":1,\"text\":\"你好\","
+                + "\"detected_source_lang\":\"EN\"}]}}",
+                event -> {}, translations::add);
+        assertTrue(translations.isEmpty());
     }
 }

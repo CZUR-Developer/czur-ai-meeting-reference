@@ -94,7 +94,7 @@ class TingwuModelSessionIssuerTest {
                             + "\"wss://join.example.invalid/meeting\"}}");
         }, CLOCK);
 
-        issuer.issue(new ModelSessionIssuer.Request("zh-CN", List.of("en-US"), true));
+        var session = issuer.issue(new ModelSessionIssuer.Request("zh-CN", List.of("en-US"), true));
         var body = new ObjectMapper().readTree(readBody(sent.get()));
         assertEquals("multilingual", body.path("Input").path("SourceLanguage").asText());
         assertEquals(List.of("cn", "en"), new ObjectMapper().convertValue(
@@ -105,6 +105,8 @@ class TingwuModelSessionIssuerTest {
                 body.path("Parameters").path("Translation").path("TargetLanguages"),
                 new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {}));
         assertEquals(2, body.path("Parameters").path("Translation").path("OutputLevel").asInt());
+        assertEquals(Map.of("taskId", "task-bilingual", "translationEnabled", "true"),
+                session.initParams());
     }
 
     @Test void requestedTargetWithoutEnabledCapabilityRemainsSingleLanguage() throws Exception {

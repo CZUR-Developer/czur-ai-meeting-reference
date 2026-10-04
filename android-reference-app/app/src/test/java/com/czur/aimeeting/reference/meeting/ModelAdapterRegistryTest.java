@@ -22,5 +22,9 @@ public final class ModelAdapterRegistryTest {
         assertTrue(registry.setupCapabilities().contains(MeetingCapabilityState.TRANSCRIPT));
         assertFalse(registry.setupCapabilities().contains(MeetingCapabilityState.TRANSLATION));
         assertFalse(registry.setupCapabilities().contains(MeetingCapabilityState.SUMMARY));
+        assertTrue(registry.realtimeCapabilities(TingwuModelAdapter.ID)
+                .contains(MeetingCapabilityState.TRANSLATION));
+        assertFalse(registry.realtimeCapabilities(SampleJsonModelAdapter.ID)
+                .contains(MeetingCapabilityState.TRANSLATION));
     }
 }

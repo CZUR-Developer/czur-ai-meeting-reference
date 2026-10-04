@@ -99,8 +99,13 @@ public final class TingwuModelSessionIssuer implements ModelSessionIssuer {
                     || join.getHost() == null) throw new SessionIssueException();
             LOGGER.log(Level.INFO, "听悟模型会话签发成功 adapter=tingwu-realtime translation={0}",
                     sessionRequest.translationEnabled());
+            // 启动消息仍由设备 Adapter 生成；只有本场能力决策已开放翻译时，才把开关
+            // 随临时会话材料交给它。字幕会议沿用原先只有 taskId 的材料形状。
+            Map<String, String> initParams = sessionRequest.translationEnabled()
+                    ? Map.of("taskId", taskId, "translationEnabled", "true")
+                    : Map.of("taskId", taskId);
             return new Session("tingwu-realtime", endpoint,
-                    clock.instant().plus(config.connectTtl()), Map.of("taskId", taskId));
+                    clock.instant().plus(config.connectTtl()), initParams);
         } catch (IOException | GeneralSecurityException | IllegalArgumentException failure) {
             LOGGER.log(Level.WARNING, "听悟模型会话签发失败 reason=PROVIDER_UNAVAILABLE");
             throw new SessionIssueException();
