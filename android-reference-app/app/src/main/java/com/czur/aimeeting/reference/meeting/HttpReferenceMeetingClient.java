@@ -268,7 +268,9 @@ public final class HttpReferenceMeetingClient implements ReferenceMeetingClient 
                 }
             }
         }
-        return new LocalMeetingResult(manifest.optString("title", "参考会议"), transcript,
+        String title = manifest.isNull("title") ? "参考会议"
+                : manifest.optString("title", "参考会议");
+        return new LocalMeetingResult(title, transcript,
                 translation, summary, captures);
     }
 

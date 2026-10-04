@@ -44,7 +44,8 @@ final class LocalPdfWriter {
         document = new PdfDocument();
         try {
             newPage();
-            paragraph(result.title().isBlank() ? "参考会议" : result.title(), 22, true);
+            paragraph(result.title() == null || result.title().isBlank()
+                    ? "参考会议" : result.title(), 22, true);
             paragraph("会议编号：" + meetingId, 11, false);
             List<LocalPdfContent.Entry> entries = LocalPdfContent.from(result);
             for (LocalPdfContent.Entry entry : entries) {

@@ -73,6 +73,19 @@ public final class HttpReferenceMeetingClientTest {
     }
 
     @Test
+    public void localResultUsesReferenceTitleWhenManifestTitleIsNull() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse().setResponseCode(200)
+                    .setBody("{\"title\":null,\"artifacts\":[]}"));
+            server.start();
+            LocalMeetingResult result = new HttpReferenceMeetingClient(
+                    server.url("/").toString(), "local-demo-token")
+                    .readLocalResult("mtg_null_title", 123L);
+            assertEquals("参考会议", result.title());
+        }
+    }
+
+    @Test
     public void createsStartsAndAppendsOneCanonicalTranscript() throws Exception {
         try (MockWebServer server = new MockWebServer()) {
             server.enqueue(new MockResponse().setResponseCode(201)

@@ -559,9 +559,12 @@ public final class MainActivity extends Activity {
         begin.putExtra(MeetingService.EXTRA_RESULT_DELIVERY, setup.resultDelivery().name());
         begin.putExtra(MeetingService.EXTRA_RESULT_EMAILS,
                 setup.resultEmails().toArray(new String[0]));
-        if (setup.resultDelivery() == MeetingSetup.ResultDelivery.TRACELESS) {
-            stopButton.setText("结束无痕互译");
-        }
+        stopButton.setText(switch (setup.resultDelivery()) {
+            case LOCAL -> "停止会议并保存本地 PDF";
+            case EMAIL -> "停止会议并发送邮箱结果";
+            case TRACELESS -> "结束无痕互译";
+            default -> "停止会议并查看网页结果";
+        });
         try {
             // 用户仍在前台点击开始时启动 microphone 前台 Service，再由 Service 建会/开 MIC。
             startForegroundService(begin);
