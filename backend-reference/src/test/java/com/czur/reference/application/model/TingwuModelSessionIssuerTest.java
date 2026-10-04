@@ -9,6 +9,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -35,7 +36,7 @@ class TingwuModelSessionIssuerTest {
                             + "\"wss://join.example.invalid/meeting?temporary=grant\"}}");
         }, CLOCK);
 
-        var session = issuer.issue("zh-CN");
+        var session = issuer.issue(new ModelSessionIssuer.Request("zh-CN", List.of(), false));
         assertEquals("PUT", sent.get().method());
         assertEquals("type=realtime&RegionId=cn-beijing", sent.get().uri().getRawQuery());
         assertEquals("CreateTask", sent.get().headers().firstValue("X-Acs-Action").orElseThrow());
@@ -49,6 +50,10 @@ class TingwuModelSessionIssuerTest {
         assertEquals("cn", input.path("SourceLanguage").asText());
         assertEquals(16000, input.path("SampleRate").asInt());
         assertEquals("pcm", input.path("Format").asText());
+        assertFalse(input.has("LanguageHints"));
+        var parameters = new ObjectMapper().readTree(body).path("Parameters");
+        assertFalse(parameters.has("TranslationEnabled"));
+        assertFalse(parameters.has("Translation"));
         assertEquals("tingwu-realtime", session.adapterId());
         assertEquals("wss://join.example.invalid/meeting?temporary=grant", session.endpoint());
         assertEquals(Map.of("taskId", "task-123"), session.initParams());
@@ -63,7 +68,7 @@ class TingwuModelSessionIssuerTest {
                 request -> new TingwuModelSessionIssuer.ProviderResponse(200,
                         "{\"Data\":{\"TaskId\":\"task-123\"}}"), CLOCK);
         assertThrows(TingwuModelSessionIssuer.SessionIssueException.class,
-                () -> issuer.issue("zh-CN"));
+                () -> issuer.issue(new ModelSessionIssuer.Request("zh-CN", List.of(), false)));
     }
 
     @Test void englishMeetingUsesEnglishInCreateTask() throws Exception {
@@ -75,9 +80,46 @@ class TingwuModelSessionIssuerTest {
                             + "\"wss://join.example.invalid/meeting\"}}");
         }, CLOCK);
 
-        issuer.issue("en-US");
+        issuer.issue(new ModelSessionIssuer.Request("en-US", List.of(), false));
         var body = new ObjectMapper().readTree(readBody(sent.get()));
         assertEquals("en", body.path("Input").path("SourceLanguage").asText());
+    }
+
+    @Test void enabledTranslationUsesOneMultilingualTaskWithBothDirections() throws Exception {
+        AtomicReference<HttpRequest> sent = new AtomicReference<>();
+        var issuer = new TingwuModelSessionIssuer(CONFIG, request -> {
+            sent.set(request);
+            return new TingwuModelSessionIssuer.ProviderResponse(200,
+                    "{\"Data\":{\"TaskId\":\"task-bilingual\",\"MeetingJoinUrl\":"
+                            + "\"wss://join.example.invalid/meeting\"}}");
+        }, CLOCK);
+
+        issuer.issue(new ModelSessionIssuer.Request("zh-CN", List.of("en-US"), true));
+        var body = new ObjectMapper().readTree(readBody(sent.get()));
+        assertEquals("multilingual", body.path("Input").path("SourceLanguage").asText());
+        assertEquals(List.of("cn", "en"), new ObjectMapper().convertValue(
+                body.path("Input").path("LanguageHints"),
+                new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {}));
+        assertTrue(body.path("Parameters").path("TranslationEnabled").asBoolean());
+        assertEquals(List.of("cn", "en"), new ObjectMapper().convertValue(
+                body.path("Parameters").path("Translation").path("TargetLanguages"),
+                new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {}));
+        assertEquals(2, body.path("Parameters").path("Translation").path("OutputLevel").asInt());
+    }
+
+    @Test void requestedTargetWithoutEnabledCapabilityRemainsSingleLanguage() throws Exception {
+        AtomicReference<HttpRequest> sent = new AtomicReference<>();
+        var issuer = new TingwuModelSessionIssuer(CONFIG, request -> {
+            sent.set(request);
+            return new TingwuModelSessionIssuer.ProviderResponse(200,
+                    "{\"Data\":{\"TaskId\":\"task-asr\",\"MeetingJoinUrl\":"
+                            + "\"wss://join.example.invalid/meeting\"}}");
+        }, CLOCK);
+
+        issuer.issue(new ModelSessionIssuer.Request("zh-CN", List.of("en-US"), false));
+        var body = new ObjectMapper().readTree(readBody(sent.get()));
+        assertEquals("cn", body.path("Input").path("SourceLanguage").asText());
+        assertFalse(body.path("Parameters").has("TranslationEnabled"));
     }
 
     @Test void remainsDisabledWithoutConfiguredCredentials() {

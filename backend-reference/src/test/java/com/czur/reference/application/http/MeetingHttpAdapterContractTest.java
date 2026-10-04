@@ -98,9 +98,11 @@ class MeetingHttpAdapterContractTest {
     @Test
     void modelSessionRequiresOwnedActiveMeetingBeforeIssuingProviderTask() {
         int[] issues = {0};
-        ModelSessionIssuer issuer = sourceLanguage -> {
+        ModelSessionIssuer issuer = sessionRequest -> {
             issues[0]++;
-            assertEquals("en-US", sourceLanguage);
+            assertEquals("en-US", sessionRequest.sourceLanguage());
+            assertEquals(List.of(), sessionRequest.targetLanguages());
+            assertFalse(sessionRequest.translationEnabled());
             return new ModelSessionIssuer.Session("tingwu-realtime",
                     "wss://join.example.invalid/meeting?temporary=grant",
                     NOW.plusSeconds(300), Map.of("taskId", "task-123"));
@@ -108,7 +110,8 @@ class MeetingHttpAdapterContractTest {
         adapter = new MeetingHttpAdapter(query, deletion, decoder,
                 new HttpErrorMapper(() -> "model-diagnostic"), stopService(),
                 null, null, false, null, null, null, null, null, issuer,
-                (context, meetingId) -> "en-US");
+                (context, meetingId) -> new ModelSessionIssuer.Request(
+                        "en-US", List.of(), false));
         var request = new HttpRequest("POST", "/v1/meetings/mtg_detail:modelSession",
                 Map.of(), "");
         assertEquals(MeetingHttpAdapter.AuthenticationRoute.CLIENT_WRITE,
@@ -135,7 +138,8 @@ class MeetingHttpAdapterContractTest {
         adapter = new MeetingHttpAdapter(query, deletion, decoder,
                 new HttpErrorMapper(() -> "sample-diagnostic"), stopService(),
                 null, null, false, null, null, null, null, null, issuer,
-                (context, meetingId) -> "zh-CN");
+                (context, meetingId) -> new ModelSessionIssuer.Request(
+                        "zh-CN", List.of(), false));
         query.getResult = new MeetingQueryPort.Found(status(MeetingState.CREATED));
         var response = adapter.handle(new HttpRequest("POST",
                 "/v1/meetings/mtg_detail:modelSession", Map.of(), ""), context());

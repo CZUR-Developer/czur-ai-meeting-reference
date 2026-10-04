@@ -18,6 +18,7 @@ import java.time.Duration;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.TreeMap;
@@ -58,10 +59,10 @@ public final class TingwuModelSessionIssuer implements ModelSessionIssuer {
         this.clock = Objects.requireNonNull(clock, "clock");
     }
 
-    @Override public Session issue(String sourceLanguage) {
+    @Override public Session issue(Request sessionRequest) {
         try {
             URI target = URI.create(config.createTaskUrl() + "?" + QUERY);
-            String body = createBody(providerLanguage(sourceLanguage));
+            String body = createBody(sessionRequest);
             String date = DATE.format(clock.instant());
             String host = target.getHost() + (target.getPort() < 0 || target.getPort() == 443
                     ? "" : ":" + target.getPort());
@@ -96,7 +97,8 @@ public final class TingwuModelSessionIssuer implements ModelSessionIssuer {
             URI join = URI.create(endpoint);
             if (taskId.isBlank() || !"wss".equals(join.getScheme())
                     || join.getHost() == null) throw new SessionIssueException();
-            LOGGER.log(Level.INFO, "听悟模型会话签发成功 adapter=tingwu-realtime");
+            LOGGER.log(Level.INFO, "听悟模型会话签发成功 adapter=tingwu-realtime translation={0}",
+                    sessionRequest.translationEnabled());
             return new Session("tingwu-realtime", endpoint,
                     clock.instant().plus(config.connectTtl()), Map.of("taskId", taskId));
         } catch (IOException | GeneralSecurityException | IllegalArgumentException failure) {
@@ -117,13 +119,31 @@ public final class TingwuModelSessionIssuer implements ModelSessionIssuer {
         };
     }
 
-    private String createBody(String providerLanguage) throws IOException {
-        return JSON.writeValueAsString(Map.of(
-                "AppKey", config.appKey(),
-                "Input", Map.of("SourceLanguage", providerLanguage, "Format", "pcm",
-                        "SampleRate", 16000, "EnableWords", true),
-                "Parameters", Map.of("Transcription", Map.of("OutputLevel", 2,
-                        "RealtimeDiarizationEnabled", true, "DiarizationEnabled", true))));
+    /**
+     * 单语字幕沿用原有 CreateTask 请求；仅本场翻译能力 ENABLE 时，以同一个
+     * multilingual 实时任务识别双语并向两种语言翻译。双目标包含原语言，
+     * 因为说话人可以在一场会中任意切换中文和英文。
+     */
+    private String createBody(Request request) throws IOException {
+        String source = providerLanguage(request.sourceLanguage());
+        Map<String, Object> input = Map.of("SourceLanguage", source, "Format", "pcm",
+                "SampleRate", 16000, "EnableWords", true);
+        Map<String, Object> transcription = Map.of("OutputLevel", 2,
+                "RealtimeDiarizationEnabled", true, "DiarizationEnabled", true);
+        Map<String, Object> parameters = Map.of("Transcription", transcription);
+        if (request.translationEnabled()) {
+            if (request.targetLanguages().size() != 1) throw new SessionIssueException();
+            String other = providerLanguage(request.targetLanguages().get(0));
+            if (source.equals(other)) throw new SessionIssueException();
+            List<String> pair = List.of(source, other);
+            input = Map.of("SourceLanguage", "multilingual", "LanguageHints", pair,
+                    "Format", "pcm", "SampleRate", 16000, "EnableWords", true);
+            parameters = Map.of("Transcription", transcription,
+                    "TranslationEnabled", true,
+                    "Translation", Map.of("TargetLanguages", pair, "OutputLevel", 2));
+        }
+        return JSON.writeValueAsString(Map.of("AppKey", config.appKey(),
+                "Input", input, "Parameters", parameters));
     }
 
     private static String sha256(String value) throws GeneralSecurityException {

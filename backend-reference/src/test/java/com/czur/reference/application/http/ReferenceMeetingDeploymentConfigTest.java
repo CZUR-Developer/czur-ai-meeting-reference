@@ -285,6 +285,35 @@ class ReferenceMeetingDeploymentConfigTest {
     }
 
     @Test
+    void tingwuTranslationRequiresProductEntitlementAndModelRegistration() {
+        Map<String, String> values = valid();
+        values.put(ReferenceMeetingDeploymentConfig.PROFILE_OPTIONAL_CAPABILITIES,
+                CapabilityIds.TRANSLATION_REALTIME);
+        values.put(ReferenceMeetingDeploymentConfig.ENTITLEMENT_SUPPORTED_CAPABILITIES,
+                CapabilityIds.TRANSCRIPT_REALTIME + "," + CapabilityIds.TRANSLATION_REALTIME);
+        values.put(ReferenceMeetingDeploymentConfig.MODEL_CAPABILITIES,
+                CapabilityIds.TRANSCRIPT_REALTIME + "," + CapabilityIds.TRANSLATION_REALTIME);
+        var config = ReferenceMeetingDeploymentConfig.fromEnvironment(values);
+        var plan = new CapabilityPlanner().plan(config.mockCapabilities(), config.profile(),
+                Set.of(CapabilityIds.TRANSCRIPT_REALTIME, CapabilityIds.TRANSLATION_REALTIME),
+                config.entitlement().supportedCapabilities(), config.capabilityLimits());
+        var translation = plan.decisionFor(CapabilityIds.TRANSLATION_REALTIME);
+        assertEquals(CapabilityDecision.Action.ENABLE, translation.action());
+        assertEquals(List.of("model.translation.realtime"), translation.affectedWorkflows());
+        assertEquals(List.of("translation.final"), translation.producedArtifacts());
+
+        values.put(ReferenceMeetingDeploymentConfig.MODEL_CAPABILITIES,
+                CapabilityIds.TRANSCRIPT_REALTIME);
+        var asrOnly = ReferenceMeetingDeploymentConfig.fromEnvironment(values);
+        var disabled = new CapabilityPlanner().plan(asrOnly.mockCapabilities(),
+                asrOnly.profile(), Set.of(CapabilityIds.TRANSCRIPT_REALTIME,
+                        CapabilityIds.TRANSLATION_REALTIME),
+                asrOnly.entitlement().supportedCapabilities(), asrOnly.capabilityLimits());
+        assertEquals(CapabilityDecision.Action.DISABLE,
+                disabled.decisionFor(CapabilityIds.TRANSLATION_REALTIME).action());
+    }
+
+    @Test
     void parsesAllFieldsFromOnePrivateMapSnapshot() {
         Map<String, String> changing = valid();
         Map<String, String> adversarial = new AbstractMap<>() {

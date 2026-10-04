@@ -18,7 +18,7 @@ class SampleJsonWsModelSessionIssuerTest {
         var now = Instant.parse("2026-10-03T00:00:00Z");
         var issuer = new SampleJsonWsModelSessionIssuer(
                 URI.create("ws://127.0.0.1:19091/model"), Clock.fixed(now, ZoneOffset.UTC));
-        var session = issuer.issue("zh-CN");
+        var session = issuer.issue(new ModelSessionIssuer.Request("zh-CN", java.util.List.of(), false));
         assertEquals("sample-json-ws", session.adapterId());
         assertEquals("ws://127.0.0.1:19091/model", session.endpoint());
         assertEquals(now.plusSeconds(300), session.expiresAt());

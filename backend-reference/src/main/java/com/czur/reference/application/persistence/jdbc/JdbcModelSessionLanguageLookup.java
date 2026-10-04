@@ -3,8 +3,11 @@ package com.czur.reference.application.persistence.jdbc;
 import com.czur.reference.application.command.MeetingAccessGuard;
 import com.czur.reference.application.command.MeetingCommandContext;
 import com.czur.reference.application.model.ModelSessionLanguageLookup;
+import com.czur.reference.application.model.ModelSessionIssuer;
 import com.czur.reference.application.port.CreateMeetingFactStore;
 import com.czur.reference.application.port.IdempotencyScopeCodec;
+import com.czur.reference.domain.capability.CapabilityDecision;
+import com.czur.reference.domain.capability.CapabilityIds;
 import com.czur.reference.domain.meeting.MeetingIdPolicy;
 
 import javax.sql.DataSource;
@@ -16,8 +19,9 @@ import java.sql.Timestamp;
 import java.util.Objects;
 
 /**
- * 模型会话的本场语言读取：会议行和首次 Create 事实来自同一个只读快照。
- * 只有当前部署的会议所有者能得到语言；不从全局模型配置或请求 body 推断。
+ * 模型会话的本场事实读取：会议行和首次 Create 事实来自同一个只读快照。
+ * 只有当前部署的会议所有者能得到语言与首次能力决策；不从全局模型配置、
+ * 未认证的请求 body 或当前已变化的产品档位推断翻译权限。
  */
 public final class JdbcModelSessionLanguageLookup implements ModelSessionLanguageLookup {
     private final DataSource dataSource;
@@ -27,7 +31,7 @@ public final class JdbcModelSessionLanguageLookup implements ModelSessionLanguag
     }
 
     @Override
-    public String load(MeetingCommandContext context, String meetingId) {
+    public ModelSessionIssuer.Request load(MeetingCommandContext context, String meetingId) {
         Objects.requireNonNull(context, "context");
         MeetingIdPolicy.requireValid(meetingId);
         try (Connection connection = dataSource.getConnection()) {
@@ -58,7 +62,13 @@ public final class JdbcModelSessionLanguageLookup implements ModelSessionLanguag
                         throw unavailable();
                     }
                     connection.rollback();
-                    return request.languages().source();
+                    boolean translationEnabled = request.requestedCapabilities().contains(
+                            CapabilityIds.TRANSLATION_REALTIME)
+                            && first.response().capabilityDecisions().stream().anyMatch(decision ->
+                                    CapabilityIds.TRANSLATION_REALTIME.equals(decision.capability())
+                                    && decision.action() == CapabilityDecision.Action.ENABLE);
+                    return new ModelSessionIssuer.Request(request.languages().source(),
+                            request.languages().targets(), translationEnabled);
                 }
             }
         } catch (SQLException | RuntimeException failure) {

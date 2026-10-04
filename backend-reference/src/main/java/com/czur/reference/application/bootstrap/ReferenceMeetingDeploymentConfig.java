@@ -45,6 +45,8 @@ public final class ReferenceMeetingDeploymentConfig {
     private static final int MINIMUM_PUBLIC_AUDIO_FRAME_BYTES = 16_000 * 2 * 20 / 1_000;
     private static final String MOCK_TRANSCRIPT_WORKFLOW = "mock.transcript";
     private static final String MOCK_TRANSCRIPT_ARTIFACT = "transcript.final";
+    private static final String MODEL_TRANSLATION_WORKFLOW = "model.translation.realtime";
+    private static final String MODEL_TRANSLATION_ARTIFACT = "translation.final";
     public static final String DEPLOYMENT_SCOPE = "AI_MEETING_DEPLOYMENT_SCOPE";
     public static final String PROFILE_ID = "AI_MEETING_PROFILE_ID";
     public static final String PROFILE_REVISION = "AI_MEETING_PROFILE_REVISION";
@@ -170,12 +172,26 @@ public final class ReferenceMeetingDeploymentConfig {
         Set<String> optional = capabilities(environment, PROFILE_OPTIONAL_CAPABILITIES, false);
         ProductProfile profile;
         try {
+            // P5-5 只登记真实模型互译的本场执行能力。产物名称先冻结为协议名；
+            // 标准译文事件和最终收口在下一片接入，当前收口仍明确拒绝翻译会议。
+            Map<String, List<String>> workflows = optional.contains(
+                    CapabilityIds.TRANSLATION_REALTIME)
+                    ? Map.of(CapabilityIds.TRANSCRIPT_REALTIME,
+                            List.of(MOCK_TRANSCRIPT_WORKFLOW),
+                            CapabilityIds.TRANSLATION_REALTIME,
+                            List.of(MODEL_TRANSLATION_WORKFLOW))
+                    : Map.of(CapabilityIds.TRANSCRIPT_REALTIME,
+                            List.of(MOCK_TRANSCRIPT_WORKFLOW));
+            Map<String, List<String>> artifacts = optional.contains(
+                    CapabilityIds.TRANSLATION_REALTIME)
+                    ? Map.of(CapabilityIds.TRANSCRIPT_REALTIME,
+                            List.of(MOCK_TRANSCRIPT_ARTIFACT),
+                            CapabilityIds.TRANSLATION_REALTIME,
+                            List.of(MODEL_TRANSLATION_ARTIFACT))
+                    : Map.of(CapabilityIds.TRANSCRIPT_REALTIME,
+                            List.of(MOCK_TRANSCRIPT_ARTIFACT));
             profile = new ProductProfile(profileId, revision, required, optional,
-                    Map.of(), Map.of(), Map.of(),
-                    Map.of(CapabilityIds.TRANSCRIPT_REALTIME,
-                            List.of(MOCK_TRANSCRIPT_WORKFLOW)),
-                    Map.of(CapabilityIds.TRANSCRIPT_REALTIME,
-                            List.of(MOCK_TRANSCRIPT_ARTIFACT)));
+                    Map.of(), Map.of(), Map.of(), workflows, artifacts);
             // Start 与最终收口依赖持久快照中的完整执行映射，不能只校验 Profile ID。
             ProductProfileSnapshot.from(profile);
         } catch (RuntimeException malformed) {
@@ -240,8 +256,7 @@ public final class ReferenceMeetingDeploymentConfig {
                     && limits.permits(capability)
                     && (profile.affectedWorkflowsOf(capability).isEmpty()
                     || profile.producedArtifactsOf(capability).isEmpty())) {
-                // 当前参考实现仅给必选 ASR 冻结执行映射。可选能力允许因某方缺失
-                // 而 DISABLE，但不能在三方都声明可用时伪造一个无法产出结果的 ENABLE。
+                // 可选能力允许因某方缺失而 DISABLE；三方均允许时必须有执行映射。
                 throw invalid(PROFILE_OPTIONAL_CAPABILITIES);
             }
         }

@@ -480,9 +480,9 @@ public final class MeetingHttpAdapter {
                 return errors.modelSessionInvalidState();
             }
             try {
-                String sourceLanguage = modelSessionLanguages.load(context, modelSession.group(1));
+                var sessionRequest = modelSessionLanguages.load(context, modelSession.group(1));
                 return errors.modelSession(modelSession.group(1),
-                        modelSessions.issue(sourceLanguage));
+                        modelSessions.issue(sessionRequest));
             } catch (TingwuModelSessionIssuer.SessionIssueException | IllegalStateException unavailable) {
                 return errors.modelSessionUnavailable();
             }
