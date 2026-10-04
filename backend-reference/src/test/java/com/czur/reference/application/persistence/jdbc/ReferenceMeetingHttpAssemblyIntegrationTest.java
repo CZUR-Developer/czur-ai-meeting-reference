@@ -267,7 +267,9 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
             assertEquals(200, artifactResponse.status());
             assertEquals(finalText, ERROR_JSON.readTree(artifactResponse.body())
                     .path("text").asText());
-            assertFalse(ERROR_JSON.readTree(artifactResponse.body()).has("segments"));
+            JsonNode segments = ERROR_JSON.readTree(artifactResponse.body()).path("segments");
+            assertEquals(1, segments.size());
+            assertFalse(segments.get(0).has("sessionSpeakerId"));
         }
     }
 
@@ -436,6 +438,83 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
                     """, networkHeaders(TOKEN, null, true));
             assertNetworkError(denied, 422, "TRANSLATION_NOT_GRANTED");
             assertEquals(0, count("meeting_client_event"));
+        }
+    }
+
+    @Test
+    void sessionSpeakerIsGrantedPerMeetingAndReadableAfterStop(
+            @TempDir Path artifactRoot) throws Exception {
+        migrate(1);
+        Map<String, String> enabled = enabledConfig();
+        enabled.put(ReferenceMeetingDeploymentConfig.ENTITLEMENT_SUPPORTED_CAPABILITIES,
+                "transcript.realtime,speaker.diarization.session");
+        enabled.put(ReferenceMeetingDeploymentConfig.MOCK_CAPABILITIES,
+                "transcript.realtime,speaker.diarization.session");
+        enabled.put(ReferenceMeetingDeploymentConfig.RESULT_LINK_TTL_MS, "60000");
+        try (var assembly = ReferenceMeetingHttpAssembly.start(enabled, CLOCK,
+                new PersistentFileSystemMockArtifactStore(artifactRoot, 1024 * 1024));
+             var network = assembly.newJdkHttpServer(new InetSocketAddress("127.0.0.1", 0))) {
+            network.start();
+            int port = network.address().getPort();
+            HttpRequest base = createRequest("speaker-create-key-123456789", "speaker-client");
+            String create = base.body().replace("[\"transcript.realtime\"]",
+                    "[\"transcript.realtime\",\"speaker.diarization.session\"]");
+            String created = exchange(port, "POST", "/v1/meetings", create,
+                    networkHeaders(TOKEN, "speaker-create-key-123456789", true));
+            assertEquals(201, status(created));
+            String meetingId = ERROR_JSON.readTree(responseBody(created))
+                    .path("meetingId").asText();
+            assertEquals(200, status(exchange(port, "POST",
+                    "/v1/meetings/" + meetingId + ":startClient", "",
+                    networkHeaders(TOKEN, null, false))));
+            String path = "/v1/meetings/" + meetingId + "/events:append";
+            String first = """
+                    {"clientEventId":"speaker-1-r1","clientSequence":1,
+                     "transcriptUpsert":{"segmentId":"speaker-1","revision":1,
+                     "operation":"UPSERT_OPERATION_UPSERT","startMs":0,"endMs":1000,
+                     "language":"zh-CN","text":"你好","final":true,
+                     "speaker":{"sessionSpeakerId":"speaker-2"}}}
+                    """;
+            String second = """
+                    {"clientEventId":"speaker-2-r1","clientSequence":2,
+                     "transcriptUpsert":{"segmentId":"speaker-2","revision":1,
+                     "operation":"UPSERT_OPERATION_UPSERT","startMs":1000,"endMs":2000,
+                     "language":"zh-CN","text":"再见","final":true}}
+                    """;
+            assertEquals(201, status(exchange(port, "POST", path, first,
+                    networkHeaders(TOKEN, null, true))));
+            assertEquals(201, status(exchange(port, "POST", path, second,
+                    networkHeaders(TOKEN, null, true))));
+            assertEquals(200, status(exchange(port, "POST",
+                    "/v1/meetings/" + meetingId + ":stop", "",
+                    networkHeaders(TOKEN, "speaker-stop-key-123456789", false))));
+            String manifestResponse = exchange(port, "GET",
+                    "/v1/meetings/" + meetingId + "/manifest?genTime=" + NOW.toEpochMilli(),
+                    "", networkHeaders(TOKEN, null, false));
+            assertEquals(200, status(manifestResponse));
+            JsonNode manifest = ERROR_JSON.readTree(responseBody(manifestResponse));
+            String artifactId = manifest.path("artifacts").get(0).path("artifactId").asText();
+            String artifact = exchange(port, "GET",
+                    "/v1/artifacts/" + artifactId + "?genTime=" + NOW.toEpochMilli(),
+                    "", networkHeaders(TOKEN, null, false));
+            assertEquals(200, status(artifact));
+            JsonNode segments = ERROR_JSON.readTree(responseBody(artifact)).path("segments");
+            assertEquals("speaker-2", segments.get(0).path("sessionSpeakerId").asText());
+            assertFalse(segments.get(1).has("sessionSpeakerId"));
+
+            HttpRequest withoutSpeaker = createRequest(
+                    "speaker-denied-create-key-123456789", "speaker-denied-client");
+            String deniedCreate = exchange(port, "POST", "/v1/meetings", withoutSpeaker.body(),
+                    networkHeaders(TOKEN, "speaker-denied-create-key-123456789", true));
+            assertEquals(201, status(deniedCreate));
+            String deniedId = ERROR_JSON.readTree(responseBody(deniedCreate))
+                    .path("meetingId").asText();
+            assertEquals(200, status(exchange(port, "POST",
+                    "/v1/meetings/" + deniedId + ":startClient", "",
+                    networkHeaders(TOKEN, null, false))));
+            assertNetworkError(exchange(port, "POST",
+                    "/v1/meetings/" + deniedId + "/events:append", first,
+                    networkHeaders(TOKEN, null, true)), 422, "SPEAKER_NOT_GRANTED");
         }
     }
 

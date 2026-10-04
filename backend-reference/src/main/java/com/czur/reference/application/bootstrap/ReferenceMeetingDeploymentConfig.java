@@ -47,6 +47,7 @@ public final class ReferenceMeetingDeploymentConfig {
     private static final String MOCK_TRANSCRIPT_ARTIFACT = "transcript.final";
     private static final String MODEL_TRANSLATION_WORKFLOW = "model.translation.realtime";
     private static final String MODEL_TRANSLATION_ARTIFACT = "translation.final";
+    private static final String MODEL_SPEAKER_WORKFLOW = "model.speaker.session";
     public static final String DEPLOYMENT_SCOPE = "AI_MEETING_DEPLOYMENT_SCOPE";
     public static final String PROFILE_ID = "AI_MEETING_PROFILE_ID";
     public static final String PROFILE_REVISION = "AI_MEETING_PROFILE_REVISION";
@@ -169,27 +170,31 @@ public final class ReferenceMeetingDeploymentConfig {
         String profileId = required(environment, PROFILE_ID);
         int revision = positiveInt(environment, PROFILE_REVISION);
         Set<String> required = capabilities(environment, PROFILE_REQUIRED_CAPABILITIES, true);
-        Set<String> optional = capabilities(environment, PROFILE_OPTIONAL_CAPABILITIES, false);
+        TreeSet<String> optionalValues = new TreeSet<>(capabilities(environment,
+                PROFILE_OPTIONAL_CAPABILITIES, false));
+        // 本场发言人始终是可请求项；是否启用仍由权益、模型和部署限制共同决定。
+        optionalValues.add(CapabilityIds.SPEAKER_DIARIZATION_SESSION);
+        Set<String> optional = Collections.unmodifiableSet(optionalValues);
         ProductProfile profile;
         try {
             // P5-5 登记真实模型互译的本场执行能力；客户端标准译文事件和最终结果
             // 已按该冻结能力决定接入。旧 WSS 音频 Worker 不因此具备译文收口。
-            Map<String, List<String>> workflows = optional.contains(
-                    CapabilityIds.TRANSLATION_REALTIME)
-                    ? Map.of(CapabilityIds.TRANSCRIPT_REALTIME,
-                            List.of(MOCK_TRANSCRIPT_WORKFLOW),
-                            CapabilityIds.TRANSLATION_REALTIME,
-                            List.of(MODEL_TRANSLATION_WORKFLOW))
-                    : Map.of(CapabilityIds.TRANSCRIPT_REALTIME,
-                            List.of(MOCK_TRANSCRIPT_WORKFLOW));
-            Map<String, List<String>> artifacts = optional.contains(
-                    CapabilityIds.TRANSLATION_REALTIME)
-                    ? Map.of(CapabilityIds.TRANSCRIPT_REALTIME,
-                            List.of(MOCK_TRANSCRIPT_ARTIFACT),
-                            CapabilityIds.TRANSLATION_REALTIME,
-                            List.of(MODEL_TRANSLATION_ARTIFACT))
-                    : Map.of(CapabilityIds.TRANSCRIPT_REALTIME,
-                            List.of(MOCK_TRANSCRIPT_ARTIFACT));
+            Map<String, List<String>> workflows = new HashMap<>();
+            workflows.put(CapabilityIds.TRANSCRIPT_REALTIME,
+                    List.of(MOCK_TRANSCRIPT_WORKFLOW));
+            Map<String, List<String>> artifacts = new HashMap<>();
+            artifacts.put(CapabilityIds.TRANSCRIPT_REALTIME,
+                    List.of(MOCK_TRANSCRIPT_ARTIFACT));
+            if (optional.contains(CapabilityIds.TRANSLATION_REALTIME)) {
+                workflows.put(CapabilityIds.TRANSLATION_REALTIME,
+                        List.of(MODEL_TRANSLATION_WORKFLOW));
+                artifacts.put(CapabilityIds.TRANSLATION_REALTIME,
+                        List.of(MODEL_TRANSLATION_ARTIFACT));
+            }
+            workflows.put(CapabilityIds.SPEAKER_DIARIZATION_SESSION,
+                    List.of(MODEL_SPEAKER_WORKFLOW));
+            artifacts.put(CapabilityIds.SPEAKER_DIARIZATION_SESSION,
+                    List.of(MOCK_TRANSCRIPT_ARTIFACT));
             profile = new ProductProfile(profileId, revision, required, optional,
                     Map.of(), Map.of(), Map.of(), workflows, artifacts);
             // Start 与最终收口依赖持久快照中的完整执行映射，不能只校验 Profile ID。

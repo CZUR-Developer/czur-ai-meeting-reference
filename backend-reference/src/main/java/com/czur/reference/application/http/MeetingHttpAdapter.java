@@ -17,6 +17,7 @@ import com.czur.reference.application.port.MeetingEventLogPort;
 import com.czur.reference.application.port.ClientMeetingInputPort;
 import com.czur.reference.application.port.model.CanonicalTranscriptEvent;
 import com.czur.reference.application.port.model.CanonicalTranslationEvent;
+import com.czur.reference.application.port.model.SpeakerReference;
 import com.czur.reference.application.port.identity.IdentityVerificationRequest;
 import com.czur.reference.domain.meeting.MeetingIdPolicy;
 
@@ -756,17 +757,27 @@ public final class MeetingHttpAdapter {
             }
             requireFields(root, Set.of("clientEventId", "clientSequence", "transcriptUpsert"));
             JsonNode body = root.get("transcriptUpsert");
-            requireFields(body, Set.of("segmentId", "revision", "operation", "startMs",
-                    "endMs", "language", "text", "final"));
+            Set<String> transcriptFields = body != null && body.has("speaker")
+                    ? Set.of("segmentId", "revision", "operation", "startMs",
+                            "endMs", "language", "text", "final", "speaker")
+                    : Set.of("segmentId", "revision", "operation", "startMs",
+                            "endMs", "language", "text", "final");
+            requireFields(body, transcriptFields);
             JsonNode finalNode = body.get("final");
             if (!finalNode.isBoolean()) {
                 throw new IllegalArgumentException("client event final is invalid");
+            }
+            SpeakerReference speaker = null;
+            if (body.has("speaker")) {
+                JsonNode value = body.get("speaker");
+                requireFields(value, Set.of("sessionSpeakerId"));
+                speaker = new SpeakerReference(textField(value, "sessionSpeakerId"), null, null);
             }
             CanonicalTranscriptEvent transcript = new CanonicalTranscriptEvent(
                     textField(body, "segmentId"), intField(body, "revision"), upsertOperation(body),
                     longField(body, "startMs"), longField(body, "endMs"),
                     textField(body, "language"), textField(body, "text"),
-                    finalNode.booleanValue(), null, 1.0, java.util.List.of(),
+                    finalNode.booleanValue(), speaker, 1.0, java.util.List.of(),
                     java.util.List.of());
             return new ClientMeetingInputPort.ClientTranscript(
                     textField(root, "clientEventId"), longField(root, "clientSequence"),

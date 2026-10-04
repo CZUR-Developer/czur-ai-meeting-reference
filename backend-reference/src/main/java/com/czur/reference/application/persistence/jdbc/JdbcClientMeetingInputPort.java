@@ -207,6 +207,11 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
                         && !translationEnabled(connection, meetingId)) {
                     return rollback(connection, new Rejected(Reason.CAPABILITY_NOT_GRANTED));
                 }
+                if (request instanceof ClientTranscript transcript
+                        && transcript.transcript().speaker() != null
+                        && !speakerEnabled(connection, meetingId)) {
+                    return rollback(connection, new Rejected(Reason.SPEAKER_NOT_GRANTED));
+                }
 
                 ClientEventRow previous = findClientEvent(connection, meetingId,
                         request.clientEventId());
@@ -260,12 +265,22 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
 
     /** 能力以本场首次持久化 Create 决策为准；全局配置变动不改变既有会议。 */
     private static boolean translationEnabled(Connection connection, String meetingId) {
+        return capabilityEnabled(connection, meetingId, CapabilityIds.TRANSLATION_REALTIME);
+    }
+
+    private static boolean speakerEnabled(Connection connection, String meetingId) {
+        return capabilityEnabled(connection, meetingId,
+                CapabilityIds.SPEAKER_DIARIZATION_SESSION);
+    }
+
+    private static boolean capabilityEnabled(Connection connection, String meetingId,
+            String capability) {
         var first = new JdbcCreateMeetingFactStore(connection)
                 .findByMeetingId(meetingId).orElse(null);
         if (first == null || !first.request().requestSnapshot().requestedCapabilities()
-                .contains(CapabilityIds.TRANSLATION_REALTIME)) return false;
+                .contains(capability)) return false;
         return first.response().capabilityDecisions().stream().anyMatch(decision ->
-                CapabilityIds.TRANSLATION_REALTIME.equals(decision.capability())
+                capability.equals(decision.capability())
                 && decision.action() == CapabilityDecision.Action.ENABLE);
     }
 

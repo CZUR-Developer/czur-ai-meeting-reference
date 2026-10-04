@@ -112,15 +112,17 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
                     artifact.put("artifactType", "transcript.final");
                     artifact.put("language", projection.language());
                     artifact.put("text", projection.text());
-                    if ("mul".equals(projection.language())) {
-                        ArrayNode segments = artifact.putArray("segments");
-                        for (TranscriptUpsert segment : projection.transcripts()) {
-                            ObjectNode item = segments.addObject();
-                            item.put("segmentId", segment.getSegmentId());
-                            item.put("startMs", segment.getStartMs());
-                            item.put("endMs", segment.getEndMs());
-                            item.put("language", segment.getLanguage());
-                            item.put("text", segment.getText());
+                    ArrayNode segments = artifact.putArray("segments");
+                    for (TranscriptUpsert segment : projection.transcripts()) {
+                        ObjectNode item = segments.addObject();
+                        item.put("segmentId", segment.getSegmentId());
+                        item.put("startMs", segment.getStartMs());
+                        item.put("endMs", segment.getEndMs());
+                        item.put("language", segment.getLanguage());
+                        item.put("text", segment.getText());
+                        if (segment.hasSpeaker()) {
+                            item.put("sessionSpeakerId",
+                                    segment.getSpeaker().getSessionSpeakerId());
                         }
                     }
                     artifactRefs.add(publishReady(connection, artifactId, meetingId,

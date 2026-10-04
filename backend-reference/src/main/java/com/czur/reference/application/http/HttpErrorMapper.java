@@ -150,6 +150,9 @@ public final class HttpErrorMapper {
             case CAPABILITY_NOT_GRANTED -> error(422, HttpErrorEnvelope.Domain.ENTITLEMENT,
                     "TRANSLATION_NOT_GRANTED", false, HttpErrorEnvelope.UserAction.NONE,
                     "ai_meeting.entitlement.translation_not_granted");
+            case SPEAKER_NOT_GRANTED -> error(422, HttpErrorEnvelope.Domain.ENTITLEMENT,
+                    "SPEAKER_NOT_GRANTED", false, HttpErrorEnvelope.UserAction.NONE,
+                    "ai_meeting.entitlement.speaker_not_granted");
             case STORAGE_UNAVAILABLE -> error(503, HttpErrorEnvelope.Domain.STORAGE,
                     "CLIENT_INPUT_UNAVAILABLE", true, HttpErrorEnvelope.UserAction.RETRY,
                     "ai_meeting.storage.input_unavailable");

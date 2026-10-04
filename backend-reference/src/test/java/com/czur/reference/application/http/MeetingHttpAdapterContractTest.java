@@ -328,6 +328,32 @@ class MeetingHttpAdapterContractTest {
     }
 
     @Test
+    void clientTranscriptAcceptsOnlySessionSpeakerId() {
+        RecordingClientInput client = new RecordingClientInput();
+        adapter = new MeetingHttpAdapter(query, deletion, decoder,
+                new HttpErrorMapper(() -> "client-diagnostic"), stopService(),
+                null, null, false, null, null, null, null, client);
+        String body = """
+                {"clientEventId":"speaker-segment-r1","clientSequence":1,
+                 "transcriptUpsert":{"segmentId":"speaker-segment","revision":1,
+                 "operation":"UPSERT_OPERATION_UPSERT","startMs":0,"endMs":1000,
+                 "language":"zh-CN","text":"你好","final":true,
+                 "speaker":{"sessionSpeakerId":"speaker-2"}}}
+                """;
+        HttpRequest append = new HttpRequest("POST",
+                "/v1/meetings/mtg_client/events:append",
+                Map.of("content-type", "application/json"), body);
+        assertEquals(201, adapter.handle(append, context()).status());
+        var transcript = (ClientMeetingInputPort.ClientTranscript) client.request;
+        assertEquals("speaker-2", transcript.transcript().speaker().sessionSpeakerId());
+        assertEquals(null, transcript.transcript().speaker().personId());
+        assertEquals(400, adapter.handle(new HttpRequest("POST",
+                "/v1/meetings/mtg_client/events:append",
+                Map.of("content-type", "application/json"),
+                body.replace("speaker-2", "")), context()).status());
+    }
+
+    @Test
     void presentationChunkAcceptsOrderedJpegFramesAndRejectsBadOrder() {
         RecordingClientInput client = new RecordingClientInput();
         adapter = new MeetingHttpAdapter(query, deletion, decoder,

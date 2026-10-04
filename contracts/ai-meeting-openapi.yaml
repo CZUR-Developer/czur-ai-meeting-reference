@@ -1126,6 +1126,13 @@ components:
           type: string
         final:
           type: boolean
+        speaker:
+          type: object
+          additionalProperties: false
+          required: [sessionSpeakerId]
+          description: 仅本场模型给出的临时发言人，不代表跨会议声纹身份。
+          properties:
+            sessionSpeakerId: { type: string, minLength: 1 }
     StopMeetingResponse:
       type: object
       additionalProperties: false
