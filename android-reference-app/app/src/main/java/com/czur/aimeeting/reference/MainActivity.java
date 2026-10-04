@@ -568,7 +568,8 @@ public final class MainActivity extends Activity {
                 ? state.display.latestBilingualRow() : null;
         meetingTitle.setText(bilingual ? "双语互译 · 会议中"
                 + (latest != null && latest.languageFallback() ? "（语种分栏降级）" : "")
-                : "实时字幕 · 会议中");
+                : state.mode == MeetingSetup.Mode.MEETING_MINUTES
+                        ? "AI 会议纪要 · 会议中" : "实时字幕 · 会议中");
         leftLanguageTitle.setText(state.display.leftLabel());
         rightLanguageTitle.setText(state.display.rightLabel());
         bilingualHeader.setVisibility(bilingual ? View.VISIBLE : View.GONE);

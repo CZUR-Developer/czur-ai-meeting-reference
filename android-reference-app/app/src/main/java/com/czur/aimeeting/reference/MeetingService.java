@@ -75,11 +75,12 @@ public final class MeetingService extends Service {
         final String resultUrl;
         final String timeText;
         final MeetingReminderPresentation.Notice reminder;
+        final MeetingSetup.Mode mode;
 
         State(MeetingDisplayState display, String status, String capabilityText, boolean busy,
                 boolean active, boolean canStop, boolean overlayShowing,
                 int transcriptVersion, String resultUrl, String timeText,
-                MeetingReminderPresentation.Notice reminder) {
+                MeetingReminderPresentation.Notice reminder, MeetingSetup.Mode mode) {
             this.display = display;
             this.status = status;
             this.capabilityText = capabilityText;
@@ -91,6 +92,7 @@ public final class MeetingService extends Service {
             this.resultUrl = resultUrl;
             this.timeText = timeText;
             this.reminder = reminder;
+            this.mode = mode;
         }
     }
 
@@ -664,8 +666,9 @@ public final class MeetingService extends Service {
         MeetingReminderPresentation.Notice reminder = active && clock != null
                 ? reminderPresentation.at(clock) : MeetingReminderPresentation.Notice.NONE;
         State state = new State(display, status, capabilityText, busy, active, canStop,
-                overlay.isShowing(), transcriptVersion, resultUrl, timeText, reminder);
-        overlay.render(display, timeText, reminder, canStop, observer == null);
+                overlay.isShowing(), transcriptVersion, resultUrl, timeText, reminder,
+                setup == null ? MeetingSetup.Mode.LIVE_TRANSCRIPT : setup.mode());
+        overlay.render(display, state.mode, timeText, reminder, canStop, observer == null);
         if (observer != null) observer.onMeetingState(state);
     }
 

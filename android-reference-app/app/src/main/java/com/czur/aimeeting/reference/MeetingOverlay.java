@@ -14,6 +14,7 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import com.czur.aimeeting.reference.meeting.MeetingDisplayState;
 import com.czur.aimeeting.reference.meeting.MeetingReminderPresentation;
+import com.czur.aimeeting.reference.meeting.MeetingSetup;
 import com.czur.aimeeting.reference.meeting.OverlayLayoutState;
 import java.util.List;
 
@@ -45,6 +46,7 @@ final class MeetingOverlay {
     private ScrollView historyScroll;
     private LinearLayout historyRows;
     private MeetingDisplayState lastDisplay;
+    private MeetingSetup.Mode lastMode = MeetingSetup.Mode.LIVE_TRANSCRIPT;
     private String lastTimeText = "";
     private MeetingReminderPresentation.Notice lastReminder =
             MeetingReminderPresentation.Notice.NONE;
@@ -170,11 +172,12 @@ final class MeetingOverlay {
         root = panel;
     }
 
-    void render(MeetingDisplayState state, String timeText,
+    void render(MeetingDisplayState state, MeetingSetup.Mode mode, String timeText,
             MeetingReminderPresentation.Notice reminder, boolean canStop,
             boolean allowOverlayReminder) {
         if (root == null) return;
         lastDisplay = state;
+        lastMode = mode;
         lastTimeText = timeText;
         lastReminder = reminder;
         lastAllowReminder = allowOverlayReminder;
@@ -188,7 +191,7 @@ final class MeetingOverlay {
                 + state.rightLabel()
                 + (large ? " · 大窗" : " · 普通窗")
                 + (current != null && current.languageFallback() ? "（语种降级）" : "")
-                : "实时字幕");
+                : mode == MeetingSetup.Mode.MEETING_MINUTES ? "AI 会议纪要" : "实时字幕");
         transcriptView.setVisibility(bilingual ? View.GONE : View.VISIBLE);
         bilingualRow.setVisibility(bilingual && !large ? View.VISIBLE : View.GONE);
         historyScroll.setVisibility(bilingual && large ? View.VISIBLE : View.GONE);
@@ -294,7 +297,7 @@ final class MeetingOverlay {
     }
 
     private void renderLastState() {
-        if (lastDisplay != null) render(lastDisplay, lastTimeText, lastReminder,
+        if (lastDisplay != null) render(lastDisplay, lastMode, lastTimeText, lastReminder,
                 lastCanStop, lastAllowReminder);
     }
 
