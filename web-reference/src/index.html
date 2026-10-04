@@ -12,6 +12,10 @@
     .translation-item { border-left: 3px solid #4f7ed7; padding: 8px 12px; background: #f7f9ff; }
     .translation-item h3 { font-size: 0.95rem; margin: 0 0 6px; color: #3158a5; }
     .translation-item p { white-space: pre-wrap; line-height: 1.7; margin: 0; }
+    #presentation-frames { display: grid; gap: 20px; }
+    .presentation-frame { margin: 0; }
+    .presentation-frame img { display: block; width: 100%; height: auto; }
+    .presentation-frame figcaption { margin-top: 6px; color: #5f6368; }
   </style>
 </head>
 <body>
@@ -25,6 +29,10 @@
     <section id="translation-result" hidden aria-label="最终译文">
       <h2>最终译文</h2>
       <div id="translations"></div>
+    </section>
+    <section id="presentation-result" hidden aria-label="演示文稿">
+      <h2>演示文稿</h2>
+      <div id="presentation-frames"></div>
     </section>
   </main>
   <script type="module" src="./result.mjs"></script>

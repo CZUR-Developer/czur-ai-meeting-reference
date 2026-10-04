@@ -78,13 +78,44 @@ test('无字幕结果只读取空产物清单，不请求不存在的正文', as
     ['http://api.test/v1/meetings/mtg_empty/manifest?genTime=12345']);
 });
 
+test('READY 演示截图包按修订顺序读取，包内画面顺序保持不变', async () => {
+  const requests = [];
+  const content = {
+    art_capture_1: { schemaVersion: 'presentation-capture/v1', chunkSequence: 1,
+      frames: [
+        { offsetMs: 0, jpegBase64: '/9j/2Q==' },
+        { offsetMs: 10000, jpegBase64: '/9j/2Q==' }
+      ] },
+    art_capture_2: { schemaVersion: 'presentation-capture/v1', chunkSequence: 2,
+      frames: [{ offsetMs: 20000, jpegBase64: '/9j/2Q==' }] }
+  };
+  const manifest = { title: '演示会议', artifacts: [
+    { type: 'presentation.capture', status: 'READY', artifactId: 'art_capture_2', revision: 2 },
+    { type: 'presentation.capture', status: 'PENDING', artifactId: 'art_pending', revision: 3 },
+    { type: 'presentation.capture', status: 'READY', artifactId: 'art_capture_1', revision: 1 }
+  ] };
+  const fetcher = async url => {
+    requests.push(url);
+    const artifactId = url.match(/\/v1\/artifacts\/([^?]+)/)?.[1];
+    return { ok: true, status: 200,
+      json: async () => artifactId ? content[artifactId] : manifest };
+  };
+  const result = await readFinalTranscript('http://api.test', 'mtg_presentation', '789', fetcher);
+  assert.deepEqual(result.presentationFrames.map(frame => frame.offsetMs), [0, 10000, 20000]);
+  assert.deepEqual(requests, [
+    'http://api.test/v1/meetings/mtg_presentation/manifest?genTime=789',
+    'http://api.test/v1/artifacts/art_capture_1?genTime=789',
+    'http://api.test/v1/artifacts/art_capture_2?genTime=789'
+  ]);
+});
+
 test('纯字幕隐藏译文区，双向译文显示两个语言方向', () => {
   const node = () => ({ hidden: true, textContent: '', children: [],
     append(...items) { this.children.push(...items); } });
   const page = () => {
     const nodes = Object.fromEntries([
       '#status', '#title', '#transcript', '#result', '#translations',
-      '#translation-result'
+      '#translation-result', '#presentation-result', '#presentation-frames'
     ].map(selector => [selector, node()]));
     return { nodes, querySelector: selector => nodes[selector], createElement: node };
   };
@@ -92,6 +123,7 @@ test('纯字幕隐藏译文区，双向译文显示两个语言方向', () => {
   renderFinalResult({ title: '字幕会议', text: '今天开会。' }, transcriptOnly);
   assert.equal(transcriptOnly.nodes['#result'].hidden, false);
   assert.equal(transcriptOnly.nodes['#translation-result'].hidden, true);
+  assert.equal(transcriptOnly.nodes['#presentation-result'].hidden, true);
   assert.equal(transcriptOnly.nodes['#transcript'].textContent, '今天开会。');
 
   const bilingual = page();
@@ -104,4 +136,25 @@ test('纯字幕隐藏译文区，双向译文显示两个语言方向', () => {
     [row.children[0].textContent, row.children[1].textContent]), [
     ['中文 → English', 'Hello'], ['English → 中文', '早上好']
   ]);
+});
+
+test('只有演示画面也显示结果，字幕与译文缺席不误报空会议', () => {
+  const node = () => ({ hidden: true, textContent: '', children: [],
+    append(...items) { this.children.push(...items); } });
+  const nodes = Object.fromEntries([
+    '#status', '#title', '#transcript', '#result', '#translations',
+    '#translation-result', '#presentation-result', '#presentation-frames'
+  ].map(selector => [selector, node()]));
+  const page = { querySelector: selector => nodes[selector], createElement: node };
+  renderFinalResult({ title: '演示会议', text: null, presentationFrames: [
+    { offsetMs: 65000, jpegBase64: '/9j/2Q==' }
+  ] }, page);
+  assert.equal(nodes['#status'].textContent, '结果已生成');
+  assert.equal(nodes['#result'].hidden, true);
+  assert.equal(nodes['#translation-result'].hidden, true);
+  assert.equal(nodes['#presentation-result'].hidden, false);
+  const figure = nodes['#presentation-frames'].children[0];
+  assert.equal(figure.children[0].src, 'data:image/jpeg;base64,/9j/2Q==');
+  assert.equal(figure.children[0].alt, '会议 01:05 的演示画面');
+  assert.equal(figure.children[1].textContent, '会议 01:05');
 });
