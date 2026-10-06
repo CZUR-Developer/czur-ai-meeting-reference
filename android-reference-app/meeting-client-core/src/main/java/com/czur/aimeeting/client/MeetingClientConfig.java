@@ -5,7 +5,9 @@ import java.util.concurrent.Executor;
 
 /**
  * 组合会议的部署配置。访问令牌由 App 登录流程提供，模型 endpoint 不在本配置中。
- * callbackExecutor 用于类型化业务通知；Android App 通常提供主线程 Executor。
+ * accessToken 可在发现/登录阶段为空，登录成功后重新创建配置；不接受模型地址/短期材料。
+ * callbackExecutor 必须串行执行，用于类型化业务通知与 beforeStop 衔接；
+ * Android App 通常提供主线程 Executor，不使用线程池造成结果/状态重排。
  * 本类不自动输出字段，避免配置日志泄露访问令牌。
  */
 public final class MeetingClientConfig {

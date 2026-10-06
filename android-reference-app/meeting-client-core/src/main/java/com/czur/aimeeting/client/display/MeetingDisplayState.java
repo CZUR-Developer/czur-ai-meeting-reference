@@ -105,6 +105,7 @@ public final class MeetingDisplayState {
     private String languageA = "zh-CN";
     private String languageB = "en-US";
     private String transcript = "等待字幕…";
+    private String latestTranscriptSegmentId;
     private boolean finalTranscript;
     private long startedAtElapsedMs;
     private boolean waitForModelLanguage;
@@ -126,6 +127,7 @@ public final class MeetingDisplayState {
         swapped = false;
         router = new DisplayRouter(languageA, languageB);
         transcript = "等待字幕…";
+        latestTranscriptSegmentId = null;
         finalTranscript = false;
         startedAtElapsedMs = elapsedRealtimeMs;
         waitForModelLanguage = false;
@@ -178,6 +180,7 @@ public final class MeetingDisplayState {
         if (bilingual) router.route(event.segmentId(), event.language(), event.text());
         segments.put(event.segmentId(), new Segment(event));
         transcript = event.text();
+        latestTranscriptSegmentId = event.segmentId();
         finalTranscript = event.isFinal();
     }
 
@@ -342,7 +345,8 @@ public final class MeetingDisplayState {
         List<MeetingDisplaySnapshot.Row> rows = new ArrayList<>();
         for (Segment source : segments.values()) rows.add(snapshotRow(source.id, source, bySource.remove(source.id)));
         for (String id : bySource.keySet()) rows.add(snapshotRow(id, null, bySource.get(id)));
-        return new MeetingDisplaySnapshot(bilingual, languageA, languageB, swapped, rows);
+        return new MeetingDisplaySnapshot(bilingual, languageA, languageB, swapped, rows,
+                latestTranscriptSegmentId);
     }
 
     private MeetingDisplaySnapshot.Row snapshotRow(String id, Segment source, TranslationSegment translation) {

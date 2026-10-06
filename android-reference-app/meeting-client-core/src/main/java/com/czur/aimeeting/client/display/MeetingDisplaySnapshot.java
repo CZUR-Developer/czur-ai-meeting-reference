@@ -10,8 +10,13 @@ import java.util.List;
  * 文字透明度由 App 使用 isFinal 渲染 80%/100%，本类型不依赖 Android 颜色或控件。
  */
 public record MeetingDisplaySnapshot(boolean bilingual, String languageA, String languageB,
-        boolean swapped, List<Row> rows) {
+        boolean swapped, List<Row> rows, String latestTranscriptSegmentId) {
     public MeetingDisplaySnapshot { rows = List.copyOf(rows); }
+    /** 旧低层调用兼容；最近可见事实仅由正式 DisplayState 的六参快照填充。 */
+    public MeetingDisplaySnapshot(boolean bilingual, String languageA, String languageB,
+            boolean swapped, List<Row> rows) {
+        this(bilingual, languageA, languageB, swapped, rows, null);
+    }
     public enum Side { UNRESOLVED, A, B }
 
     /** 原文或译文尚未到达时相应字段可为 null；同一源片段 ID 始终对应同一显示行。 */

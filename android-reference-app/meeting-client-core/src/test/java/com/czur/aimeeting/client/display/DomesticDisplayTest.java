@@ -9,6 +9,18 @@ import org.junit.Test;
 
 /** 国内正常显示链：会前语言/方向、句开始、迟到语种与停止；没有网络或Android依赖。 */
 public final class DomesticDisplayTest {
+    @Test public void latestVisibleTranscriptIdKeepsRevisionArrivalInsteadOfRowInsertionOrder() {
+        MeetingDisplayState display = new MeetingDisplayState();
+        display.start(0);
+        display.apply(event("s1", 1, "zh-CN", "第一句", false), 0);
+        display.apply(event("s2", 1, "zh-CN", "第二句", false), 1);
+        MeetingDisplaySnapshot older = display.snapshot();
+        display.apply(event("s1", 2, "zh-CN", "第一句迟到修订", true), 2);
+        assertEquals("s1", display.snapshot().latestTranscriptSegmentId());
+        assertEquals("s2", older.latestTranscriptSegmentId());
+        assertEquals("s2", display.snapshot().rows().get(1).segmentId());
+    }
+
     @Test public void sentenceBeginKeepsItsDirectionWhileNextSpeakerMoves() {
         MeetingDisplayState display = bilingual();
         display.updateAudioDirection(direction(220, AudioDirectionSample.Status.AVAILABLE));
