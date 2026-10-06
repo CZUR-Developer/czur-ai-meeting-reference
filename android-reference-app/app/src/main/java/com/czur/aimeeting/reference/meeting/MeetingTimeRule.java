@@ -31,9 +31,15 @@ public final class MeetingTimeRule {
     /** 任意非空原文 partial/final 都重新开始无转写计时；译文不单独作为恢复信号。 */
     public void onTranscript(long nowMs, String text) {
         if (text != null && !text.isBlank()) {
-            lastTranscriptAtMs = nowMs;
+            onTranscriptActivity(nowMs);
         }
     }
+
+    /**
+     * SDK 已确认收到非空原文时通知活跃时间。时间与开场起点使用同一单调时基，
+     * 不等待显示侧的语种窗口；App 无需重新接收原文或为计时构造占位文字。
+     */
+    public void onTranscriptActivity(long nowMs) { lastTranscriptAtMs = nowMs; }
 
     /** 20 分钟提醒只适用于上限超过 20 分钟的会议；5 分钟停止无需曾有字幕。 */
     public Snapshot at(long nowMs) {

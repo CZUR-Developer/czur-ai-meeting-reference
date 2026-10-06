@@ -34,7 +34,7 @@ public final class MeetingTimeRuleTest {
         assertFalse(speaking.at(10L + 4 * MINUTE - 1).noTranscriptWarning());
         assertTrue(speaking.at(10L + 4 * MINUTE).noTranscriptWarning());
         assertEquals(MINUTE, speaking.at(10L + 4 * MINUTE).noTranscriptRemainingMs());
-        speaking.onTranscript(10L + 4 * MINUTE + 1000L, "Hello");
+        speaking.onTranscriptActivity(10L + 4 * MINUTE + 1000L);
         assertFalse(speaking.at(10L + 4 * MINUTE + 1000L).noTranscriptWarning());
         assertEquals(MeetingTimeRule.StopCause.NONE,
                 speaking.at(10L + 5 * MINUTE).stopCause());
