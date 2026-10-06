@@ -21,6 +21,8 @@ import com.czur.aimeeting.model.AudioInputMode;
 import com.czur.aimeeting.model.ModelSession;
 import com.czur.aimeeting.model.ModelSessionGrant;
 import com.czur.aimeeting.model.ModelSessionListener;
+import com.czur.aimeeting.model.SegmentStartedEvent;
+import com.czur.aimeeting.client.provider.TingwuModelAdapter;
 import com.czur.aimeeting.model.SummaryInput;
 import com.czur.aimeeting.model.SummarySessionGrant;
 import com.czur.aimeeting.model.TranscriptEvent;
@@ -113,6 +115,8 @@ public final class MeetingService extends Service {
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService network = Executors.newSingleThreadExecutor();
     private final MeetingDisplayState display = new MeetingDisplayState();
+    /** 精确安排公共core的语种截止点；独立主线程，不被HTTP事件上传阻塞。 */
+    private final Runnable languageDeadline = this::onLanguageDeadline;
     private final FinalTranscriptCollector finalTranscript = new FinalTranscriptCollector();
     private MeetingReminderPresentation reminderPresentation =
             new MeetingReminderPresentation();
@@ -383,6 +387,9 @@ public final class MeetingService extends Service {
         display.start(startedAtMs,
                 requested.mode() == MeetingSetup.Mode.LIVE_TRANSLATION,
                 requested.sourceLanguage(), requested.targetLanguage());
+        display.setWaitForModelLanguage(created.modelSession() != null
+                && TingwuModelAdapter.ID.equals(created.modelSession().adapterId()));
+        main.removeCallbacks(languageDeadline);
         audioInputMode = null;
         transcriptVersion++;
         Set<String> local = runtime.realtimeCapabilities(created);
@@ -414,13 +421,17 @@ public final class MeetingService extends Service {
 
                 @Override public void onAudioDirection(AudioDirectionSample sample) {
                     // 与 showTranscript／showTranslation 排入同一个主线程队列。
-                    // SDK 返回技术角度，左右判定、语种降级和片段锁侧仍由 App 的路由执行。
+                    // SDK 返回技术角度，公共core负责国内方向/语种与锁侧，不在页面重复判断。
                     main.post(() -> {
                         display.updateAudioDirection(sample);
                         Log.d(TAG, "方向样本 status=" + sample.status()
                                 + " raw=" + sample.angleDegrees()
                                 + " stable=" + sample.stableAngleDegrees());
                     });
+                }
+
+                @Override public void onSegmentStarted(SegmentStartedEvent event) {
+                    main.post(() -> display.onSegmentStarted(event));
                 }
 
                 @Override public void onAudioError(AudioInputErrorCode code, String message) {
@@ -450,11 +461,14 @@ public final class MeetingService extends Service {
                 }
 
                 @Override public void onFinished() {
-                    modelFinished = true;
                     Log.i(TAG, "模型最终输出已接收 meetingId=" + created.meetingId());
-                    if (stopRequested && stopInputSent.get()) scheduleComplete();
-                    else main.post(() -> {
-                        status = "模型已完成，可结束会议";
+                    main.post(() -> {
+                        // 前面的字幕/译文显示已进入同一队列；先冲刷等待快照再完成会议。
+                        if (display.flushPendingLanguages()) transcriptVersion++;
+                        main.removeCallbacks(languageDeadline);
+                        modelFinished = true;
+                        if (stopRequested && stopInputSent.get()) scheduleComplete();
+                        else status = "模型已完成，可结束会议";
                         publish();
                     });
                 }
@@ -504,7 +518,8 @@ public final class MeetingService extends Service {
             }
         }
         boolean firstRoute = display.isBilingual() && display.route(event.segmentId()) == null;
-        display.apply(event);
+        display.apply(event, SystemClock.elapsedRealtime());
+        scheduleLanguageDeadline();
         if (firstRoute && display.route(event.segmentId()) != null)
             Log.i(TAG, "互译片段分栏 segmentId=" + event.segmentId()
                 + " route=" + display.route(event.segmentId()));
@@ -517,7 +532,8 @@ public final class MeetingService extends Service {
     private void showTranslation(TranslationEvent event) {
         boolean firstRoute = display.isBilingual()
                 && display.route(event.sourceSegmentId()) == null;
-        display.apply(event);
+        display.apply(event, SystemClock.elapsedRealtime());
+        scheduleLanguageDeadline();
         if (firstRoute && display.route(event.sourceSegmentId()) != null)
             Log.i(TAG, "译文先到时锁定分栏 segmentId=" + event.sourceSegmentId()
                 + " route=" + display.route(event.sourceSegmentId()));
@@ -552,6 +568,23 @@ public final class MeetingService extends Service {
                 publish();
             });
         }
+    }
+
+    /** 由core给出绝对单调deadline，只调度一个最早截止回调，避免秒级tick延长1.5秒窗口。 */
+    private void scheduleLanguageDeadline() {
+        main.removeCallbacks(languageDeadline);
+        var deadline = display.nextLanguageDeadlineMs();
+        if (deadline.isPresent()) main.postDelayed(languageDeadline,
+                Math.max(0L, deadline.getAsLong() - SystemClock.elapsedRealtime()));
+    }
+
+    private void onLanguageDeadline() {
+        if (display.releaseExpiredLanguages(SystemClock.elapsedRealtime())) {
+            transcriptVersion++;
+            Log.i(TAG, "听悟待语种显示已按截止时间释放 meetingId=" + meetingId);
+            publish();
+        }
+        scheduleLanguageDeadline();
     }
 
     private void appendTranslation(ReferenceMeetingClient nextClient, String id,
@@ -621,6 +654,8 @@ public final class MeetingService extends Service {
         stopRequested = true;
         canStop = false;
         main.removeCallbacks(presentationTick);
+        if (display.flushPendingLanguages()) transcriptVersion++;
+        main.removeCallbacks(languageDeadline);
         status = progressText;
         publish();
         network.execute(() -> {
@@ -760,6 +795,7 @@ public final class MeetingService extends Service {
         status = message;
         main.removeCallbacks(clockTick);
         main.removeCallbacks(presentationTick);
+        main.removeCallbacks(languageDeadline);
         closePresentation();
         overlay.dismiss();
         if (session != null) {
@@ -789,6 +825,7 @@ public final class MeetingService extends Service {
     @Override public void onDestroy() {
         main.removeCallbacks(clockTick);
         main.removeCallbacks(presentationTick);
+        main.removeCallbacks(languageDeadline);
         closePresentation();
         overlay.dismiss();
         if (session != null) session.close();

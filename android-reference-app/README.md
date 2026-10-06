@@ -129,10 +129,12 @@ App 调用 `POST /v1/reference/session:login` 取得访问令牌，再以该令�
 Broker 的竞合保证；模式用于准确说明当前能力。
 
 `onAudioDirection(AudioDirectionSample)` 返回原始／稳定角度、单调时间戳和
-`AVAILABLE`／`NO_DIRECTION`／`UNSUPPORTED` 状态。SDK 只提供技术样本，App 的
-`MeetingDisplayState.updateAudioDirection()` 更新全局稳定方向，业务 `DisplayRouter`
-结合会前语言、模型语种和片段状态确定左右栏。`MeetingService` 将方向和字幕回调都
-排入主线程队列；方向消失时清除旧全局角度，新片段按语种降级，已有片段不搬栏。
+`AVAILABLE`／`NO_DIRECTION`／`UNSUPPORTED` 状态。SDK 基础层只提供技术样本，唯一
+公共 core 的 `MeetingDisplayState` 结合会前语言、模型语种、句开始方向快照及片段状态
+确定左右栏。`MeetingService` 将句开始、方向、字幕与译文回调排入主线程队列，
+调用同一 core；`NO_DIRECTION` 保留上次有效稳定角，`UNSUPPORTED` 让新片段按语种
+降级，已有片段不搬栏。听悟模糊方向区的迟到语种窗口通过独立deadline定时释放，
+不被HTTP上传或秒级计时tick延长；停止即时冲刷待显示快照，真实語种不被显示侧改写。
 
 `onAudioError(AudioInputErrorCode, String)` 区分权限拒绝、开流失败与读取失败。
 SDK 无权限时返回 `PERMISSION_DENIED`，不负责申请权限；参考 App 的开始按钮和诊断

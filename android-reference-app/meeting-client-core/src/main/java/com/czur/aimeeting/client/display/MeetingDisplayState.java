@@ -1,36 +1,44 @@
 package com.czur.aimeeting.client.display;
 
 import com.czur.aimeeting.model.AudioDirectionSample;
+import com.czur.aimeeting.model.SegmentStartedEvent;
 import com.czur.aimeeting.model.TranscriptEvent;
 import com.czur.aimeeting.model.TranslationEvent;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.OptionalLong;
+import java.util.logging.Logger;
 
 /**
  * 一场会议的会中显示快照。应用内页面和跨应用悬浮窗读取同一个实例，避免两套控件
  * 分别处理模型修订消息而显示不同文字。计时使用单调时钟，避免设备时间校准影响时长。
  */
 public final class MeetingDisplayState {
+    private static final Logger LOG = Logger.getLogger(MeetingDisplayState.class.getName());
     public static final class Segment {
         private final String id;
         private final int revision;
         private final String text;
         private final String language;
         private final boolean isFinal;
+        private final TranscriptEvent event;
 
-        private Segment(String id, int revision, String text, String language, boolean isFinal) {
-            this.id = id;
-            this.revision = revision;
-            this.text = text;
-            this.language = language;
-            this.isFinal = isFinal;
+        private Segment(TranscriptEvent event) {
+            this.event = event;
+            id = event.segmentId();
+            revision = event.revision();
+            text = event.text();
+            language = event.language();
+            isFinal = event.isFinal();
         }
 
         public String id() { return id; }
         public String text() { return text; }
         public String language() { return language; }
+        public int revision() { return revision; }
+        public boolean isFinal() { return isFinal; }
         public float alpha() { return isFinal ? 1.0f : 0.8f; }
     }
 
@@ -72,8 +80,10 @@ public final class MeetingDisplayState {
         private final String sourceLanguage;
         private final String text;
         private final boolean isFinal;
+        private final TranslationEvent event;
 
         private TranslationSegment(TranslationEvent event) {
+            this.event = event;
             sourceId = event.sourceSegmentId();
             revision = event.revision();
             sourceLanguage = event.sourceLanguage();
@@ -86,6 +96,9 @@ public final class MeetingDisplayState {
 
     private final LinkedHashMap<String, Segment> segments = new LinkedHashMap<>();
     private final LinkedHashMap<String, TranslationSegment> translations = new LinkedHashMap<>();
+    /** 每段只保留等待期内的最新全量快照；起始时间不随 partial 修订延后。 */
+    private final LinkedHashMap<String, PendingLanguage> pendingLanguages = new LinkedHashMap<>();
+    private static final long LANGUAGE_WAIT_MS = 1500L;
     private DisplayRouter router;
     private boolean bilingual;
     private boolean swapped;
@@ -94,6 +107,8 @@ public final class MeetingDisplayState {
     private String transcript = "等待字幕…";
     private boolean finalTranscript;
     private long startedAtElapsedMs;
+    private boolean waitForModelLanguage;
+    private boolean finalizing;
 
     public void start(long elapsedRealtimeMs) {
         start(elapsedRealtimeMs, false, "zh-CN", "en-US");
@@ -104,6 +119,7 @@ public final class MeetingDisplayState {
             String languageB) {
         segments.clear();
         translations.clear();
+        pendingLanguages.clear();
         this.bilingual = bilingual;
         this.languageA = languageA;
         this.languageB = languageB;
@@ -112,27 +128,117 @@ public final class MeetingDisplayState {
         transcript = "等待字幕…";
         finalTranscript = false;
         startedAtElapsedMs = elapsedRealtimeMs;
+        waitForModelLanguage = false;
+        finalizing = false;
     }
 
     public void apply(TranscriptEvent event) {
+        apply(event, System.nanoTime() / 1_000_000L);
+    }
+
+    /**
+     * 只有已确认需要迟到语种处理的默认听悟启用窗口；其他模型复用相同路由但不强加等待。
+     * 必须在本场第一条字幕前设置。App/Coordinator 根据工厂标识设置，不在 UI 解析 JSON。
+     */
+    public void setWaitForModelLanguage(boolean enabled) { waitForModelLanguage = enabled; }
+
+    /** 模型句开始绑定方向快照；没有此事件的模型在第一条字幕到达时兜底绑定。 */
+    public void onSegmentStarted(SegmentStartedEvent event) { router.onSegmentStarted(event.segmentId()); }
+
+    /**
+     * 接收一次原文修订。nowMs 必须来自同一单调时钟；等待仅影响显示，原始事件可立即保存。
+     * 显示控制器只等待有效模糊方向区，最多1.5秒，明确方向或不支持DOA时正常直接显示。
+     */
+    public void apply(TranscriptEvent event, long nowMs) {
+        releaseExpiredLanguages(nowMs);
         Segment previous = segments.get(event.segmentId());
         if (previous != null && (event.revision() < previous.revision
                 || previous.isFinal && event.revision() <= previous.revision)) return;
+        PendingLanguage pending = pendingLanguages.get(event.segmentId());
+        if (pending != null && event.revision() < pending.event.revision()) return;
+        router.onSegmentStarted(event.segmentId());
+        if (bilingual && waitForModelLanguage && router.isLanguageBased(event.segmentId())
+                && router.existingRoute(event.segmentId()) == null
+                && !router.hasConfiguredLanguage(event.language())) {
+            if (finalizing) {
+                router.forceLocalFallback(event.segmentId(), event.text());
+            } else {
+                pendingLanguages.put(event.segmentId(), new PendingLanguage(event,
+                        pending == null ? nowMs : pending.startedAtMs));
+                if (pending == null) LOG.fine("启动待语种显示窗口 segmentId=" + event.segmentId()
+                        + " deadlineMs=" + (nowMs + LANGUAGE_WAIT_MS));
+                return;
+            }
+        }
+        pendingLanguages.remove(event.segmentId());
+        applyVisible(event);
+    }
+
+    private void applyVisible(TranscriptEvent event) {
         if (bilingual) router.route(event.segmentId(), event.language(), event.text());
-        segments.put(event.segmentId(), new Segment(event.segmentId(), event.revision(),
-                event.text(), event.language(), event.isFinal()));
+        segments.put(event.segmentId(), new Segment(event));
         transcript = event.text();
         finalTranscript = event.isFinal();
     }
 
     /** 同一 translationId 原位修订；旧 revision 不得覆盖更新的显示内容。 */
     public void apply(TranslationEvent event) {
+        apply(event, System.nanoTime() / 1_000_000L);
+    }
+
+    /** 独立译文与原文按ID配对；可信源语种可立即释放同段等待快照。 */
+    public void apply(TranslationEvent event, long nowMs) {
+        releaseExpiredLanguages(nowMs);
         TranslationSegment previous = translations.get(event.translationId());
         if (previous != null && (event.revision() < previous.revision
                 || previous.isFinal && event.revision() <= previous.revision)) return;
-        if (bilingual) router.route(event.sourceSegmentId(), event.sourceLanguage(), "");
+        if (bilingual && router.hasConfiguredLanguage(event.sourceLanguage())) {
+            router.route(event.sourceSegmentId(), event.sourceLanguage(), "");
+            PendingLanguage pending = pendingLanguages.remove(event.sourceSegmentId());
+            if (pending != null) applyVisible(pending.event);
+        } else if (bilingual) {
+            router.onSegmentStarted(event.sourceSegmentId());
+        }
         translations.put(event.translationId(), new TranslationSegment(event));
     }
+
+    /** 最早等待截止时间；使用方只安排一个定时回调，不依赖网络队列或秒级计时tick。 */
+    public OptionalLong nextLanguageDeadlineMs() {
+        return pendingLanguages.values().stream().mapToLong(p -> p.startedAtMs + LANGUAGE_WAIT_MS).min();
+    }
+
+    /** 到期时冲刷最新快照并锁侧；返回true表示UI应刷新。迟到语种可以改事实但不搬栏。 */
+    public boolean releaseExpiredLanguages(long nowMs) {
+        boolean changed = false;
+        var iterator = pendingLanguages.entrySet().iterator();
+        while (iterator.hasNext()) {
+            var entry = iterator.next();
+            PendingLanguage pending = entry.getValue();
+            if (nowMs - pending.startedAtMs < LANGUAGE_WAIT_MS) continue;
+            router.forceLocalFallback(entry.getKey(), pending.event.text());
+            applyVisible(pending.event);
+            LOG.fine("待语种显示窗口到期 segmentId=" + entry.getKey()
+                    + " revision=" + pending.event.revision() + " waitMs=" + (nowMs - pending.startedAtMs));
+            iterator.remove();
+            changed = true;
+        }
+        return changed;
+    }
+
+    /** 正常收口时立即显示待语种快照；不再等待完整窗口，不修改raw事件中的未知语种。 */
+    public boolean flushPendingLanguages() {
+        finalizing = true;
+        boolean changed = !pendingLanguages.isEmpty();
+        if (changed) LOG.fine("停止时冲刷待语种显示段 count=" + pendingLanguages.size());
+        for (var entry : pendingLanguages.entrySet()) {
+            router.forceLocalFallback(entry.getKey(), entry.getValue().event.text());
+            applyVisible(entry.getValue().event);
+        }
+        pendingLanguages.clear();
+        return changed;
+    }
+
+    private record PendingLanguage(TranscriptEvent event, long startedAtMs) { }
 
     public boolean hasTranslation() { return !translations.isEmpty(); }
 
@@ -156,17 +262,20 @@ public final class MeetingDisplayState {
     /** 用户交换显示位置时，既有片段及后续片段一同换边，语义分栏锁不变。 */
     public void swapColumns() { swapped = !swapped; }
 
-    /** P6 SDK 可提供最新稳定角度；无效值将让新片段改走语种降级，已锁片段不搬栏。 */
+    /** 显式更新/清除稳定角；正常SDK样本应使用updateAudioDirection区分无读数与不支持。 */
     public void updateStableDirection(float angle) { router.updateStableAngle(angle); }
 
     /**
      * SDK 正式方向输入。技术样本的状态只决定本次是否有角度；方向区间、语种与片段
-     * 修订的组合规则继续由 App 路由决定。无声源／不支持时清掉旧全局角度，下一新片段
-     * 可按语种降级；已经显示并锁侧的片段保持原栏位，不因后续采样反复搬动。
+     * 修订的组合规则由本公共core唯一处理。NO_DIRECTION保留上次有效稳定角，与国内
+     * DoaPoller一致；UNSUPPORTED清除角度，后续新段按语种降级。已拍快照/锁侧的段不搬栏。
      */
     public void updateAudioDirection(AudioDirectionSample sample) {
-        updateStableDirection(sample.status() == AudioDirectionSample.Status.AVAILABLE
-                ? sample.stableAngleDegrees() : Float.NaN);
+        if (sample.status() == AudioDirectionSample.Status.AVAILABLE) {
+            updateStableDirection(sample.stableAngleDegrees());
+        } else if (sample.status() == AudioDirectionSample.Status.UNSUPPORTED) {
+            updateStableDirection(Float.NaN);
+        }
     }
 
     /** P6 SDK 若能把方向绑定到 ASR 片段，应在该片段首次显示前调用此入口。 */
@@ -225,6 +334,26 @@ public final class MeetingDisplayState {
     public List<Segment> segments() { return new ArrayList<>(segments.values()); }
 
     public Segment segment(String id) { return segments.get(id); }
+
+    /** 供组合层一次回调两处UI；嵌套事件和行均不可变，后续修订不会改变旧快照。 */
+    public MeetingDisplaySnapshot snapshot() {
+        LinkedHashMap<String, TranslationSegment> bySource = new LinkedHashMap<>();
+        for (TranslationSegment translation : translations.values()) bySource.put(translation.sourceId, translation);
+        List<MeetingDisplaySnapshot.Row> rows = new ArrayList<>();
+        for (Segment source : segments.values()) rows.add(snapshotRow(source.id, source, bySource.remove(source.id)));
+        for (String id : bySource.keySet()) rows.add(snapshotRow(id, null, bySource.get(id)));
+        return new MeetingDisplaySnapshot(bilingual, languageA, languageB, swapped, rows);
+    }
+
+    private MeetingDisplaySnapshot.Row snapshotRow(String id, Segment source, TranslationSegment translation) {
+        DisplayRouter.Route route = bilingual ? router.existingRoute(id) : null;
+        int side = route == null ? 0 : route.side();
+        return new MeetingDisplaySnapshot.Row(id, source == null ? null : source.event,
+                translation == null ? null : translation.event,
+                side == 1 ? MeetingDisplaySnapshot.Side.A : side == 2 ? MeetingDisplaySnapshot.Side.B
+                        : MeetingDisplaySnapshot.Side.UNRESOLVED,
+                route == null ? DisplayRouter.Basis.LANGUAGE_UNRESOLVED : route.basis());
+    }
 
     public String transcript() { return transcript; }
 

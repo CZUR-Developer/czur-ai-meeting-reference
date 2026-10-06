@@ -99,8 +99,16 @@ public final class MeetingDisplayStateTest {
     }
 
     @Test
-    public void noDirectionClearsOldAngleAndNewSegmentUsesModelLanguage() {
-        assertUnavailableDirectionFallsBack(AudioDirectionSample.Status.NO_DIRECTION);
+    public void noDirectionKeepsLastStableAngleForNewSegment() {
+        MeetingDisplayState state = new MeetingDisplayState();
+        state.start(0L, true, "zh-CN", "en-US");
+        state.updateAudioDirection(new AudioDirectionSample(218f, 220f, 100L,
+                AudioDirectionSample.Status.AVAILABLE));
+        state.updateAudioDirection(new AudioDirectionSample(Float.NaN, Float.NaN, 200L,
+                AudioDirectionSample.Status.NO_DIRECTION));
+        state.apply(new TranscriptEvent("speech", 1, 0, 100, "en-US", "Hello", true));
+        assertEquals(DisplayRouter.Basis.STABLE_DIRECTION, state.route("speech").basis());
+        assertEquals("Hello", state.latestBilingualRow().left());
     }
 
     @Test

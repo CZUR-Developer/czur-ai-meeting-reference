@@ -96,7 +96,9 @@ public final class TingwuModelAdapterTest {
                 + "\"translate_result\":[{\"index\":7,\"text\":\"你好。\","
                 + "\"partial\":false,\"detected_source_lang\":\"EN\"}]}}",
                 transcripts::add, translations::add);
-        assertEquals(1, transcripts.size());
+        assertEquals(2, transcripts.size());
+        assertFalse(transcripts.get(0).isFinal());
+        assertTrue(transcripts.get(1).isFinal());
         assertEquals(2, translations.size());
         assertEquals("tingwu-7", translations.get(0).sourceSegmentId());
         assertEquals(translations.get(0).translationId(), translations.get(1).translationId());
