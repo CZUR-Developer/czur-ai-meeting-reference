@@ -12,7 +12,6 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
 import android.provider.MediaStore;
-import android.util.Base64;
 import com.czur.aimeeting.reference.meeting.LocalMeetingResult;
 import com.czur.aimeeting.reference.meeting.LocalPdfContent;
 import java.io.File;
@@ -52,7 +51,7 @@ final class LocalPdfWriter {
                 switch (entry.kind()) {
                     case HEADING -> paragraph(entry.text(), 17, true);
                     case TEXT -> paragraph(entry.text(), 12, false);
-                    case IMAGE -> image(entry.text(), entry.imageBase64());
+                    case IMAGE -> image(entry.text(), entry.jpeg());
                 }
             }
             finishPage();
@@ -150,13 +149,7 @@ final class LocalPdfWriter {
         y += bold ? 9 : 5;
     }
 
-    private void image(String caption, String jpegBase64) throws IOException {
-        byte[] bytes;
-        try {
-            bytes = Base64.decode(jpegBase64, Base64.DEFAULT);
-        } catch (IllegalArgumentException invalid) {
-            throw new IOException("演示画面 JPEG 编码错误", invalid);
-        }
+    private void image(String caption, byte[] bytes) throws IOException {
         BitmapFactory.Options options = new BitmapFactory.Options();
         options.inJustDecodeBounds = true;
         BitmapFactory.decodeByteArray(bytes, 0, bytes.length, options);

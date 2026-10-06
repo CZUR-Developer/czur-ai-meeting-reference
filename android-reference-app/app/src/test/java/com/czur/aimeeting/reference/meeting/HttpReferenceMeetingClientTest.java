@@ -43,7 +43,7 @@ public final class HttpReferenceMeetingClientTest {
         try (MockWebServer server = new MockWebServer()) {
             server.enqueue(new MockResponse().setResponseCode(202).setBody("{}"));
             server.enqueue(new MockResponse().setResponseCode(200).setBody("{"
-                    + "\"title\":\"本场会议\",\"artifacts\":["
+                    + "\"status\":\"READY\",\"title\":\"本场会议\",\"artifacts\":["
                     + "{\"type\":\"presentation.capture\",\"status\":\"READY\",\"revision\":2,\"artifactId\":\"art_slide2\"},"
                     + "{\"type\":\"transcript.final\",\"status\":\"READY\",\"revision\":1,\"artifactId\":\"art_text\"},"
                     + "{\"type\":\"summary.structured\",\"status\":\"PENDING\",\"artifactId\":\"art_pending\"},"
@@ -51,19 +51,18 @@ public final class HttpReferenceMeetingClientTest {
             server.enqueue(new MockResponse().setResponseCode(200)
                     .setBody("{\"text\":\"你好\",\"segments\":[]}"));
             server.enqueue(new MockResponse().setResponseCode(200)
-                    .setBody("{\"frames\":[{\"offsetMs\":1000}]}"));
+                    .setBody("{\"frames\":[{\"offsetMs\":1000,\"jpegBase64\":\"AQ==\"}]}"));
             server.enqueue(new MockResponse().setResponseCode(200)
-                    .setBody("{\"frames\":[{\"offsetMs\":2000}]}"));
+                    .setBody("{\"frames\":[{\"offsetMs\":2000,\"jpegBase64\":\"Ag==\"}]}"));
             server.start();
             HttpReferenceMeetingClient client = new HttpReferenceMeetingClient(
                     server.url("/").toString(), "local-demo-token");
             LocalMeetingResult result = client.readLocalResult("mtg_test", 123L);
             assertEquals("本场会议", result.title());
-            assertEquals("你好", result.transcript().getString("text"));
-            assertTrue(result.summary() == null);
-            assertEquals(2, result.presentationCaptures().size());
-            assertEquals(1000, result.presentationCaptures().get(0)
-                    .getJSONArray("frames").getJSONObject(0).getInt("offsetMs"));
+            assertEquals("你好", result.content().transcriptText());
+            assertTrue(result.content().summary() == null);
+            assertEquals(2, result.content().presentationFrames().size());
+            assertEquals(1000, result.content().presentationFrames().get(0).offsetMs());
             assertEquals("/v1/meetings/mtg_test/manifest?genTime=123",
                     server.takeRequest().getPath());
             assertEquals("/v1/meetings/mtg_test/manifest?genTime=123",
@@ -78,7 +77,7 @@ public final class HttpReferenceMeetingClientTest {
     public void localResultUsesReferenceTitleWhenManifestTitleIsNull() throws Exception {
         try (MockWebServer server = new MockWebServer()) {
             server.enqueue(new MockResponse().setResponseCode(200)
-                    .setBody("{\"title\":null,\"artifacts\":[]}"));
+                    .setBody("{\"status\":\"READY\",\"title\":null,\"artifacts\":[]}"));
             server.start();
             LocalMeetingResult result = new HttpReferenceMeetingClient(
                     server.url("/").toString(), "local-demo-token")

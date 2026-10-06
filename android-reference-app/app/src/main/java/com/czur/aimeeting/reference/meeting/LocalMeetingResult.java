@@ -1,12 +1,6 @@
 package com.czur.aimeeting.reference.meeting;
 
-import java.util.List;
-import org.json.JSONObject;
+import com.czur.aimeeting.client.MeetingResultContent;
 
-/** 只包含本场 Manifest 中 READY 的最终产物；缺席的章节保持 null/空列表。 */
-public record LocalMeetingResult(String title, JSONObject transcript, JSONObject translation,
-        JSONObject summary, List<JSONObject> presentationCaptures) {
-    public LocalMeetingResult {
-        presentationCaptures = List.copyOf(presentationCaptures);
-    }
-}
+/** P6-6 迁移期本地 PDF 参数；所有协议 JSON 已由 core 转成类型化内容。 */
+public record LocalMeetingResult(String title, MeetingResultContent content) { }

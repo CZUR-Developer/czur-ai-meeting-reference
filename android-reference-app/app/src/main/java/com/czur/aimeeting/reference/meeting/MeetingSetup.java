@@ -1,6 +1,7 @@
 package com.czur.aimeeting.reference.meeting;
 
 import com.czur.aimeeting.client.MeetingCapabilityState;
+import com.czur.aimeeting.client.MeetingOptions;
 
 import java.util.List;
 
@@ -48,17 +49,17 @@ public record MeetingSetup(Mode mode, String sourceLanguage, String targetLangua
 
     /** 会前选择直接决定 Create 的请求能力；字幕是所有当前模式的基础产物。 */
     public List<String> requestedCapabilities() {
-        return switch (mode) {
-            case LIVE_TRANSCRIPT -> List.of(MeetingCapabilityState.TRANSCRIPT,
-                    MeetingCapabilityState.SPEAKER);
-            case MEETING_MINUTES -> List.of(MeetingCapabilityState.TRANSCRIPT,
-                    MeetingCapabilityState.SUMMARY, MeetingCapabilityState.SPEAKER);
-            case LIVE_TRANSLATION -> List.of(MeetingCapabilityState.TRANSCRIPT,
-                    MeetingCapabilityState.TRANSLATION, MeetingCapabilityState.SPEAKER);
-        };
+        return toOptions().requestedCapabilities();
     }
 
     public List<String> targetLanguages() {
-        return mode == Mode.LIVE_TRANSLATION ? List.of(targetLanguage) : List.of();
+        return toOptions().targetLanguages();
+    }
+
+    /** P6-6 迁移期将旧 UI 快照转成唯一 core 业务类型，P6-7 会直接使用它。 */
+    public MeetingOptions toOptions() {
+        return new MeetingOptions(MeetingOptions.Mode.valueOf(mode.name()), sourceLanguage,
+                targetLanguage, presentationCapture,
+                MeetingOptions.ResultDelivery.valueOf(resultDelivery.name()), resultWebUrl, resultEmails);
     }
 }
