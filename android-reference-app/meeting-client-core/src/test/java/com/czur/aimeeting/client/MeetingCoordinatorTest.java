@@ -145,6 +145,26 @@ public final class MeetingCoordinatorTest {
         }
     }
 
+    /** 保留旧 App StopRule 覆盖：音频终止后用户正常停止，不等待已关闭模型的 FINISHED。 */
+    @Test public void terminatedAudioCanStopWithoutModelFinishedCallback() throws Exception {
+        try (Fixture f = new Fixture(true, Set.of(MeetingCapabilityState.TRANSCRIPT))) {
+            f.runtime.emitFinished = false;
+            f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.WEB, false);
+            assertTrue(f.runtime.waitsForModelFinish());
+            f.probe.awaitCanStop();
+            f.runtime.listener.onAudioError(AudioInputErrorCode.PERMISSION_DENIED, "测试音频输入已终止");
+            f.session.requestStop();
+            MeetingSessionState ended = f.probe.awaitPhase(MeetingSessionState.Phase.ENDED);
+            assertFalse(ended.active());
+            assertFalse(ended.canStop());
+            assertEquals(1, f.runtime.stopCalls);
+            assertEquals(1, f.probe.beforeStopCalls.get());
+            assertEquals(List.of("discover", "create", "grant", "start", "stop"), f.server.steps);
+            assertFalse(f.server.steps.contains("manifest"));
+            assertTrue(f.probe.results.isEmpty());
+        }
+    }
+
     private static MeetingOptions options(MeetingOptions.Mode mode, MeetingOptions.ResultDelivery delivery, boolean capture) {
         return new MeetingOptions(mode, "zh-CN", "en-US", capture, delivery,
                 "https://result.example.test/index.html?existing=1#section", List.of("recipient@example.test"));
@@ -218,6 +238,7 @@ public final class MeetingCoordinatorTest {
         SummaryInput summaryInput;
         volatile int stopCalls;
         boolean emitTail;
+        boolean emitFinished = true;
         Runtime(boolean real) { this.real = real; }
         @Override public boolean usesServerModelMaterials() { return real; }
         @Override public Set<String> localCapabilities() { return ALL; }
@@ -232,7 +253,7 @@ public final class MeetingCoordinatorTest {
                             emit("tail", 1, "zh-CN", "最后字幕", true);
                             listener.onTranslation(new TranslationEvent("t1", "tail", 1, "zh-CN", "en-US", "Final text", true));
                         }
-                        listener.onFinished();
+                        if (emitFinished) listener.onFinished();
                     }
                 }
                 @Override public void close() { }
