@@ -1,5 +1,7 @@
 package com.czur.aimeeting.reference.sample;
 
+import com.czur.aimeeting.client.provider.SampleJsonModelAdapter;
+
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;

@@ -1,4 +1,4 @@
-package com.czur.aimeeting.reference.meeting;
+package com.czur.aimeeting.client.display;
 
 import com.czur.aimeeting.model.AudioDirectionSample;
 import com.czur.aimeeting.model.TranscriptEvent;

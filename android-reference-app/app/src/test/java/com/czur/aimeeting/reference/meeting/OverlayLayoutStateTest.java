@@ -1,5 +1,7 @@
 package com.czur.aimeeting.reference.meeting;
 
+import com.czur.aimeeting.client.display.MeetingDisplayState;
+
 import static org.junit.Assert.assertEquals;
 import com.czur.aimeeting.model.TranscriptEvent;
 import com.czur.aimeeting.model.TranslationEvent;

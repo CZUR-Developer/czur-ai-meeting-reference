@@ -1,7 +1,6 @@
-package com.czur.aimeeting.reference.meeting;
+package com.czur.aimeeting.client.display;
 
 import java.util.HashMap;
-import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -31,6 +30,7 @@ public final class DisplayRouter {
     private final String languageB;
     private final Map<String, Route> locked = new HashMap<>();
     private final Map<String, Integer> segmentDirections = new HashMap<>();
+    private final Map<String, Float> segmentAngles = new HashMap<>();
     private float stableAngle = Float.NaN;
 
     public DisplayRouter(String languageA, String languageB) {
@@ -50,16 +50,42 @@ public final class DisplayRouter {
         }
     }
 
+    /** 句开始时保存角度，包括“无方向”；之后不能被下一人或下一句的方向覆盖。 */
+    public void onSegmentStarted(String segmentId) {
+        segmentAngles.putIfAbsent(segmentId, stableAngle);
+    }
+
+    /** 只针对句开始快照中的有效模糊区等待模型语种，与国内听悟门规则一致。 */
+    public boolean isLanguageBased(String segmentId) {
+        float angle = segmentAngles.getOrDefault(segmentId, stableAngle);
+        return angle >= 0f && angle < 180f || angle > 260f && angle < 280f;
+    }
+
+    public boolean hasConfiguredLanguage(String language) { return languageSide(language) != 0; }
+
+    /** 等待期结束或 Stop 时本地二选一；即使数字同分也选择 A，但不改真实模型语种。 */
+    public Route forceLocalFallback(String segmentId, String text) {
+        Route previous = locked.get(segmentId);
+        if (previous != null) return previous;
+        BilingualLanguageResolver.Resolution resolution =
+                BilingualLanguageResolver.resolve(text, languageA, languageB);
+        Route route = new Route(resolution.language().equals(languageA) ? 1 : 2, Basis.TEXT_LANGUAGE);
+        locked.put(segmentId, route);
+        return route;
+    }
+
     public Route route(String segmentId, String modelLanguage, String sourceText) {
         Route previous = locked.get(segmentId);
         if (previous != null) return previous;
         Integer segmentSide = segmentDirections.remove(segmentId);
+        onSegmentStarted(segmentId);
+        float angle = segmentAngles.get(segmentId);
         Route decided;
         if (segmentSide != null) {
             decided = new Route(segmentSide, Basis.SEGMENT_DIRECTION);
-        } else if (stableAngle >= 180f && stableAngle <= 260f) {
+        } else if (angle >= 180f && angle <= 260f) {
             decided = new Route(1, Basis.STABLE_DIRECTION);
-        } else if (stableAngle >= 280f && stableAngle <= 360f) {
+        } else if (angle >= 280f && angle <= 360f) {
             decided = new Route(2, Basis.STABLE_DIRECTION);
         } else {
             int byModel = languageSide(modelLanguage);
@@ -82,31 +108,15 @@ public final class DisplayRouter {
         return 0;
     }
 
-    /** 只为当前可见的中英配置识别显著字形；其他语种由模型语种或会前 A 兜底。 */
+    /** 复用国内多语种二选一；完全无文字线索时继续等后续事实，不提前锁数字 partial。 */
     private int textSide(String text) {
-        if (text == null) return 0;
-        int han = 0;
-        int latin = 0;
-        for (int offset = 0; offset < text.length();) {
-            int codePoint = text.codePointAt(offset);
-            if (Character.UnicodeScript.of(codePoint) == Character.UnicodeScript.HAN) han++;
-            else if ((codePoint >= 'A' && codePoint <= 'Z')
-                    || (codePoint >= 'a' && codePoint <= 'z')) latin++;
-            offset += Character.charCount(codePoint);
-        }
-        if (han > latin && han > 0) return languageSide("zh");
-        if (latin > han && latin > 0) return languageSide("en");
-        return 0;
+        BilingualLanguageResolver.Resolution resolution =
+                BilingualLanguageResolver.resolve(text, languageA, languageB);
+        return resolution.scoreA() == 0 && resolution.scoreB() == 0 ? 0
+                : resolution.language().equals(languageA) ? 1 : 2;
     }
 
     private static String normalize(String language) {
-        if (language == null) return "";
-        String base = language.trim().toLowerCase(Locale.ROOT).split("[-_]", 2)[0];
-        return switch (base) {
-            case "cn" -> "zh";
-            case "jp" -> "ja";
-            case "kr" -> "ko";
-            default -> base;
-        };
+        return BilingualLanguageResolver.normalize(language);
     }
 }

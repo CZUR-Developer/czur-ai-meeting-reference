@@ -13,3 +13,4 @@ dependencyResolutionManagement {
 rootProject.name = "ai-meeting-reference-app"
 include(":app")
 include(":model-runtime-contract")
+include(":meeting-client-core")

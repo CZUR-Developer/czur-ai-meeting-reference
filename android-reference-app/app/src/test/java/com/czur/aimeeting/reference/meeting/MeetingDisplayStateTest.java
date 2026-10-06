@@ -1,5 +1,9 @@
 package com.czur.aimeeting.reference.meeting;
 
+import com.czur.aimeeting.client.display.MeetingDisplayState;
+
+import com.czur.aimeeting.client.display.DisplayRouter;
+
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import com.czur.aimeeting.model.AudioDirectionSample;

@@ -1,5 +1,7 @@
 package com.czur.aimeeting.reference.meeting;
 
+import com.czur.aimeeting.client.ModelAdapterRegistry;
+
 import android.content.Context;
 import com.czur.aimeeting.model.ModelRuntime;
 import com.czur.aimeeting.model.ModelSession;

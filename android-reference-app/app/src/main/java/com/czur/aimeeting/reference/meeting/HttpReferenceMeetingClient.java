@@ -1,5 +1,7 @@
 package com.czur.aimeeting.reference.meeting;
 
+import com.czur.aimeeting.client.MeetingCapabilityState;
+
 import com.czur.aimeeting.model.ModelSessionGrant;
 import com.czur.aimeeting.model.SummaryResult;
 import com.czur.aimeeting.model.SummarySessionGrant;

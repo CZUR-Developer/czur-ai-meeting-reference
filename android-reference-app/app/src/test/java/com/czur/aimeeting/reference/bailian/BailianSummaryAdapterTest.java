@@ -1,5 +1,7 @@
 package com.czur.aimeeting.reference.bailian;
 
+import com.czur.aimeeting.client.provider.BailianSummaryAdapter;
+
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;

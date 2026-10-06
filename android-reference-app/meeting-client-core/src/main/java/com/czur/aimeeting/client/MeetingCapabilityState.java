@@ -1,4 +1,4 @@
-package com.czur.aimeeting.reference.meeting;
+package com.czur.aimeeting.client;
 
 import java.util.Collections;
 import java.util.HashMap;

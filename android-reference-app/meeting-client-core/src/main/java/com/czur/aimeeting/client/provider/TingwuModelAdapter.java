@@ -1,4 +1,4 @@
-package com.czur.aimeeting.reference.tingwu;
+package com.czur.aimeeting.client.provider;
 
 import com.czur.aimeeting.model.ModelAdapter;
 import com.czur.aimeeting.model.ModelSessionGrant;

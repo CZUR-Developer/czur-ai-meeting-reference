@@ -36,8 +36,12 @@ android {
 
 dependencies {
     implementation(project(":model-runtime-contract"))
+    if (meetingRuntime == "mock") {
+        implementation(project(":meeting-client-core"))
+    }
     if (meetingRuntime == "sdk") {
         implementation(files(sdkAar!!))
+        // SDK AAR 内带同一 core JAR；不要再次依赖 :meeting-client-core 造成重复类。
         // 本地 AAR 文件不传递 POM 依赖；SDK 的 WebSocket 运行时需要 OkHttp。
         implementation("com.squareup.okhttp3:okhttp:4.12.0")
     }

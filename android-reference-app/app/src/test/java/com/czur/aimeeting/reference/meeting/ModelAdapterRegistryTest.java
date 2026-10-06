@@ -1,13 +1,17 @@
 package com.czur.aimeeting.reference.meeting;
 
+import com.czur.aimeeting.client.ModelAdapterRegistry;
+
+import com.czur.aimeeting.client.MeetingCapabilityState;
+
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
-import com.czur.aimeeting.reference.sample.SampleJsonModelAdapter;
-import com.czur.aimeeting.reference.tingwu.TingwuModelAdapter;
-import com.czur.aimeeting.reference.bailian.BailianSummaryAdapter;
+import com.czur.aimeeting.client.provider.SampleJsonModelAdapter;
+import com.czur.aimeeting.client.provider.TingwuModelAdapter;
+import com.czur.aimeeting.client.provider.BailianSummaryAdapter;
 import org.junit.Test;
 
 /** 两种协议只在注册表分流，每场取得全新 Adapter 状态。 */

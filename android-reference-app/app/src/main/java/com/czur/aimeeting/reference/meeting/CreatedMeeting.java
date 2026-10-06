@@ -1,5 +1,7 @@
 package com.czur.aimeeting.reference.meeting;
 
+import com.czur.aimeeting.client.MeetingCapabilityState;
+
 import com.czur.aimeeting.model.ModelSessionGrant;
 
 /** 创建会议的应用可用信息；modelSession 在 Mock 后端响应中可缺省。 */

@@ -7,6 +7,9 @@ integration.
 
 工程采用 Android Studio 结构：`app/` 是参考 APK，`model-runtime-contract/`
 是模型 Adapter、会话材料、生命周期和标准字幕事件的唯一公共源码。
+`meeting-client-core/` 保存共享 Adapter 工厂、默认解析和显示规则，详见其
+[接入说明](meeting-client-core/README.md)。Mock 直接依赖 core；SDK 模式使用 AAR
+内带的同一 core，App 不重复打包。Server 组合入口继续按 P6-6/P6-7 实装计划推进。
 默认 `mock` 模式不需要私有 AAR，可干净构建并演示同一片段的初稿、修订稿、最终稿；
 未完成文字以 80% 透明度显示，最终文字以 100% 显示。
 

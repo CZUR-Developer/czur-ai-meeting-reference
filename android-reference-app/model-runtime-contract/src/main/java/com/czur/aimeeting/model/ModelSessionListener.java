@@ -9,10 +9,14 @@ public interface ModelSessionListener {
     default void onAudioInputMode(AudioInputMode mode) {}
 
     /**
-     * 当前系统方向样本。应用需要方向参与分栏时应在同一 UI 队列更新状态，再显示
-     * 后续字幕；NO_DIRECTION／UNSUPPORTED 应清除旧全局方向，已锁侧片段保持原栏。
+     * 当前系统方向样本，NO_DIRECTION 如实表示本次无有效读数。是否保留历史稳定角属于
+     * 上层显示策略：国内组合规则保留 NO_DIRECTION 之前的有效角，UNSUPPORTED 按语种
+     * 降级。基础层不把缓存角伪装成本次 AVAILABLE；已锁侧片段始终保持原栏。
      */
     default void onAudioDirection(AudioDirectionSample sample) {}
+
+    /** 模型句开始的标准事实；与字幕/译文同队列交付，供上层绑定本段方向快照。 */
+    default void onSegmentStarted(SegmentStartedEvent event) {}
 
     /**
      * 音频输入失败。SDK 不弹窗、不申请权限，应用根据 code 提示或进入自己的申请流程。

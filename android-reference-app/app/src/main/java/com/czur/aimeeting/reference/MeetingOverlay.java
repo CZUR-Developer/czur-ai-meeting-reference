@@ -12,7 +12,7 @@ import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
-import com.czur.aimeeting.reference.meeting.MeetingDisplayState;
+import com.czur.aimeeting.client.display.MeetingDisplayState;
 import com.czur.aimeeting.reference.meeting.MeetingReminderPresentation;
 import com.czur.aimeeting.reference.meeting.MeetingSetup;
 import com.czur.aimeeting.reference.meeting.OverlayLayoutState;

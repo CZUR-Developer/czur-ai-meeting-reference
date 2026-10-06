@@ -1,5 +1,7 @@
 package com.czur.aimeeting.reference.meeting;
 
+import com.czur.aimeeting.client.MeetingCapabilityState;
+
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 

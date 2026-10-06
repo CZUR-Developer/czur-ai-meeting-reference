@@ -29,6 +29,16 @@ public interface ModelAdapter {
         return onServerMessage(message, transcriptListener);
     }
 
+    /**
+     * 带句开始事实的统一解析入口。支持句开始的实现先发 SegmentStartedEvent，再发该段
+     * 的字幕/译文；SDK 保持这些回调的先后顺序。默认调用旧三参数入口，既有伙伴 Adapter
+     * 不需新增方法。语种修正仍用更高修订号的标准字幕表达，不另建原始消息旁路。
+     */
+    default ModelSignal onServerMessage(String message, TranscriptListener transcriptListener,
+            TranslationListener translationListener, SegmentStartedListener segmentStartedListener) {
+        return onServerMessage(message, transcriptListener, translationListener);
+    }
+
     /** 停止输入后的协议收尾消息；不需要文本收尾的协议可以返回 null。 */
     default String stopMessage(ModelSessionGrant grant) { return null; }
 }

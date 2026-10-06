@@ -1,4 +1,4 @@
-package com.czur.aimeeting.reference.bailian;
+package com.czur.aimeeting.client.provider;
 
 import com.czur.aimeeting.model.SummaryAdapter;
 import com.czur.aimeeting.model.SummaryInput;
