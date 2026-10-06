@@ -14,7 +14,7 @@ import com.czur.aimeeting.model.AudioDirectionSample;
 import com.czur.aimeeting.model.AudioInputErrorCode;
 import com.czur.aimeeting.model.AudioInputMode;
 
-/** P6 设备验收页：看见 SDK 实际选择的音频源、模型帧数和 PCM 峰值。 */
+/** P6 设备验收页：独立读取基础音频，展示实际来源、音频帧数和 PCM 峰值。 */
 public final class AudioDiagnosticActivity extends Activity {
     private static final String TAG = "AiMeetingAudioDiagnostic";
     private static final int RECORD_AUDIO_REQUEST = 1;
@@ -119,7 +119,7 @@ public final class AudioDiagnosticActivity extends Activity {
     /** 同一快照同时展示模式、方向和有效音频；无效角度不会显示为方向验收成功。 */
     private void renderAudioState() {
         status.setText("来源：" + inputMode + "\n方向：" + direction
-                + "\n模型帧：" + frames + "\n峰值：" + peak);
+                + "\n音频帧：" + frames + "\n峰值：" + peak);
     }
 
     @Override public void onRequestPermissionsResult(int requestCode, String[] permissions,
