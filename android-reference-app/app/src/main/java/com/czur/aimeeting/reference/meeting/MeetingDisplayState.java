@@ -1,5 +1,6 @@
 package com.czur.aimeeting.reference.meeting;
 
+import com.czur.aimeeting.model.AudioDirectionSample;
 import com.czur.aimeeting.model.TranscriptEvent;
 import com.czur.aimeeting.model.TranslationEvent;
 import java.util.ArrayList;
@@ -157,6 +158,16 @@ public final class MeetingDisplayState {
 
     /** P6 SDK 可提供最新稳定角度；无效值将让新片段改走语种降级，已锁片段不搬栏。 */
     public void updateStableDirection(float angle) { router.updateStableAngle(angle); }
+
+    /**
+     * SDK 正式方向输入。技术样本的状态只决定本次是否有角度；方向区间、语种与片段
+     * 修订的组合规则继续由 App 路由决定。无声源／不支持时清掉旧全局角度，下一新片段
+     * 可按语种降级；已经显示并锁侧的片段保持原栏位，不因后续采样反复搬动。
+     */
+    public void updateAudioDirection(AudioDirectionSample sample) {
+        updateStableDirection(sample.status() == AudioDirectionSample.Status.AVAILABLE
+                ? sample.stableAngleDegrees() : Float.NaN);
+    }
 
     /** P6 SDK 若能把方向绑定到 ASR 片段，应在该片段首次显示前调用此入口。 */
     public void setSegmentDirection(String segmentId, int side) {

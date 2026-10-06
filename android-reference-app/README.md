@@ -10,8 +10,10 @@ integration.
 默认 `mock` 模式不需要私有 AAR，可干净构建并演示同一片段的初稿、修订稿、最终稿；
 未完成文字以 80% 透明度显示，最终文字以 100% 显示。
 
-`sdk` 模式把 `starry` 独立 SDK Module 产出的版本化 AAR 从仓外注入。SDK 使用普通
-Android 麦克风和 WebSocket 直连模型；本仓公开的 `TingwuModelAdapter` 编码
+`sdk` 模式把 `starry` 独立 SDK Module 产出的版本化 AAR 从仓外注入。SDK 在有兼容
+共享音频接口的新 Starry 系统读取 Broker；旧 CZUR 系统无服务／接口不兼容，以及
+普通 Android 设备使用标准麦克风，并通过 WebSocket
+直连模型；本仓公开的 `TingwuModelAdapter` 编码
 `StartTranscription`/`StopTranscription`，把模型 partial/final 消息归一化为标准字幕。
 当前还可解析按国内版字段路径重建的听悟 `translate_result` 固定样例，并将译文与
 原文片段关联，在应用内双栏和悬浮窗显示。会前现场互译入口在 SDK 构建中已开放：
@@ -53,15 +55,25 @@ P5-6 的参考结果方式以网页、本地 PDF、邮箱链接和互译无痕�
 # 从 starry 构建或交付渠道取得对应版本 AAR 后，在本机注入
 ./gradlew :app:assembleDebug :app:testDebugUnitTest \
   -PmeetingRuntime=sdk \
-  -PmeetingSdkAar=/absolute/path/ai-meeting-sdk-0.4.0-release.aar
+  -PmeetingSdkAar=/absolute/path/ai-meeting-sdk-0.5.0-release.aar
 ```
 
 排查真实模型字幕但设备 MIC 声学入口不确定时，可将同一 SDK Module 的
-`ai-meeting-sdk-0.4.0-debug.aar` 注入上面的 `meetingSdkAar` 参数。调试 AAR 若在
+`ai-meeting-sdk-0.5.0-debug.aar` 注入上面的 `meetingSdkAar` 参数。调试 AAR 若在
 参考 App 私有外部目录找到 `meeting-debug.wav`，会按实时节奏把该 16 kHz、单声道、
-PCM16 WAV 发往模型；没有该文件就继续使用 MIC。录音仅通过设备调试工具临时放在
+PCM16 WAV 发往模型；没有该文件时，SDK 探测 CZUR／Starry 平台及共享音频接口兼容性，
+兼容时选择系统共享音频，由系统处理 SELF/OTHER 切换；旧系统无兼容服务时选择标准 MIC。
+普通 Android 平台使用标准 MIC。已探测到匹配接口描述符的 Broker 若实际开流失败，返回明确音频
+错误，不在本场取流失败后切换到普通 MIC，避免掩盖新系统故障和破坏音源竞合。
+新系统与 SDK 使用带 `clientToken` 的内部开流接口；共享供流、普通 MIC 双顺序和专业
+录拍竞合已有设备证据。2026-10-06 新接口复验确认实际模式为 `CZUR_BROKER`、音频
+帧持续增长，方向输出 `NO_DIRECTION` 与递增时间戳；撤销录音权限后直接调用 SDK 得到
+`PERMISSION_DENIED`，没有权限弹窗且进程存活，恢复权限后可重开 Broker 并正常停止。
+有效实体方向的左右准确性与物理旧系统的 MIC 降级仍未实测，P6 继续保持未整体签收。
+录音仅通过设备调试工具临时放在
 `/sdcard/Android/data/com.czur.aimeeting.reference/files/meeting-debug.wav`，
-不可加入仓库或 APK。正式 release AAR 始终使用 MIC。此验证仍使用真实参考 App、
+不可加入仓库或 APK。正式 release AAR 使用相同的自动音频选择，但不包含 WAV。
+此验证仍使用真实参考 App、
 后端签发、听悟 Adapter、标准事件提交与结果页面；WAV 读完后在 App 点击停止。
 
 裸 AAR 不传递依赖元数据，`sdk` 模式显式添加 SDK 所需的 OkHttp 运行依赖。
@@ -70,7 +82,7 @@ SDK 从公共 `model-runtime-contract-0.4.0.jar` 编译，参考 App 只打包�
 产生真实字幕，并确认音频送达模型端点、后端只接收标准事件。
 
 会中模型会话、标准事件队列和跨应用字幕窗由 `MeetingService` 持有。用户在 App
-前台点击开始时启动 microphone 前台服务；切换到其他 App 后，标准 MIC 与模型会话
+前台点击开始时启动 microphone 前台服务；切换到其他 App 后，SDK 音源与模型会话
 仍由该服务持有，页面重新打开时订阅同一场字幕状态。设备上的后台连续采集尚待真实
 会议验证。悬浮窗需要用户在系统设置中授予
 “显示在其他应用上层”权限，页面和悬浮窗的停止操作进入同一服务收口流程。
@@ -104,6 +116,40 @@ App 调用 `POST /v1/reference/session:login` 取得访问令牌，再以该令�
 结果仍待验；真实双向互译已用调试录音在设备上完成会中与结果读回，实体麦克风声学效果仍待验。
 互译分栏同时考虑会前语言、模型源语种、有效方向角、片段修订和用户交换栏位；P5
 无有效方向角时按语种降级，实体方向角左右准确性留待 P6 验证。
+
+### SDK 音频来源、方向与权限边界
+
+`ModelSessionListener.onAudioInputMode(AudioInputMode)` 返回本次实际来源：`MIC`
+为标准 Android 麦克风，`CZUR_BROKER` 为兼容的新系统共享音频，`DEBUG_WAV` 为
+仅 Debug 的测试文件。参考 App 在会中功能栏显示该枚举值；伙伴可用于状态展示，
+无需自行探测系统。旧 CZUR 系统的 MIC 降级遵循该系统既有录音竞合能力，不具备新
+Broker 的竞合保证；模式用于准确说明当前能力。
+
+`onAudioDirection(AudioDirectionSample)` 返回原始／稳定角度、单调时间戳和
+`AVAILABLE`／`NO_DIRECTION`／`UNSUPPORTED` 状态。SDK 只提供技术样本，App 的
+`MeetingDisplayState.updateAudioDirection()` 更新全局稳定方向，业务 `DisplayRouter`
+结合会前语言、模型语种和片段状态确定左右栏。`MeetingService` 将方向和字幕回调都
+排入主线程队列；方向消失时清除旧全局角度，新片段按语种降级，已有片段不搬栏。
+
+`onAudioError(AudioInputErrorCode, String)` 区分权限拒绝、开流失败与读取失败。
+SDK 无权限时返回 `PERMISSION_DENIED`，不负责申请权限；参考 App 的开始按钮和诊断
+正常入口检查并申请 `RECORD_AUDIO`，Service 只显示错误提示，不从后台弹权限框。
+SDK 终止本场音频后，用户仍可停止会议；App 使用已收到的标准事件执行后端 Stop，
+不等待已关闭会话的最终模型回调，不生成缺字幕的纪要或主动交付空结果。结束后返回
+会前页面，由 App 正常申请权限并重新开始。
+只实现旧 `onError(String)` 的调用方仍会由默认方法收到音频错误。
+
+Debug `AudioDiagnosticActivity` 同时显示模式、方向状态、帧数和峰值；“SDK 权限自检
+（不申请）”按钮只用于撤销权限后的设备验收，验证 SDK 返回错误且应用不崩溃。正常
+诊断按钮仍由 App 请求权限，Release 不包含诊断页或测试音源。
+
+本轮诊断设备证据保存于 `/home/cfy/Sync/p6-sdk-audio-contract-20261006/`：`06`／`07`
+记录 Broker 模式、持续读帧、无有效声源的方向状态及正常停止；`11` 记录无权限错误
+回调；`13`／`14` 记录恢复权限后的重新取流和最终停止。这些证据验证模式与方向状态
+出口及 SDK 权限边界，不代签有效 DOA 左右分栏或物理旧系统的 MIC 取流。
+
+### 参考结果方式
+
 结果方式包含网页查看、本地 PDF、按后端 SMTP 配置开放的邮箱链接，以及仅现场互译
 可选的无痕方式。参考 App 不提供扫码接收或小程序；需要接收者检查的合作伙伴可按下文
 在会前开会条件 Hook 注入自己的实现。参考链路不新增录音归档，模型音频仍直连模型，

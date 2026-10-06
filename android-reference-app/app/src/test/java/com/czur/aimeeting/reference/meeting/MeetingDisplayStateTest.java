@@ -2,6 +2,7 @@ package com.czur.aimeeting.reference.meeting;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import com.czur.aimeeting.model.AudioDirectionSample;
 import com.czur.aimeeting.model.TranscriptEvent;
 import com.czur.aimeeting.model.TranslationEvent;
 import org.junit.Test;
@@ -76,5 +77,41 @@ public final class MeetingDisplayStateTest {
         assertEquals("中文", state.leftLabel());
         assertEquals("Hello", state.latestBilingualRow().right());
         assertEquals(state.bilingualRows().get(0).right(), state.latestBilingualRow().right());
+    }
+
+    @Test
+    public void sdkDirectionRoutesBeforeFirstDisplayAndKeepsSegmentLocked() {
+        MeetingDisplayState state = new MeetingDisplayState();
+        state.start(0L, true, "zh-CN", "en-US");
+        state.updateAudioDirection(new AudioDirectionSample(218f, 220f, 100L,
+                AudioDirectionSample.Status.AVAILABLE));
+        state.apply(new TranscriptEvent("speech", 1, 0, 100, "en-US", "Hello", false));
+        assertEquals(DisplayRouter.Basis.STABLE_DIRECTION, state.route("speech").basis());
+        assertEquals("Hello", state.latestBilingualRow().left());
+        state.updateAudioDirection(new AudioDirectionSample(302f, 300f, 200L,
+                AudioDirectionSample.Status.AVAILABLE));
+        state.apply(new TranscriptEvent("speech", 2, 0, 200, "en-US", "Hello again", true));
+        assertEquals("Hello again", state.latestBilingualRow().left());
+    }
+
+    @Test
+    public void noDirectionClearsOldAngleAndNewSegmentUsesModelLanguage() {
+        assertUnavailableDirectionFallsBack(AudioDirectionSample.Status.NO_DIRECTION);
+    }
+
+    @Test
+    public void unsupportedDirectionClearsOldAngleAndNewSegmentUsesModelLanguage() {
+        assertUnavailableDirectionFallsBack(AudioDirectionSample.Status.UNSUPPORTED);
+    }
+
+    private void assertUnavailableDirectionFallsBack(AudioDirectionSample.Status status) {
+        MeetingDisplayState state = new MeetingDisplayState();
+        state.start(0L, true, "zh-CN", "en-US");
+        state.updateAudioDirection(new AudioDirectionSample(218f, 220f, 100L,
+                AudioDirectionSample.Status.AVAILABLE));
+        state.updateAudioDirection(new AudioDirectionSample(Float.NaN, Float.NaN, 200L, status));
+        state.apply(new TranscriptEvent("speech", 1, 0, 100, "en-US", "Hello", true));
+        assertEquals(DisplayRouter.Basis.MODEL_LANGUAGE, state.route("speech").basis());
+        assertEquals("Hello", state.latestBilingualRow().right());
     }
 }

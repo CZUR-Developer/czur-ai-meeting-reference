@@ -15,6 +15,9 @@ import android.os.IBinder;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Log;
+import com.czur.aimeeting.model.AudioDirectionSample;
+import com.czur.aimeeting.model.AudioInputErrorCode;
+import com.czur.aimeeting.model.AudioInputMode;
 import com.czur.aimeeting.model.ModelSession;
 import com.czur.aimeeting.model.ModelSessionGrant;
 import com.czur.aimeeting.model.ModelSessionListener;
@@ -161,6 +164,8 @@ public final class MeetingService extends Service {
     private String meetingId;
     private String status = "请先登录，再开始会议";
     private String capabilityText = "本场功能将在创建会议后按后端能力显示";
+    /** SDK 回传的实际来源；App 不自行探测系统，也不把 Debug WAV 标为 MIC。 */
+    private AudioInputMode audioInputMode;
     private String resultUrl;
     private LocalPdfWriter.SavedPdf resultPdf;
     private int transcriptVersion;
@@ -169,6 +174,8 @@ public final class MeetingService extends Service {
     private boolean canStop;
     private volatile boolean stopRequested;
     private volatile boolean modelFinished;
+    /** SDK 已终止音频会话，后续不会有 onFinished；允许正常 Stop 收口后重新申请权限。 */
+    private volatile boolean audioInputFailed;
     private boolean summarySubmitted;
     private boolean limitReminderLogged;
     private boolean idleReminderLogged;
@@ -364,6 +371,7 @@ public final class MeetingService extends Service {
         stopInputSent.set(false);
         stopRequested = false;
         modelFinished = false;
+        audioInputFailed = false;
         summarySubmitted = false;
         finalTranscript.clear();
         presentationSequence = 0;
@@ -375,6 +383,7 @@ public final class MeetingService extends Service {
         display.start(startedAtMs,
                 requested.mode() == MeetingSetup.Mode.LIVE_TRANSLATION,
                 requested.sourceLanguage(), requested.targetLanguage());
+        audioInputMode = null;
         transcriptVersion++;
         Set<String> local = runtime.realtimeCapabilities(created);
         MeetingCapabilityState capabilities = created.capabilities();
@@ -395,6 +404,41 @@ public final class MeetingService extends Service {
                 network.execute(() -> appendTranscript(nextClient, created.meetingId(),
                         clientSequence, standard));
             }, new ModelSessionListener() {
+                @Override public void onAudioInputMode(AudioInputMode mode) {
+                    main.post(() -> {
+                        audioInputMode = mode;
+                        Log.i(TAG, "本场实际音频来源 mode=" + mode + " meetingId=" + meetingId);
+                        publish();
+                    });
+                }
+
+                @Override public void onAudioDirection(AudioDirectionSample sample) {
+                    // 与 showTranscript／showTranslation 排入同一个主线程队列。
+                    // SDK 返回技术角度，左右判定、语种降级和片段锁侧仍由 App 的路由执行。
+                    main.post(() -> {
+                        display.updateAudioDirection(sample);
+                        Log.d(TAG, "方向样本 status=" + sample.status()
+                                + " raw=" + sample.angleDegrees()
+                                + " stable=" + sample.stableAngleDegrees());
+                    });
+                }
+
+                @Override public void onAudioError(AudioInputErrorCode code, String message) {
+                    audioInputFailed = true;
+                    Log.w(TAG, "音频输入失败 code=" + code + " meetingId=" + meetingId);
+                    // SDK 已关闭本场输入，不能继续等待一个不会发生的模型完成回调。
+                    // 如果用户先点了停止，则接着收口；否则仍保留停止按钮供用户确认。
+                    main.post(() -> {
+                        status = code == AudioInputErrorCode.PERMISSION_DENIED
+                                ? "没有麦克风权限，请在应用中授予权限后重新开始会议"
+                                : "音频输入失败：" + message;
+                        // SDK 只回传错误；这里不从后台 Service 弹权限框。
+                        // 正常开始按钮已有应用级权限申请，当前会议仍可由用户停止收口。
+                        publish();
+                    });
+                    if (stopRequested && stopInputSent.get()) scheduleComplete();
+                }
+
                 @Override public void onTranslation(TranslationEvent event) {
                     main.post(() -> showTranslation(event));
                     if (requested.mode() == MeetingSetup.Mode.LIVE_TRANSLATION) {
@@ -585,7 +629,8 @@ public final class MeetingService extends Service {
                 closePresentation();
                 session.stopInput();
                 stopInputSent.set(true);
-                if (!runtime.waitsForModelFinish() || modelFinished) scheduleComplete();
+                if (canCompleteAfterStop(runtime.waitsForModelFinish(), modelFinished,
+                        audioInputFailed)) scheduleComplete();
             } catch (RuntimeException failure) {
                 Log.e(TAG, "停止模型输入失败 meetingId=" + meetingId
                         + " errorType=" + failure.getClass().getSimpleName());
@@ -596,6 +641,15 @@ public final class MeetingService extends Service {
                 });
             }
         });
+    }
+
+    /**
+     * 停止输入后的最小完成条件。真实模型正常场次等待最终输出；音频被 SDK 终止时
+     * 不会再有最终回调，直接使用已经提交的标准事件执行后端 Stop。
+     */
+    static boolean canCompleteAfterStop(boolean waitsForModelFinish, boolean modelFinished,
+            boolean audioInputFailed) {
+        return !waitsForModelFinish || modelFinished || audioInputFailed;
     }
 
     private void scheduleComplete() {
@@ -614,7 +668,8 @@ public final class MeetingService extends Service {
             return;
         }
         try {
-            if (setup.mode() == MeetingSetup.Mode.MEETING_MINUTES && !summarySubmitted) {
+            if (!audioInputFailed && setup.mode() == MeetingSetup.Mode.MEETING_MINUTES
+                    && !summarySubmitted) {
                 final SummaryInput input;
                 try {
                     input = finalTranscript.input(setup.sourceLanguage());
@@ -637,6 +692,13 @@ public final class MeetingService extends Service {
                 return;
             }
             session.close();
+            if (audioInputFailed) {
+                // 后端保存已经收到的内容；未成功采集的场次不自动发邮件、生成 PDF 或
+                // 展示空结果，也不要求无字幕的纪要场次先生成总结才能结束。
+                main.post(() -> finishWithStatus(
+                        "音频输入已结束，本场会议已停止；请检查麦克风权限或音频连接后重新开始"));
+                return;
+            }
             Log.i(TAG, "会议结束，结果已就绪 meetingId=" + meetingId);
             if (setup.resultDelivery() == MeetingSetup.ResultDelivery.TRACELESS) {
                 main.post(() -> finishWithStatus("会议已结束；无痕互译不主动交付结果"));
@@ -716,7 +778,8 @@ public final class MeetingService extends Service {
                 + " · 剩余 " + MeetingTimeRule.format(clock.remainingMs());
         MeetingReminderPresentation.Notice reminder = active && clock != null
                 ? reminderPresentation.at(clock) : MeetingReminderPresentation.Notice.NONE;
-        State state = new State(display, status, capabilityText, busy, active, canStop,
+        String audioText = audioInputMode == null ? "" : "\n音频来源：" + audioInputMode;
+        State state = new State(display, status, capabilityText + audioText, busy, active, canStop,
                 overlay.isShowing(), transcriptVersion, resultUrl, resultPdf, timeText, reminder,
                 setup == null ? MeetingSetup.Mode.LIVE_TRANSCRIPT : setup.mode());
         overlay.render(display, state.mode, timeText, reminder, canStop, observer == null);
