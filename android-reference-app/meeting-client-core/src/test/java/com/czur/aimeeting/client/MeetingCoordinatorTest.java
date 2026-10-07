@@ -4,6 +4,10 @@ import static org.junit.Assert.*;
 
 import com.czur.aimeeting.client.display.MeetingDisplaySnapshot;
 import com.czur.aimeeting.client.provider.TingwuModelAdapter;
+import com.czur.aimeeting.client.identity.IdentityProvider;
+import com.czur.aimeeting.client.identity.IdentityResult;
+import com.czur.aimeeting.client.identity.IdentitySession;
+import com.czur.aimeeting.client.identity.ReferenceIdentityProvider;
 import com.czur.aimeeting.client.server.*;
 import com.czur.aimeeting.model.*;
 import java.io.IOException;
@@ -25,6 +29,64 @@ import org.junit.Test;
 public final class MeetingCoordinatorTest {
     private static final Set<String> ALL = Set.of(MeetingCapabilityState.TRANSCRIPT,
             MeetingCapabilityState.TRANSLATION, MeetingCapabilityState.SUMMARY, MeetingCapabilityState.SPEAKER);
+
+    @Test public void missingIdentityIsVisibleAndNeverCreatesMeeting() throws Exception {
+        try (Fixture f = new Fixture(false, Set.of(MeetingCapabilityState.TRANSCRIPT),
+                new ReferenceIdentityProvider())) {
+            BlockingQueue<IdentityResult> refreshed = new LinkedBlockingQueue<>();
+            f.client.refreshIdentity(identityCallback(refreshed));
+            assertEquals(IdentityResult.Status.LOGIN_REQUIRED, refreshed.poll(2, TimeUnit.SECONDS).status());
+            f.session = f.client.start(options(MeetingOptions.Mode.LIVE_TRANSCRIPT,
+                    MeetingOptions.ResultDelivery.WEB, false), f.probe);
+            assertEquals("请先登录", f.probe.awaitPhase(MeetingSessionState.Phase.FAILED).message());
+            assertTrue(f.server.steps.isEmpty());
+            assertNull(f.sessionToken);
+        }
+    }
+
+    @Test public void meetingReadsLatestIdentityAndKeepsItsCredentialSnapshot() throws Exception {
+        ReferenceIdentityProvider identity = new ReferenceIdentityProvider();
+        identity.updateSession(new IdentitySession("initial-fixture", "参考用户"));
+        try (Fixture f = new Fixture(false, Set.of(MeetingCapabilityState.TRANSCRIPT), identity)) {
+            BlockingQueue<IdentityResult> refreshed = new LinkedBlockingQueue<>();
+            f.client.refreshIdentity(identityCallback(refreshed));
+            assertEquals("initial-fixture", refreshed.poll(2, TimeUnit.SECONDS).session().accessToken());
+            identity.updateSession(new IdentitySession("latest-fixture", "参考用户"));
+            f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.WEB, false);
+            assertEquals("latest-fixture", f.sessionToken);
+            identity.clearSession();
+            f.client.refreshIdentity(identityCallback(refreshed));
+            assertEquals(IdentityResult.Status.LOGIN_REQUIRED, refreshed.poll(2, TimeUnit.SECONDS).status());
+            assertEquals("latest-fixture", f.sessionToken);
+            f.runtime.emit("s1", 1, "zh-CN", "最终字幕", true);
+            f.probe.awaitCanStop();
+            f.session.requestStop();
+            assertNotNull(f.probe.result());
+        }
+    }
+
+    @Test public void identityReadFailureReturnsTypedMessageWithoutStartingRuntime() throws Exception {
+        try (Fixture f = new Fixture(false, Set.of(MeetingCapabilityState.TRANSCRIPT),
+                () -> { throw new IOException("fixture-read-unavailable"); })) {
+            BlockingQueue<IdentityResult> refreshed = new LinkedBlockingQueue<>();
+            f.client.refreshIdentity(identityCallback(refreshed));
+            IdentityResult identity = refreshed.poll(2, TimeUnit.SECONDS);
+            assertEquals(IdentityResult.Status.READ_FAILED, identity.status());
+            assertEquals("读取登录状态失败，请稍后重试", identity.message());
+            f.session = f.client.start(options(MeetingOptions.Mode.LIVE_TRANSCRIPT,
+                    MeetingOptions.ResultDelivery.WEB, false), f.probe);
+            assertEquals(identity.message(), f.probe.awaitPhase(MeetingSessionState.Phase.FAILED).message());
+            assertTrue(f.server.steps.isEmpty());
+            assertEquals(1, f.runtime.started.getCount());
+        }
+    }
+
+    private static MeetingClient.Callback<IdentityResult> identityCallback(BlockingQueue<IdentityResult> results) {
+        return new MeetingClient.Callback<>() {
+            @Override public void onSuccess(IdentityResult result) { results.add(result); }
+            @Override public void onError(String message) { fail(message); }
+        };
+    }
 
     @Test public void mockMinutesSharesCoordinatorAndKeepsSummaryCapabilityAndFinalCaptureOrder() throws Exception {
         try (Fixture f = new Fixture(false, Set.of(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.SUMMARY))) {
@@ -176,12 +238,18 @@ public final class MeetingCoordinatorTest {
         final Probe probe = new Probe();
         final AtomicInteger clockCalls = new AtomicInteger();
         final MeetingCoordinator client;
+        volatile String sessionToken;
         MeetingSession session;
         Fixture(boolean real, Set<String> granted) {
+            this(real, granted, new ReferenceIdentityProvider("test-token"));
+        }
+        Fixture(boolean real, Set<String> granted, IdentityProvider identity) {
             server = new Server(granted);
             runtime = new Runtime(real);
-            client = new MeetingCoordinator(MeetingClientConfig.reference("http://127.0.0.1", "test-token"),
-                    new ModelAdapterRegistry(), runtime, () -> server,
+            var config = new MeetingClientConfig("http://127.0.0.1", identity,
+                    ClientIdentity.reference(), MeetingProfile.reference(), Runnable::run);
+            client = new MeetingCoordinator(config,
+                    new ModelAdapterRegistry(), runtime, resolved -> { sessionToken = resolved.accessToken(); return server; },
                     () -> System.nanoTime() / 1_000_000L, () -> { clockCalls.incrementAndGet(); return 555; });
         }
         void start(MeetingOptions.Mode mode, MeetingOptions.ResultDelivery delivery, boolean capture) throws Exception {

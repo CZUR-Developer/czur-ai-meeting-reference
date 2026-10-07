@@ -18,12 +18,10 @@ import android.os.IBinder;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Log;
-import com.czur.aimeeting.client.ClientIdentity;
 import com.czur.aimeeting.client.MeetingCapabilityState;
 import com.czur.aimeeting.client.MeetingClient;
 import com.czur.aimeeting.client.MeetingClientConfig;
 import com.czur.aimeeting.client.MeetingListener;
-import com.czur.aimeeting.client.MeetingProfile;
 import com.czur.aimeeting.client.MeetingResult;
 import com.czur.aimeeting.client.MeetingSession;
 import com.czur.aimeeting.client.MeetingSessionState;
@@ -32,6 +30,7 @@ import com.czur.aimeeting.client.display.MeetingDisplaySnapshot;
 import com.czur.aimeeting.model.AudioInputErrorCode;
 import com.czur.aimeeting.model.AudioInputMode;
 import com.czur.aimeeting.reference.meeting.MeetingRuntimeFactory;
+import com.czur.aimeeting.reference.meeting.MeetingAppAssembly;
 import com.czur.aimeeting.reference.meeting.MeetingSetup;
 import com.czur.aimeeting.reference.meeting.MeetingTimeRule;
 import com.czur.aimeeting.reference.meeting.MeetingReminderPresentation;
@@ -49,8 +48,6 @@ import java.util.concurrent.Executors;
 public final class MeetingService extends Service {
     static final String ACTION_BEGIN = "com.czur.aimeeting.reference.BEGIN";
     static final String ACTION_DEBUG_STOP = "com.czur.aimeeting.reference.DEBUG_STOP";
-    static final String EXTRA_BACKEND = "backend";
-    static final String EXTRA_TOKEN = "token";
     static final String EXTRA_MODE = "mode";
     static final String EXTRA_SOURCE = "source";
     static final String EXTRA_TARGET = "target";
@@ -223,7 +220,7 @@ public final class MeetingService extends Service {
             }
         }
         startForegroundForMeeting(requested.presentationCapture());
-        begin(intent.getStringExtra(EXTRA_BACKEND), intent.getStringExtra(EXTRA_TOKEN), requested);
+        begin(requested);
         return START_NOT_STICKY;
     }
 
@@ -290,7 +287,7 @@ public final class MeetingService extends Service {
         Log.i(TAG, "双语分栏左右交换已请求 meetingId=" + meetingId);
     }
 
-    private void begin(String backend, String token, MeetingSetup requested) {
+    private void begin(MeetingSetup requested) {
         setup = requested;
         busy = true;
         active = false;
@@ -311,8 +308,7 @@ public final class MeetingService extends Service {
         capabilityText = "本场功能将在创建会议后按后端能力显示";
         publish();
         try {
-            MeetingClientConfig config = new MeetingClientConfig(backend, token,
-                    ClientIdentity.reference(), MeetingProfile.reference(), command -> main.post(command));
+            MeetingClientConfig config = MeetingAppAssembly.clientConfig(command -> main.post(command));
             client = MeetingRuntimeFactory.create(this, config);
             session = client.start(requested.toOptions(), new MeetingListener() {
                 @Override public void onStarted(MeetingStarted started) {

@@ -11,6 +11,12 @@ integration.
 [接入说明](meeting-client-core/README.md)。Mock 直接依赖 core；SDK 模式使用 AAR
 内带的同一 core，App 不重复打包。参考 App 已接入完整 `MeetingClient` 组合入口；
 主机构建与迁移后设备验证的状态见 P6-7 过程记录，源码接线不代签设备验收。
+
+P7-1a新增可注入的`IdentityProvider`及`MeetingClient.refreshIdentity()`。
+默认账号密码登录更新`MeetingAppAssembly`持有的内存身份，Activity与Service共用；
+进入页面／登录返回刷新状态，每次开始时SDK再次读取当前凭据并冻结为本场快照。
+伙伴替换身份来源和App登录入口即可，SDK不引用CZUR个人中心、不退出设备系统账号。
+接口及例子见[公共核心的身份接入](meeting-client-core/README.md#可替换身份与默认登录)。
 默认 `mock` 模式不需要私有 AAR，可干净构建并演示同一片段的初稿、修订稿、最终稿；
 未完成文字以 80% 透明度显示，最终文字以 100% 显示。
 
@@ -122,10 +128,10 @@ Mini 期间会议仍继续采音、收模型结果和提交标准事件，恢复
 没有真正的暂停接口；参考版因此只实现窗口收起，不声称 Mini 暂停识别或计费。
 
 P5-4 的会前入口先填写设备可达的后端地址，以及部署者预置的终端用户账号和密码。
-App 调用 `MeetingClient.login` 取得访问令牌，再用凭据创建 Service 的独立会议客户端。
+App调用`MeetingClient.login`更新集中装配的参考内存身份，Service用同一Provider创建独立会议客户端。
 组合层封装 `POST /v1/reference/session:login`、建会、标准字幕/译文提交及结束会议。
 两类事件在协调器内共用本场 `clientSequence` 与单线程
-提交队列；模型确认完成后，Stop 排在此前事件提交之后。令牌仅保存在本次进程内，切换账号时清除；账号密码和
+提交队列；模型确认完成后，Stop 排在此前事件提交之后。令牌仅保存在本次进程内Provider，切换账号时清除；账号密码和
 令牌均不写入 APK、日志或持久化配置。登录地址须使用设备可访问的 HTTPS；本机调试
 可以通过 `adb reverse tcp:8080 tcp:8080`，在设备上填写 `http://127.0.0.1:8080`
 访问开发机。未做端口转发时，设备上的 `localhost` 不是开发机。参考账号与 CZUR

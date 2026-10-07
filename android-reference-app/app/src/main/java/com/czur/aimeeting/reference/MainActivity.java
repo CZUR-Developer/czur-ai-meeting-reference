@@ -32,17 +32,17 @@ import android.widget.RadioGroup;
 import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
-import com.czur.aimeeting.client.ClientIdentity;
 import com.czur.aimeeting.client.MeetingClient;
-import com.czur.aimeeting.client.MeetingClientConfig;
 import com.czur.aimeeting.client.MeetingDiscovery;
-import com.czur.aimeeting.client.MeetingProfile;
 import com.czur.aimeeting.client.server.ReferenceLoginSession;
 import com.czur.aimeeting.reference.meeting.DisplaySnapshotPresentation;
 import com.czur.aimeeting.reference.meeting.MeetingRuntimeFactory;
 import com.czur.aimeeting.client.MeetingCapabilityState;
 import com.czur.aimeeting.client.display.MeetingDisplaySnapshot;
 import com.czur.aimeeting.reference.meeting.MeetingSetup;
+import com.czur.aimeeting.reference.meeting.MeetingAppAssembly;
+import com.czur.aimeeting.client.identity.IdentityResult;
+import com.czur.aimeeting.client.identity.IdentitySession;
 import com.czur.aimeeting.reference.meeting.MeetingStartCondition;
 import com.czur.aimeeting.reference.meeting.MeetingStartConditions;
 import java.util.ArrayList;
@@ -110,8 +110,9 @@ public final class MainActivity extends Activity {
     private Button overlayButton;
     private Button swapColumnsButton;
     private Button loginButton;
-    private String sessionToken;
-    private String sessionBackendUrl;
+    /** 只用于页面展示／入口开关；Service开始时仍通过Provider重新获取真实凭据。 */
+    private IdentitySession displayedIdentity;
+    private boolean meetingBusy;
     private Set<String> deploymentCapabilities = Set.of();
     private long resultLinkTtlMs;
     private boolean resultEmailEnabled;
@@ -152,6 +153,7 @@ public final class MainActivity extends Activity {
         backendUrlView.setSingleLine(true);
         backendUrlView.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         backendUrlView.setHint("后端地址，例如 https://meeting.example.com");
+        backendUrlView.setText(MeetingAppAssembly.serverUrl());
         layout.addView(backendUrlView);
 
         usernameView = new EditText(this);
@@ -169,7 +171,7 @@ public final class MainActivity extends Activity {
         loginButton = new Button(this);
         loginButton.setText("登录");
         loginButton.setOnClickListener(view -> {
-            if (sessionToken == null) login();
+            if (displayedIdentity == null) login();
             else logout();
         });
         layout.addView(loginButton);
@@ -365,8 +367,9 @@ public final class MainActivity extends Activity {
     }
 
     /**
-     * 登录仅用于参考会议后端。凭据直接从输入框取出发送，后端令牌留在内存中；
-     * CZUR 系统账号、设备登录与这个会话互不依赖。
+     * 默认参考账号密码页面；SDK登录成功后更新已装配的内存Provider。
+     * 伙伴使用其他身份来源时替换此页面动作，返回后调用refreshIdentity即可；
+     * CZUR系统账号、设备登录与参考默认会话互不依赖。
      */
     private void login() {
         String baseUrl = backendUrlView.getText().toString().trim();
@@ -379,39 +382,15 @@ public final class MainActivity extends Activity {
         loginButton.setEnabled(false);
         statusView.setText("正在登录…");
         if (preMeetingClient != null) preMeetingClient.close();
-        MeetingClientConfig config = new MeetingClientConfig(baseUrl, "",
-                ClientIdentity.reference(), MeetingProfile.reference(), command -> main.post(command));
-        preMeetingClient = MeetingRuntimeFactory.create(this, config);
+        MeetingAppAssembly.configureBackend(baseUrl);
+        preMeetingClient = MeetingRuntimeFactory.create(this,
+                MeetingAppAssembly.clientConfig(command -> main.post(command)));
         preMeetingClient.login(username, password, new MeetingClient.Callback<ReferenceLoginSession>() {
             @Override public void onSuccess(ReferenceLoginSession loginSession) {
-                sessionToken = loginSession.accessToken();
-                sessionBackendUrl = baseUrl;
                 passwordView.setText("");
-                backendUrlView.setEnabled(false);
-                usernameView.setEnabled(false);
-                passwordView.setEnabled(false);
-                loginButton.setText("切换账号");
                 statusView.setText("登录成功，正在获取可用功能…");
                 Log.i(TAG, "参考账号登录成功");
-                preMeetingClient.discover(new MeetingClient.Callback<MeetingDiscovery>() {
-                    @Override public void onSuccess(MeetingDiscovery discovery) {
-                        // SDK 已完成部署/本地能力求交；UI 直接使用类型化结果，不创建 Adapter。
-                        deploymentCapabilities = discovery.availableCapabilities();
-                        resultLinkTtlMs = discovery.deployment().resultLinkTtlMs();
-                        resultEmailEnabled = discovery.deployment().resultEmailEnabled();
-                        refreshResultAvailability();
-                        refreshModeAvailability();
-                        loginButton.setEnabled(true);
-                        startButton.setEnabled(deploymentCapabilities.contains(MeetingCapabilityState.TRANSCRIPT));
-                        statusView.setText("登录成功，可开始会议");
-                    }
-                    @Override public void onError(String message) {
-                        // 组合入口建会也要求部署能力；发现失败时保留切换账号入口供修改地址。
-                        loginButton.setEnabled(true);
-                        startButton.setEnabled(false);
-                        statusView.setText("登录成功；" + message);
-                    }
-                });
+                refreshIdentity(true);
             }
             @Override public void onError(String message) {
                 loginButton.setEnabled(true);
@@ -421,11 +400,72 @@ public final class MainActivity extends Activity {
         });
     }
 
+    /** 进入页面／从伙伴登录入口返回时读取当前来源，页面不直接读token或Provider私有字段。 */
+    private void refreshIdentity(boolean reloadCapabilities) {
+        if (MeetingAppAssembly.serverUrl().isEmpty()) return;
+        if (preMeetingClient == null) preMeetingClient = MeetingRuntimeFactory.create(this,
+                MeetingAppAssembly.clientConfig(command -> main.post(command)));
+        preMeetingClient.refreshIdentity(new MeetingClient.Callback<IdentityResult>() {
+            @Override public void onSuccess(IdentityResult identity) {
+                renderIdentity(identity);
+                if (identity.status() == IdentityResult.Status.LOGGED_IN && reloadCapabilities)
+                    discoverCapabilities();
+            }
+            @Override public void onError(String message) { statusView.setText(message); }
+        });
+    }
+
+    /** 只更新会前身份入口，进行中的会议仍由Service使用开始时的凭据快照。 */
+    private void renderIdentity(IdentityResult identity) {
+        displayedIdentity = identity.session();
+        boolean loggedIn = identity.status() == IdentityResult.Status.LOGGED_IN;
+        backendUrlView.setEnabled(!loggedIn);
+        usernameView.setEnabled(!loggedIn);
+        passwordView.setEnabled(!loggedIn);
+        loginButton.setText(loggedIn ? "切换账号" : "登录");
+        loginButton.setEnabled(!meetingBusy);
+        if (loggedIn && !displayedIdentity.displayName().isEmpty())
+            usernameView.setText(displayedIdentity.displayName());
+        if (!loggedIn) {
+            deploymentCapabilities = Set.of();
+            resultLinkTtlMs = 0;
+            resultEmailEnabled = false;
+            if (!meetingBusy) statusView.setText(identity.message());
+        }
+        refreshResultAvailability();
+        refreshModeAvailability();
+        startButton.setEnabled(loggedIn && !meetingBusy
+                && deploymentCapabilities.contains(MeetingCapabilityState.TRANSCRIPT));
+        Log.d(TAG, "页面身份刷新 state=" + identity.status());
+    }
+
+    private void discoverCapabilities() {
+        preMeetingClient.discover(new MeetingClient.Callback<MeetingDiscovery>() {
+            @Override public void onSuccess(MeetingDiscovery discovery) {
+                // SDK已完成部署／本地能力求交；UI直接使用类型化结果，不创建Adapter。
+                deploymentCapabilities = discovery.availableCapabilities();
+                resultLinkTtlMs = discovery.deployment().resultLinkTtlMs();
+                resultEmailEnabled = discovery.deployment().resultEmailEnabled();
+                refreshResultAvailability();
+                refreshModeAvailability();
+                loginButton.setEnabled(!meetingBusy);
+                startButton.setEnabled(displayedIdentity != null && !meetingBusy
+                        && deploymentCapabilities.contains(MeetingCapabilityState.TRANSCRIPT));
+                if (!meetingBusy) statusView.setText("登录成功，可开始会议");
+            }
+            @Override public void onError(String message) {
+                loginButton.setEnabled(!meetingBusy);
+                startButton.setEnabled(false);
+                if (!meetingBusy) statusView.setText("登录成功；" + message);
+            }
+        });
+    }
+
     /** 退出当前参考账号并允许重新配置后端；正在进行的会议不提供账号切换。 */
     private void logout() {
         if (preMeetingClient != null) { preMeetingClient.close(); preMeetingClient = null; }
-        sessionToken = null;
-        sessionBackendUrl = null;
+        MeetingAppAssembly.clearReferenceSession();
+        displayedIdentity = null;
         deploymentCapabilities = Set.of();
         resultLinkTtlMs = 0;
         resultEmailEnabled = false;
@@ -442,9 +482,9 @@ public final class MainActivity extends Activity {
 
     /** 会前入口直接消费组合客户端已经求交的可用能力。 */
     private void refreshModeAvailability() {
-        boolean minutes = sessionToken != null
+        boolean minutes = displayedIdentity != null
                 && deploymentCapabilities.contains(MeetingCapabilityState.SUMMARY);
-        boolean translation = sessionToken != null
+        boolean translation = displayedIdentity != null
                 && deploymentCapabilities.contains(MeetingCapabilityState.TRANSLATION);
         minutesModeView.setText(minutes ? "AI 会议纪要" : "AI 会议纪要（当前部署/应用不可用）");
         minutesModeView.setEnabled(minutes);
@@ -457,7 +497,7 @@ public final class MainActivity extends Activity {
     }
 
     private void refreshResultAvailability() {
-        boolean available = sessionToken != null && resultLinkTtlMs > 0
+        boolean available = displayedIdentity != null && resultLinkTtlMs > 0
                 && resultEmailEnabled;
         emailResultView.setEnabled(available);
         emailResultView.setText(available ? "邮箱" : "邮箱（当前部署不可用）");
@@ -493,10 +533,23 @@ public final class MainActivity extends Activity {
     }
 
     private void createAndStartMeeting() {
-        if (sessionToken == null) {
+        if (preMeetingClient == null) {
             statusView.setText("请先登录");
             return;
         }
+        startButton.setEnabled(false);
+        loginButton.setEnabled(false);
+        preMeetingClient.refreshIdentity(new MeetingClient.Callback<IdentityResult>() {
+            @Override public void onSuccess(IdentityResult identity) {
+                renderIdentity(identity);
+                if (identity.status() == IdentityResult.Status.LOGGED_IN) continueStartMeeting();
+            }
+            @Override public void onError(String message) { statusView.setText(message); }
+        });
+    }
+
+    /** 页面条件检查之后，SDK仍会在真正建会前重新读取Provider，避免使用过时身份。 */
+    private void continueStartMeeting() {
         // 点击开始时读取一次会前设置。会议进行中即使输入框变化，也使用这份快照。
         MeetingSetup setup = selectedSetup();
         if (!deploymentCapabilities.contains(setup.mode().requiredCapability())) {
@@ -557,8 +610,6 @@ public final class MainActivity extends Activity {
         statusView.setText("正在创建会议…");
         Intent begin = new Intent(this, MeetingService.class);
         begin.setAction(MeetingService.ACTION_BEGIN);
-        begin.putExtra(MeetingService.EXTRA_BACKEND, sessionBackendUrl);
-        begin.putExtra(MeetingService.EXTRA_TOKEN, sessionToken);
         begin.putExtra(MeetingService.EXTRA_MODE, setup.mode().name());
         begin.putExtra(MeetingService.EXTRA_SOURCE, setup.sourceLanguage());
         begin.putExtra(MeetingService.EXTRA_TARGET, setup.targetLanguage());
@@ -620,10 +671,11 @@ public final class MainActivity extends Activity {
 
     /** Service 每秒或状态变化时推送；Activity 重建后可直接重绘整场字幕。 */
     private void renderMeetingState(MeetingService.State state) {
+        meetingBusy = state.busy;
         statusView.setText(state.status);
         capabilityView.setText(state.capabilityText);
         showMeetingScreen(state.active);
-        startButton.setEnabled(sessionToken != null && !state.busy
+        startButton.setEnabled(displayedIdentity != null && !state.busy
                 && deploymentCapabilities.contains(MeetingCapabilityState.TRANSCRIPT));
         loginButton.setEnabled(!state.busy);
         stopButton.setEnabled(state.canStop);
@@ -729,6 +781,7 @@ public final class MainActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
+        refreshIdentity(deploymentCapabilities.isEmpty());
         if (recentPdfButton != null) recentPdfButton.setVisibility(
                 LocalResultActivity.recentIntent(this) == null ? View.GONE : View.VISIBLE);
     }

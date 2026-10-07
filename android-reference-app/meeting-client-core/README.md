@@ -19,15 +19,42 @@ Server 协议、模型适配与国内显示规则。Android 控件、权限申�
 Mock 注入窄端口 `MeetingRuntimePort`；二者使用唯一 `MeetingCoordinator`，App 不领取材料或重复分栏。
 同进程基础输入、诊断和完整会议择一持有真实音源。
 
-正常链为能力发现 → Create → Server 材料/新 Adapter → StartClient → 采音/模型 → 标准事件保存 →
+正常链为当前身份读取 → 能力发现 → Create → Server 材料/新 Adapter → StartClient → 采音/模型 → 标准事件保存 →
 按能力总结 → Stop 输入受理 → 实际 READY/交付。后端仍负责身份、模型选择、计费和存储。
 模型完整地址、短期材料及本场授权只取 Server，配置不接收模型地址或凭据。
 
-`MeetingClientConfig` 接受 Server URL、访问令牌、`ClientIdentity`、`MeetingProfile` 和
+`MeetingClientConfig` 接受 Server URL、`IdentityProvider`、`ClientIdentity`、`MeetingProfile` 和
 **串行** `callbackExecutor`。Android 通常用主线程 Executor；不能用无序线程池让结果和状态重排。
-发现/登录阶段可传空令牌，`discover()` 返回 typed `DeploymentOptions` 及本地可执行能力交集；
-`login()` 返回 `ReferenceLoginSession`，App 用 typed token 创建新的配置和客户端。
-登录页面/凭据保存仍由 App 决定；登录不隐式修改原配置或引入新身份框架。
+旧访问令牌构造器保留，将固定token包装为参考内存身份。`discover()`仍为匿名能力发现，
+返回typed `DeploymentOptions`及本地可执行能力交集；可用功能不等于本场已获许可。
+
+### 可替换身份与默认登录
+
+`IdentityProvider.currentIdentity()`在IO队列返回`IdentityResult`：已登录、需要登录或读取失败。
+已登录的`IdentitySession`携带本部署会议后端接受的Bearer凭据及可选展示名。SDK不打开登录页、
+不读取Starry私有Provider，也不退出系统账号。App进入页面或登录返回时调用
+`MeetingClient.refreshIdentity()`，通过串行回调处理状态；开始会议时SDK再次读取，并把本次
+凭据冻结到本场Server客户端。会中刷新身份不会悄悄更换该场请求使用的账号。
+
+参考默认`ReferenceIdentityProvider`只保存进程内会话；`MeetingClient.login()`沿用已有账号密码
+端点，成功后更新同一Provider并保留旧typed返回值。伙伴自定义Provider使用自己的App登录动作，
+返回后刷新即可，无须实现账号密码接口。
+
+```java
+IdentityProvider identity = () -> {
+    // 伙伴从自己的会话来源读取；需要时在实现内交换成其会议后端可接受的凭据。
+    String token = myAccount.currentMeetingToken();
+    return token == null ? IdentityResult.loginRequired("请登录伙伴账号")
+            : IdentityResult.loggedIn(new IdentitySession(token, "伙伴账号"));
+};
+MeetingClientConfig config = new MeetingClientConfig(serverUrl, identity,
+        clientIdentity, productProfile, mainThreadExecutor);
+```
+
+参考App的`MeetingAppAssembly`集中注册来源并供Activity与Service共用；开始Intent只传会议设置，
+不复制可能过时的token。账号密码登录界面是默认示例，伙伴可替换页面动作和身份来源。
+CZUR系统token与默认参考token没有天然等价关系：私有身份及后端认可适配在P7-1c实施，
+本接口及主机测试不代签CZUR生产账号联通。
 
 同一客户端同时只允许一场未完成会议，完成后可开下一场；`close()` 幂等取消，关闭后不可重用。
 所有 listener/会前回调排到配置的 Executor，关闭后不再执行尚未派发的通知。

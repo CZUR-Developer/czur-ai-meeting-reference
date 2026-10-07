@@ -1,10 +1,11 @@
 package com.czur.aimeeting.client;
 
 import com.czur.aimeeting.client.server.ReferenceLoginSession;
+import com.czur.aimeeting.client.identity.IdentityResult;
 
 /**
  * 完整会议入口；App 不接触模型材料、音频帧或 Server 协议 JSON。
- * discover/login 是异步会前入口，配置 accessToken 可先为空；登录成功后用令牌创建本场配置。
+ * discover/login/refreshIdentity是异步会前入口；登录页面由App负责，身份来源可注入。
  * 所有通知排到配置的串行 callbackExecutor；Android 通常传主线程 Executor。
  */
 public interface MeetingClient extends AutoCloseable {
@@ -14,8 +15,15 @@ public interface MeetingClient extends AutoCloseable {
      */
     void discover(Callback<MeetingDiscovery> callback);
     /**
-     * 异步复用终端用户登录协议。不修改此客户端的不可变配置；成功后 App 用返回令牌
-     * 创建新的本场配置/客户端。登录页面、凭据保存及系统身份仍由 App 决定。
+     * 在IO队列读取已注册身份来源，并经callbackExecutor返回类型化状态。
+     * 进入页面／登录返回时可调用；未登录或读取失败通过onSuccess的状态表达，App自行
+     * 显示对应入口。此操作不创建会议、不退出设备账号，也不替换进行中会议的凭据。
+     */
+    void refreshIdentity(Callback<IdentityResult> callback);
+    /**
+     * 默认参考账号密码登录。成功后更新同一个ReferenceIdentityProvider，页面与Service
+     * 可继续共用它。自定义身份来源使用其App登录入口，返回后调用refreshIdentity，
+     * 无须实现账号密码接口。保留返回值供旧调用方创建token配置。
      */
     void login(String username, String password, Callback<ReferenceLoginSession> callback);
     /**

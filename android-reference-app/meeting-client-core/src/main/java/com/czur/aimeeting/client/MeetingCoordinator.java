@@ -7,6 +7,9 @@ import com.czur.aimeeting.client.server.CreatedMeeting;
 import com.czur.aimeeting.client.server.HttpMeetingServerClient;
 import com.czur.aimeeting.client.server.HttpMeetingSessionClient;
 import com.czur.aimeeting.client.server.MeetingServerClient;
+import com.czur.aimeeting.client.identity.IdentityResult;
+import com.czur.aimeeting.client.identity.IdentitySession;
+import com.czur.aimeeting.client.identity.ReferenceIdentityProvider;
 import com.czur.aimeeting.model.AudioDirectionSample;
 import com.czur.aimeeting.model.AudioInputErrorCode;
 import com.czur.aimeeting.model.AudioInputMode;
@@ -35,6 +38,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
+import java.util.function.Function;
 import java.util.logging.Logger;
 
 /**
@@ -48,7 +52,7 @@ public final class MeetingCoordinator implements MeetingClient {
     private final MeetingClientConfig config;
     private final ModelAdapterRegistry adapters;
     private final MeetingRuntimePort runtime;
-    private final Supplier<MeetingServerClient> servers;
+    private final Function<MeetingClientConfig, MeetingServerClient> servers;
     private final LongSupplier monotonicMs;
     private final LongSupplier wallClockMs;
     private final ScheduledExecutorService state = Executors.newSingleThreadScheduledExecutor();
@@ -58,13 +62,20 @@ public final class MeetingCoordinator implements MeetingClient {
 
     public MeetingCoordinator(MeetingClientConfig config, ModelAdapterRegistry adapters,
             MeetingRuntimePort runtime) {
-        this(config, adapters, runtime, () -> new HttpMeetingServerClient(config),
+        this(config, adapters, runtime, HttpMeetingServerClient::new,
                 runtime::elapsedRealtimeMs, System::currentTimeMillis);
     }
 
     /** 同包定向测试使用可控时钟/Server 端口，生产仍复用第一片 HTTP 实现。 */
     MeetingCoordinator(MeetingClientConfig config, ModelAdapterRegistry adapters,
             MeetingRuntimePort runtime, Supplier<MeetingServerClient> servers,
+            LongSupplier monotonicMs, LongSupplier wallClockMs) {
+        this(config, adapters, runtime, ignored -> servers.get(), monotonicMs, wallClockMs);
+    }
+
+    /** 身份测试可以直接核对传入Server的本场配置，生产仍使用同一HTTP实现。 */
+    MeetingCoordinator(MeetingClientConfig config, ModelAdapterRegistry adapters,
+            MeetingRuntimePort runtime, Function<MeetingClientConfig, MeetingServerClient> servers,
             LongSupplier monotonicMs, LongSupplier wallClockMs) {
         this.config = Objects.requireNonNull(config, "config");
         this.adapters = Objects.requireNonNull(adapters, "adapters");
@@ -84,7 +95,7 @@ public final class MeetingCoordinator implements MeetingClient {
         io.execute(() -> {
             try {
                 LOG.info("部署能力发现开始");
-                var deployment = servers.get().discover();
+                var deployment = servers.apply(config).discover();
                 Set<String> available = new HashSet<>(deployment.capabilities());
                 available.retainAll(setupCapabilities());
                 LOG.info("部署能力发现完成");
@@ -96,13 +107,37 @@ public final class MeetingCoordinator implements MeetingClient {
         });
     }
 
+    @Override public void refreshIdentity(Callback<IdentityResult> callback) {
+        requireOpen();
+        io.execute(() -> {
+            IdentityResult identity = readIdentity();
+            LOG.fine("当前身份读取完成 state=" + identity.status());
+            notifyClient(() -> callback.onSuccess(identity));
+        });
+    }
+
+    private IdentityResult readIdentity() {
+        try {
+            return config.identityProvider().currentIdentity();
+        } catch (IOException | RuntimeException failure) {
+            logFailure("身份读取", failure);
+            return IdentityResult.readFailed("读取登录状态失败，请稍后重试");
+        }
+    }
+
     @Override public void login(String username, String password,
             Callback<com.czur.aimeeting.client.server.ReferenceLoginSession> callback) {
         requireOpen();
         io.execute(() -> {
+            if (!(config.identityProvider() instanceof ReferenceIdentityProvider)) {
+                notifyClient(() -> callback.onError("请使用当前身份来源的应用登录入口"));
+                return;
+            }
             try {
                 LOG.info("终端用户登录开始");
                 var login = new HttpMeetingSessionClient(config.serverUrl()).login(username, password);
+                ((ReferenceIdentityProvider) config.identityProvider()).updateSession(
+                        new IdentitySession(login.accessToken(), username));
                 LOG.info("终端用户登录完成");
                 notifyClient(() -> callback.onSuccess(login));
             } catch (IOException | RuntimeException failure) {
@@ -115,7 +150,7 @@ public final class MeetingCoordinator implements MeetingClient {
     @Override public synchronized MeetingSession start(MeetingOptions options, MeetingListener listener) {
         requireOpen();
         if (current != null && !current.done) throw new IllegalStateException("已有会议正在进行");
-        Session session = new Session(options, listener, servers.get());
+        Session session = new Session(options, listener);
         current = session;
         enqueue(session::begin);
         return session;
@@ -147,7 +182,7 @@ public final class MeetingCoordinator implements MeetingClient {
     private final class Session implements MeetingSession {
         private final MeetingOptions options;
         private final MeetingListener listener;
-        private final MeetingServerClient server;
+        private MeetingServerClient server;
         private final MeetingDisplayState display = new MeetingDisplayState();
         private final FinalTranscriptCollector finals = new FinalTranscriptCollector();
         private volatile boolean done;
@@ -174,10 +209,9 @@ public final class MeetingCoordinator implements MeetingClient {
         private boolean summarySubmitted;
         private Long genTime;
 
-        Session(MeetingOptions options, MeetingListener listener, MeetingServerClient server) {
+        Session(MeetingOptions options, MeetingListener listener) {
             this.options = Objects.requireNonNull(options, "options");
             this.listener = Objects.requireNonNull(listener, "listener");
-            this.server = server;
         }
 
         private void notifyListener(Runnable task) {
@@ -201,10 +235,19 @@ public final class MeetingCoordinator implements MeetingClient {
 
         private void begin() {
             if (cancelled || closed) return;
-            publish("正在发现能力并创建会议…");
+            publish("正在确认登录状态并创建会议…");
             io.execute(() -> {
-                String step = "能力发现";
+                String step = "身份读取";
                 try {
+                    IdentityResult identity = readIdentity();
+                    if (identity.status() != IdentityResult.Status.LOGGED_IN) {
+                        LOG.info("会议开始身份未就绪 state=" + identity.status());
+                        enqueue(() -> failStart(identity.message()));
+                        return;
+                    }
+                    server = servers.apply(config.forSession(identity.session()));
+                    LOG.info("本场身份已确认");
+                    step = "能力发现";
                     var deployment = server.discover();
                     Set<String> setup = new HashSet<>(deployment.capabilities());
                     setup.retainAll(setupCapabilities());
