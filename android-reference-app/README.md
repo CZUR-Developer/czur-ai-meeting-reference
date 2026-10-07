@@ -197,8 +197,11 @@ MeetingSession session = client.start(setup.toOptions(), new MeetingListener() {
         // WEB/邮箱消费 resultUrl；LOCAL_READY 的 typed content 在 App 生成 PDF。
     }
 });
+// 稍后用户点击停止，且最近 onState 的 state.canStop() 为 true 时调用：
 session.requestStop(); // 正常收口；client.close() 仅用于取消/释放，不产生会议结果。
 ```
+
+`start()` 异步创建会议并立即返回句柄；App 保存该句柄，过早的 Stop 不受理。
 
 屏幕授权、周期 JPEG、PDF/MediaStore 和权限申请均在 App；截图通过
 `session.submitPresentation(offsetMs, jpeg)` 交组合层保存。系统单独停止投影只结束
