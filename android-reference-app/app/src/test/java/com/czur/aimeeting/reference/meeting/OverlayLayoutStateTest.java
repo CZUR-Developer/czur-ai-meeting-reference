@@ -1,6 +1,8 @@
 package com.czur.aimeeting.reference.meeting;
 
-import com.czur.aimeeting.client.display.MeetingDisplayState;
+import com.czur.aimeeting.client.display.MeetingDisplaySnapshot;
+import com.czur.aimeeting.client.display.DisplayRouter;
+import java.util.List;
 
 import static org.junit.Assert.assertEquals;
 import com.czur.aimeeting.model.TranscriptEvent;
@@ -12,14 +14,15 @@ public final class OverlayLayoutStateTest {
     @Test
     public void subtitleMiniRestoresWithoutDiscardingNewTranscript() {
         OverlayLayoutState layout = new OverlayLayoutState(false);
-        MeetingDisplayState display = new MeetingDisplayState();
-        display.start(0L);
         layout.collapse();
         assertEquals(OverlayLayoutState.Type.MINI, layout.current());
-        display.apply(new TranscriptEvent("part", 1, 0, 100, "zh-CN", "收起期间", true));
+        MeetingDisplaySnapshot display = new MeetingDisplaySnapshot(false, "zh-CN", "en-US",
+                false, List.of(new MeetingDisplaySnapshot.Row("part",
+                        new TranscriptEvent("part", 1, 0, 100, "zh-CN", "收起期间", true),
+                        null, MeetingDisplaySnapshot.Side.A, DisplayRouter.Basis.MODEL_LANGUAGE)), "part");
         layout.restore();
         assertEquals(OverlayLayoutState.Type.SUBTITLE, layout.current());
-        assertEquals("收起期间", display.transcript());
+        assertEquals("收起期间", DisplaySnapshotPresentation.latestSubtitle(display).text());
         layout.showLarge();
         assertEquals(OverlayLayoutState.Type.SUBTITLE, layout.current());
     }
@@ -27,20 +30,20 @@ public final class OverlayLayoutStateTest {
     @Test
     public void translationNormalLargeAndMiniRestoreKeepRoutedRows() {
         OverlayLayoutState layout = new OverlayLayoutState(true);
-        MeetingDisplayState display = new MeetingDisplayState();
-        display.start(0L, true, "zh-CN", "en-US");
         layout.showLarge();
         assertEquals(OverlayLayoutState.Type.TRANSLATION_LARGE, layout.current());
         layout.collapse();
-        display.apply(new TranscriptEvent("source", 1, 0, 100, "en-US", "Hello", true));
-        display.apply(new TranslationEvent("translated", "source", 1,
-                "en-US", "zh-CN", "你好", true));
+        MeetingDisplaySnapshot display = new MeetingDisplaySnapshot(true, "zh-CN", "en-US",
+                false, List.of(new MeetingDisplaySnapshot.Row("source",
+                        new TranscriptEvent("source", 1, 0, 100, "en-US", "Hello", true),
+                        new TranslationEvent("translated", "source", 1, "en-US", "zh-CN", "你好", true),
+                        MeetingDisplaySnapshot.Side.B, DisplayRouter.Basis.MODEL_LANGUAGE)), "source");
         layout.restore();
         assertEquals(OverlayLayoutState.Type.TRANSLATION_LARGE, layout.current());
-        assertEquals("你好", display.latestBilingualRow().left());
-        assertEquals("Hello", display.latestBilingualRow().right());
+        assertEquals("你好", DisplaySnapshotPresentation.bilingual(display.rows().get(0), display.swapped()).left());
+        assertEquals("Hello", DisplaySnapshotPresentation.bilingual(display.rows().get(0), display.swapped()).right());
         layout.showNormal();
         assertEquals(OverlayLayoutState.Type.TRANSLATION_NORMAL, layout.current());
-        assertEquals("Hello", display.latestBilingualRow().right());
+        assertEquals("Hello", DisplaySnapshotPresentation.bilingual(display.rows().get(0), display.swapped()).right());
     }
 }

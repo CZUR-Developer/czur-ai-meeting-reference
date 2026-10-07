@@ -12,7 +12,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
 import android.provider.MediaStore;
-import com.czur.aimeeting.reference.meeting.LocalMeetingResult;
+import com.czur.aimeeting.client.MeetingResult;
 import com.czur.aimeeting.reference.meeting.LocalPdfContent;
 import java.io.File;
 import java.io.FileOutputStream;
@@ -37,7 +37,7 @@ final class LocalPdfWriter {
 
     LocalPdfWriter(Context context) { this.context = context; }
 
-    SavedPdf write(String meetingId, LocalMeetingResult result) throws IOException {
+    SavedPdf write(String meetingId, MeetingResult result) throws IOException {
         String fileName = "会议纪要-" + meetingId.replaceAll("[^A-Za-z0-9_-]", "_")
                 + "-" + System.currentTimeMillis() + ".pdf";
         document = new PdfDocument();

@@ -1,63 +1,21 @@
 package com.czur.aimeeting.reference.meeting;
 
-import com.czur.aimeeting.client.ModelAdapterRegistry;
-
 import android.content.Context;
-import com.czur.aimeeting.model.ModelRuntime;
-import com.czur.aimeeting.model.ModelSession;
-import com.czur.aimeeting.model.ModelSessionGrant;
-import com.czur.aimeeting.model.ModelSessionListener;
-import com.czur.aimeeting.model.SummaryInput;
-import com.czur.aimeeting.model.SummaryResult;
-import com.czur.aimeeting.model.SummarySessionGrant;
-import com.czur.aimeeting.model.TranscriptListener;
-import com.czur.aimeeting.sdk.AndroidModelRuntime;
-import com.czur.aimeeting.sdk.AndroidSummaryRuntime;
-import java.io.IOException;
-import java.util.Set;
+import com.czur.aimeeting.client.MeetingClient;
+import com.czur.aimeeting.client.MeetingClientConfig;
+import com.czur.aimeeting.sdk.AiMeetingClient;
 
-/** SDK 装配与具体模型协议在构建期确定，通用会议页面不依赖私有类。 */
+/**
+ * 构建期装配完整 SDK；模型材料、默认 Adapter 和音源均由 SDK 内部处理。
+ * 页面及前台服务通过公共 MeetingClient 接口使用，不直接依赖模型运行时。
+ */
 public final class MeetingRuntimeFactory {
     private MeetingRuntimeFactory() {}
 
-    public static MeetingRuntimeBridge create(Context context) {
-        ModelRuntime runtime = new AndroidModelRuntime(context);
-        AndroidSummaryRuntime summaryRuntime = new AndroidSummaryRuntime();
-        ModelAdapterRegistry adapters = new ModelAdapterRegistry();
-        return new MeetingRuntimeBridge() {
-            @Override
-            public ModelSession open(CreatedMeeting created, TranscriptListener transcriptListener,
-                    ModelSessionListener sessionListener) {
-                ModelSessionGrant grant = created.modelSession();
-                if (grant == null) {
-                    throw new IllegalArgumentException("创建会议响应缺少 modelSession");
-                }
-                return runtime.open(grant, adapters.create(grant.adapterId()),
-                        transcriptListener, sessionListener);
-            }
-
-            @Override
-            public boolean waitsForModelFinish() { return true; }
-
-            @Override
-            public String displayName() { return "模型"; }
-
-            @Override
-            public Set<String> setupCapabilities() {
-                return adapters.setupCapabilities();
-            }
-
-            @Override
-            public Set<String> realtimeCapabilities(CreatedMeeting created) {
-                return adapters.realtimeCapabilities(created.modelSession().adapterId());
-            }
-
-            @Override public SummaryResult summarize(SummaryInput input,
-                    SummarySessionGrant grant) throws IOException {
-                if (grant == null) throw new IOException("本场缺少文本总结材料");
-                return summaryRuntime.summarize(grant,
-                        adapters.createSummary(grant.adapterId()), input);
-            }
-        };
+    public static MeetingClient create(Context context, MeetingClientConfig config) {
+        return new AiMeetingClient(context, config);
     }
+
+    /** App 负责申请 RECORD_AUDIO 和启动 microphone 前台服务，SDK 不弹权限框。 */
+    public static boolean requiresMicrophone() { return true; }
 }

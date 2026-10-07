@@ -3,6 +3,7 @@ package com.czur.aimeeting.reference.meeting;
 import com.czur.aimeeting.client.FinalTranscriptSegment;
 import com.czur.aimeeting.client.FinalTranslation;
 import com.czur.aimeeting.client.MeetingResultContent;
+import com.czur.aimeeting.client.MeetingResult;
 import com.czur.aimeeting.client.PresentationFrame;
 import com.czur.aimeeting.model.SummaryResult;
 import java.util.ArrayList;
@@ -14,7 +15,7 @@ public final class LocalPdfContent {
     public record Entry(Kind kind, String text, byte[] jpeg) { }
     private LocalPdfContent() { }
 
-    public static List<Entry> from(LocalMeetingResult result) {
+    public static List<Entry> from(MeetingResult result) {
         List<Entry> entries = new ArrayList<>();
         MeetingResultContent content = result.content();
         if (content.artifactTypes().contains("transcript.final")) {

@@ -1,6 +1,10 @@
 package com.czur.aimeeting.reference.meeting;
 
 import com.czur.aimeeting.client.MeetingCapabilityState;
+import com.czur.aimeeting.client.MeetingClientConfig;
+import com.czur.aimeeting.client.server.HttpMeetingServerClient;
+import com.czur.aimeeting.client.server.HttpMeetingSessionClient;
+import com.czur.aimeeting.client.server.ReferenceLoginSession;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
@@ -16,7 +20,7 @@ import org.json.JSONObject;
 import org.junit.Test;
 
 /** 参考账号登录只验证与真实会议入口直接相关的请求和会话字段。 */
-public final class HttpReferenceSessionClientTest {
+public final class HttpMeetingSessionClientAppTest {
     @Test
     public void logsInAndReturnsBearerTokenForMeetingCalls() throws Exception {
         try (MockWebServer server = new MockWebServer()) {
@@ -28,10 +32,10 @@ public final class HttpReferenceSessionClientTest {
             server.start();
 
             String backendUrl = server.url("/").toString();
-            ReferenceLoginSession session = new HttpReferenceSessionClient(backendUrl)
+            ReferenceLoginSession session = new HttpMeetingSessionClient(backendUrl)
                     .login("viewer", "test-password");
-            new HttpReferenceMeetingClient(backendUrl, session.accessToken()).createMeeting(
-                    MeetingSetup.transcript("zh-CN", "https://result.example.test/index.html"));
+            new HttpMeetingServerClient(MeetingClientConfig.reference(backendUrl, session.accessToken())).createMeeting(
+                    MeetingSetup.transcript("zh-CN", "https://result.example.test/index.html").toOptions());
 
             RecordedRequest login = server.takeRequest();
             RecordedRequest create = server.takeRequest();
@@ -51,7 +55,7 @@ public final class HttpReferenceSessionClientTest {
             server.enqueue(new MockResponse().setResponseCode(401));
             server.start();
             IOException failure = assertThrows(IOException.class,
-                    () -> new HttpReferenceSessionClient(server.url("/").toString())
+                    () -> new HttpMeetingSessionClient(server.url("/").toString())
                             .login("viewer", "wrong-password"));
             assertEquals("账号或密码错误", failure.getMessage());
         }
@@ -68,7 +72,7 @@ public final class HttpReferenceSessionClientTest {
                     + "\"limits\":{\"maxMeetingDurationMs\":600000,"
                     + "\"maxAudioFrameBytes\":32000,\"eventReplayWindow\":100}}"));
             server.start();
-            var options = new HttpReferenceSessionClient(server.url("/").toString())
+            var options = new HttpMeetingSessionClient(server.url("/").toString())
                     .deploymentOptions();
             Set<String> capabilities = options.capabilities();
             assertEquals(Set.of(MeetingCapabilityState.TRANSCRIPT,
@@ -84,13 +88,13 @@ public final class HttpReferenceSessionClientTest {
 
     @Test
     public void loginRequiresHttpsExceptLoopbackDevelopmentAddress() throws Exception {
-        assertThrows(IOException.class, () -> HttpReferenceSessionClient.validateLoginUrl(
+        assertThrows(IOException.class, () -> HttpMeetingSessionClient.validateLoginUrl(
                 new URL("http://192.168.1.10:8080/v1/reference/session:login")));
-        HttpReferenceSessionClient.validateLoginUrl(
+        HttpMeetingSessionClient.validateLoginUrl(
                 new URL("https://meeting.example.com/v1/reference/session:login"));
-        HttpReferenceSessionClient.validateLoginUrl(
+        HttpMeetingSessionClient.validateLoginUrl(
                 new URL("http://localhost:8080/v1/reference/session:login"));
-        HttpReferenceSessionClient.validateLoginUrl(
+        HttpMeetingSessionClient.validateLoginUrl(
                 new URL("http://127.0.0.1:8080/v1/reference/session:login"));
     }
 }

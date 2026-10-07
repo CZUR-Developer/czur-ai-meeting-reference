@@ -7,7 +7,7 @@ import java.util.List;
 
 /**
  * 用户在点击“开始会议”时冻结的本场会前设置。模型能力和结果交付能力彼此独立：
- * 前者进入 Create 的能力请求，后者留在 App 内决定网页或本地 PDF 交付。
+ * 前者进入组合入口的能力请求，后者交给组合入口处理网页/邮件；本地 PDF 绘制留在 App。
  */
 public record MeetingSetup(Mode mode, String sourceLanguage, String targetLanguage,
         boolean presentationCapture, ResultDelivery resultDelivery, String resultWebUrl,
@@ -56,7 +56,7 @@ public record MeetingSetup(Mode mode, String sourceLanguage, String targetLangua
         return toOptions().targetLanguages();
     }
 
-    /** P6-6 迁移期将旧 UI 快照转成唯一 core 业务类型，P6-7 会直接使用它。 */
+    /** 将 UI/开始条件 Hook 的会前快照转成组合层的唯一业务类型。 */
     public MeetingOptions toOptions() {
         return new MeetingOptions(MeetingOptions.Mode.valueOf(mode.name()), sourceLanguage,
                 targetLanguage, presentationCapture,

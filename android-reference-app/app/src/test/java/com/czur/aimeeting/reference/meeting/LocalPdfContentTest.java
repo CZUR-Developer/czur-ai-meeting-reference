@@ -8,6 +8,7 @@ import static org.junit.Assert.assertArrayEquals;
 import com.czur.aimeeting.client.FinalTranscriptSegment;
 import com.czur.aimeeting.client.FinalTranslation;
 import com.czur.aimeeting.client.MeetingResultContent;
+import com.czur.aimeeting.client.MeetingResult;
 import com.czur.aimeeting.client.PresentationFrame;
 import com.czur.aimeeting.model.SummaryResult;
 import java.util.List;
@@ -15,8 +16,12 @@ import java.util.Set;
 import org.junit.Test;
 
 public final class LocalPdfContentTest {
+    private static MeetingResult result(MeetingResultContent content) {
+        return new MeetingResult("mtg_pdf", "本场", 123L, MeetingResult.Status.READY,
+                content.artifactTypes(), content);
+    }
     @Test public void includesOnlyChaptersBackedByReadyContent() {
-        LocalMeetingResult result = new LocalMeetingResult("本场", new MeetingResultContent(
+        MeetingResult result = result(new MeetingResultContent(
                 Set.of("transcript.final"), "你好\n继续", List.of(
                         new FinalTranscriptSegment("s1", 0, 100, "zh-CN", "你好", "speaker-1"),
                         new FinalTranscriptSegment("s2", 100, 200, "zh-CN", "继续", null)),
@@ -30,7 +35,7 @@ public final class LocalPdfContentTest {
     }
 
     @Test public void includesTranslationSummaryAndPresentationOnlyWhenPresent() {
-        LocalMeetingResult result = new LocalMeetingResult("本场", new MeetingResultContent(
+        MeetingResult result = result(new MeetingResultContent(
                 Set.of("translation.final", "summary.structured", "presentation.capture"), "",
                 List.of(), List.of(new FinalTranslation("t1", "s1", "en-US", "zh-CN", "你好")),
                 new SummaryResult("zh-CN", "纪要", "结论", List.of("要点"), List.of()),
@@ -46,7 +51,7 @@ public final class LocalPdfContentTest {
     }
 
     @Test public void keepsWholeTranscriptFallbackWithoutInventingMissingSections() {
-        LocalMeetingResult result = new LocalMeetingResult("本场", new MeetingResultContent(
+        MeetingResult result = result(new MeetingResultContent(
                 Set.of("transcript.final"), "仅有全文的产物", List.of(), List.of(), null, List.of()));
         List<LocalPdfContent.Entry> entries = LocalPdfContent.from(result);
         assertEquals(List.of("字幕", "仅有全文的产物"), entries.stream()

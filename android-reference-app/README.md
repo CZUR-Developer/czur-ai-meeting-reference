@@ -9,7 +9,8 @@ integration.
 是模型 Adapter、会话材料、生命周期和标准字幕事件的唯一公共源码。
 `meeting-client-core/` 保存共享 Adapter 工厂、默认解析和显示规则，详见其
 [接入说明](meeting-client-core/README.md)。Mock 直接依赖 core；SDK 模式使用 AAR
-内带的同一 core，App 不重复打包。Server 组合入口继续按 P6-6/P6-7 实装计划推进。
+内带的同一 core，App 不重复打包。参考 App 已接入完整 `MeetingClient` 组合入口；
+主机构建与迁移后设备验证的状态见 P6-7 过程记录，源码接线不代签设备验收。
 默认 `mock` 模式不需要私有 AAR，可干净构建并演示同一片段的初稿、修订稿、最终稿；
 未完成文字以 80% 透明度显示，最终文字以 100% 显示。
 
@@ -20,9 +21,9 @@ integration.
 `StartTranscription`/`StopTranscription`，把模型 partial/final 消息归一化为标准字幕。
 当前还可解析按国内版字段路径重建的听悟 `translate_result` 固定样例，并将译文与
 原文片段关联，在应用内双栏和悬浮窗显示。会前现场互译入口在 SDK 构建中已开放：
-后端本场能力决策允许翻译时，听悟启动消息会开启译文，App 提交标准译文事件，
+后端本场能力决策允许翻译时，听悟启动消息会开启译文，组合层提交标准译文事件，
 Stop 后由后端生成字幕和译文结果。真实双向会议与 Web 读回仍待设备验收。
-真实模式在创建并启动会议后调用独立的
+真实模式由组合层在创建会议后调用独立的
 `POST /v1/meetings/{meetingId}:modelSession` 领取材料：`adapterId`、完整的临时签名
 `endpoint`、`expiresAt`、`initParams.taskId`，可选 `token`。Create 的 `realtime`
 仍属于旧后端音频入口。`endpoint` 与
@@ -32,10 +33,10 @@ P5-2 增加 `sample-json-ws` 第二格式样例：它的模型消息使用顶层
 `type/segment/revision`，与听悟的 `header/payload` 格式不同；两者在
 `ModelAdapterRegistry` 中构建期注册，后端 `modelSession.adapterId` 决定本场选用哪一个。
 伙伴适配其他格式时新增 Adapter 并在注册表登记其实时能力，通用会议页面和 SDK
-不用修改。登录后参考 App 读取既有 `GET /v1/capabilities`，将部署静态能力与
-本地已装配的 Adapter 能力求交后开放会前模式；旧后端未实现发现接口时只保留
-实时字幕入口。参考 App 仍读取 Create 响应的 `capabilityDecisions`，本场权益、
-模型与降级结果以该决策为准；未请求或本场不可用的翻译/总结不会启动会议。
+不用修改。登录后参考 App 调用 `MeetingClient.discover`，直接读取部署与本地能力
+已求交的 `availableCapabilities` 开放会前模式；发现失败时显示原因并保留账号切换入口，
+不创建会议。组合层读取 Create 响应的 `capabilityDecisions`，本场权益、
+模型与降级结果以该决策为准；必需能力不可用时不启动会议，可选能力不启用。
 P5-6 的参考结果方式以网页、本地 PDF、邮箱链接和互译无痕为准；扫码接收由合作伙伴
 自行开发，并通过会前条件 Hook 扩展。
 
@@ -43,7 +44,7 @@ P5-6 的参考结果方式以网页、本地 PDF、邮箱链接和互译无痕�
 在模型最终字幕到齐后，向已认证后端请求本场 `:summarySession`；后端只下发
 百炼临时 Key、应用 completion 地址与过期时间。SDK 用短期 Bearer 向
 `/api/v1/apps/{appId}/completion` 发送 `input.prompt`，Adapter 从 `output.text`
-解析标准标题、概述、要点和待办；App 在 Stop 前提交标准纪要，后端不调用总结模型。
+解析标准标题、概述、要点和待办；组合层在 Stop 前提交标准纪要，后端不调用总结模型。
 部署方须在后端配置百炼 AppId、永久 Key 及本场 `summary.structured` 能力，
 永久 Key 不进入 App。当前仅以环回假 HTTP 和代码构建验证协议，真实百炼请求及
 设备 App→后端→Web 纪要真链仍待验。
@@ -84,11 +85,12 @@ SDK 从公共 `model-runtime-contract-0.4.0.jar` 编译，参考 App 只打包�
 `model-runtime-contract` 的同版类，避免重复类。SDK 模式的最终验收还需要设备说话
 产生真实字幕，并确认音频送达模型端点、后端只接收标准事件。
 
-会中模型会话、标准事件队列和跨应用字幕窗由 `MeetingService` 持有。用户在 App
+会中 `MeetingService` 持有完整会议句柄、跨应用字幕窗与平台资源；模型、音频和
+标准事件队列由 SDK 内的唯一协调器持有。用户在 App
 前台点击开始时启动 microphone 前台服务；切换到其他 App 后，SDK 音源与模型会话
 仍由该服务持有，页面重新打开时订阅同一场字幕状态。设备上的后台连续采集尚待真实
 会议验证。悬浮窗需要用户在系统设置中授予
-“显示在其他应用上层”权限，页面和悬浮窗的停止操作进入同一服务收口流程。
+“显示在其他应用上层”权限，页面和悬浮窗的停止操作进入同一 `MeetingSession.requestStop()`。
 Mock 构建使用同一服务流程，但选择不占用麦克风的 `dataSync` 前台服务类型。
 
 Create 响应的 `limits.maxMeetingDurationMs` 是本场计时上限；会议页与悬浮窗读取
@@ -106,8 +108,9 @@ Mini 期间会议仍继续采音、收模型结果和提交标准事件，恢复
 没有真正的暂停接口；参考版因此只实现窗口收起，不声称 Mini 暂停识别或计费。
 
 P5-4 的会前入口先填写设备可达的后端地址，以及部署者预置的终端用户账号和密码。
-App 调用 `POST /v1/reference/session:login` 取得访问令牌，再以该令牌创建会议、
-提交标准字幕/译文事件和结束会议。两类事件共用本场 `clientSequence` 与单线程
+App 调用 `MeetingClient.login` 取得访问令牌，再用凭据创建 Service 的独立会议客户端。
+组合层封装 `POST /v1/reference/session:login`、建会、标准字幕/译文提交及结束会议。
+两类事件在协调器内共用本场 `clientSequence` 与单线程
 提交队列；模型确认完成后，Stop 排在此前事件提交之后。令牌仅保存在本次进程内，切换账号时清除；账号密码和
 令牌均不写入 APK、日志或持久化配置。登录地址须使用设备可访问的 HTTPS；本机调试
 可以通过 `adb reverse tcp:8080 tcp:8080`，在设备上填写 `http://127.0.0.1:8080`
@@ -122,7 +125,8 @@ App 调用 `POST /v1/reference/session:login` 取得访问令牌，再以该令�
 
 ### SDK 音频来源、方向与权限边界
 
-`ModelSessionListener.onAudioInputMode(AudioInputMode)` 返回本次实际来源：`MIC`
+基础模型运行接口的 `ModelSessionListener.onAudioInputMode(AudioInputMode)` 和组合入口的
+`MeetingListener.onAudioInputMode(AudioInputMode)` 均返回本次实际来源：`MIC`
 为标准 Android 麦克风，`CZUR_BROKER` 为兼容的新系统共享音频，`DEBUG_WAV` 为
 仅 Debug 的测试文件。参考 App 在会中功能栏显示该枚举值；伙伴可用于状态展示，
 无需自行探测系统。旧 CZUR 系统的 MIC 降级遵循该系统既有录音竞合能力，不具备新
@@ -131,15 +135,17 @@ Broker 的竞合保证；模式用于准确说明当前能力。
 `onAudioDirection(AudioDirectionSample)` 返回原始／稳定角度、单调时间戳和
 `AVAILABLE`／`NO_DIRECTION`／`UNSUPPORTED` 状态。SDK 基础层只提供技术样本，唯一
 公共 core 的 `MeetingDisplayState` 结合会前语言、模型语种、句开始方向快照及片段状态
-确定左右栏。`MeetingService` 将句开始、方向、字幕与译文回调排入主线程队列，
-调用同一 core；`NO_DIRECTION` 保留上次有效稳定角，`UNSUPPORTED` 让新片段按语种
+确定左右栏。完整会议的协调器在内部串行处理句开始、方向、字幕与译文，Service 只通过
+`onDisplay(MeetingDisplaySnapshot)` 接收已经配对及路由的不可变结果；页面/悬浮窗
+用同一无状态 `DisplaySnapshotPresentation` 设置文本和透明度，不再处理原始方向。
+`NO_DIRECTION` 保留上次有效稳定角，`UNSUPPORTED` 让新片段按语种
 降级，已有片段不搬栏。听悟模糊方向区的迟到语种窗口通过独立deadline定时释放，
 不被HTTP上传或秒级计时tick延长；停止即时冲刷待显示快照，真实語种不被显示侧改写。
 
 `onAudioError(AudioInputErrorCode, String)` 区分权限拒绝、开流失败与读取失败。
 SDK 无权限时返回 `PERMISSION_DENIED`，不负责申请权限；参考 App 的开始按钮和诊断
 正常入口检查并申请 `RECORD_AUDIO`，Service 只显示错误提示，不从后台弹权限框。
-SDK 终止本场音频后，用户仍可停止会议；App 使用已收到的标准事件执行后端 Stop，
+SDK 终止本场音频后，用户仍可停止会议；组合层使用已收到的标准事件执行后端 Stop，
 不等待已关闭会话的最终模型回调，不生成缺字幕的纪要或主动交付空结果。结束后返回
 会前页面，由 App 正常申请权限并重新开始。
 只实现旧 `onError(String)` 的调用方仍会由默认方法收到音频错误。
@@ -161,7 +167,7 @@ Debug `AudioDiagnosticActivity` 同时显示模式、方向状态、帧数和峰
 后端保存标准事件和已启用的结果产物。实时字幕模式可选择演示文稿，系统授权录屏后由会议 Service
 定时采集 JPEG，并在 Stop 前提交截图包；互译模式暂不开放演示文稿。用户点击开始时冻结本场设置；创建后
 还会核对后端 `capabilityDecisions`，能力不满足时不会启动客户端会议。
-Mock 模式三次字幕都保存后可停止；SDK 模式随时可请求停止输入，等待模型最后一条
+Mock 模式最终字幕保存后可停止；SDK 模式随时可请求停止输入，等待模型最后一条
 字幕后再向后端结束会议。网页和邮箱方式需要填写已部署的静态 Web `index.html`
 地址；网页方式在 Stop 成功后由内置 WebView 打开含 `meetingId` 与 `genTime` 的
 结果链接，邮箱方式发送同一链接。本地方式生成 PDF，互译无痕方式不主动交付结果。
@@ -169,6 +175,36 @@ Mock 模式三次字幕都保存后可停止；SDK 模式随时可请求停止�
 它不承诺无服务端记录。合作伙伴若需要真正的不留存流程，须自行调整后端与 App，
 不能仅依赖这个结果方式选项。
 Starry 设备无需外部浏览器。
+
+### 完整会议入口与平台扩展点
+
+`src/sdk/.../MeetingRuntimeFactory` 仅构造 `AiMeetingClient(context, config)`；Mock Factory
+为同一 `MeetingCoordinator` 注入现存固定字幕/纪要运行端口，不增加第二套业务流程。
+配置包含 Server 地址、登录 Token、客户端身份、会议档位和串行回调 Executor；Android
+使用主线程 Handler。Activity 的会前客户端和 Service 的会议客户端彼此独立。
+
+```java
+MeetingClient client = MeetingRuntimeFactory.create(context, config);
+MeetingSession session = client.start(setup.toOptions(), new MeetingListener() {
+    @Override public void onDisplay(MeetingDisplaySnapshot snapshot) {
+        // SDK 已决定片段配对、源侧和交换；UI 只渲染 final=100%、partial=80%。
+    }
+    @Override public void beforeStop(Runnable continuation) {
+        // 停止周期屏采，在平台队列提交最后有效截图、关闭投影，再调用 continuation。
+        continuation.run(); // 没有屏采时直接继续；详细接线见 MeetingService。
+    }
+    @Override public void onResult(MeetingResult result) {
+        // WEB/邮箱消费 resultUrl；LOCAL_READY 的 typed content 在 App 生成 PDF。
+    }
+});
+session.requestStop(); // 正常收口；client.close() 仅用于取消/释放，不产生会议结果。
+```
+
+屏幕授权、周期 JPEG、PDF/MediaStore 和权限申请均在 App；截图通过
+`session.submitPresentation(offsetMs, jpeg)` 交组合层保存。系统单独停止投影只结束
+屏采，字幕会议继续。`onResult` 先于 READY 状态，LOCAL 的 PDF 队列在保存完成后才
+停止 Service；邮箱失败保留 SDK 返回的同一个网页链接。合作伙伴可更换这些平台/UI
+实现，或在 SDK Factory 传入自定义 Adapter 工厂注册表，继续复用同一组合流程。
 
 ### 合作伙伴会前开会条件 Hook
 

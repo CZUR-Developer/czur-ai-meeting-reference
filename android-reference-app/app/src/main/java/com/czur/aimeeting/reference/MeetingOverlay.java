@@ -12,7 +12,8 @@ import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
-import com.czur.aimeeting.client.display.MeetingDisplayState;
+import com.czur.aimeeting.client.display.MeetingDisplaySnapshot;
+import com.czur.aimeeting.reference.meeting.DisplaySnapshotPresentation;
 import com.czur.aimeeting.reference.meeting.MeetingReminderPresentation;
 import com.czur.aimeeting.reference.meeting.MeetingSetup;
 import com.czur.aimeeting.reference.meeting.OverlayLayoutState;
@@ -20,7 +21,7 @@ import java.util.List;
 
 /**
  * 参考 App 的最小跨应用字幕窗。只负责展示和转发停止点击；模型连接、会议收口和
- * 字幕修订由前台会议 Service 管理。窗口只在用户主动打开且授予悬浮窗权限后创建。
+ * 字幕修订由 SDK 管理，窗口和页面读取同一不可变快照。只在用户主动打开且授予悬浮窗权限后创建。
  */
 final class MeetingOverlay {
     private static final String TAG = "AiMeetingReference";
@@ -45,7 +46,7 @@ final class MeetingOverlay {
     private Button sizeButton;
     private ScrollView historyScroll;
     private LinearLayout historyRows;
-    private MeetingDisplayState lastDisplay;
+    private MeetingDisplaySnapshot lastDisplay;
     private MeetingSetup.Mode lastMode = MeetingSetup.Mode.LIVE_TRANSCRIPT;
     private String lastTimeText = "";
     private MeetingReminderPresentation.Notice lastReminder =
@@ -60,11 +61,11 @@ final class MeetingOverlay {
 
     boolean isShowing() { return root != null; }
 
-    void show(MeetingDisplayState state, Runnable onOpenApp, Runnable onSwapColumns,
+    void show(MeetingDisplaySnapshot state, Runnable onOpenApp, Runnable onSwapColumns,
             Runnable onConfirmReminder, Runnable onStop) {
         if (root != null) return;
         this.onConfirmReminder = onConfirmReminder;
-        layout = new OverlayLayoutState(state.isBilingual());
+        layout = new OverlayLayoutState(state.bilingual());
         LinearLayout panel = new LinearLayout(context);
         panel.setOrientation(LinearLayout.VERTICAL);
         GradientDrawable background = new GradientDrawable();
@@ -172,7 +173,7 @@ final class MeetingOverlay {
         root = panel;
     }
 
-    void render(MeetingDisplayState state, MeetingSetup.Mode mode, String timeText,
+    void render(MeetingDisplaySnapshot state, MeetingSetup.Mode mode, String timeText,
             MeetingReminderPresentation.Notice reminder, boolean canStop,
             boolean allowOverlayReminder) {
         if (root == null) return;
@@ -184,11 +185,13 @@ final class MeetingOverlay {
         lastCanStop = canStop;
         renderReminder(reminder, allowOverlayReminder);
         if (layout.current() == OverlayLayoutState.Type.MINI) return;
-        boolean bilingual = state.isBilingual();
+        boolean bilingual = state.bilingual();
         boolean large = layout.current() == OverlayLayoutState.Type.TRANSLATION_LARGE;
-        MeetingDisplayState.BilingualRow current = bilingual ? state.latestBilingualRow() : null;
-        titleView.setText(bilingual ? "双语互译  " + state.leftLabel() + " / "
-                + state.rightLabel()
+        var current = !bilingual || state.rows().isEmpty() ? null
+                : DisplaySnapshotPresentation.bilingual(
+                        state.rows().get(state.rows().size() - 1), state.swapped());
+        titleView.setText(bilingual ? "双语互译  " + DisplaySnapshotPresentation.leftLabel(state) + " / "
+                + DisplaySnapshotPresentation.rightLabel(state)
                 + (large ? " · 大窗" : " · 普通窗")
                 + (current != null && current.languageFallback() ? "（语种降级）" : "")
                 : mode == MeetingSetup.Mode.MEETING_MINUTES ? "AI 会议纪要" : "实时字幕");
@@ -198,8 +201,9 @@ final class MeetingOverlay {
         swapButton.setVisibility(bilingual ? View.VISIBLE : View.GONE);
         sizeButton.setVisibility(bilingual ? View.VISIBLE : View.GONE);
         sizeButton.setText(large ? "普通窗" : "大窗");
-        transcriptView.setText(state.transcript());
-        transcriptView.setAlpha(state.transcriptAlpha());
+        var latestSubtitle = DisplaySnapshotPresentation.latestSubtitle(state);
+        transcriptView.setText(latestSubtitle.text());
+        transcriptView.setAlpha(latestSubtitle.alpha());
         if (bilingual) {
             if (current != null) {
                 leftView.setText(current.left());
@@ -210,7 +214,7 @@ final class MeetingOverlay {
                 leftView.setText("等待字幕…");
                 rightView.setText("");
             }
-            if (large) renderHistory(state.bilingualRows());
+            if (large) renderHistory(state);
         }
         elapsedView.setText(timeText);
         stopButton.setEnabled(canStop);
@@ -265,7 +269,8 @@ final class MeetingOverlay {
     }
 
     /** 大窗展示最近几行；行数据始终取自 Service 的同一份已路由会议状态。 */
-    private void renderHistory(List<MeetingDisplayState.BilingualRow> rows) {
+    private void renderHistory(MeetingDisplaySnapshot snapshot) {
+        List<MeetingDisplaySnapshot.Row> rows = snapshot.rows();
         historyRows.removeAllViews();
         if (rows.isEmpty()) {
             TextView waiting = new TextView(context);
@@ -275,7 +280,7 @@ final class MeetingOverlay {
             return;
         }
         for (int index = Math.max(0, rows.size() - 8); index < rows.size(); index++) {
-            MeetingDisplayState.BilingualRow segment = rows.get(index);
+            var segment = DisplaySnapshotPresentation.bilingual(rows.get(index), snapshot.swapped());
             LinearLayout row = new LinearLayout(context);
             row.setOrientation(LinearLayout.HORIZONTAL);
             TextView left = historyCell(segment.left(), segment.leftAlpha());

@@ -1,6 +1,11 @@
 package com.czur.aimeeting.reference.meeting;
 
 import com.czur.aimeeting.client.MeetingCapabilityState;
+import com.czur.aimeeting.client.MeetingClientConfig;
+import com.czur.aimeeting.client.MeetingResult;
+import com.czur.aimeeting.client.server.CreatedMeeting;
+import com.czur.aimeeting.client.server.HttpMeetingServerClient;
+import com.czur.aimeeting.client.server.MeetingServerClient;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertArrayEquals;
@@ -19,14 +24,17 @@ import org.json.JSONObject;
 import org.junit.Test;
 
 /** 用本机 HTTP 服务核对 P4-2 的 Create、启动和字幕提交正常路径。 */
-public final class HttpReferenceMeetingClientTest {
+public final class HttpMeetingServerClientAppTest {
+    private static HttpMeetingServerClient client(String url, String token) {
+        return new HttpMeetingServerClient(MeetingClientConfig.reference(url, token));
+    }
     @Test
     public void sendsTheSameExpiringResultLinkToSelectedEmailsWithoutPdf() throws Exception {
         try (MockWebServer server = new MockWebServer()) {
             server.enqueue(new MockResponse().setResponseCode(200).setBody("{\"sent\":true}"));
             server.start();
             String url = "https://result.example.test/index.html?meetingId=mtg_mail&genTime=123";
-            new HttpReferenceMeetingClient(server.url("/").toString(), "local-demo-token")
+            client(server.url("/").toString(), "local-demo-token")
                     .sendResultEmail("mtg_mail", List.of("viewer@example.test"), url);
             RecordedRequest request = server.takeRequest();
             assertEquals("/v1/meetings/mtg_mail:sendResultEmail", request.getPath());
@@ -55,9 +63,9 @@ public final class HttpReferenceMeetingClientTest {
             server.enqueue(new MockResponse().setResponseCode(200)
                     .setBody("{\"frames\":[{\"offsetMs\":2000,\"jpegBase64\":\"Ag==\"}]}"));
             server.start();
-            HttpReferenceMeetingClient client = new HttpReferenceMeetingClient(
+            HttpMeetingServerClient client = client(
                     server.url("/").toString(), "local-demo-token");
-            LocalMeetingResult result = client.readLocalResult("mtg_test", 123L);
+            MeetingResult result = client.readResult("mtg_test", 123L, true);
             assertEquals("本场会议", result.title());
             assertEquals("你好", result.content().transcriptText());
             assertTrue(result.content().summary() == null);
@@ -79,9 +87,9 @@ public final class HttpReferenceMeetingClientTest {
             server.enqueue(new MockResponse().setResponseCode(200)
                     .setBody("{\"status\":\"READY\",\"title\":null,\"artifacts\":[]}"));
             server.start();
-            LocalMeetingResult result = new HttpReferenceMeetingClient(
+            MeetingResult result = client(
                     server.url("/").toString(), "local-demo-token")
-                    .readLocalResult("mtg_null_title", 123L);
+                    .readResult("mtg_null_title", 123L, true);
             assertEquals("参考会议", result.title());
         }
     }
@@ -101,16 +109,16 @@ public final class HttpReferenceMeetingClientTest {
             server.enqueue(new MockResponse().setResponseCode(200)
                     .setBody("{\"inputState\":\"INPUT_ACCEPTED\"}"));
             server.start();
-            ReferenceMeetingClient client = new HttpReferenceMeetingClient(
+            MeetingServerClient client = client(
                     server.url("/").toString(), "local-demo-token");
             CreatedMeeting created = client.createMeeting(
-                    MeetingSetup.transcript("en-US", "https://result.example.test/index.html"));
+                    MeetingSetup.transcript("en-US", "https://result.example.test/index.html").toOptions());
             String meetingId = created.meetingId();
             client.startClient(meetingId);
             client.appendTranscript(meetingId, 1,
                     new TranscriptEvent("mock-segment-1", 1, 0, 0,
                             "zh-CN", "今天我们讨论 AI", false));
-            assertTrue(client.stopMeeting(meetingId));
+            assertTrue(client.stopMeeting(meetingId).accepted());
 
             RecordedRequest createRequest = server.takeRequest();
             RecordedRequest startRequest = server.takeRequest();
@@ -162,7 +170,7 @@ public final class HttpReferenceMeetingClientTest {
             server.enqueue(new MockResponse().setResponseCode(201).setBody("{}"));
             server.enqueue(new MockResponse().setResponseCode(201).setBody("{}"));
             server.start();
-            ReferenceMeetingClient client = new HttpReferenceMeetingClient(
+            MeetingServerClient client = client(
                     server.url("/").toString(), "local-demo-token");
             TranscriptEvent spoken = new TranscriptEvent("seg-1", 1, 0, 500,
                     "zh-CN", "你好", false, "speaker-2");
@@ -188,11 +196,11 @@ public final class HttpReferenceMeetingClientTest {
             server.enqueue(new MockResponse().setResponseCode(201).setBody("{}"));
             server.enqueue(new MockResponse().setResponseCode(200).setBody("{}"));
             server.start();
-            ReferenceMeetingClient client = new HttpReferenceMeetingClient(
+            MeetingServerClient client = client(
                     server.url("/").toString(), "local-demo-token");
             client.submitSummary("mtg_minutes", new SummaryResult("zh-CN", "方案会议",
                     "已确定下一步方案", List.of("先做样例"), List.of("确认负责人")));
-            assertTrue(client.stopMeeting("mtg_minutes"));
+            assertTrue(client.stopMeeting("mtg_minutes").accepted());
 
             RecordedRequest submit = server.takeRequest();
             RecordedRequest stop = server.takeRequest();
@@ -221,10 +229,10 @@ public final class HttpReferenceMeetingClientTest {
                     + "\"expiresAt\":\"2030-01-01T00:01:00Z\","
                     + "\"initParams\":{\"taskId\":\"task-1\"}}"));
             server.start();
-            HttpReferenceMeetingClient client = new HttpReferenceMeetingClient(
+            HttpMeetingServerClient client = client(
                     server.url("/").toString(), "local-demo-token");
             String meetingId = client.createMeeting(
-                    MeetingSetup.transcript("zh-CN", "https://result.example.test/index.html"))
+                    MeetingSetup.transcript("zh-CN", "https://result.example.test/index.html").toOptions())
                     .meetingId();
             var grant = client.requestModelSession(meetingId);
             assertEquals("mtg_real", meetingId);
@@ -247,12 +255,12 @@ public final class HttpReferenceMeetingClientTest {
             server.enqueue(new MockResponse().setResponseCode(201)
                     .setBody("{\"meetingId\":\"mtg_translation\",\"limits\":{\"maxMeetingDurationMs\":600000}}"));
             server.start();
-            HttpReferenceMeetingClient client = new HttpReferenceMeetingClient(
+            HttpMeetingServerClient client = client(
                     server.url("/").toString(), "local-demo-token");
             MeetingSetup setup = new MeetingSetup(MeetingSetup.Mode.LIVE_TRANSLATION,
                     "zh-CN", "en-US", true, MeetingSetup.ResultDelivery.WEB,
                     "https://result.example.test/index.html");
-            client.createMeeting(setup);
+            client.createMeeting(setup.toOptions());
 
             JSONObject request = new JSONObject(server.takeRequest().getBody().readUtf8());
             assertEquals("zh-CN", request.getJSONObject("languages").getString("source"));
@@ -273,7 +281,7 @@ public final class HttpReferenceMeetingClientTest {
             server.enqueue(new MockResponse().setResponseCode(201).setBody("{}"));
             server.enqueue(new MockResponse().setResponseCode(200).setBody("{}"));
             server.start();
-            ReferenceMeetingClient client = new HttpReferenceMeetingClient(
+            MeetingServerClient client = client(
                     server.url("/").toString(), "local-demo-token");
             client.appendTranscript("mtg_translation", 1, new TranscriptEvent(
                     "source-1", 1, 0, 100, "en-US", "Hello", true));
@@ -281,7 +289,7 @@ public final class HttpReferenceMeetingClientTest {
                     "translation-1", "source-1", 1, "en-US", "zh-CN", "你好", false));
             client.appendTranslation("mtg_translation", 3, new TranslationEvent(
                     "translation-1", "source-1", 2, "en-US", "zh-CN", "你好。", true));
-            assertTrue(client.stopMeeting("mtg_translation"));
+            assertTrue(client.stopMeeting("mtg_translation").accepted());
 
             JSONObject transcript = new JSONObject(server.takeRequest().getBody().readUtf8());
             RecordedRequest partialRequest = server.takeRequest();
@@ -319,13 +327,13 @@ public final class HttpReferenceMeetingClientTest {
             server.enqueue(new MockResponse().setResponseCode(201).setBody("{}"));
             server.enqueue(new MockResponse().setResponseCode(200).setBody("{}"));
             server.start();
-            ReferenceMeetingClient client = new HttpReferenceMeetingClient(
+            MeetingServerClient client = client(
                     server.url("/").toString(), "local-demo-token");
             byte[] firstJpeg = {(byte) 0xff, (byte) 0xd8, 1, (byte) 0xff, (byte) 0xd9};
             byte[] secondJpeg = {(byte) 0xff, (byte) 0xd8, 2, (byte) 0xff, (byte) 0xd9};
             client.appendPresentation("mtg_slides", 1, 10_000L, firstJpeg);
             client.appendPresentation("mtg_slides", 2, 20_000L, secondJpeg);
-            assertTrue(client.stopMeeting("mtg_slides"));
+            assertTrue(client.stopMeeting("mtg_slides").accepted());
 
             for (int expected = 1; expected <= 2; expected++) {
                 RecordedRequest request = server.takeRequest();
