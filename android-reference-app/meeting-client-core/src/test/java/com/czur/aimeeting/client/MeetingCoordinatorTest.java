@@ -4,6 +4,7 @@ import static org.junit.Assert.*;
 
 import com.czur.aimeeting.client.display.MeetingDisplaySnapshot;
 import com.czur.aimeeting.client.provider.TingwuModelAdapter;
+import com.czur.aimeeting.client.provider.BailianSummaryAdapter;
 import com.czur.aimeeting.client.identity.IdentityProvider;
 import com.czur.aimeeting.client.identity.IdentityResult;
 import com.czur.aimeeting.client.identity.IdentitySession;
@@ -133,6 +134,37 @@ public final class MeetingCoordinatorTest {
             assertEquals(1, f.probe.beforeStopCalls.get());
             assertTrue(f.probe.info.startedAtMs() > 0);
             assertEquals(600000L, f.probe.info.maxMeetingDurationMs());
+        }
+    }
+
+    @Test public void translationSummaryWaitsForTailAndSavesBothBeforeStop() throws Exception {
+        try (Fixture f = new Fixture(true, ALL)) {
+            f.runtime.emitTail = true;
+            f.session = f.client.start(new MeetingOptions(MeetingOptions.Mode.LIVE_TRANSLATION,
+                    "zh-CN", "en-US", false, MeetingOptions.ResultDelivery.WEB,
+                    "https://result.example.test", List.of(), true), f.probe);
+            assertTrue(f.runtime.started.await(2, TimeUnit.SECONDS));
+            f.session.requestStop();
+            assertNotNull(f.probe.result());
+            assertTrue(f.probe.info.availableCapabilities().contains(MeetingCapabilityState.TRANSLATION));
+            assertTrue(f.probe.info.availableCapabilities().contains(MeetingCapabilityState.SUMMARY));
+            assertEquals("最后字幕", f.runtime.summaryInput.transcript());
+            assertEquals(List.of("discover", "create", "grant", "start", "event1", "translation2",
+                    "summaryGrant", "summary", "stop", "manifest"), f.server.steps);
+            assertTrue(f.server.requested.summaryEnabled());
+        }
+    }
+
+    @Test public void checkedSummaryIsRequiredAlongsideTranslation() throws Exception {
+        try (Fixture f = new Fixture(true, Set.of(MeetingCapabilityState.TRANSCRIPT,
+                MeetingCapabilityState.TRANSLATION))) {
+            f.session = f.client.start(new MeetingOptions(MeetingOptions.Mode.LIVE_TRANSLATION,
+                    "zh-CN", "en-US", false, MeetingOptions.ResultDelivery.WEB,
+                    "https://result.example.test", List.of(), true), f.probe);
+            assertEquals(MeetingSessionState.Phase.FAILED,
+                    f.probe.awaitPhase(MeetingSessionState.Phase.FAILED).phase());
+            assertEquals(List.of("discover", "create"), f.server.steps);
+            assertEquals(1, f.runtime.started.getCount());
         }
     }
 
@@ -349,9 +381,11 @@ public final class MeetingCoordinatorTest {
         boolean includeContent;
         byte[] jpeg;
         String emailUrl;
+        MeetingOptions requested;
         Server(Set<String> granted) { this.granted = granted; }
         @Override public DeploymentOptions discover() { steps.add("discover"); return new DeploymentOptions(ALL, 86400000L, true); }
         @Override public CreatedMeeting createMeeting(MeetingOptions options) throws IOException {
+            requested = options;
             steps.add("create");
             try {
                 JSONArray decisions = new JSONArray();
@@ -360,7 +394,11 @@ public final class MeetingCoordinatorTest {
             } catch (Exception failure) { throw new IOException(failure); }
         }
         @Override public ModelSessionGrant requestModelSession(String id) { steps.add("grant"); return new ModelSessionGrant(id, TingwuModelAdapter.ID, "wss://model.example.test/signed", "2030-01-01T00:00:00Z", null, Map.of()); }
-        @Override public SummarySessionGrant requestSummarySession(String id) { steps.add("summaryGrant"); throw new AssertionError("本用例的 Mock 总结不领取模型材料"); }
+        @Override public SummarySessionGrant requestSummarySession(String id) {
+            steps.add("summaryGrant");
+            return new SummarySessionGrant(BailianSummaryAdapter.ID, "https://summary.example.test",
+                    "2030-01-01T00:00:00Z", "fixture-summary");
+        }
         @Override public void startClient(String id) { steps.add("start"); }
         @Override public void appendTranscript(String id, int number, TranscriptEvent event) throws IOException {
             steps.add("event" + number); transcripts.add(event); appendEntered.countDown();

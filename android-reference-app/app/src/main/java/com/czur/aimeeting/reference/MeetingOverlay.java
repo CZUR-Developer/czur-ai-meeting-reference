@@ -48,6 +48,7 @@ final class MeetingOverlay {
     private LinearLayout historyRows;
     private MeetingDisplaySnapshot lastDisplay;
     private MeetingSetup.Mode lastMode = MeetingSetup.Mode.LIVE_TRANSCRIPT;
+    private boolean lastSummaryEnabled;
     private String lastTimeText = "";
     private MeetingReminderPresentation.Notice lastReminder =
             MeetingReminderPresentation.Notice.NONE;
@@ -176,9 +177,18 @@ final class MeetingOverlay {
     void render(MeetingDisplaySnapshot state, MeetingSetup.Mode mode, String timeText,
             MeetingReminderPresentation.Notice reminder, boolean canStop,
             boolean allowOverlayReminder) {
+        render(state, mode, mode == MeetingSetup.Mode.MEETING_MINUTES, timeText,
+                reminder, canStop, allowOverlayReminder);
+    }
+
+    /** 同一会中模式可选择总结；窗口仅显示本场快照，不改变模型或收口流程。 */
+    void render(MeetingDisplaySnapshot state, MeetingSetup.Mode mode, boolean summaryEnabled,
+            String timeText, MeetingReminderPresentation.Notice reminder, boolean canStop,
+            boolean allowOverlayReminder) {
         if (root == null) return;
         lastDisplay = state;
         lastMode = mode;
+        lastSummaryEnabled = summaryEnabled;
         lastTimeText = timeText;
         lastReminder = reminder;
         lastAllowReminder = allowOverlayReminder;
@@ -190,11 +200,12 @@ final class MeetingOverlay {
         var current = !bilingual || state.rows().isEmpty() ? null
                 : DisplaySnapshotPresentation.bilingual(
                         state.rows().get(state.rows().size() - 1), state.swapped());
-        titleView.setText(bilingual ? "双语互译  " + DisplaySnapshotPresentation.leftLabel(state) + " / "
+        titleView.setText(bilingual ? "双语互译" + (summaryEnabled ? "＋纪要" : "")
+                + "  " + DisplaySnapshotPresentation.leftLabel(state) + " / "
                 + DisplaySnapshotPresentation.rightLabel(state)
                 + (large ? " · 大窗" : " · 普通窗")
                 + (current != null && current.languageFallback() ? "（语种降级）" : "")
-                : mode == MeetingSetup.Mode.MEETING_MINUTES ? "AI 会议纪要" : "实时字幕");
+                : summaryEnabled ? "AI 会议纪要" : "实时字幕");
         transcriptView.setVisibility(bilingual ? View.GONE : View.VISIBLE);
         bilingualRow.setVisibility(bilingual && !large ? View.VISIBLE : View.GONE);
         historyScroll.setVisibility(bilingual && large ? View.VISIBLE : View.GONE);
@@ -302,7 +313,7 @@ final class MeetingOverlay {
     }
 
     private void renderLastState() {
-        if (lastDisplay != null) render(lastDisplay, lastMode, lastTimeText, lastReminder,
+        if (lastDisplay != null) render(lastDisplay, lastMode, lastSummaryEnabled, lastTimeText, lastReminder,
                 lastCanStop, lastAllowReminder);
     }
 

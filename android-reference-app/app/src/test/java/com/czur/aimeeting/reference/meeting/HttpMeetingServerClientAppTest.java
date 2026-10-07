@@ -259,7 +259,7 @@ public final class HttpMeetingServerClientAppTest {
                     server.url("/").toString(), "local-demo-token");
             MeetingSetup setup = new MeetingSetup(MeetingSetup.Mode.LIVE_TRANSLATION,
                     "zh-CN", "en-US", true, MeetingSetup.ResultDelivery.WEB,
-                    "https://result.example.test/index.html");
+                    "https://result.example.test/index.html", List.of(), true);
             client.createMeeting(setup.toOptions());
 
             JSONObject request = new JSONObject(server.takeRequest().getBody().readUtf8());
@@ -268,6 +268,8 @@ public final class HttpMeetingServerClientAppTest {
                     .getJSONArray("targets").getString(0));
             assertEquals("translation.realtime",
                     request.getJSONArray("requestedCapabilities").getString(1));
+            assertEquals("summary.structured",
+                    request.getJSONArray("requestedCapabilities").getString(2));
             assertTrue(request.getJSONObject("artifactPolicy").getBoolean("presentationCapture"));
             assertTrue(!request.has("resultDelivery"));
         }

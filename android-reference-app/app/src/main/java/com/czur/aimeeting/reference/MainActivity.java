@@ -50,6 +50,7 @@ import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
+import java.util.Locale;
 
 /** 参考会议入口：App 保留登录、会前设置和 UI，会议业务经完整客户端使用。 */
 public final class MainActivity extends Activity {
@@ -97,8 +98,8 @@ public final class MainActivity extends Activity {
     private Spinner sourceLanguageView;
     private Spinner targetLanguageView;
     private CheckBox presentationCaptureView;
+    private CheckBox summaryEnabledView;
     private RadioButton transcriptModeView;
-    private RadioButton minutesModeView;
     private RadioButton translationModeView;
     private RadioButton webResultView;
     private RadioButton localResultView;
@@ -114,6 +115,8 @@ public final class MainActivity extends Activity {
     private IdentitySession displayedIdentity;
     private boolean meetingBusy;
     private Set<String> deploymentCapabilities = Set.of();
+    /** 按后端声明顺序保存code，Spinner标签仅负责呈现，不硬编码模型语言。 */
+    private List<String> deploymentLanguages = List.of();
     private long resultLinkTtlMs;
     private boolean resultEmailEnabled;
     private MeetingSetup pendingPresentationSetup;
@@ -177,7 +180,7 @@ public final class MainActivity extends Activity {
         layout.addView(loginButton);
 
         TextView modeTitle = new TextView(this);
-        modeTitle.setText("会议模式");
+        modeTitle.setText("会中显示");
         layout.addView(modeTitle);
         RadioGroup modeGroup = new RadioGroup(this);
         transcriptModeView = new RadioButton(this);
@@ -185,37 +188,33 @@ public final class MainActivity extends Activity {
         transcriptModeView.setText("实时字幕");
         transcriptModeView.setChecked(true);
         modeGroup.addView(transcriptModeView);
-        minutesModeView = new RadioButton(this);
-        minutesModeView.setId(View.generateViewId());
-        modeGroup.addView(minutesModeView);
         translationModeView = new RadioButton(this);
         translationModeView.setId(View.generateViewId());
         modeGroup.addView(translationModeView);
         modeGroup.check(transcriptModeView.getId());
-        refreshModeAvailability();
         layout.addView(modeGroup);
+
+        summaryEnabledView = new CheckBox(this);
+        summaryEnabledView.setText("会后生成会议纪要");
+        layout.addView(summaryEnabledView);
 
         TextView sourceTitle = new TextView(this);
         sourceTitle.setText("源语言");
         layout.addView(sourceTitle);
-        String[] languages = {"中文（zh-CN）", "英语（en-US）"};
         sourceLanguageView = new Spinner(this);
-        sourceLanguageView.setAdapter(new ArrayAdapter<>(this,
-                android.R.layout.simple_spinner_dropdown_item, languages));
         layout.addView(sourceLanguageView);
 
         TextView targetTitle = new TextView(this);
         targetTitle.setText("互译目标语言");
         layout.addView(targetTitle);
         targetLanguageView = new Spinner(this);
-        targetLanguageView.setAdapter(new ArrayAdapter<>(this,
-                android.R.layout.simple_spinner_dropdown_item, languages));
-        targetLanguageView.setSelection(1);
         targetLanguageView.setEnabled(false);
         layout.addView(targetLanguageView);
         presentationCaptureView = new CheckBox(this);
         presentationCaptureView.setText("演示文稿（每10秒采集屏幕，开始时需系统授权）");
         layout.addView(presentationCaptureView);
+        refreshLanguageOptions(List.of());
+        refreshModeAvailability();
         modeGroup.setOnCheckedChangeListener((group, checkedId) -> {
             boolean translation = checkedId == translationModeView.getId();
             targetLanguageView.setEnabled(translation);
@@ -428,6 +427,7 @@ public final class MainActivity extends Activity {
             usernameView.setText(displayedIdentity.displayName());
         if (!loggedIn) {
             deploymentCapabilities = Set.of();
+            refreshLanguageOptions(List.of());
             resultLinkTtlMs = 0;
             resultEmailEnabled = false;
             if (!meetingBusy) statusView.setText(identity.message());
@@ -435,7 +435,8 @@ public final class MainActivity extends Activity {
         refreshResultAvailability();
         refreshModeAvailability();
         startButton.setEnabled(loggedIn && !meetingBusy
-                && deploymentCapabilities.contains(MeetingCapabilityState.TRANSCRIPT));
+                && deploymentCapabilities.contains(MeetingCapabilityState.TRANSCRIPT)
+                && !deploymentLanguages.isEmpty());
         Log.d(TAG, "页面身份刷新 state=" + identity.status());
     }
 
@@ -444,14 +445,17 @@ public final class MainActivity extends Activity {
             @Override public void onSuccess(MeetingDiscovery discovery) {
                 // SDK已完成部署／本地能力求交；UI直接使用类型化结果，不创建Adapter。
                 deploymentCapabilities = discovery.availableCapabilities();
+                refreshLanguageOptions(discovery.deployment().languages());
                 resultLinkTtlMs = discovery.deployment().resultLinkTtlMs();
                 resultEmailEnabled = discovery.deployment().resultEmailEnabled();
                 refreshResultAvailability();
                 refreshModeAvailability();
                 loginButton.setEnabled(!meetingBusy);
                 startButton.setEnabled(displayedIdentity != null && !meetingBusy
-                        && deploymentCapabilities.contains(MeetingCapabilityState.TRANSCRIPT));
-                if (!meetingBusy) statusView.setText("登录成功，可开始会议");
+                        && deploymentCapabilities.contains(MeetingCapabilityState.TRANSCRIPT)
+                        && !deploymentLanguages.isEmpty());
+                if (!meetingBusy) statusView.setText(deploymentLanguages.isEmpty()
+                        ? "当前部署尚未声明会议语言" : "登录成功，可开始会议");
             }
             @Override public void onError(String message) {
                 loginButton.setEnabled(!meetingBusy);
@@ -467,6 +471,7 @@ public final class MainActivity extends Activity {
         MeetingAppAssembly.clearReferenceSession();
         displayedIdentity = null;
         deploymentCapabilities = Set.of();
+        refreshLanguageOptions(List.of());
         resultLinkTtlMs = 0;
         resultEmailEnabled = false;
         refreshResultAvailability();
@@ -482,18 +487,48 @@ public final class MainActivity extends Activity {
 
     /** 会前入口直接消费组合客户端已经求交的可用能力。 */
     private void refreshModeAvailability() {
-        boolean minutes = displayedIdentity != null
+        boolean summary = displayedIdentity != null
                 && deploymentCapabilities.contains(MeetingCapabilityState.SUMMARY);
         boolean translation = displayedIdentity != null
-                && deploymentCapabilities.contains(MeetingCapabilityState.TRANSLATION);
-        minutesModeView.setText(minutes ? "AI 会议纪要" : "AI 会议纪要（当前部署/应用不可用）");
-        minutesModeView.setEnabled(minutes);
+                && deploymentCapabilities.contains(MeetingCapabilityState.TRANSLATION)
+                && deploymentLanguages.size() >= 2;
+        summaryEnabledView.setText(summary ? "会后生成会议纪要" : "会后生成会议纪要（当前部署/应用不可用）");
+        summaryEnabledView.setEnabled(summary);
+        if (!summary) summaryEnabledView.setChecked(false);
         translationModeView.setText(translation ? "现场互译" : "现场互译（当前部署/应用不可用）");
         translationModeView.setEnabled(translation);
-        if ((!minutes && minutesModeView.isChecked())
-                || (!translation && translationModeView.isChecked())) {
+        if (!translation && translationModeView.isChecked()) {
             transcriptModeView.setChecked(true);
         }
+        targetLanguageView.setEnabled(translation && translationModeView.isChecked());
+    }
+
+    /** 保留仍可用的已选语言；初次发现使用后端前两项作为默认原文／目标语言。 */
+    private void refreshLanguageOptions(List<String> languages) {
+        int oldSource = sourceLanguageView.getSelectedItemPosition();
+        int oldTarget = targetLanguageView.getSelectedItemPosition();
+        String source = oldSource >= 0 && oldSource < deploymentLanguages.size()
+                ? deploymentLanguages.get(oldSource) : null;
+        String target = oldTarget >= 0 && oldTarget < deploymentLanguages.size()
+                ? deploymentLanguages.get(oldTarget) : null;
+        deploymentLanguages = List.copyOf(languages);
+        List<String> labels = new ArrayList<>();
+        for (String code : deploymentLanguages) {
+            String label = Locale.forLanguageTag(code).getDisplayLanguage(Locale.SIMPLIFIED_CHINESE);
+            labels.add(label.isEmpty() ? code : label + "（" + code + "）");
+        }
+        sourceLanguageView.setAdapter(new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_dropdown_item, labels));
+        targetLanguageView.setAdapter(new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_dropdown_item, labels));
+        if (!deploymentLanguages.isEmpty()) {
+            sourceLanguageView.setSelection(Math.max(0, deploymentLanguages.indexOf(source)));
+            int targetIndex = deploymentLanguages.indexOf(target);
+            targetLanguageView.setSelection(targetIndex >= 0 ? targetIndex
+                    : Math.min(1, deploymentLanguages.size() - 1));
+        }
+        sourceLanguageView.setEnabled(!deploymentLanguages.isEmpty());
+        Log.d(TAG, "会议语言选项更新 count=" + deploymentLanguages.size());
     }
 
     private void refreshResultAvailability() {
@@ -550,10 +585,14 @@ public final class MainActivity extends Activity {
 
     /** 页面条件检查之后，SDK仍会在真正建会前重新读取Provider，避免使用过时身份。 */
     private void continueStartMeeting() {
+        if (deploymentLanguages.isEmpty()) {
+            statusView.setText("当前部署尚未声明会议语言");
+            return;
+        }
         // 点击开始时读取一次会前设置。会议进行中即使输入框变化，也使用这份快照。
         MeetingSetup setup = selectedSetup();
-        if (!deploymentCapabilities.contains(setup.mode().requiredCapability())) {
-            statusView.setText(setup.mode().displayName() + "当前不可用");
+        if (!deploymentCapabilities.containsAll(setup.toOptions().requiredCapabilities())) {
+            statusView.setText("本场选择的字幕／互译或纪要功能当前不可用");
             return;
         }
         if (setup.resultDelivery() != MeetingSetup.ResultDelivery.LOCAL
@@ -611,6 +650,7 @@ public final class MainActivity extends Activity {
         Intent begin = new Intent(this, MeetingService.class);
         begin.setAction(MeetingService.ACTION_BEGIN);
         begin.putExtra(MeetingService.EXTRA_MODE, setup.mode().name());
+        begin.putExtra(MeetingService.EXTRA_SUMMARY, setup.summaryEnabled());
         begin.putExtra(MeetingService.EXTRA_SOURCE, setup.sourceLanguage());
         begin.putExtra(MeetingService.EXTRA_TARGET, setup.targetLanguage());
         begin.putExtra(MeetingService.EXTRA_PRESENTATION, setup.presentationCapture());
@@ -640,17 +680,14 @@ public final class MainActivity extends Activity {
     }
 
     private MeetingSetup selectedSetup() {
-        MeetingSetup.Mode mode = minutesModeView.isChecked()
-                ? MeetingSetup.Mode.MEETING_MINUTES
-                : translationModeView.isChecked() ? MeetingSetup.Mode.LIVE_TRANSLATION
+        MeetingSetup.Mode mode = translationModeView.isChecked() ? MeetingSetup.Mode.LIVE_TRANSLATION
                 : MeetingSetup.Mode.LIVE_TRANSCRIPT;
-        String[] codes = {"zh-CN", "en-US"};
         List<String> emails = new ArrayList<>();
         for (String entry : resultEmailsView.getText().toString().split("[,，;；\\s]+")) {
             if (!entry.isBlank()) emails.add(entry.trim());
         }
-        return new MeetingSetup(mode, codes[sourceLanguageView.getSelectedItemPosition()],
-                codes[targetLanguageView.getSelectedItemPosition()],
+        return new MeetingSetup(mode, deploymentLanguages.get(sourceLanguageView.getSelectedItemPosition()),
+                deploymentLanguages.get(targetLanguageView.getSelectedItemPosition()),
                 mode == MeetingSetup.Mode.LIVE_TRANSCRIPT
                         && presentationCaptureView.isChecked(), localResultView.isChecked()
                                 ? MeetingSetup.ResultDelivery.LOCAL
@@ -658,7 +695,7 @@ public final class MainActivity extends Activity {
                                 : tracelessResultView.isChecked()
                                         ? MeetingSetup.ResultDelivery.TRACELESS
                                 : MeetingSetup.ResultDelivery.WEB,
-                resultWebUrlView.getText().toString().trim(), emails);
+                resultWebUrlView.getText().toString().trim(), emails, summaryEnabledView.isChecked());
     }
 
 
@@ -676,7 +713,8 @@ public final class MainActivity extends Activity {
         capabilityView.setText(state.capabilityText);
         showMeetingScreen(state.active);
         startButton.setEnabled(displayedIdentity != null && !state.busy
-                && deploymentCapabilities.contains(MeetingCapabilityState.TRANSCRIPT));
+                && deploymentCapabilities.contains(MeetingCapabilityState.TRANSCRIPT)
+                && !deploymentLanguages.isEmpty());
         loginButton.setEnabled(!state.busy);
         stopButton.setEnabled(state.canStop);
         overlayButton.setText(state.overlayShowing
@@ -729,9 +767,9 @@ public final class MainActivity extends Activity {
         var latest = !bilingual || state.display.rows().isEmpty() ? null
                 : DisplaySnapshotPresentation.bilingual(
                         state.display.rows().get(state.display.rows().size() - 1), state.display.swapped());
-        meetingTitle.setText(bilingual ? "双语互译 · 会议中"
+        meetingTitle.setText(bilingual ? "双语互译" + (state.summaryEnabled ? "＋纪要" : "") + " · 会议中"
                 + (latest != null && latest.languageFallback() ? "（语种分栏降级）" : "")
-                : state.mode == MeetingSetup.Mode.MEETING_MINUTES
+                : state.summaryEnabled
                         ? "AI 会议纪要 · 会议中" : "实时字幕 · 会议中");
         leftLanguageTitle.setText(DisplaySnapshotPresentation.leftLabel(state.display));
         rightLanguageTitle.setText(DisplaySnapshotPresentation.rightLabel(state.display));

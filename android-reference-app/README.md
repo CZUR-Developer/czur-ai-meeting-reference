@@ -5,6 +5,17 @@ application. The app consumes the public audio-source SDK and canonical
 meeting protocols; it does not contain CZUR launcher or production-only UI
 integration.
 
+## 当前交付状态（2026-10-08）
+
+P6核心音频底座和分层SDK已于2026-10-07完成对应新固件验收。真实Broker MIC字幕、
+单向互译及正常Stop／同场Web已有设备证据；新固件生命周期收尾再次验证了字幕正常链。
+实体左右方向准确性、物理旧系统降级、HDMI-IN／投屏／外设音源、真实百炼总结等具体范围
+仍按原记录补验。下文P5／P6接入过程中的验证时点属于历史，不能当成全部场景已通过。
+
+P7正在扩展参考产品：身份来源、可组合设置、结果动作与可选UI工具。当前新增设置将字幕／
+互译与“会后生成会议纪要”分别选择；语言直接消费后端发现协议的`languages`，没有固定中英文列表。
+结果动作整理后参考默认只提供Web；下文P5／P6的其他交付方式作为历史实现留痕。
+
 工程采用 Android Studio 结构：`app/` 是参考 APK，`model-runtime-contract/`
 是模型 Adapter、会话材料、生命周期和标准字幕事件的唯一公共源码。
 `meeting-client-core/` 保存共享 Adapter 工厂、默认解析和显示规则，详见其
@@ -28,7 +39,8 @@ P7-1a新增可注入的`IdentityProvider`及`MeetingClient.refreshIdentity()`。
 当前还可解析按国内版字段路径重建的听悟 `translate_result` 固定样例，并将译文与
 原文片段关联，在应用内双栏和悬浮窗显示。会前现场互译入口在 SDK 构建中已开放：
 后端本场能力决策允许翻译时，听悟启动消息会开启译文，组合层提交标准译文事件，
-Stop 后由后端生成字幕和译文结果。真实双向会议与 Web 读回仍待设备验收。
+Stop后由后端生成字幕和译文结果。2026-10-07实体MIC的字幕／单向互译及Web读回已有对应验收；
+双向现场声源的完整效果仍待具体条件补验。
 真实模式由组合层在创建会议后调用独立的
 `POST /v1/meetings/{meetingId}:modelSession` 领取材料：`adapterId`、完整的临时签名
 `endpoint`、`expiresAt`、`initParams.taskId`，可选 `token`。Create 的 `realtime`
@@ -79,7 +91,7 @@ PCM16 WAV 发往模型；没有该文件时，SDK 探测 CZUR／Starry 平台及
 录拍竞合已有设备证据。2026-10-06 新接口复验确认实际模式为 `CZUR_BROKER`、音频
 帧持续增长，方向输出 `NO_DIRECTION` 与递增时间戳；撤销录音权限后直接调用 SDK 得到
 `PERMISSION_DENIED`，没有权限弹窗且进程存活，恢复权限后可重开 Broker 并正常停止。
-有效实体方向的左右准确性与物理旧系统的 MIC 降级仍未实测，P6 继续保持未整体签收。
+有效实体方向的左右准确性与物理旧系统的MIC降级仍未实测，作为P6核心签收之外的具体补验项保留。
 录音仅通过设备调试工具临时放在
 `/sdcard/Android/data/com.czur.aimeeting.reference/files/meeting-debug.wav`，
 不可加入仓库或 APK。正式 release AAR 使用相同的自动音频选择，但不包含 WAV。
@@ -88,14 +100,14 @@ PCM16 WAV 发往模型；没有该文件时，SDK 探测 CZUR／Starry 平台及
 
 裸 AAR 不传递依赖元数据，`sdk` 模式显式添加 SDK 所需的 OkHttp 运行依赖。
 SDK 从公共 `model-runtime-contract-0.4.0.jar` 编译，参考 App 只打包本工程
-`model-runtime-contract` 的同版类，避免重复类。SDK 模式的最终验收还需要设备说话
-产生真实字幕，并确认音频送达模型端点、后端只接收标准事件。
+`model-runtime-contract`的同版类，避免重复类。SDK模式的正常链验收目标是实体语音产生真实字幕、
+音频直达模型、后端接收标准事件以及正常Stop／同场结果；2026-10-07已有对应新固件的签收记录。
 
 会中 `MeetingService` 持有完整会议句柄、跨应用字幕窗与平台资源；模型、音频和
 标准事件队列由 SDK 内的唯一协调器持有。用户在 App
 前台点击开始时启动 microphone 前台服务；切换到其他 App 后，SDK 音源与模型会话
-仍由该服务持有，页面重新打开时订阅同一场字幕状态。设备上的后台连续采集尚待真实
-会议验证。悬浮窗需要用户在系统设置中授予
+仍由该服务持有，页面重新打开时订阅同一场字幕状态。后台连续采集的具体设备验收范围以
+对应记录为准，源码生命周期说明不代签场景验证。悬浮窗需要用户在系统设置中授予
 “显示在其他应用上层”权限，页面和悬浮窗的停止操作进入同一 `MeetingSession.requestStop()`。
 Mock 构建使用同一服务流程，但选择不占用麦克风的 `dataSync` 前台服务类型。
 
@@ -130,7 +142,9 @@ Mini 期间会议仍继续采音、收模型结果和提交标准事件，恢复
 P5-4 的会前入口先填写设备可达的后端地址，以及部署者预置的终端用户账号和密码。
 App调用`MeetingClient.login`更新集中装配的参考内存身份，Service用同一Provider创建独立会议客户端。
 组合层封装 `POST /v1/reference/session:login`、建会、标准字幕/译文提交及结束会议。
-两类事件在协调器内共用本场 `clientSequence` 与单线程
+字幕／互译两种会中呈现均可独立开启会后总结；用户选择的功能必须同时获本场授权。
+旧`MEETING_MINUTES`调用保留“字幕＋总结”的语义，新页面使用独立checkbox。
+两类事件在协调器内共用本场`clientSequence`与单线程
 提交队列；模型确认完成后，Stop 排在此前事件提交之后。令牌仅保存在本次进程内Provider，切换账号时清除；账号密码和
 令牌均不写入 APK、日志或持久化配置。登录地址须使用设备可访问的 HTTPS；本机调试
 可以通过 `adb reverse tcp:8080 tcp:8080`，在设备上填写 `http://127.0.0.1:8080`
@@ -139,9 +153,10 @@ App调用`MeetingClient.login`更新集中装配的参考内存身份，Service�
 会前选择的两种会议语言分别进入 `languages.source` 和 `languages.targets`；现场互译
 只在 SDK 构建中开放，且仍须本场后端能力决策和听悟 Adapter 同时允许。模型只有字幕
 能力时，本场不会启动互译。AI 会议纪要已接本地 Adapter，真实百炼材料与设备
-结果仍待验；真实双向互译已用调试录音在设备上完成会中与结果读回，实体麦克风声学效果仍待验。
+结果仍待验。P5使用调试录音验证双向互译会中与结果读回；2026-10-07随后补验了实体MIC
+中文原文与英语译文的正常Stop／Web链。双向现场声学效果不由这次单向短会代签。
 互译分栏同时考虑会前语言、模型源语种、有效方向角、片段修订和用户交换栏位；P5
-无有效方向角时按语种降级，实体方向角左右准确性留待 P6 验证。
+无有效方向角时按语种降级，实体方向角左右准确性仍列在后续补验范围。
 
 ### SDK 音频来源、方向与权限边界
 

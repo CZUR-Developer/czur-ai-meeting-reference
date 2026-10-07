@@ -13,6 +13,7 @@ import static org.junit.Assert.assertThrows;
 import java.io.IOException;
 import java.net.URL;
 import java.util.Set;
+import java.util.List;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import okhttp3.mockwebserver.RecordedRequest;
@@ -79,6 +80,7 @@ public final class HttpMeetingSessionClientAppTest {
                     MeetingCapabilityState.SUMMARY), capabilities);
             assertEquals(86400000, options.resultLinkTtlMs());
             assertEquals(true, options.resultEmailEnabled());
+            assertEquals(List.of("zh-CN"), options.languages());
             RecordedRequest discovery = server.takeRequest();
             assertEquals("GET", discovery.getMethod());
             assertEquals("/v1/capabilities", discovery.getPath());

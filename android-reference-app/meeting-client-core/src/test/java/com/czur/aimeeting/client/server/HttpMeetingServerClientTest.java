@@ -31,11 +31,12 @@ public final class HttpMeetingServerClientTest {
     @Test public void coordinatorDiscoveryUsesExistingAnonymousCapabilitiesProtocol() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.reply(200, "{\"capabilities\":[\"transcript.realtime\"],\"resultLinkTtlMs\":86400000,"
-                    + "\"resultEmailEnabled\":true}");
+                    + "\"resultEmailEnabled\":true,\"languages\":[\"en-US\",\"ja-JP\"]}");
             DeploymentOptions options = fixture.client().discover();
             assertEquals(Set.of("transcript.realtime"), options.capabilities());
             assertEquals(86400000, options.resultLinkTtlMs());
             assertTrue(options.resultEmailEnabled());
+            assertEquals(List.of("en-US", "ja-JP"), options.languages());
             Request request = fixture.request();
             assertEquals("/v1/capabilities", request.path());
             assertNull(request.authorization());

@@ -7,11 +7,19 @@ import java.util.List;
 
 /**
  * 用户在点击“开始会议”时冻结的本场会前设置。模型能力和结果交付能力彼此独立：
- * 前者进入组合入口的能力请求，后者交给组合入口处理网页/邮件；本地 PDF 绘制留在 App。
+ * 前者进入组合入口的能力请求，后者交给组合入口处理网页/邮件；本地PDF绘制留在App。
+ * summaryEnabled与字幕／互译mode独立；旧MEETING_MINUTES仍表示字幕＋总结。
  */
 public record MeetingSetup(Mode mode, String sourceLanguage, String targetLanguage,
         boolean presentationCapture, ResultDelivery resultDelivery, String resultWebUrl,
-        List<String> resultEmails) {
+        List<String> resultEmails, boolean summaryEnabled) {
+    /** 旧七参数构造器继续保持模式所对应的默认总结语义。 */
+    public MeetingSetup(Mode mode, String sourceLanguage, String targetLanguage,
+            boolean presentationCapture, ResultDelivery resultDelivery, String resultWebUrl,
+            List<String> resultEmails) {
+        this(mode, sourceLanguage, targetLanguage, presentationCapture, resultDelivery,
+                resultWebUrl, resultEmails, mode == Mode.MEETING_MINUTES);
+    }
     public MeetingSetup(Mode mode, String sourceLanguage, String targetLanguage,
             boolean presentationCapture, ResultDelivery resultDelivery, String resultWebUrl) {
         this(mode, sourceLanguage, targetLanguage, presentationCapture, resultDelivery,
@@ -20,6 +28,7 @@ public record MeetingSetup(Mode mode, String sourceLanguage, String targetLangua
 
     public MeetingSetup {
         resultEmails = List.copyOf(resultEmails);
+        summaryEnabled = summaryEnabled || mode == Mode.MEETING_MINUTES;
     }
     public enum Mode {
         LIVE_TRANSCRIPT("实时字幕", MeetingCapabilityState.TRANSCRIPT),
@@ -60,6 +69,7 @@ public record MeetingSetup(Mode mode, String sourceLanguage, String targetLangua
     public MeetingOptions toOptions() {
         return new MeetingOptions(MeetingOptions.Mode.valueOf(mode.name()), sourceLanguage,
                 targetLanguage, presentationCapture,
-                MeetingOptions.ResultDelivery.valueOf(resultDelivery.name()), resultWebUrl, resultEmails);
+                MeetingOptions.ResultDelivery.valueOf(resultDelivery.name()), resultWebUrl,
+                resultEmails, summaryEnabled);
     }
 }

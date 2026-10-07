@@ -8,6 +8,8 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.ArrayList;
+import java.util.List;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -74,7 +76,7 @@ public final class HttpMeetingSessionClient {
         return deploymentOptions().capabilities();
     }
 
-    /** 同一能力响应还提供结果链接有效期及可用的邮箱交付方式。 */
+    /** 同一发现响应提供语言、结果链接有效期及邮箱开关；不为模型推断未声明的语言。 */
     public DeploymentOptions deploymentOptions() throws IOException {
         URL url = new URL(baseUrl + "/v1/capabilities");
         validateLoginUrl(url);
@@ -94,9 +96,15 @@ public final class HttpMeetingSessionClient {
                 for (int index = 0; index < values.length(); index++) {
                     capabilities.add(values.getString(index));
                 }
+                List<String> languages = new ArrayList<>();
+                JSONArray declaredLanguages = response.optJSONArray("languages");
+                if (declaredLanguages != null) {
+                    for (int index = 0; index < declaredLanguages.length(); index++)
+                        languages.add(declaredLanguages.getString(index));
+                }
                 return new DeploymentOptions(Set.copyOf(capabilities),
                         response.optLong("resultLinkTtlMs", 0),
-                        response.optBoolean("resultEmailEnabled", false));
+                        response.optBoolean("resultEmailEnabled", false), languages);
             } catch (JSONException invalidResponse) {
                 throw new IOException("部署能力响应格式错误", invalidResponse);
             }

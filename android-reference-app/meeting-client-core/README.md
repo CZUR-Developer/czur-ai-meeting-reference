@@ -9,6 +9,7 @@ Server 协议、模型适配与国内显示规则。Android 控件、权限申�
 - `client.provider`：默认听悟、第二格式 JSON 样例、百炼总结的唯一公开解析实现。
 - `ModelAdapterRegistry`：按 Server 下发的 `adapterId` 选择工厂，每场会议创建独立实例。
 - `MeetingCapabilityState`：Create 响应的本场能力决策，不由厂商名字推断。
+- `DeploymentOptions.languages`：透传既有发现协议的语言code清单，供App设置页使用。
 - `client.display`：共享显示状态、句开始方向快照，以及国内 A/B 多语种兜底。
 
 ## 两层入口与组合契约
@@ -71,8 +72,14 @@ App 保留权限、前台服务、时长提醒/自动停止、页面/悬浮窗�
 
 Coordinator 使用轻量串行状态/方向/显示/deadline 队列和独立串行 HTTP/模型启动停止/总结队列；
 慢网络不会阻塞句开始、活跃事实和语种截止点。所有模式必需 `transcript.realtime`；互译另需
-`translation.realtime`，纪要另需 `summary.structured`，缺少必需能力不启动模型。
+`translation.realtime`；独立`summaryEnabled`开启时另需`summary.structured`。
+互译＋总结同时请求／要求两项能力，缺少用户选择的必需能力不启动模型。
 speaker 可选，未授予时移除字段、不拒绝开场；总结工厂独立参与求交，不误当实时解析能力。
+
+新构造器在原会前设置最后增加`summaryEnabled`，例如`LIVE_TRANSLATION`加`true`即互译＋纪要。
+旧七参数构造器、`Mode.MEETING_MINUTES`及其能力名称继续可用，保持字幕＋总结的行为。
+总结仍在末尾最终字幕完成、标准事件提交后生成，并在后端Stop前保存；设置拆分不改变
+P6的采音、模型、DOA或尾部收口时序。
 
 ### 正常停止与结果
 

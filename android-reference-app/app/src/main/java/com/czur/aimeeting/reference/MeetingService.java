@@ -49,6 +49,8 @@ public final class MeetingService extends Service {
     static final String ACTION_BEGIN = "com.czur.aimeeting.reference.BEGIN";
     static final String ACTION_DEBUG_STOP = "com.czur.aimeeting.reference.DEBUG_STOP";
     static final String EXTRA_MODE = "mode";
+    /** 字幕／互译模式之外独立携带总结选择，旧纪要模式的Intent仍默认开启。 */
+    static final String EXTRA_SUMMARY = "summaryEnabled";
     static final String EXTRA_SOURCE = "source";
     static final String EXTRA_TARGET = "target";
     static final String EXTRA_PRESENTATION = "presentation";
@@ -79,11 +81,13 @@ public final class MeetingService extends Service {
         final String timeText;
         final MeetingReminderPresentation.Notice reminder;
         final MeetingSetup.Mode mode;
+        final boolean summaryEnabled;
 
         State(MeetingDisplaySnapshot display, String status, String capabilityText, boolean busy,
                 boolean active, boolean canStop, boolean overlayShowing,
                 int transcriptVersion, String resultUrl, LocalPdfWriter.SavedPdf resultPdf,
-                String timeText, MeetingReminderPresentation.Notice reminder, MeetingSetup.Mode mode) {
+                String timeText, MeetingReminderPresentation.Notice reminder, MeetingSetup.Mode mode,
+                boolean summaryEnabled) {
             this.display = display;
             this.status = status;
             this.capabilityText = capabilityText;
@@ -97,6 +101,7 @@ public final class MeetingService extends Service {
             this.timeText = timeText;
             this.reminder = reminder;
             this.mode = mode;
+            this.summaryEnabled = summaryEnabled;
         }
     }
 
@@ -201,12 +206,13 @@ public final class MeetingService extends Service {
         if (intent == null || !ACTION_BEGIN.equals(intent.getAction()) || busy)
             return START_NOT_STICKY;
         String[] emails = intent.getStringArrayExtra(EXTRA_RESULT_EMAILS);
-        MeetingSetup requested = new MeetingSetup(MeetingSetup.Mode.valueOf(
-                intent.getStringExtra(EXTRA_MODE)), intent.getStringExtra(EXTRA_SOURCE),
+        MeetingSetup.Mode mode = MeetingSetup.Mode.valueOf(intent.getStringExtra(EXTRA_MODE));
+        MeetingSetup requested = new MeetingSetup(mode, intent.getStringExtra(EXTRA_SOURCE),
                 intent.getStringExtra(EXTRA_TARGET), intent.getBooleanExtra(EXTRA_PRESENTATION, false),
                 MeetingSetup.ResultDelivery.valueOf(intent.getStringExtra(EXTRA_RESULT_DELIVERY)),
                 intent.getStringExtra(EXTRA_RESULT_WEB),
-                emails == null ? List.of() : java.util.Arrays.asList(emails));
+                emails == null ? List.of() : java.util.Arrays.asList(emails),
+                intent.getBooleanExtra(EXTRA_SUMMARY, mode == MeetingSetup.Mode.MEETING_MINUTES));
         if (requested.presentationCapture()) {
             projectionData = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
                     ? intent.getParcelableExtra(EXTRA_PROJECTION_DATA, Intent.class)
@@ -540,8 +546,9 @@ public final class MeetingService extends Service {
         if (audioErrorText != null) audioText += "\n" + audioErrorText;
         State state = new State(display, status, capabilityText + audioText, busy, active, canStop,
                 overlay.isShowing(), transcriptVersion, resultUrl, resultPdf, timeText, reminder,
-                setup == null ? MeetingSetup.Mode.LIVE_TRANSCRIPT : setup.mode());
-        overlay.render(display, state.mode, timeText, reminder, canStop, observer == null);
+                setup == null ? MeetingSetup.Mode.LIVE_TRANSCRIPT : setup.mode(),
+                setup != null && setup.summaryEnabled());
+        overlay.render(display, state.mode, state.summaryEnabled, timeText, reminder, canStop, observer == null);
         if (observer != null) observer.onMeetingState(state);
     }
 

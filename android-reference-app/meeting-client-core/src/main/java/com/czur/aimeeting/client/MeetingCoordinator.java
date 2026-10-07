@@ -290,9 +290,8 @@ public final class MeetingCoordinator implements MeetingClient {
         }
 
         private void requireCapabilities(Set<String> capabilities) throws IOException {
-            if (!capabilities.contains(MeetingCapabilityState.TRANSCRIPT)
-                    || !capabilities.contains(options.mode().requiredCapability())) {
-                LOG.warning("本场缺少必需能力 transcript.realtime / " + options.mode().requiredCapability());
+            if (!capabilities.containsAll(options.requiredCapabilities())) {
+                LOG.warning("本场缺少用户已选择的必需能力 " + options.requiredCapabilities());
                 throw new IOException("本场缺少必需字幕或模式能力");
             }
         }
@@ -487,7 +486,7 @@ public final class MeetingCoordinator implements MeetingClient {
             publish("正在保存本场最终结果…");
             SummaryInput input = null;
             if (!audioFailed && available.contains(MeetingCapabilityState.SUMMARY)
-                    && options.mode() == MeetingOptions.Mode.MEETING_MINUTES) {
+                    && options.summaryEnabled()) {
                 try { input = finals.input(options.sourceLanguage()); }
                 catch (IllegalArgumentException empty) { completionFailed("没有最终字幕，无法生成纪要"); return; }
             }
