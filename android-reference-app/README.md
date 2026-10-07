@@ -93,6 +93,20 @@ SDK 从公共 `model-runtime-contract-0.4.0.jar` 编译，参考 App 只打包�
 “显示在其他应用上层”权限，页面和悬浮窗的停止操作进入同一 `MeetingSession.requestStop()`。
 Mock 构建使用同一服务流程，但选择不占用麦克风的 `dataSync` 前台服务类型。
 
+调试版参考 App（APK 的 `ApplicationInfo.FLAG_DEBUGGABLE` 已开启）在会议
+`MeetingService` 存活期间支持以下正常停止命令；字幕持续增加时也可直接使用：
+
+```bash
+adb shell am broadcast -a com.czur.aimeeting.reference.DEBUG_STOP -p com.czur.aimeeting.reference
+```
+
+广播在主线程调用与页面、悬浮窗相同的 `requestStop()`，沿现有流程排空音频、等待
+模型最终字幕、保存结果并按本场结果方式交付；网页方式仍打开同场结果页。这是正常
+Stop，不是 `close()`、强停进程或可恢复的业务暂停。当前状态尚不能停止或已请求停止时，
+沿用原 `canStop` 判断。普通 Release APK 不注册接收器；调试接收器随 Service
+创建/销毁注册/注销，原 Service 仍不导出。此开关取决于 App 的调试标记，与注入的
+SDK AAR 是 Debug 还是 Release 无关。
+
 Create 响应的 `limits.maxMeetingDurationMs` 是本场计时上限；会议页与悬浮窗读取
 Service 的同一份“已进行 / 剩余”状态。上限超过 20 分钟时，剩余 20 分钟显示约
 10 秒的中央提醒卡片；从开会起连续 4 分钟无转写时显示剩余 60 秒倒数，确认或

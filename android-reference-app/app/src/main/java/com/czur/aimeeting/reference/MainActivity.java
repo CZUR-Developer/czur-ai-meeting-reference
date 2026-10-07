@@ -75,6 +75,7 @@ public final class MainActivity extends Activity {
     private boolean serviceBound;
     private ScrollView setupScreen;
     private ScrollView meetingScreen;
+    private LinearLayout meetingControls;
     private int renderedTranscriptVersion = -1;
     private EditText backendUrlView;
     private EditText usernameView;
@@ -139,6 +140,13 @@ public final class MainActivity extends Activity {
         meetingScreen.addView(meetingLayout);
         meetingScreen.setVisibility(View.GONE);
         root.addView(meetingScreen, new LinearLayout.LayoutParams(-1, 0, 1));
+
+        // 会中操作留在滚动区之外，持续新增字幕时仍可直接停止。
+        meetingControls = new LinearLayout(this);
+        meetingControls.setOrientation(LinearLayout.VERTICAL);
+        meetingControls.setPadding(40, 0, 40, 12);
+        meetingControls.setVisibility(View.GONE);
+        root.addView(meetingControls, new LinearLayout.LayoutParams(-1, -2));
 
         backendUrlView = new EditText(this);
         backendUrlView.setSingleLine(true);
@@ -309,7 +317,7 @@ public final class MainActivity extends Activity {
             if (meetingService != null) meetingService.swapDisplayColumns();
         });
         swapColumnsButton.setVisibility(View.GONE);
-        meetingLayout.addView(swapColumnsButton);
+        meetingControls.addView(swapColumnsButton);
 
         startButton = new Button(this);
         startButton.setText("开始会议");
@@ -332,12 +340,12 @@ public final class MainActivity extends Activity {
         stopButton.setOnClickListener(view -> {
             if (meetingService != null) meetingService.requestStop();
         });
-        meetingLayout.addView(stopButton);
+        meetingControls.addView(stopButton);
 
         overlayButton = new Button(this);
         overlayButton.setText("显示跨应用悬浮字幕");
         overlayButton.setOnClickListener(view -> toggleOverlay());
-        meetingLayout.addView(overlayButton);
+        meetingControls.addView(overlayButton);
 
         capabilityView = new TextView(this);
         capabilityView.setText("本场功能将在创建会议后按后端能力显示");
@@ -607,6 +615,7 @@ public final class MainActivity extends Activity {
     private void showMeetingScreen(boolean visible) {
         setupScreen.setVisibility(visible ? View.GONE : View.VISIBLE);
         meetingScreen.setVisibility(visible ? View.VISIBLE : View.GONE);
+        meetingControls.setVisibility(visible ? View.VISIBLE : View.GONE);
     }
 
     /** Service 每秒或状态变化时推送；Activity 重建后可直接重绘整场字幕。 */

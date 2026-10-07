@@ -5,7 +5,11 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.pm.ApplicationInfo;
 import android.content.pm.ServiceInfo;
 import android.os.Binder;
 import android.os.Build;
@@ -44,6 +48,7 @@ import java.util.concurrent.Executors;
  */
 public final class MeetingService extends Service {
     static final String ACTION_BEGIN = "com.czur.aimeeting.reference.BEGIN";
+    static final String ACTION_DEBUG_STOP = "com.czur.aimeeting.reference.DEBUG_STOP";
     static final String EXTRA_BACKEND = "backend";
     static final String EXTRA_TOKEN = "token";
     static final String EXTRA_MODE = "mode";
@@ -104,6 +109,14 @@ public final class MeetingService extends Service {
 
     private final LocalBinder binder = new LocalBinder();
     private final Handler main = new Handler(Looper.getMainLooper());
+    private final BroadcastReceiver debugStopReceiver = new BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) {
+            if (!ACTION_DEBUG_STOP.equals(intent.getAction())) return;
+            // 注册时不指定后台调度器：主线程直接复用页面的正常 Stop 和 canStop 门控。
+            Log.d(TAG, "收到调试正常停止命令 active=" + active + " canStop=" + canStop);
+            requestStop();
+        }
+    };
     /** 只运行 JPEG/PDF 平台工作，不承载 HTTP、模型、事件序号或 Stop 编排。 */
     private final ExecutorService platformWork = Executors.newSingleThreadExecutor();
     private MeetingDisplaySnapshot display =
@@ -161,6 +174,7 @@ public final class MeetingService extends Service {
     private boolean localResultPending;
     private boolean limitReminderLogged;
     private boolean idleReminderLogged;
+    private boolean debugStopReceiverRegistered;
     private Intent projectionData;
     private int projectionResultCode;
 
@@ -170,6 +184,18 @@ public final class MeetingService extends Service {
         NotificationManager manager = getSystemService(NotificationManager.class);
         manager.createNotificationChannel(new NotificationChannel(CHANNEL,
                 "AI 会议进行中", NotificationManager.IMPORTANCE_LOW));
+        // 本 App 未生成 BuildConfig；只在可调试 APK 的 Service 存活期间开放调试命令。
+        if ((getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+            IntentFilter filter = new IntentFilter(ACTION_DEBUG_STOP);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                // adb shell 来自应用进程外；Android 13+ 需要显式允许外部广播。
+                registerReceiver(debugStopReceiver, filter, Context.RECEIVER_EXPORTED);
+            } else {
+                registerReceiver(debugStopReceiver, filter);
+            }
+            debugStopReceiverRegistered = true;
+            Log.d(TAG, "调试正常停止命令已注册");
+        }
     }
 
     @Override public IBinder onBind(Intent intent) { return binder; }
@@ -524,6 +550,11 @@ public final class MeetingService extends Service {
     }
 
     @Override public void onDestroy() {
+        if (debugStopReceiverRegistered) {
+            unregisterReceiver(debugStopReceiver);
+            debugStopReceiverRegistered = false;
+            Log.d(TAG, "调试正常停止命令已注销");
+        }
         main.removeCallbacks(clockTick);
         main.removeCallbacks(presentationTick);
         closePresentation();
