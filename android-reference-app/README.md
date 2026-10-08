@@ -334,8 +334,12 @@ Debug `AudioDiagnosticActivity` 同时显示模式、方向状态、帧数和峰
 Web生成含同场`meetingId/genTime`的链接，保留已有query／fragment，不读取正文。
 
 插件需要可见页面时向`context.uiExecutor()`提交`AppResultActionPlugin.UiOperation`：
-Service暂存通用操作，Activity重新绑定／恢复后消费；普通执行与完成回调仍走主线程，
-不因页面离开吞掉结果。耗时文件工作交`workExecutor`，协议交窄`access`；
+Assembly的同进程内存宿主暂存已经准备好的通用操作，Service退出不清此交接；
+新Service绑定／Activity可见后沿原入口消费一次，不强行后台拉起页面，不承诺进程恢复。
+操作只捕获Application Context、冻结参数及完成回调，不捕获Activity／View，
+不重新使用已关闭Session；排队不是成功，实际显示后才报告成功。
+普通执行与完成回调仍走主线程，旧Service关闭只停止旧宿主状态更新，不吞掉完成闭包。
+耗时文件工作交原存活`workExecutor`，协议交该场仍有效的窄`access`；
 通用Service／MainActivity不识别PDF或邮件。普通失败只显示独立动作提示，提供“再次执行”
 和“结束本场结果交互”；重试沿用同一READY／genTime，不再Stop、采音、总结或计费。
 成功或结束交互释放原client；开始新场前也释放旧结果访问，仅支持当前进程交互。

@@ -4,8 +4,11 @@ import static org.junit.Assert.*;
 import static org.robolectric.Shadows.shadowOf;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ComponentName;
 import android.content.Intent;
+import android.content.ServiceConnection;
 import android.graphics.Rect;
+import android.os.Looper;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
@@ -15,15 +18,18 @@ import android.widget.TextView;
 import com.czur.aimeeting.client.*;
 import com.czur.aimeeting.client.display.*;
 import com.czur.aimeeting.client.result.*;
+import com.czur.aimeeting.client.server.DeploymentOptions;
 import com.czur.aimeeting.model.*;
 import com.czur.aimeeting.reference.meeting.*;
 import com.czur.aimeeting.ui.SubtitleTextView;
+import com.czur.aimeeting.reference.ui.OverlayViewFactory;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.ExecutorService;
 import org.junit.After;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -33,6 +39,8 @@ import org.robolectric.annotation.Config;
 import org.robolectric.annotation.GraphicsMode;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.shadows.ShadowAlertDialog;
+import org.robolectric.android.controller.ActivityController;
+import org.robolectric.android.controller.ServiceController;
 
 /** 实际原生布局与正常接线；不建会、不联网、不启动音源或操作实体设备。 */
 @RunWith(RobolectricTestRunner.class)
@@ -44,6 +52,11 @@ public class ReferenceMeetingPageTest {
         MeetingAppAssembly.configureResultWeb("");
         MeetingAppAssembly.clearReferenceSession();
         MeetingAppAssembly.registerPageFactory(new MeetingPageViews.DefaultFactory());
+        MeetingAppAssembly.registerOverlayFactory(new OverlayViewFactory());
+        // 清理同进程交接，不执行其他测试留下的平台操作。
+        var cleanup = Robolectric.buildService(MeetingService.class).create();
+        while (cleanup.get().takeUiOperation() != null) { }
+        cleanup.destroy();
     }
 
     @Test public void centeredCardHasSingleLanguageAndFixedStartOutsideScroll() {
@@ -171,6 +184,206 @@ public class ReferenceMeetingPageTest {
         Intent opened = shadowOf(app).getNextStartedActivity();
         assertEquals("https://start.example.test/index.html?x=1&meetingId=mtg_same&genTime=555#part",
                 opened.getStringExtra(ResultActivity.EXTRA_RESULT_URL));
+    }
+
+    @Test public void backgroundReadyWebSurvivesServiceDestroyAndVisibleActivityConsumesOnce() throws Exception {
+        try (var fixture = new ResultUiFixture(false)) {
+            fixture.ready();
+            idleMain();
+            assertNull(shadowOf(RuntimeEnvironment.getApplication()).getNextStartedActivity());
+            assertEquals(0, fixture.successes.get());
+            fixture.destroyOld();
+            fixture.returnToVisibleActivity();
+            idleMain();
+            fixture.assertOpenedOnce();
+            fixture.activity.pause().resume();
+            idleMain();
+            fixture.assertNoFurtherOpen();
+            // Registry完成通知也是普通Runnable；旧宿主关闭不能关掉它的Executor。
+            AtomicInteger ordinary = new AtomicInteger();
+            invoke(fixture.old, "queueUiOperation", Runnable.class, (Runnable) ordinary::incrementAndGet);
+            idleMain();
+            assertEquals(1, ordinary.get());
+            assertEquals(fixture.oldStatus, field(fixture.old, "status"));
+            assertNull(field(fixture.old, "actionOutcome"));
+            assertEquals(1, fixture.closes.get());
+            assertEquals(1, fixture.accesses.get());
+            assertEquals(0, fixture.windowCreates.get());
+        }
+    }
+
+    @Test public void latePreparedWebFromDestroyedServiceNotifiesNewVisibleConsumer() throws Exception {
+        try (var fixture = new ResultUiFixture(false, true)) {
+            fixture.ready();
+            idleMain(); // 真实Web已准备UiOperation，fixture仅延迟向原Executor交接。
+            fixture.destroyOld();
+            fixture.returnToVisibleActivity();
+            assertEquals(0, fixture.successes.get());
+            assertNull(shadowOf(RuntimeEnvironment.getApplication()).getNextStartedActivity());
+            fixture.preparedUiHandoff.run(); // 交给原Service Executor，不直接执行UiOperation。
+            idleMain(); // 必须通知当前可见新宿主，而非已销毁Service。
+            fixture.assertOpenedOnce();
+            assertEquals(fixture.oldStatus, field(fixture.old, "status"));
+            assertEquals(1, fixture.closes.get());
+            assertEquals(1, fixture.accesses.get());
+            fixture.activity.pause().resume();
+            idleMain();
+            fixture.assertNoFurtherOpen();
+        }
+    }
+
+    @Test public void visibleWebFailureKeepsOriginalSessionForExplicitRetryThenReleasesOnce() throws Exception {
+        try (var fixture = new ResultUiFixture(true)) {
+            fixture.returnToVisibleActivity(fixture.old);
+            fixture.ready();
+            idleMain();
+            assertEquals(1, fixture.errors.get());
+            assertEquals(0, fixture.successes.get());
+            assertEquals(ResultActionOutcome.Status.FAILED,
+                    ((ResultActionOutcome) field(fixture.old, "actionOutcome")).status());
+            assertNotNull(field(fixture.old, "session"));
+            assertEquals(0, fixture.closes.get());
+            fixture.old.retryResultAction();
+            idleMain();
+            fixture.assertOpenedOnce();
+            assertEquals(2, fixture.accesses.get());
+            assertNull(field(fixture.old, "session"));
+            assertEquals(1, fixture.closes.get());
+            fixture.old.retryResultAction();
+            idleMain();
+            fixture.assertNoFurtherOpen();
+        }
+    }
+
+    /** fixture READY／窄协议句柄；执行真实Web冻结闭包、Registry和Service，不建会或访问网络。 */
+    private static final class ResultUiFixture implements AutoCloseable {
+        static final String WEB = "https://frozen.example.test/index.html?x=1#part";
+        final AtomicInteger successes = new AtomicInteger(), errors = new AtomicInteger();
+        final AtomicInteger closes = new AtomicInteger(), accesses = new AtomicInteger(), windowCreates = new AtomicInteger();
+        final ServiceController<MeetingService> oldController = Robolectric.buildService(MeetingService.class).create();
+        final MeetingService old = oldController.get();
+        ServiceController<MeetingService> next;
+        ActivityController<MainActivity> activity;
+        boolean oldDestroyed;
+        Object oldStatus;
+        Runnable preparedUiHandoff;
+
+        ResultUiFixture(boolean failFirstOpen) throws Exception { this(failFirstOpen, false); }
+        ResultUiFixture(boolean failFirstOpen, boolean delayUiHandoff) throws Exception {
+            var app = RuntimeEnvironment.getApplication();
+            MeetingAppAssembly.configureResultWeb(WEB);
+            var setup = new MeetingSetup(MeetingSetup.Mode.LIVE_TRANSCRIPT, "zh-CN", "en-US", false,
+                    ResultOptions.action("web"), "", List.of(), false);
+            ResultActionPlugin web = new WebResultActionPlugin().createSettings(app).freeze().get();
+            if (failFirstOpen) {
+                AtomicInteger attempts = new AtomicInteger();
+                web = new WebResultActionPlugin(WEB, url -> {
+                    if (attempts.incrementAndGet() == 1) throw new IllegalStateException("fixture首次打开失败");
+                    app.startActivity(new Intent(app, ResultActivity.class)
+                            .putExtra(ResultActivity.EXTRA_RESULT_URL, url).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                });
+            }
+            var frozen = MeetingAppAssembly.prepare(setup, new MeetingDiscovery(
+                    new DeploymentOptions(Set.of(), 10_000L, false), Set.of()), web).meeting();
+            assertNotNull(frozen);
+            var original = frozen.action();
+            var counted = new ResultActionRegistry.PreparedAction(original.id(), original.requiredArtifactTypes(),
+                    original.requiredServiceCapabilities(), (context, callback) -> {
+                        var executionContext = delayUiHandoff ? new ResultActionContext(context.result(), context.access(),
+                                context.serviceCapabilities(), context.workExecutor(), command -> {
+                                    if (command instanceof AppResultActionPlugin.UiOperation)
+                                        preparedUiHandoff = () -> context.uiExecutor().execute(command);
+                                    else context.uiExecutor().execute(command);
+                                }) : context;
+                        original.execution().execute(executionContext, new MeetingClient.Callback<ResultActionOutcome>() {
+                                @Override public void onSuccess(ResultActionOutcome outcome) {
+                                    successes.incrementAndGet();
+                                    callback.onSuccess(outcome);
+                                }
+                                @Override public void onError(String message) {
+                                    errors.incrementAndGet();
+                                    callback.onError(message);
+                                }
+                            });
+                    });
+            field(old, "preparedMeeting", new MeetingAppAssembly.PreparedMeeting(setup, counted, frozen.serviceCapabilities()));
+            field(old, "readyResult", new MeetingResult("mtg_same", "fixture", 555, MeetingResult.Status.READY,
+                    Set.of("transcript.final"), null));
+            ResultActionAccess unused = new ResultActionAccess() {
+                @Override public void readContent(MeetingClient.Callback<MeetingResultContent> callback) { fail("Web不读正文"); }
+                @Override public void sendEmail(List<String> emails, String url, MeetingClient.Callback<Void> callback) { fail("Web不发邮件"); }
+            };
+            field(old, "session", Proxy.newProxyInstance(MeetingSession.class.getClassLoader(),
+                    new Class<?>[] {MeetingSession.class}, (proxy, method, args) -> {
+                        assertEquals("resultActionAccess", method.getName());
+                        assertEquals("关闭后不得再次访问Session", 0, closes.get());
+                        accesses.incrementAndGet();
+                        return unused;
+                    }));
+            field(old, "client", Proxy.newProxyInstance(MeetingClient.class.getClassLoader(),
+                    new Class<?>[] {MeetingClient.class}, (proxy, method, args) -> {
+                        assertEquals("close", method.getName());
+                        closes.incrementAndGet();
+                        return null;
+                    }));
+            var defaultWindow = new OverlayViewFactory();
+            MeetingAppAssembly.registerOverlayFactory((context, open, swap, stop) -> {
+                windowCreates.incrementAndGet();
+                return defaultWindow.create(context, open, swap, stop);
+            });
+            MeetingAppAssembly.configureResultWeb("https://next.example.test/");
+        }
+
+        void ready() throws Exception { invoke(old, "resultReady"); }
+        void destroyOld() throws Exception {
+            oldStatus = field(old, "status");
+            oldController.destroy();
+            oldDestroyed = true;
+            assertNull(field(old, "session"));
+            assertTrue(((ExecutorService) field(old, "platformWork")).isShutdown());
+            assertFalse(((MeetingOverlay) field(old, "overlay")).isShowing());
+        }
+        void returnToVisibleActivity() throws Exception {
+            next = Robolectric.buildService(MeetingService.class).create();
+            returnToVisibleActivity(next.get());
+        }
+        void returnToVisibleActivity(MeetingService service) throws Exception {
+            activity = Robolectric.buildActivity(MainActivity.class).create();
+            // 使用真实LocalBinder／ServiceConnection和onResume，不直接poll或run UI操作。
+            ((ServiceConnection) field(activity.get(), "serviceConnection")).onServiceConnected(
+                    new ComponentName(RuntimeEnvironment.getApplication(), MeetingService.class), service.onBind(new Intent()));
+            activity.resume();
+        }
+        void assertOpenedOnce() {
+            Intent opened = shadowOf(RuntimeEnvironment.getApplication()).getNextStartedActivity();
+            assertNotNull("旧Service销毁后必须恢复本场实际Web操作", opened);
+            assertEquals(ResultActivity.class.getName(), opened.getComponent().getClassName());
+            assertEquals("https://frozen.example.test/index.html?x=1&meetingId=mtg_same&genTime=555#part",
+                    opened.getStringExtra(ResultActivity.EXTRA_RESULT_URL));
+            assertEquals(1, successes.get());
+            assertNoFurtherOpen();
+        }
+        void assertNoFurtherOpen() {
+            assertNull(shadowOf(RuntimeEnvironment.getApplication()).getNextStartedActivity());
+            assertEquals(1, successes.get());
+        }
+        @Override public void close() {
+            if (activity != null) activity.pause().destroy();
+            if (next != null) next.destroy();
+            if (!oldDestroyed) oldController.destroy();
+        }
+    }
+
+    private static void idleMain() { shadowOf(Looper.getMainLooper()).idle(); }
+    private static void invoke(Object target, String name) throws Exception {
+        Method method = target.getClass().getDeclaredMethod(name);
+        method.setAccessible(true);
+        method.invoke(target);
+    }
+    private static void invoke(Object target, String name, Class<?> type, Object argument) throws Exception {
+        Method method = target.getClass().getDeclaredMethod(name, type);
+        method.setAccessible(true);
+        method.invoke(target, argument);
     }
 
     @Test public void independentSettingsSaveAndNativeWebBackRetainOriginalUrl() {

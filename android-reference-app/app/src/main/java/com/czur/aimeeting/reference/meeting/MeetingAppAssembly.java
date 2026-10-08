@@ -16,6 +16,7 @@ import com.czur.aimeeting.reference.ui.OverlayViewFactory;
 import com.czur.aimeeting.client.identity.IdentityProvider;
 import com.czur.aimeeting.client.identity.ReferenceIdentityProvider;
 import java.util.Objects;
+import java.util.ArrayDeque;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.Executor;
@@ -40,6 +41,9 @@ public final class MeetingAppAssembly {
     private static List<AppResultActionPlugin> resultActions = List.of(new WebResultActionPlugin());
     private static ResultActionRegistry resultRegistry = new ResultActionRegistry(resultActions);
     private static PreparedMeeting pendingMeeting;
+    // 只交接已准备的平台操作，不保存Session、会议状态或进程恢复数据。
+    private static final ArrayDeque<AppResultActionPlugin.UiOperation> pendingResultUi = new ArrayDeque<>();
+    private static Runnable resultUiObserver;
     private static MeetingOverlayFactory overlayFactory = new OverlayViewFactory();
     private static MeetingPageViews.Factory pageFactory = new MeetingPageViews.DefaultFactory();
 
@@ -147,6 +151,33 @@ public final class MeetingAppAssembly {
     }
     /** 取消授权／启动失败时清除尚未消费的单场交接。 */
     public static synchronized void clearPreparedMeeting() { pendingMeeting = null; }
+
+    /**
+     * 原UI Executor在主线程交接已准备的显示操作；Service退出不会清除本进程队列。
+     * 不在后台启动页面。当前可见消费方只收到通知，仍由Activity的原消费入口实际执行。
+     * 闭包不得捕获Activity／View或重新使用已关闭Session；进程退出不保留。
+     */
+    public static void queueResultUiOperation(AppResultActionPlugin.UiOperation operation) {
+        Runnable notify;
+        synchronized (MeetingAppAssembly.class) {
+            pendingResultUi.add(Objects.requireNonNull(operation, "operation"));
+            notify = resultUiObserver;
+        }
+        if (notify != null) notify.run();
+    }
+
+    /** 可见Activity在主线程逐项消费；先移出队列，再执行，重复恢复不会重复打开。 */
+    public static synchronized Runnable consumeResultUiOperation() { return pendingResultUi.poll(); }
+
+    /** Service只在被页面观察期间登记通知；不把页面或第二份会议快照放进装配。 */
+    public static synchronized void observeResultUi(Runnable notify) {
+        resultUiObserver = Objects.requireNonNull(notify, "notify");
+    }
+
+    /** 按实例撤销，旧Service退出不能移除新Service的通知。 */
+    public static synchronized void unobserveResultUi(Runnable notify) {
+        if (resultUiObserver == notify) resultUiObserver = null;
+    }
 
     /** 页面与Service共用同一个来源，但分别创建自己的客户端与串行回调队列。 */
     public static synchronized MeetingClientConfig clientConfig(Executor callbacks) {

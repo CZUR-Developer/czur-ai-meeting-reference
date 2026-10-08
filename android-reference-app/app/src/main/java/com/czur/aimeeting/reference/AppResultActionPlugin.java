@@ -18,8 +18,10 @@ public interface AppResultActionPlugin extends ResultActionPlugin {
     record Settings(View view, Supplier<ResultActionPlugin> freeze) { }
 
     /**
-     * 需要可见页面的通用操作标记；交context.uiExecutor，Service暂存至Activity绑定后消费。
-     * 普通编排／完成回调仍立即走主线程，不因页面离开而吞掉动作结果。只捕获应用Context。
+     * 已准备、需要可见页面的通用操作标记；交context.uiExecutor，由App同进程内存宿主暂存。
+     * Service退出不清该交接，Activity可见后消费一次；不承诺进程恢复，也不后台强拉页面。
+     * 只捕获应用Context／冻结参数及完成回调，不捕获Activity／View，不重新访问已关闭Session。
+     * 普通编排／完成回调仍走主线程；实际显示后才成功，旧宿主关闭不吞掉完成闭包。
      */
     record UiOperation(Runnable command) implements Runnable {
         @Override public void run() { command.run(); }

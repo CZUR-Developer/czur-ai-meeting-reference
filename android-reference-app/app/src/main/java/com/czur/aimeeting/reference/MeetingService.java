@@ -40,7 +40,6 @@ import com.czur.aimeeting.reference.meeting.MeetingReminderPresentation;
 import java.io.IOException;
 import java.util.List;
 import java.util.Set;
-import java.util.ArrayDeque;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -172,8 +171,8 @@ public final class MeetingService extends Service {
     private MeetingResult readyResult;
     private ResultActionOutcome actionOutcome;
     private boolean actionRunning;
-    /** 通用UI操作只在页面可呈现时消费；离开／重新绑定保留同一待执行操作。 */
-    private final ArrayDeque<Runnable> pendingUi = new ArrayDeque<>();
+    /** 只在页面观察期间登记；标记UI操作由App进程持有，不随本Service退出丢失。 */
+    private final Runnable resultUiAvailable = this::publish;
     private int transcriptVersion;
     private boolean busy;
     private boolean active;
@@ -182,6 +181,7 @@ public final class MeetingService extends Service {
     private boolean limitReminderLogged;
     private boolean idleReminderLogged;
     private boolean debugStopReceiverRegistered;
+    private boolean destroyed;
     private Intent projectionData;
     private int projectionResultCode;
 
@@ -253,19 +253,30 @@ public final class MeetingService extends Service {
         } else startForeground(NOTIFICATION_ID, notification);
     }
 
-    void observe(Observer next) { observer = next; publish(); }
-    void unobserve(Observer old) { if (observer == old) { observer = null; publish(); } }
+    void observe(Observer next) {
+        if (destroyed) return;
+        observer = next;
+        MeetingAppAssembly.observeResultUi(resultUiAvailable);
+        publish();
+    }
+    void unobserve(Observer old) {
+        if (observer == old) {
+            observer = null;
+            MeetingAppAssembly.unobserveResultUi(resultUiAvailable);
+            publish();
+        }
+    }
     void confirmReminder() { reminderPresentation.confirm(); publish(); }
 
     /** Activity在主线程逐项消费；Service不识别插件页面或通知方式。 */
-    Runnable takeUiOperation() { return pendingUi.poll(); }
+    Runnable takeUiOperation() { return MeetingAppAssembly.consumeResultUiOperation(); }
 
     private void queueUiOperation(Runnable command) {
         main.post(() -> {
-            if (command instanceof AppResultActionPlugin.UiOperation) {
-                pendingUi.add(command);
-                publish();
-            } else command.run();
+            if (command instanceof AppResultActionPlugin.UiOperation operation)
+                MeetingAppAssembly.queueResultUiOperation(operation);
+            // Registry完成闭包仍要执行；关闭旧宿主只停止其状态更新，不吞掉普通回调。
+            else command.run();
         });
     }
 
@@ -506,15 +517,19 @@ public final class MeetingService extends Service {
     private void executeResultAction() {
         if (actionRunning || readyResult == null || session == null || preparedMeeting == null
                 || preparedMeeting.action() == null) return;
+        MeetingSession executingSession = session;
+        var action = preparedMeeting.action();
         actionRunning = true;
         busy = true;
         actionOutcome = null;
         status = "本场结果已就绪，正在执行结果动作…";
         publish();
-        var context = new ResultActionContext(readyResult, session.resultActionAccess(),
+        var context = new ResultActionContext(readyResult, executingSession.resultActionAccess(),
                 preparedMeeting.serviceCapabilities(), platformWork, this::queueUiOperation);
-        MeetingAppAssembly.resultRegistry().execute(preparedMeeting.action(), context, new MeetingClient.Callback<>() {
+        MeetingAppAssembly.resultRegistry().execute(action, context, new MeetingClient.Callback<>() {
             @Override public void onSuccess(ResultActionOutcome outcome) {
+                // 已准备UI可能由新Service消费；原完成闭包抵达后不再操作已释放／另一场宿主。
+                if (destroyed || session != executingSession) return;
                 actionRunning = false;
                 busy = false;
                 actionOutcome = outcome;
@@ -528,7 +543,7 @@ public final class MeetingService extends Service {
                 publish();
             }
             @Override public void onError(String message) {
-                onSuccess(ResultActionOutcome.failure(preparedMeeting.action().id(), message));
+                onSuccess(ResultActionOutcome.failure(action.id(), message));
             }
         });
     }
@@ -547,7 +562,6 @@ public final class MeetingService extends Service {
     private void releaseResultAccess() {
         if (client != null) { client.close(); client = null; }
         session = null;
-        pendingUi.clear();
     }
 
     private void stopMeetingUi() {
@@ -574,6 +588,7 @@ public final class MeetingService extends Service {
     }
 
     private void publish() {
+        if (destroyed) return;
         MeetingTimeRule.Snapshot clock = stoppedClock != null ? stoppedClock : timing == null ? null
                 : timing.at(SystemClock.elapsedRealtime());
         String timeText = clock == null ? "" : "已进行 " + MeetingTimeRule.format(clock.elapsedMs())
@@ -592,6 +607,9 @@ public final class MeetingService extends Service {
     }
 
     @Override public void onDestroy() {
+        destroyed = true;
+        observer = null;
+        MeetingAppAssembly.unobserveResultUi(resultUiAvailable);
         audioLevel = null;
         if (debugStopReceiverRegistered) {
             unregisterReceiver(debugStopReceiver);
