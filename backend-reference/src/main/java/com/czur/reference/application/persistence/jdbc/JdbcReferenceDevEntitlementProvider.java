@@ -6,6 +6,7 @@ import com.czur.reference.application.port.entitlement.AuthorizedProfileSnapshot
 import com.czur.reference.application.port.entitlement.CancelReservationRequest;
 import com.czur.reference.application.port.entitlement.CommitUsageRequest;
 import com.czur.reference.application.port.entitlement.EntitlementProvider;
+import com.czur.reference.application.port.entitlement.EntitlementPolicy;
 import com.czur.reference.application.port.entitlement.EntitlementProviderError;
 import com.czur.reference.application.port.entitlement.EntitlementProviderResult;
 import com.czur.reference.application.port.entitlement.ExpiredReservationStore;
@@ -29,10 +30,10 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * PostgreSQL reference-dev 权益 Provider。
+ * 使用可替换资格策略的 PostgreSQL 权益 Provider，保留 reference-dev 类名兼容旧调用。
  *
- * <p>{@link #authorizeStart(AuthorizeStartRequest)} 直接委托纯 Java 策略，绝不
- * 获取 JDBC 连接。reserve、commit 和 cancel 才访问 V003 的 Reservation 与
+ * <p>{@link #authorizeStart(AuthorizeStartRequest)} 委托资格策略，不获取会议账本
+ * 的JDBC连接；部署策略可只读访问自身账号服务。reserve、commit 和 cancel才访问Reservation与
  * usage operation 表，并在完整的 deployment + subject + operation + key
  * 四元组内提供持久幂等。</p>
  *
@@ -53,20 +54,35 @@ public final class JdbcReferenceDevEntitlementProvider
             JdbcReferenceDevEntitlementProvider.class.getName());
 
     private final DataSource dataSource;
-    private final ReferenceDevEntitlementPolicy policy;
+    private final EntitlementPolicy policy;
     private final Clock clock;
 
+    /** 保留旧构造器的类型签名；默认策略和账本行为保持一致。 */
     public JdbcReferenceDevEntitlementProvider(
             DataSource dataSource,
             ReferenceDevEntitlementPolicy policy,
             Clock clock) {
+        this(dataSource, (EntitlementPolicy) policy, clock);
+    }
+
+    /**
+     * 将部署方的资格策略与当前会议数据库账本组合。
+     *
+     * @param dataSource 与建会工作单元共用的会议数据源；不能替换为外部会员库
+     * @param policy 支持并发调用的资格策略，只提供授权和首次预占候选
+     * @param clock 预占、提交、取消事实共用的服务端时钟
+     */
+    public JdbcReferenceDevEntitlementProvider(
+            DataSource dataSource,
+            EntitlementPolicy policy,
+            Clock clock) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
         this.policy = Objects.requireNonNull(policy, "policy");
         this.clock = Objects.requireNonNull(clock, "clock");
-        LOGGER.log(Level.INFO, "JDBC reference-dev 权益 Provider 已创建");
+        LOGGER.log(Level.INFO, "JDBC 会议权益 Provider 已创建");
     }
 
-    /** 纯策略授权；本方法不得调用 {@link DataSource#getConnection()}。 */
+    /** 委托资格策略；本方法不获取会议账本连接，策略可只读访问自己的账号服务。 */
     @Override
     public EntitlementProviderResult<MeetingGrant> authorizeStart(AuthorizeStartRequest request) {
         return policy.authorizeStart(request);

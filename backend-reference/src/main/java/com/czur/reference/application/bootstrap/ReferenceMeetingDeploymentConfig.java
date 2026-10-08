@@ -36,8 +36,9 @@ import java.util.TreeSet;
  *
  * <p>同一映射只解析一次。数据库与演示身份沿用原有配置规则；部署范围、单版本
  * Profile、权益、Mock 描述、能力开关和 Create 限制在取得数据库连接前交叉校验。
- * 受信 audience/clientId 直接取自身份配置使用的同两个键，后续 Create/Stop
- * 解码器和 GET/DELETE 解析器必须使用本对象的访问器，不得各自再读环境变量。
+ * 默认入口的受信audience/clientId取自演示身份配置；外部身份入口由部署方显式
+ * 提供。后续Create/Stop解码器和GET/DELETE解析器使用本对象的访问器，不得各自
+ * 再读环境变量或从客户端请求取身份参数。
  * 此类只保存分页密钥的私有字节副本，调用方只能取得副本并须负责清零临时数组。
  * 日志和异常不得拼接输入值；本对象的诊断文本也不显示连接串、身份或 Secret。</p>
  */
@@ -156,6 +157,33 @@ public final class ReferenceMeetingDeploymentConfig {
      */
     public static ReferenceMeetingDeploymentConfig fromEnvironment(
             Map<String, String> source) {
+        return fromEnvironment(source, false, null, null);
+    }
+
+    /**
+     * 为使用自身账号体系的部署读取同一份会议运行配置。
+     *
+     * <p>此入口不读取演示Token、预置账号或演示登录开关；演示身份保持禁用。
+     * audience和clientId由部署方的可信配置显式提供，所有请求共用这两个值。
+     * 数据库、能力、会议限制及模型配置仍按默认入口解析，不创建第二套持久化。
+     * 调用方须使用装配根接受IdentityProvider的重载；本方法不验证用户凭据。</p>
+     *
+     * @param source 部署会议配置；调用期间不可并发修改
+     * @param audience 当前会议服务认可的凭据受众，来自服务端配置
+     * @param clientId 当前会议服务认可的客户端标识，来自服务端配置
+     * @return 演示身份和登录关闭、其余运行参数已校验的配置
+     * @throws IllegalArgumentException 必填运行参数或可信身份参数非法
+     */
+    public static ReferenceMeetingDeploymentConfig fromEnvironmentWithExternalIdentity(
+            Map<String, String> source, String audience, String clientId) {
+        return fromEnvironment(source, true,
+                trustedIdentityText("audience", audience),
+                trustedIdentityText("clientId", clientId));
+    }
+
+    private static ReferenceMeetingDeploymentConfig fromEnvironment(
+            Map<String, String> source, boolean externalIdentity,
+            String externalAudience, String externalClientId) {
         Objects.requireNonNull(source, "source");
         final Map<String, String> environment;
         try {
@@ -166,16 +194,19 @@ public final class ReferenceMeetingDeploymentConfig {
             throw invalid("environment");
         }
         DatabaseRuntimeConfig database = DatabaseRuntimeConfig.fromEnvironment(environment);
-        ReferenceDevIdentityConfig identity = ReferenceDevIdentityConfig.fromEnvironment(environment);
-        if (!identity.enabled()) {
+        ReferenceDevIdentityConfig identity = ReferenceDevIdentityConfig.fromEnvironment(
+                externalIdentity ? Map.of() : environment);
+        if (!externalIdentity && !identity.enabled()) {
             throw invalid(ReferenceDevIdentityConfig.ENABLED);
         }
-        ReferenceDevLoginConfig login = ReferenceDevLoginConfig.fromEnvironment(
-                environment, identity);
+        ReferenceDevLoginConfig login = externalIdentity ? null
+                : ReferenceDevLoginConfig.fromEnvironment(environment, identity);
         String scope = required(environment, DEPLOYMENT_SCOPE);
-        // IdentityConfig 已用同一映射验证这两个必填字段；不需要修改其包内 API。
-        String audience = required(environment, ReferenceDevIdentityConfig.AUDIENCE);
-        String clientId = required(environment, ReferenceDevIdentityConfig.CLIENT_ID);
+        // 默认身份与会议使用同一环境快照；外部身份参数由部署装配提供。
+        String audience = externalIdentity ? externalAudience
+                : required(environment, ReferenceDevIdentityConfig.AUDIENCE);
+        String clientId = externalIdentity ? externalClientId
+                : required(environment, ReferenceDevIdentityConfig.CLIENT_ID);
         String profileId = required(environment, PROFILE_ID);
         int revision = positiveInt(environment, PROFILE_REVISION);
         Set<String> required = capabilities(environment, PROFILE_REQUIRED_CAPABILITIES, true);
@@ -345,6 +376,7 @@ public final class ReferenceMeetingDeploymentConfig {
     }
 
     public DatabaseRuntimeConfig database() { return database; }
+    /** 默认演示身份配置；外部身份配置入口返回禁用状态，由装配显式注入Provider。 */
     public ReferenceDevIdentityConfig identity() { return identity; }
     /** 仅当部署者同时预置用户名和密码时开放参考登录；不用于伙伴生产认证。 */
     public Optional<ReferenceDevLoginConfig> login() { return Optional.ofNullable(login); }
@@ -396,6 +428,13 @@ public final class ReferenceMeetingDeploymentConfig {
         String value = environment.get(key);
         if (value == null || value.isBlank() || !value.equals(value.trim())) {
             throw invalid(key);
+        }
+        return value;
+    }
+
+    private static String trustedIdentityText(String name, String value) {
+        if (value == null || value.isBlank() || !value.equals(value.trim())) {
+            throw invalid(name);
         }
         return value;
     }

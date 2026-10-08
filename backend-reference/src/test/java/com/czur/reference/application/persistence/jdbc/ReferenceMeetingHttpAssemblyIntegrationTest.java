@@ -32,6 +32,10 @@ import com.czur.reference.application.port.artifact.ArtifactReadyMetadataStore;
 import com.czur.reference.application.port.artifact.ArtifactStore;
 import com.czur.reference.application.port.entitlement.AuthorizedProfileSnapshot;
 import com.czur.reference.application.port.entitlement.EntitlementIdGenerator;
+import com.czur.reference.application.port.entitlement.EntitlementPolicy;
+import com.czur.reference.application.port.entitlement.EntitlementProviderResult;
+import com.czur.reference.application.port.entitlement.AuthorizeStartRequest;
+import com.czur.reference.application.port.entitlement.ReserveUsageRequest;
 import com.czur.reference.application.port.entitlement.MeetingGrant;
 import com.czur.reference.application.port.entitlement.UsageEstimate;
 import com.czur.reference.application.port.entitlement.UsageOperationResult;
@@ -39,6 +43,11 @@ import com.czur.reference.application.port.entitlement.UsageReservation;
 import com.czur.reference.application.port.entitlement.UsageUnit;
 import com.czur.reference.application.identity.referencedev.ReferenceDevIdentityConfig;
 import com.czur.reference.application.identity.referencedev.ReferenceDevLoginConfig;
+import com.czur.reference.application.port.identity.IdentityProvider;
+import com.czur.reference.application.port.identity.IdentityProviderResult;
+import com.czur.reference.application.port.identity.IdentityProviderError;
+import com.czur.reference.application.port.identity.Subject;
+import com.czur.reference.application.port.identity.VerifiedIdentity;
 import com.czur.reference.application.manifest.ManifestResultAccessPolicy;
 import com.czur.reference.domain.meeting.MeetingState;
 import com.czur.reference.domain.meeting.MeetingAggregate;
@@ -149,12 +158,14 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
     private PGSimpleDataSource fixtureDataSource;
 
     @Test
-    void preconfiguredLoginTokenCanCreateAndStartClientMeetingOverHttp() throws Exception {
+    void preconfiguredLoginTokenCanCreateAndStartClientMeetingOverHttp(
+            @TempDir Path artifactRoot) throws Exception {
         migrate(1);
         Map<String, String> settings = enabledConfig();
         settings.put(ReferenceDevLoginConfig.USERNAME, "meeting-user");
         settings.put(ReferenceDevLoginConfig.PASSWORD, "local-password");
-        try (var assembly = ReferenceMeetingHttpAssembly.start(settings, CLOCK);
+        try (var assembly = ReferenceMeetingHttpAssembly.start(settings, CLOCK,
+                new PersistentFileSystemMockArtifactStore(artifactRoot, 1024 * 1024));
              var network = assembly.newJdkHttpServer(
                      new InetSocketAddress("127.0.0.1", 0))) {
             network.start();
@@ -181,7 +192,126 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
             assertEquals("STARTING", ERROR_JSON.readTree(responseBody(start))
                     .path("state").asText());
             assertEquals("STARTING", meetingState(meetingId));
+            completeClientTranscriptOverHttp(port, meetingId, issuedToken,
+                    "login-stop-key-123456789");
+            assertEquals("READY", meetingState(meetingId));
+            assertEquals(1, count("meeting_client_result"));
         }
+    }
+
+    @Test
+    void externalIdentityAndPolicySharePgCreateReplayAndClientStop(
+            @TempDir Path artifactRoot) throws Exception {
+        migrate(1);
+        Map<String, String> settings = enabledConfig();
+        settings.keySet().removeIf(key -> key.startsWith("REFERENCE_DEV_"));
+        var config = ReferenceMeetingDeploymentConfig.fromEnvironmentWithExternalIdentity(
+                settings, "external-meeting", "external-android");
+        AtomicInteger identityCalls = new AtomicInteger();
+        AtomicInteger authorizeCalls = new AtomicInteger();
+        AtomicInteger prepareCalls = new AtomicInteger();
+        String subject = "external-subject";
+        // 仅测试部署注入边界；此替身不代替CZUR的真实登录／会员实现。
+        IdentityProvider identity = request -> {
+            identityCalls.incrementAndGet();
+            assertEquals("external-meeting", request.audience());
+            assertEquals("external-android", request.clientId());
+            boolean matches = request.credential().useBytes(bytes ->
+                    MessageDigest.isEqual(bytes, TOKEN.getBytes(StandardCharsets.US_ASCII)));
+            if (!matches) {
+                return IdentityProviderResult.failure(new IdentityProviderError(
+                        IdentityProviderError.Code.INVALID_CREDENTIAL, false));
+            }
+            return IdentityProviderResult.success(new VerifiedIdentity(
+                    new Subject(subject, null), Set.of("USER"),
+                    Set.of(MeetingPermissions.CREATE, MeetingPermissions.STOP),
+                    NOW.minusSeconds(60), NOW.plusSeconds(600), null));
+        };
+        EntitlementIdGenerator ids = new EntitlementIdGenerator() {
+            @Override public String newGrantId() { return "grant_" + UUID.randomUUID(); }
+            @Override public String newReservationId() {
+                return "reservation_" + UUID.randomUUID();
+            }
+            @Override public String newLeaseToken() { return "lease_" + UUID.randomUUID(); }
+        };
+        var defaultPolicy = new ReferenceDevEntitlementPolicy(config.entitlement(), CLOCK, ids);
+        EntitlementPolicy policy = new EntitlementPolicy() {
+            @Override public EntitlementProviderResult<MeetingGrant> authorizeStart(
+                    AuthorizeStartRequest request) {
+                authorizeCalls.incrementAndGet();
+                assertEquals(subject, request.subject().subjectScope());
+                return defaultPolicy.authorizeStart(request);
+            }
+            @Override public EntitlementProviderResult<UsageReservation> prepareReservation(
+                    ReserveUsageRequest request) {
+                prepareCalls.incrementAndGet();
+                assertEquals(subject, request.subjectScope());
+                return defaultPolicy.prepareReservation(request);
+            }
+        };
+        try (var assembly = ReferenceMeetingHttpAssembly.start(config, CLOCK,
+                new PersistentFileSystemMockArtifactStore(artifactRoot, 1024 * 1024),
+                identity, policy);
+             var network = assembly.newJdkHttpServer(new InetSocketAddress("127.0.0.1", 0))) {
+            network.start();
+            int port = network.address().getPort();
+            assertInstanceOf(JdbcReferenceDevEntitlementProvider.class,
+                    assembly.entitlementProvider());
+            String key = "external-create-key-123456789";
+            String body = createRequest(key, "external-session").body();
+            String created = exchange(port, "POST", "/v1/meetings", body,
+                    networkHeaders(TOKEN, key, true));
+            assertEquals(201, status(created));
+            String meetingId = ERROR_JSON.readTree(responseBody(created))
+                    .path("meetingId").asText();
+            String replay = exchange(port, "POST", "/v1/meetings", body,
+                    networkHeaders(TOKEN, key, true));
+            assertEquals(responseBody(created), responseBody(replay));
+            assertEquals(1, authorizeCalls.get());
+            assertEquals(1, prepareCalls.get());
+            assertEquals(1, count("meeting"));
+            assertEquals(1, count("usage_reservation"));
+            assertEquals(1, count("usage_operation"));
+            try (var connection = fixtureDataSource.getConnection();
+                 var statement = connection.prepareStatement(
+                         "SELECT subject_scope FROM meeting WHERE meeting_id=?")) {
+                statement.setString(1, meetingId);
+                try (var rows = statement.executeQuery()) {
+                    assertTrue(rows.next());
+                    assertEquals(subject, rows.getString(1));
+                }
+            }
+            assertEquals(200, status(exchange(port, "POST", "/v1/meetings/" + meetingId
+                    + ":startClient", "", networkHeaders(TOKEN, null, false))));
+            completeClientTranscriptOverHttp(port, meetingId, TOKEN,
+                    "external-stop-key-123456789");
+            assertEquals("READY", meetingState(meetingId));
+            assertEquals(1, count("meeting_client_result"));
+            assertEquals(200, status(exchange(port, "GET", "/v1/meetings/" + meetingId,
+                    "", networkHeaders(TOKEN, null, false))));
+            assertTrue(identityCalls.get() >= 6);
+        }
+    }
+
+    /** 两种身份装配共用标准字幕→Stop→同键Stop重放，不调用外部模型。 */
+    private void completeClientTranscriptOverHttp(int port, String meetingId, String token,
+            String stopKey) throws Exception {
+        String transcript = """
+                {"clientEventId":"client-transcript-1","clientSequence":1,
+                 "transcriptUpsert":{"segmentId":"source-1","revision":1,
+                 "operation":"UPSERT_OPERATION_UPSERT","startMs":0,"endMs":1000,
+                 "language":"zh-CN","text":"测试字幕","final":true}}
+                """;
+        assertEquals(201, status(exchange(port, "POST", "/v1/meetings/" + meetingId
+                + "/events:append", transcript, networkHeaders(token, null, true))));
+        String stopPath = "/v1/meetings/" + meetingId + ":stop";
+        String stopped = exchange(port, "POST", stopPath, "",
+                networkHeaders(token, stopKey, false));
+        assertEquals(200, status(stopped));
+        String replay = exchange(port, "POST", stopPath, "",
+                networkHeaders(token, stopKey, false));
+        assertEquals(200, status(replay));
+        assertEquals(responseBody(stopped), responseBody(replay));
     }
 
     @Test

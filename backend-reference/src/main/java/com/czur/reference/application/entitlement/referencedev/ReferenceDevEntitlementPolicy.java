@@ -2,6 +2,7 @@ package com.czur.reference.application.entitlement.referencedev;
 
 import com.czur.reference.application.port.entitlement.AuthorizeStartRequest;
 import com.czur.reference.application.port.entitlement.EntitlementIdGenerator;
+import com.czur.reference.application.port.entitlement.EntitlementPolicy;
 import com.czur.reference.application.port.entitlement.EntitlementProviderError;
 import com.czur.reference.application.port.entitlement.EntitlementProviderResult;
 import com.czur.reference.application.port.entitlement.MeetingGrant;
@@ -32,7 +33,7 @@ import java.util.logging.Logger;
  * <p>时钟和不透明 ID 端口均由装配层注入。日志只记录固定原因码和结果类别，
  * 不记录主体、幂等键、摘要、Grant/Reservation ID 或请求正文。</p>
  */
-public final class ReferenceDevEntitlementPolicy {
+public final class ReferenceDevEntitlementPolicy implements EntitlementPolicy {
     private static final Logger LOGGER = Logger.getLogger(
             ReferenceDevEntitlementPolicy.class.getName());
 
@@ -55,6 +56,7 @@ public final class ReferenceDevEntitlementPolicy {
      *
      * @return 成功时返回只包含本次申请能力的短期 Grant；失败时返回稳定错误码
      */
+    @Override
     public EntitlementProviderResult<MeetingGrant> authorizeStart(
             AuthorizeStartRequest request) {
         if (request == null) {
@@ -119,6 +121,7 @@ public final class ReferenceDevEntitlementPolicy {
      * 事实，调用方不能指定。调用方必须把返回快照和 usage operation 放入同一个
      * 数据库事务；本方法本身不产生持久副作用。</p>
      */
+    @Override
     public EntitlementProviderResult<UsageReservation> prepareReservation(
             ReserveUsageRequest request) {
         if (request == null) {

@@ -2,14 +2,11 @@ package com.czur.reference.application.bootstrap;
 
 import com.czur.reference.application.artifact.filesystem.PersistentFileSystemMockArtifactStore;
 import com.czur.reference.application.artifact.s3.S3ArtifactStore;
-import com.czur.reference.application.entitlement.referencedev.ReferenceDevEntitlementPolicy;
 import com.czur.reference.application.finalization.MeetingInputReconciliationScan;
 import com.czur.reference.application.finalization.MockFinalizationWorker;
 import com.czur.reference.application.http.MeetingJdkHttpServer;
 import com.czur.reference.application.persistence.jdbc.JdbcFinalizationCompletionUnitOfWork;
-import com.czur.reference.application.persistence.jdbc.JdbcReferenceDevEntitlementProvider;
 import com.czur.reference.application.persistence.jdbc.JdbcWorkflowStepStore;
-import com.czur.reference.application.port.entitlement.EntitlementIdGenerator;
 import com.czur.reference.application.port.artifact.ArtifactStoreException;
 import com.czur.reference.application.port.artifact.ArtifactStore;
 import com.czur.reference.application.wss.MeetingRealtimeWssServer;
@@ -109,15 +106,8 @@ public final class ReferenceMeetingProcess implements AutoCloseable {
             var source = assembly.databaseRuntime().dataSource();
             MeetingInputReconciliationScan scan =
                     assembly.newInputReconciliationScan(SCAN_PAGE_SIZE);
-            EntitlementIdGenerator ids = new EntitlementIdGenerator() {
-                @Override public String newGrantId() { return "grant_" + UUID.randomUUID(); }
-                @Override public String newReservationId() {
-                    return "reservation_" + UUID.randomUUID();
-                }
-                @Override public String newLeaseToken() { return "lease_" + UUID.randomUUID(); }
-            };
-            var entitlement = new JdbcReferenceDevEntitlementProvider(source,
-                    new ReferenceDevEntitlementPolicy(config.entitlement(), clock, ids), clock);
+            // 收口和Create共用同一个权益Provider，避免Worker重新装配一套默认策略。
+            var entitlement = assembly.entitlementProvider();
             var worker = new MockFinalizationWorker(new JdbcWorkflowStepStore(source),
                     artifacts, entitlement, new JdbcFinalizationCompletionUnitOfWork(source),
                     new MockFinalizationWorker.Config("reference-" + UUID.randomUUID(), clock,

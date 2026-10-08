@@ -64,6 +64,9 @@ import com.czur.reference.application.realtime.RealtimeTranscriptSessions;
 import com.czur.reference.application.realtime.RealtimeMeetingStartCoordinator;
 import com.czur.reference.application.wss.MeetingRealtimeWssServer;
 import com.czur.reference.application.port.entitlement.EntitlementIdGenerator;
+import com.czur.reference.application.port.entitlement.EntitlementPolicy;
+import com.czur.reference.application.port.entitlement.EntitlementProvider;
+import com.czur.reference.application.port.identity.IdentityProvider;
 import com.czur.reference.domain.capability.CapabilityPlanner;
 
 import javax.sql.DataSource;
@@ -87,8 +90,9 @@ import java.util.logging.Logger;
  * <p>启动前从一份可信配置完成交叉校验；数据库运行时检查唯一 V001 基线登记及
  * 当前物理结构，只有显式启用实时 Token 续期时才额外检查其物理结构。不自动迁移或回退
  * 内存端口。查询、认证 Stop 与 T14 删除受理从同一
- * DataSource 装配。只有可信配置显式开启 Create 才接入 V013 重放、权益与创建
- * 工作单元；关闭时请求在任何身份、权益、V013 写入或会话分配前返回 501。
+ * DataSource装配。身份与持久权益Provider在装配时共享；可信配置显式开启Create
+ * 才接入创建重放与工作单元。关闭时Create请求在身份验证、资格策略调用、预占／
+ * 会议写入或会话分配前返回501，其他既有会议请求仍使用同一Provider。
  * {@code start()} 不自动创建网络监听器；调用方可显式创建 HTTP/WSS listener。
  * 本对象不启动 Worker、模型或存储适配器。</p>
  *
@@ -112,6 +116,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
     private final JdbcMeetingEventLogPort eventLog;
     private final Clock clock;
     private final ResultEmailEndpoint resultEmail;
+    private final EntitlementProvider entitlementProvider;
     private final AtomicBoolean closed = new AtomicBoolean();
 
     private ReferenceMeetingHttpAssembly(
@@ -123,7 +128,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
             RealtimeTranscriptSessions realtimeTranscriptSessions,
             MeetingInputReconciler inputReconciler,
             JdbcMeetingEventLogPort eventLog, Clock clock,
-            ResultEmailEndpoint resultEmail) {
+            ResultEmailEndpoint resultEmail, EntitlementProvider entitlementProvider) {
         this.database = database;
         this.deploymentScope = deploymentScope;
         this.runtime = runtime;
@@ -137,6 +142,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
         this.eventLog = Objects.requireNonNull(eventLog, "eventLog");
         this.clock = clock;
         this.resultEmail = resultEmail;
+        this.entitlementProvider = entitlementProvider;
     }
 
     /**
@@ -172,6 +178,45 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
             ReferenceMeetingDeploymentConfig config, Clock clock,
             ArtifactStore artifactStore) {
         Objects.requireNonNull(config, "config");
+        if (!config.identity().enabled()) {
+            throw new IllegalArgumentException("外部身份配置须显式注入身份和权益策略");
+        }
+        return start(config, clock, artifactStore, null, null, true);
+    }
+
+    /**
+     * 使用部署方身份和资格策略装配同一会议运行时及PostgreSQL账本。
+     *
+     * <p>Create、Stop、查询／删除、模型材料和续期共用此身份实现。资格策略只判断
+     * 许可并生成首次预占快照；装配根将其与会议数据源组合，预占及用量操作仍写入
+     * 同一PG库，供建会工作单元绑定。此重载不开放参考预置账号登录，无需伪造演示
+     * 凭据。部署方负责自身登录入口，仍可通过普通JAR消费本装配和公开端口。</p>
+     *
+     * <p>两个实现均可被多个请求线程调用，须支持并发。外部身份／策略持有的资源
+     * 由部署方关闭；本装配只拥有会议运行时和PG连接池。调用方先停HTTP／WSS，
+     * 再关闭本装配，最后释放其外部账号服务资源。</p>
+     *
+     * @param config 可信会议运行配置，外部账号部署可使用外部身份配置入口
+     * @param clock 身份、会议和权益事实共用的服务端时钟
+     * @param artifactStore 持久产物存储；沿用旧装配允许为null的边界
+     * @param identityProvider 部署方的凭据验证实现，不能用本地登录状态代替
+     * @param entitlementPolicy 部署方的开会资格和首次预占策略，不负责持久账本
+     * @return readiness通过的装配；不会自行开放网络监听器
+     */
+    public static ReferenceMeetingHttpAssembly start(
+            ReferenceMeetingDeploymentConfig config, Clock clock,
+            ArtifactStore artifactStore, IdentityProvider identityProvider,
+            EntitlementPolicy entitlementPolicy) {
+        Objects.requireNonNull(identityProvider, "identityProvider");
+        Objects.requireNonNull(entitlementPolicy, "entitlementPolicy");
+        return start(config, clock, artifactStore, identityProvider, entitlementPolicy, false);
+    }
+
+    private static ReferenceMeetingHttpAssembly start(
+            ReferenceMeetingDeploymentConfig config, Clock clock,
+            ArtifactStore artifactStore, IdentityProvider identityProvider,
+            EntitlementPolicy entitlementPolicy, boolean referenceDefaults) {
+        Objects.requireNonNull(config, "config");
         Objects.requireNonNull(clock, "clock");
         JdbcDatabaseRuntime database = JdbcDatabaseRuntime.start(config.database());
         MeetingHttpRuntime runtime = null;
@@ -194,11 +239,18 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
             }
             var stop = new JdbcOwnedMeetingStopUnitOfWork(dataSource, clock);
             var deletion = new JdbcMeetingDeletionAdmissionUnitOfWork(dataSource, clock);
-            var identity = new ReferenceDevIdentityProvider(config.identity(), clock);
+            IdentityProvider identity = referenceDefaults
+                    ? new ReferenceDevIdentityProvider(config.identity(), clock)
+                    : identityProvider;
+            EntitlementPolicy policy = referenceDefaults
+                    ? new ReferenceDevEntitlementPolicy(config.entitlement(), clock, ids)
+                    : entitlementPolicy;
+            // Create与Worker复用同一个Provider；所有预占／用量操作仍在会议库持久化。
+            var entitlement = new JdbcReferenceDevEntitlementProvider(dataSource, policy, clock);
             var errors = new HttpErrorMapper();
-            var referenceLogin = config.login()
+            var referenceLogin = referenceDefaults ? config.login()
                     .map(login -> new ReferenceDevSessionLoginEndpoint(login, errors, clock))
-                    .orElse(null);
+                    .orElse(null) : null;
             var capabilities = new ReferenceDeploymentCapabilitiesEndpoint(config, errors);
             var decoder = new ReferenceMeetingHttpRequestDecoder(
                     config.audience(), config.clientId());
@@ -271,10 +323,6 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
             if (config.createEnabled()) {
                 // 与查询、Stop、Delete 共用唯一连接池、身份 Provider、Clock 和错误映射。
                 // ID 仅由服务端安全随机源生成；首次公开响应由 V013 持久化。
-                var policy = new ReferenceDevEntitlementPolicy(
-                        config.entitlement(), clock, ids);
-                var entitlement = new JdbcReferenceDevEntitlementProvider(
-                        dataSource, policy, clock);
                 var sessions = new ReferenceCreateRealtimeSessionAllocator(
                         config.wssOrigin(), config.wssTokenTtl(), clock, random);
                 var create = new AuthenticatedCompleteMeetingApplicationService(
@@ -299,14 +347,15 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                         referenceLogin, capabilities);
             }
             LOGGER.log(Level.INFO,
-                    "reference meeting HTTP 装配完成 createEnabled={0} realtimeRenewEnabled={1}",
-                    new Object[]{config.createEnabled(), config.realtimeRenewEnabled()});
+                    "reference meeting HTTP 装配完成 createEnabled={0} realtimeRenewEnabled={1} identityMode={2}",
+                    new Object[]{config.createEnabled(), config.realtimeRenewEnabled(),
+                            referenceDefaults ? "REFERENCE" : "EXTERNAL"});
             return new ReferenceMeetingHttpAssembly(database, config.deploymentScope(),
                     runtime, resolver, errors,
                     config.realtimeRenewEnabled(), realtimeVerifier, realtimeIngress,
                     realtimeTranscripts, inputReconciler, events, clock,
                     config.resultEmail().map(email -> new ResultEmailEndpoint(query, manifest,
-                            new SmtpResultEmailSender(email), errors)).orElse(null));
+                            new SmtpResultEmailSender(email), errors)).orElse(null), entitlement);
         } catch (RuntimeException | Error failure) {
             try {
                 if (runtime != null) {
@@ -339,6 +388,15 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
 
     /** 返回已通过启动 readiness 的数据库运行时；调用方不得单独关闭。 */
     public JdbcDatabaseRuntime databaseRuntime() { return database; }
+
+    /**
+     * 返回与Create共用的持久权益Provider，供部署方装配既有收口Worker。
+     *
+     * <p>该实例使用本装配的会议数据源，不另建账本或复制资格策略。调用方不得
+     * 关闭或转移连接池所有权；必须在本装配关闭前停止Worker调用。此访问器仅
+     * 开放已有权益端口，不表示客户端Stop的实际用量协议已完成。</p>
+     */
+    public EntitlementProvider entitlementProvider() { return entitlementProvider; }
 
     /**
      * 用本装配根的同一连接池和 Reconciler 创建待收口扫描器。

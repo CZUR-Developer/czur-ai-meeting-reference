@@ -1038,6 +1038,7 @@ components:
         meetingId:
           type: string
           pattern: "^mtg_[A-Za-z0-9_-]+$"
+          maxLength: 1024
         accepted:
           type: boolean
           const: true
@@ -1165,6 +1166,7 @@ components:
         meetingId:
           type: string
           pattern: "^mtg_[A-Za-z0-9_-]+$"
+          maxLength: 1024
         adapterId:
           type: string
           const: bailian-summary

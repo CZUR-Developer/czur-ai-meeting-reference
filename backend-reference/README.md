@@ -152,6 +152,42 @@ audience、client 和有效期；缺失或非法配置会在装配阶段失败�
 Bearer Token 相同。该演示入口只有一个预置账号，不提供自助注册、管理员后台、
 Token 刷新或生产认证；合作伙伴应替换身份实现，不把它当作正式账号体系。
 
+## 注入部署方身份与开会资格策略
+
+P7-1c-1的装配开放保留上述默认参考链，并增加普通Java接口接入方式：
+
+```java
+var config = ReferenceMeetingDeploymentConfig.fromEnvironmentWithExternalIdentity(
+        environment, "meeting-api", "partner-android");
+// identityProvider验证部署方自己的凭据；entitlementPolicy读取自己的账号／会员规则。
+// clock、artifactStore与这两个实现均由部署方集中装配，示例中不携带真实凭据。
+try (var assembly = ReferenceMeetingHttpAssembly.start(
+        config, clock, artifactStore, identityProvider, entitlementPolicy)) {
+    var runtime = assembly.runtime();
+    var contextResolver = assembly.contextResolver();
+    // 部署方自己的HTTP入口对接上述运行时；Gateway只做协议转发。
+    // 既有收口Worker复用assembly.entitlementProvider()，不另建一套默认权益实现。
+}
+```
+
+- `IdentityProvider`沿用已有接口，把部署方凭据转换为稳定主体与本次权限。
+  Create、Stop、查询／删除、模型材料及续期共用同一个实例。外部配置入口不要求
+  `REFERENCE_DEV_*`凭据或预置账号，且不开放演示登录；登录入口由部署方提供。
+- 新`EntitlementPolicy`只提供`authorizeStart`与`prepareReservation`。前者读取
+  当前开会资格，后者生成首次预占候选；两个方法不写会议记录、不扣费。现有JDBC
+  Provider继续把预占和用量操作保存在同一会议PostgreSQL库，供Create工作单元
+  绑定，不能仅用外部授权成功代替PG预占记录。
+- 同一能力配置、会议协议与V001基线继续使用。原`fromEnvironment`、`start`和
+  JDBC Provider的默认策略构造器保留；参考Process的Worker与Create复用同一个
+  权益Provider。身份／策略需要支持并发调用，其外部服务资源由部署方关闭。
+- Maven仍输出普通`backend-reference-0.1.0-SNAPSHOT.jar`，无需Spring或新的
+  服务进程。消费方可在现有模块中装配公开端口；CZUR私有登录、会员和部署材料
+  不进入本参考工程。
+
+本小步只开放装配边界。当前客户端事件Stop生成结果的路径尚未冻结实际采音用量、
+也未接上`commitUsage`；真实CZUR身份、会员及用量收口仍在P7-1c的后续小提交
+实现和验收，不能以注入测试或结果READY代签生产功能已迁移。
+
 ## P3-T04 Driver 契约测试
 
 `ModelDriverContractTestKit` 位于测试作用域，统一覆盖 `describe`、配置校验、

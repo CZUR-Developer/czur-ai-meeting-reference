@@ -43,6 +43,23 @@ class ReferenceMeetingDeploymentConfigTest {
     private static final String SECRET = "page-secret-0123456789-abcdefghijkl";
 
     @Test
+    void externalIdentityUsesTrustedInputsWithoutAnyDevCredentialOrLogin() {
+        Map<String, String> values = valid();
+        values.keySet().removeIf(key -> key.startsWith("REFERENCE_DEV_"));
+        var config = ReferenceMeetingDeploymentConfig.fromEnvironmentWithExternalIdentity(
+                values, "external-meeting", "external-android");
+        assertFalse(config.identity().enabled());
+        assertTrue(config.login().isEmpty());
+        assertEquals("external-meeting", config.audience());
+        assertEquals("external-android", config.clientId());
+        assertEquals("demo-deployment", config.deploymentScope());
+        assertEquals("demo-profile", config.profile().id());
+        assertEquals(config.deploymentScope(), config.entitlement().deploymentScope());
+        assertTrue(config.entitlement().supportedCapabilities()
+                .contains(CapabilityIds.TRANSCRIPT_REALTIME));
+    }
+
+    @Test
     void bailianSummaryIsOptionalAndPermanentKeyRemainsBackendOnly() {
         Map<String, String> values = valid();
         assertTrue(ReferenceMeetingDeploymentConfig.fromEnvironment(values)
