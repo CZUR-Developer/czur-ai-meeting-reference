@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 摘自国内shape_white_r_10：当前主题圆角40设计单位，不引用私有dimen。 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"><solid android:color="#FFFFFF"/><corners android:radius="40dp"/></shape>

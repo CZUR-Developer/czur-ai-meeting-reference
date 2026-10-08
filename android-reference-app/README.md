@@ -12,7 +12,9 @@ P6核心音频底座和分层SDK已于2026-10-07完成对应新固件验收。�
 实体左右方向准确性、物理旧系统降级、HDMI-IN／投屏／外设音源、真实百炼总结等具体范围
 仍按原记录补验。下文P5／P6接入过程中的验证时点属于历史，不能当成全部场景已通过。
 
-P7正在扩展参考产品：身份来源、可组合设置、结果动作与可选UI工具。当前新增设置将字幕／
+P7进行中，当前按国内版继续补齐参考UI；已有SDK工具和真实业务链证据保留，新的页面与窗口
+视觉效果尚待独立组件验收及设备对照，不能据旧测试级UI宣告本阶段完成。
+参考产品包含身份来源、可组合设置、结果动作与可选UI工具。当前新增设置将字幕／
 互译与“会后生成会议纪要”分别选择；语言直接消费后端发现协议的`languages`，没有固定中英文列表。
 P7-2a源码已切换为默认仅Web与Manifest-only收口；PDF／邮件作为显式可选插件保留。
 该接线已通过独立249项组件测试及两模式构建，并已本地提交；44记录通过默认Web正常设备链。
@@ -21,10 +23,11 @@ P7-2a源码已切换为默认仅Web与Manifest-only收口；PDF／邮件作为�
 P7-3a在基础音频与完整会议入口增加同流输入电平：`AudioInputLevel.level()`为0～100，
 `sampledAtElapsedRealtimeMs()`是单调测量毫秒时刻。SDK沿用旧RMS公式，每三个100ms帧
 测当次帧，约300ms通知一次；参考页和悬浮窗读取Service的同一值，正常停止立即复位。
-正式会议不另开Monitor／MIC；Mock没有实际PCM，页面明确“Mock 未实采”。本项源码与
+正式会议不另开Monitor／MIC；Mock没有实际PCM，不代签实采。国内形态主界面用声音图显示
+电平，音源枚举、能力说明和电平数值不占用主显示区，仍可通过日志／独立诊断查看。本项源码与
 主机构建、独立验收及设备演示分别记录，不把Mock或APK构建当成实采电平证明。
 
-P7-3b通过独立可选UI AAR装配字幕控件。页面历史单元、最新字幕浮窗及互译两栏共用
+P7-3b通过独立可选UI AAR装配字幕控件。页面历史单元、字幕浮窗及互译两栏共用
 `SubtitleViewFactory`，消费同一已路由快照；每次完整替换文字，partial为80%、final为100%，
 View自身alpha保持1。3b已独立验收并本地提交；本步3c在同一UI AAR增加基础／默认
 窗口和单形态可编辑例，3c已独立签收提交；真实设备效果与3d组合验证。
@@ -37,14 +40,16 @@ View自身alpha保持1。3b已独立验收并本地提交；本步3c在同一UI 
 地址只保存在本进程，变更后返回页面会关闭旧会前客户端并重新刷新身份／能力。
 更换后端清除默认参考会话；不写入凭据，不接CZUR个人中心、会员、充值或Launcher。
 
-会中为深色字幕或左右独立文本区，时长、电平、窗口入口和Stop固定在滚动区之外；
-原文／译文仍消费同一SDK已路由快照和`SubtitleViewFactory`，不复制分栏、修订或模型逻辑。
+会中直接复用国内字幕／互译背景和控制图标，时长、声音图、窗口入口和Stop固定在滚动区之外。
+双语原文白色、译文黄色（`#FFDB10`），同一发言方的原译在同侧上下排列；字幕24设计字号、
+36设计行高。原文／译文消费同一SDK已路由快照和`SubtitleViewFactory`，不复制分栏、修订或模型逻辑。
 停止后沿原准备动作自动打开同场Web，原生容器提供“本场会议结果”及返回入口。
 默认Web没有主页面地址输入；`Settings.freeze()`在点击开始时读取连接配置，
 系统屏采授权返回继续消费同一准备对象。自定义结果插件仍可在`result_settings_host`放自己的View。
 
-App侧`MeetingPageViews.Factory`只创建／绑定View；默认XML使用原生单位，大屏会前卡按
-988×856／1920×1080尺度居中，小窗内容可滚动，Start／Stop不随文本滚走。
+App侧`MeetingPageViews.Factory`只创建／绑定View；默认XML中的dp／sp记录设计数值，
+`ReferenceUiScale`局部映射1920×1080基准，不改系统DisplayMetrics。大屏会前卡为988×856、
+蓝标题86高、40圆角，语言／开关／开始按钮复用国内比例与样式；小窗内容可滚动，Start／Stop不随文本滚走。
 伙伴可编辑公开XML，或在首次创建Activity前登记自己的薄工厂：
 
 ```java
@@ -53,7 +58,11 @@ MeetingAppAssembly.registerPageFactory(activity -> new MeetingPageViews(
 ```
 
 自定义布局提供相同的控件ID即可由原Activity接线，不创建另一份会议状态；页面不放入SDK。
-三构建组合共用同一App布局，正式SDK版注入同一可选UI AAR组合字幕和默认悬浮窗。
+构建组合共用同一App布局，正式国内形态交付使用SDK＋UI：同时注入主SDK和UI AAR。
+无UI AAR的基础版是有限开发fallback，不作为完整四形态交付；Mock＋UI用于正常显示回归。
+复制图片和纯显示代码的来源见[页面资源清单](app/UI-RESOURCE-SOURCES.md)及
+[窗口资源清单](docs/czur-overlay-resources.md)。参考版使用自己的登录、默认仅Web结果；
+CZUR会员、个人中心、Launcher和小程序等私有联动不在本包复制。
 源码、主机布局／组件测试、APK构建、独立验收和实体截图／真实模型链分别留证，构建不代签设备效果。
 
 P7-1c的SDK会议入口复用正在使用的唯一音源累计完整标准PCM帧，停流及完整尾帧交付后
@@ -150,9 +159,11 @@ Mock与SDK使用同一独立UI AAR。正式SDK参考交付同时注入主AAR和U
 UI AAR只含控件和必要呈现类型，无core、contract、网络或原生采音，也没有其他运行依赖。
 
 工厂只接收`DisplaySnapshotPresentation`已投影的段ID、文字和各自1.0／0.8状态；
-原文迟到修订时，单语窗仍按`latestTranscriptSegmentId`选段，互译按SDK源侧及交换显示。
-参考宿主把原有sp字号换成明确px交给工具，行高为字号的1.3倍；窗口保留三行槽位，
-历史列表单元保留整段。缩窄／放大从完整输入重新排版，不改会议快照。
+`speakerColumn`仅把SDK源侧与交换开关投影为实际左右侧，原译整对同侧，未确定侧不猜测。
+页面历史单元保留整段；普通窗口用`renderParts`把final历史和当前partial交给SDK已有`setParts`，
+每段状态分别保留，只由控件裁最近可见行。没有旧`bilingual`跨侧入口或第二文字账本。
+参考宿主把24设计字号换成明确px交给工具，并用`setLineHeightPx`指定36设计行高；
+工厂原`create`默认1.3倍仍供其他宿主使用。缩窄／放大从完整输入重新排版，不改会议快照。
 占位也用工厂render→setParts提交，避免继承setText在重排时被旧字幕覆盖。
 页面与窗口的电平、Stop、结果Web及Service生命周期继续沿同一业务链。
 伙伴换字幕控件时只改对应薄工厂及构建输入；无需修改音源、Adapter或会议收口。
@@ -163,20 +174,23 @@ UI AAR只含控件和必要呈现类型，无core、contract、网络或原生�
 `MeetingOverlay`只保留原Service调用签名、提醒和工厂句柄，不再持有第二份四形态状态。
 默认`MeetingAppAssembly.overlayFactory()`为构建期互斥的`OverlayViewFactory`：
 
-- 无UI AAR的`basic-ui`版是单个基础字幕／双栏窗口，保留返回、交换、停止及同场电平；
-  不复制完整四形态、Mini或最近文字排版工具。
+- 无UI AAR的`basic-ui`版复用同一国内素材和同侧View，仅提供一个基础字幕／普通互译窗口，
+  保留返回、交换、停止及同场声音指示；不复制完整四形态、Mini或SDK最近文字排版工具。
 - 有UI AAR的`meeting-ui`版装配`DefaultMeetingOverlay`，默认注册字幕、普通互译、大互译、Mini。
-  普通互译显示最新双栏，大窗沿原参考上限取最近8行；Mini恢复之前形态。窗口隐藏／切换
+  字幕和普通互译读取完整历史与当前句，裁最近3行；普通窗简洁模式裁2行。
+  大窗左右独立滚动历史；Mini恢复之前形态。窗口隐藏／切换
   只影响UI，不暂停会议或修改音源、模型、计费及收口。
 
 `meeting-ui/.../ui/OverlayViewFactory.java`同时是公开可编辑的px布局和内容装配例。
 App按1920×1080设计尺度等比换算：宽1800、字幕高222、普通互译293、大互译1008，
-Mini126×60；位置由App决定。样式26px字号／34px行高／12px边距／44px控制行，
-字幕三行共102px，222px窗内各部分共216px；Mini文本和恢复按钮也在固定尺寸内。
-这些数值先在App换算，再交UI工具；不使用Starry私有pt／AutoSize、机型或品牌资源。
+Mini126×60；位置由App决定。字幕24设计字号／36设计行高，原文白色、译文黄色，
+普通互译的控制区在双栏中央；简洁模式高度164、背景透明，文字2行。
+Mini复用国内APNG和声音图，点击可恢复。原素材／动画字节不变，放入nodpi避免二次密度缩放。
+这些设计数值先在App换算，再交UI工具；不引入Starry私有pt／AutoSize或平台业务依赖。
 
-`OverlayViewFactory.presentation`只调用原`DisplaySnapshotPresentation`转数据，保留
-`latestTranscriptSegmentId`、源侧／交换和原／译文各自final；不改分栏或选段。
+`CzurOverlayViews`是可编辑的纯显示内容；原`OverlayViewFactory.presentation`已删除，
+直接消费统一`DisplaySnapshotPresentation.speakerColumn`及字幕投影，保留源侧／交换和
+原／译文各自final；不改分栏、选段或音源。旧跨侧投影已随页面迁移移除。
 窗口Stop／交换／返回回调继续由同一Service提供，时长、电平来自其同一State。
 提醒仍由原App卡片及规则管理，没有放入UI AAR。宿主结束／退出时调用dismiss释放窗口，
 不是另发一次Stop。
@@ -250,7 +264,7 @@ Service 的同一份“已进行 / 剩余”状态。上限超过 20 分钟时�
 分钟阈值由 `MeetingTimeRuleTest` 使用可控时钟验证，无需让设备空等五分钟。
 
 悬浮窗的“收起”会变为右上角 Mini，点击 Mini 恢复到收起前的字幕窗或互译窗；
-互译普通窗显示最新双栏，大窗显示最近的双栏记录，两种窗都读取同一份会议状态。
+互译普通窗显示最近可见3行（简洁2行），大窗显示左右独立可滚动历史，两种窗都读取同一份会议状态。
 Mini 期间会议仍继续采音、收模型结果和提交标准事件，恢复后能看到新内容。
 国内版字幕收起的清空文字／暂停ASR入口属于P9产品规则，本步不迁移；
 参考版只实现窗口收起，不声称Mini暂停识别或计费。
@@ -281,7 +295,7 @@ App调用`MeetingClient.login`更新集中装配的参考内存身份，Service�
 基础模型运行接口的 `ModelSessionListener.onAudioInputMode(AudioInputMode)` 和组合入口的
 `MeetingListener.onAudioInputMode(AudioInputMode)` 均返回本次实际来源：`MIC`
 为标准 Android 麦克风，`CZUR_BROKER` 为兼容的新系统共享音频，`DEBUG_WAV` 为
-仅 Debug 的测试文件。参考 App 在会中功能栏显示该枚举值；伙伴可用于状态展示，
+仅 Debug 的测试文件。参考 App 保留该值的接线，国内形态主界面不显示诊断枚举；伙伴可用于日志或状态展示，
 无需自行探测系统。旧 CZUR 系统的 MIC 降级遵循该系统既有录音竞合能力，不具备新
 Broker 的竞合保证；模式用于准确说明当前能力。
 

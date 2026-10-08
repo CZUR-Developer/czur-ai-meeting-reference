@@ -4,6 +4,7 @@ import android.content.Context;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
@@ -12,7 +13,11 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 import com.czur.aimeeting.reference.meeting.MeetingReminderPresentation;
 
-/** 会议页和已开启的跨应用悬浮窗共用的全屏遮罩与中央提醒卡片。 */
+/**
+ * 国内提醒的纯显示摘取，来源alert_warn_time.xml／common_float_double_btn.xml。
+ * 500×360蓝卡、36白色标题、24白色正文、180×50确认；遮罩为50%黑色。
+ * Notice及确认回调沿用既有规则，本类不计时、不改变阈值、不主动停止会议。
+ */
 final class MeetingReminderPopup {
     private final View root;
     private final TextView title;
@@ -20,50 +25,64 @@ final class MeetingReminderPopup {
 
     MeetingReminderPopup(Context context, boolean cardOnly, Runnable onConfirm) {
         LinearLayout card = new LinearLayout(context);
+        card.setId(R.id.reminder_card);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(context, 28), dp(context, 28), dp(context, 28), dp(context, 28));
+        card.setGravity(Gravity.CENTER_HORIZONTAL);
+        card.setPadding(pt(context, 40), pt(context, 25), pt(context, 40), pt(context, 30));
         GradientDrawable background = new GradientDrawable();
-        background.setColor(Color.WHITE);
-        background.setCornerRadius(dp(context, 20));
+        background.setColor(context.getColor(R.color.reference_blue));
+        background.setCornerRadius(pt(context, 40));
         card.setBackground(background);
-        int screenWidth = context.getResources().getDisplayMetrics().widthPixels;
         if (cardOnly) {
             root = card;
+            card.setMinimumWidth(pt(context, 500));
+            card.setMinimumHeight(pt(context, 360));
         } else {
             FrameLayout screen = new FrameLayout(context);
-            screen.setBackgroundColor(0xB8000000);
+            screen.setBackgroundColor(0x80000000);
             screen.setClickable(false);
-            FrameLayout.LayoutParams cardParams = new FrameLayout.LayoutParams(
-                    Math.min(screenWidth - dp(context, 48), dp(context, 440)),
-                    FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER);
-            screen.addView(card, cardParams);
+            screen.addView(card, new FrameLayout.LayoutParams(pt(context, 500), pt(context, 360), Gravity.CENTER));
             root = screen;
         }
         root.setVisibility(View.GONE);
-
         title = new TextView(context);
-        title.setTextColor(0xFF1F2937);
-        title.setTextSize(22);
+        title.setId(R.id.reminder_title);
+        title.setIncludeFontPadding(false);
+        title.setGravity(Gravity.CENTER);
+        title.setTextColor(Color.WHITE);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_PX, pt(context, 36));
         title.setTypeface(null, Typeface.BOLD);
-        card.addView(title);
+        card.addView(title, new LinearLayout.LayoutParams(-1, -2));
         message = new TextView(context);
-        message.setTextColor(0xFF4B5563);
-        message.setTextSize(17);
-        message.setLineSpacing(dp(context, 4), 1);
-        LinearLayout.LayoutParams messageParams = new LinearLayout.LayoutParams(-1, -2);
-        messageParams.topMargin = dp(context, 18);
-        card.addView(message, messageParams);
+        message.setId(R.id.reminder_message);
+        message.setIncludeFontPadding(false);
+        message.setGravity(Gravity.CENTER);
+        message.setTextColor(Color.WHITE);
+        message.setTextSize(TypedValue.COMPLEX_UNIT_PX, pt(context, 24));
+        message.setTypeface(null, Typeface.BOLD);
+        message.setLineSpacing(pt(context, 10), 1);
+        card.addView(message, new LinearLayout.LayoutParams(-1, 0, 1));
         Button confirm = new Button(context);
+        confirm.setId(R.id.reminder_confirm);
         confirm.setText("确认");
+        confirm.setTextSize(TypedValue.COMPLEX_UNIT_PX, pt(context, 20));
+        confirm.setTypeface(null, Typeface.BOLD);
+        confirm.setTextColor(context.getColor(R.color.reference_blue));
+        confirm.setBackgroundTintList(null);
+        confirm.setStateListAnimator(null);
+        confirm.setPadding(0, 0, 0, 0);
+        confirm.setMinWidth(0); confirm.setMinHeight(0);
+        GradientDrawable confirmBackground = new GradientDrawable();
+        confirmBackground.setColor(Color.WHITE);
+        confirmBackground.setCornerRadius(pt(context, 15));
+        confirm.setBackground(confirmBackground);
         confirm.setOnClickListener(view -> onConfirm.run());
-        LinearLayout.LayoutParams confirmParams = new LinearLayout.LayoutParams(-2, -2);
-        confirmParams.gravity = Gravity.END;
-        confirmParams.topMargin = dp(context, 22);
-        card.addView(confirm, confirmParams);
+        card.addView(confirm, new LinearLayout.LayoutParams(pt(context, 180), pt(context, 50)));
     }
 
     View view() { return root; }
 
+    /** 只切换既有Notice的文字及可见性，确认只转发给原会议宿主。 */
     void render(MeetingReminderPresentation.Notice notice) {
         if (notice.kind() == MeetingReminderPresentation.Kind.NONE) {
             root.setVisibility(View.GONE);
@@ -74,7 +93,5 @@ final class MeetingReminderPopup {
         root.setVisibility(View.VISIBLE);
     }
 
-    private static int dp(Context context, int value) {
-        return (int) (value * context.getResources().getDisplayMetrics().density + 0.5f);
-    }
+    private static int pt(Context context, int units) { return ReferenceUiScale.px(context, units); }
 }

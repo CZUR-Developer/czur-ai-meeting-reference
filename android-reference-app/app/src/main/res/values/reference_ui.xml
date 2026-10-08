@@ -1,32 +1,66 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- 配色／控件尺寸摘取国内transcription及base/UILib，尺寸由ReferenceUiScale适配。 -->
 <resources>
-    <color name="reference_blue">#2878E5</color>
-    <color name="reference_background">#EAF0F8</color>
-    <color name="reference_ink">#243249</color>
-    <color name="reference_dark">#151B27</color>
-    <color name="reference_dark_panel">#202939</color>
-    <color name="reference_translation">#FFE083</color>
-    <string name="reference_setup_title">实时字幕</string>
+    <color name="reference_blue">#5879FC</color>
+    <color name="reference_background">#E8EBF7</color>
+    <color name="reference_ink">#393939</color>
+    <color name="reference_dark">#000B43</color>
+    <color name="reference_dark_panel">#000B43</color>
+    <color name="reference_translation">#FFDB10</color>
+    <string name="reference_setup_title">AI会议纪要</string>
     <string name="reference_account">账号登录</string>
     <string name="reference_settings">连接设置</string>
-    <string name="reference_source">会议语言</string>
+    <string name="reference_source">语言</string>
     <string name="reference_target">目标语言</string>
-    <string name="reference_result_description">停止后自动打开本场网页结果，查看已提供的字幕、译文及会议产物。</string>
-    <string name="reference_backend_hint">后端地址，例如 https://meeting.example.com</string>
-    <string name="reference_web_hint">结果网页地址，例如 https://result.example.com/index.html</string>
+    <string name="reference_result_description">会议结束后自动打开网页，查看本场字幕、译文及已提供的会议产物。</string>
+    <string name="reference_backend_hint">例如 https://meeting.example.com</string>
+    <string name="reference_web_hint">例如 https://result.example.com/index.html</string>
     <style name="ReferenceLabel">
         <item name="android:textColor">@color/reference_ink</item>
-        <item name="android:textSize">18sp</item>
+        <item name="android:textSize">24sp</item>
+        <item name="android:includeFontPadding">false</item>
         <item name="android:gravity">center_vertical</item>
     </style>
     <style name="ReferenceButton" parent="android:style/Widget.Material.Button">
-        <item name="android:textSize">16sp</item>
+        <item name="android:textSize">20sp</item>
         <item name="android:textAllCaps">false</item>
-        <item name="android:minHeight">44dp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:minWidth">0dp</item>
+        <item name="android:minHeight">0dp</item>
+        <item name="android:padding">0dp</item>
+        <item name="android:background">@drawable/czur_ref_primary_button</item>
+        <item name="android:backgroundTint">@null</item>
+        <item name="android:textColor">#FFFFFF</item>
+        <item name="android:stateListAnimator">@null</item>
+    </style>
+    <style name="ReferenceSecondaryButton" parent="ReferenceButton">
+        <item name="android:background">@drawable/czur_ref_secondary_button</item>
+        <item name="android:textColor">@color/reference_blue</item>
+    </style>
+    <style name="ReferenceHeaderButton" parent="ReferenceButton">
+        <item name="android:background">#33FFFFFF</item>
+        <item name="android:textSize">20sp</item>
+    </style>
+    <style name="ReferenceModeButton" parent="ReferenceLabel">
+        <item name="android:button">@null</item>
+        <item name="android:background">@drawable/czur_ref_mode_button</item>
+        <item name="android:textColor">@color/czur_ref_mode_text</item>
+        <item name="android:textSize">24sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:gravity">center</item>
+        <item name="android:padding">0dp</item>
+        <item name="android:buttonTint">@null</item>
     </style>
     <style name="ReferenceDarkLabel">
         <item name="android:textColor">#FFFFFF</item>
-        <item name="android:textSize">18sp</item>
+        <item name="android:textSize">24sp</item>
+        <item name="android:includeFontPadding">false</item>
         <item name="android:gravity">center_vertical</item>
+    </style>
+    <style name="ReferenceInput" parent="ReferenceLabel">
+        <item name="android:background">@drawable/czur_ref_language_box</item>
+        <item name="android:paddingHorizontal">24dp</item>
+        <item name="android:textColorHint">#805879FC</item>
+        <item name="android:singleLine">true</item>
     </style>
 </resources>

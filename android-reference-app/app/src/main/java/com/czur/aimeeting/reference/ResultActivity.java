@@ -13,6 +13,7 @@ public final class ResultActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.reference_result_page);
+        ReferenceUiScale.bind(findViewById(android.R.id.content));
         webView = findViewById(R.id.result_web);
         webView.getSettings().setJavaScriptEnabled(true);
         findViewById(R.id.result_back).setOnClickListener(view -> finish());

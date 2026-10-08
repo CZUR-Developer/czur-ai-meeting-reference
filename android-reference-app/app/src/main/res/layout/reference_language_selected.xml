@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 国内语言框的50高／24字／左24边距，原生Spinner仅负责选中值。 -->
+<TextView xmlns:android="http://schemas.android.com/apk/res/android" android:id="@android:id/text1"
+android:layout_width="match_parent" android:layout_height="50dp" android:gravity="center_vertical"
+android:paddingStart="24dp" android:paddingEnd="44dp" android:textSize="24sp" android:textStyle="bold"
+android:textColor="#5879FC" android:singleLine="true" android:drawableEnd="@drawable/czur_ref_language_arrow"/>

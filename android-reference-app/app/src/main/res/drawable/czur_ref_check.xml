@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 直接复用国内勾选图片，功能依旧为原生CompoundButton。 -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android"><item android:state_checked="true" android:drawable="@drawable/czur_ref_checked"/><item android:drawable="@drawable/czur_ref_unchecked"/></selector>

@@ -67,10 +67,15 @@ public class ReferenceMeetingPageTest {
         assertEquals(988, card.width());
         assertEquals(856, card.height());
         assertEquals(960, card.centerX());
+        assertEquals(540, card.centerY());
+        assertEquals(48f, page.setupTitle.getTextSize(), 0f);
+        assertEquals(30f, ((TextView)page.root.findViewById(R.id.setup_subtitle)).getTextSize(), 0f);
         assertEquals(View.GONE, page.targetContainer.getVisibility());
         assertEquals(View.GONE, page.swapLanguages.getVisibility());
         assertFixed(page.start);
         Rect start = bounds(page.root, page.start);
+        assertEquals(180, start.width());
+        assertEquals(50, start.height());
         assertTrue(start.bottom <= card.bottom && start.top >= card.top);
         assertNull(page.root.findViewById(R.id.backend_url));
         assertNull(page.root.findViewById(R.id.web_url));
@@ -78,7 +83,7 @@ public class ReferenceMeetingPageTest {
         assertEquals(View.VISIBLE, page.targetContainer.getVisibility());
         assertEquals(View.VISIBLE, page.swapLanguages.getVisibility());
         assertEquals(View.GONE, page.presentation.getVisibility());
-        assertEquals("AI 双语互译", page.setupTitle.getText().toString());
+        assertEquals("AI双语互译", page.setupTitle.getText().toString());
     }
 
     @Test public void accountEntryAndConnectionReturnCloseOldClientAndClearOldCapabilities() throws Exception {
@@ -86,7 +91,7 @@ public class ReferenceMeetingPageTest {
         activity.findViewById(R.id.account_button).performClick();
         AlertDialog dialog = ShadowAlertDialog.getLatestAlertDialog();
         assertTrue(dialog.isShowing());
-        assertEquals("参考账号登录", shadowOf(dialog).getTitle().toString());
+        assertEquals("账号登录", ((TextView)dialog.findViewById(R.id.login_title)).getText().toString());
         dialog.dismiss();
         activity.findViewById(R.id.settings_button).performClick();
         assertEquals(ConnectionSettingsActivity.class.getName(), shadowOf(activity)
@@ -115,6 +120,9 @@ public class ReferenceMeetingPageTest {
         measure(page.root);
         assertEquals(View.VISIBLE, page.meetingPanel.getVisibility());
         assertEquals(47, page.level.getProgress());
+        assertEquals(47, page.voiceLevel.getLevel());
+        assertEquals(View.GONE, page.levelText.getVisibility());
+        assertEquals(View.GONE, page.capabilities.getVisibility());
         SubtitleTextView subtitle = (SubtitleTextView) page.transcriptList.getChildAt(1);
         assertEquals("source", subtitle.getParts().get(0).text().toString());
         assertFalse(subtitle.getParts().get(0).isFinal());
@@ -124,11 +132,14 @@ public class ReferenceMeetingPageTest {
         render(activity, display(true, false, false), 3, 55);
         measure(page.root);
         assertEquals("source", ((SubtitleTextView)page.leftList.getChildAt(0)).getParts().get(0).text().toString());
-        assertEquals("译文", ((SubtitleTextView)page.rightList.getChildAt(0)).getParts().get(0).text().toString());
+        assertEquals("译文", ((SubtitleTextView)page.leftList.getChildAt(1)).getParts().get(0).text().toString());
+        assertEquals(0, page.rightList.getChildCount());
         assertFalse(((SubtitleTextView)page.leftList.getChildAt(0)).getParts().get(0).isFinal());
-        assertTrue(((SubtitleTextView)page.rightList.getChildAt(0)).getParts().get(0).isFinal());
+        assertTrue(((SubtitleTextView)page.leftList.getChildAt(1)).getParts().get(0).isFinal());
         render(activity, display(true, true, false), 4, 55);
-        assertEquals("译文", ((SubtitleTextView)page.leftList.getChildAt(0)).getParts().get(0).text().toString());
+        assertEquals(0, page.leftList.getChildCount());
+        assertEquals("source", ((SubtitleTextView)page.rightList.getChildAt(0)).getParts().get(0).text().toString());
+        assertEquals("译文", ((SubtitleTextView)page.rightList.getChildAt(1)).getParts().get(0).text().toString());
         assertFixed(page.stop);
         assertFixed(page.swapColumns);
         assertFixed(page.overlay);
@@ -401,6 +412,37 @@ public class ReferenceMeetingPageTest {
         assertEquals(url, shadowOf(web).getLastLoadedUrl());
         result.findViewById(R.id.result_back).performClick();
         assertTrue(result.isFinishing());
+    }
+
+    @Test public void domesticBlueReminderRendersExistingNoticeAndConfirmsWithoutChangingClock() {
+        Activity activity = Robolectric.buildActivity(Activity.class).create().get();
+        AtomicInteger confirmations = new AtomicInteger();
+        MeetingReminderPopup popup = new MeetingReminderPopup(activity, false, confirmations::incrementAndGet);
+        android.widget.FrameLayout screen = new android.widget.FrameLayout(activity);
+        screen.addView(popup.view(), new android.widget.FrameLayout.LayoutParams(-1, -1));
+        popup.render(new MeetingReminderPresentation.Notice(MeetingReminderPresentation.Kind.NO_TRANSCRIPT,
+                "长时间无转写", "会议将在一分钟后自动结束"));
+        measure(screen);
+        View card = screen.findViewById(R.id.reminder_card);
+        assertEquals(500, card.getWidth());
+        assertEquals(360, card.getHeight());
+        TextView title = screen.findViewById(R.id.reminder_title);
+        TextView message = screen.findViewById(R.id.reminder_message);
+        assertEquals(36f, title.getTextSize(), 0f);
+        assertEquals(24f, message.getTextSize(), 0f);
+        assertEquals(android.graphics.Color.WHITE, title.getCurrentTextColor());
+        assertEquals("长时间无转写", title.getText().toString());
+        assertEquals("会议将在一分钟后自动结束", message.getText().toString());
+        assertEquals(View.VISIBLE, popup.view().getVisibility());
+        assertEquals(activity.getColor(R.color.reference_blue),
+                ((android.graphics.drawable.GradientDrawable)card.getBackground()).getColor().getDefaultColor());
+        View confirm = screen.findViewById(R.id.reminder_confirm);
+        assertEquals(180, confirm.getWidth());
+        assertEquals(50, confirm.getHeight());
+        confirm.performClick();
+        assertEquals(1, confirmations.get());
+        popup.render(MeetingReminderPresentation.Notice.NONE);
+        assertEquals(View.GONE, popup.view().getVisibility());
     }
 
     private static MeetingDisplaySnapshot display(boolean bilingual, boolean swapped, boolean complete) {

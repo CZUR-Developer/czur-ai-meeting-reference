@@ -12,11 +12,6 @@ public final class DisplaySnapshotPresentation {
     private DisplaySnapshotPresentation() { }
 
     public record SubtitleRow(String segmentId, String text, float alpha) { }
-    /** 公共扩展先小提交时保留旧页面编译入口；新页面／窗口只使用SpeakerColumnRow。 */
-    @Deprecated
-    public record BilingualRow(String segmentId, String left, String right,
-            float leftAlpha, float rightAlpha, boolean languageFallback) { }
-
     /**
      * 国内互译的一个发言条目：原文和译文始终在同一侧上下排列。
      * side是交换后的物理显示侧：A表示左栏，B表示右栏，UNRESOLVED等待路由确定。
@@ -65,23 +60,6 @@ public final class DisplaySnapshotPresentation {
     public static SubtitleRow subtitle(MeetingDisplaySnapshot.Row row) {
         return row.transcript() == null ? null : new SubtitleRow(row.segmentId(),
                 row.transcript().text(), row.transcript().isFinal() ? 1.0f : 0.8f);
-    }
-
-    /**
-     * 旧参考UI的过渡编译入口。公共显示扩展独立提交后，原页面／窗仍可编译；
-     * 实际国内复刻全部使用speakerColumn，并在调用者迁移提交中移除此旧投影。
-     */
-    @Deprecated
-    public static BilingualRow bilingual(MeetingDisplaySnapshot.Row row, boolean swapped) {
-        var pair = speakerColumn(row, swapped);
-        if (pair.side() == MeetingDisplaySnapshot.Side.UNRESOLVED)
-            return new BilingualRow(pair.segmentId(), "语言识别中：" + pair.source(), "",
-                    pair.sourceAlpha(), 1f, pair.languageFallback());
-        return pair.side() == MeetingDisplaySnapshot.Side.A
-                ? new BilingualRow(pair.segmentId(), pair.source(), pair.translated(),
-                        pair.sourceAlpha(), pair.translatedAlpha(), pair.languageFallback())
-                : new BilingualRow(pair.segmentId(), pair.translated(), pair.source(),
-                        pair.translatedAlpha(), pair.sourceAlpha(), pair.languageFallback());
     }
 
     /**

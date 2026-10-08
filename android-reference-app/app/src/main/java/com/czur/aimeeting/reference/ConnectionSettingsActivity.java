@@ -14,6 +14,7 @@ public final class ConnectionSettingsActivity extends Activity {
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.reference_connection_settings);
+        ReferenceUiScale.bind(findViewById(android.R.id.content));
         EditText backend = findViewById(R.id.backend_url);
         EditText web = findViewById(R.id.web_url);
         backend.setText(MeetingAppAssembly.serverUrl());

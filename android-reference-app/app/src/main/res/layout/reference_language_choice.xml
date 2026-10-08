@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 弹层语言行摘取国内item_language_list的字号、行高和底色。 -->
+<TextView xmlns:android="http://schemas.android.com/apk/res/android" android:id="@android:id/text1"
+android:layout_width="match_parent" android:layout_height="50dp" android:gravity="center_vertical"
+android:paddingHorizontal="24dp" android:textSize="24sp" android:textStyle="bold"
+android:textColor="#5879FC" android:background="#F1F3FE" android:singleLine="true"/>

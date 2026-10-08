@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 纯显示提醒的稳定ID，方便宿主和已有页面回归定位，不增加业务状态。 -->
+    <item name="reminder_card" type="id"/>
+    <item name="reminder_title" type="id"/>
+    <item name="reminder_message" type="id"/>
+    <item name="reminder_confirm" type="id"/>
+</resources>

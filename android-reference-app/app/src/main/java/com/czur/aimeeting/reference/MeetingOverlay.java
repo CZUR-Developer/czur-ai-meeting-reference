@@ -74,7 +74,7 @@ final class MeetingOverlay {
         if (reminderPopup == null) {
             try {
                 reminderScrim = new View(context);
-                reminderScrim.setBackgroundColor(0xB8000000);
+                reminderScrim.setBackgroundColor(0x80000000);
                 windowManager.addView(reminderScrim, new WindowManager.LayoutParams(
                         -1, -1, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                         WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
@@ -82,8 +82,8 @@ final class MeetingOverlay {
                         android.graphics.PixelFormat.TRANSLUCENT));
                 reminderPopup = new MeetingReminderPopup(context, true, onConfirmReminder);
                 WindowManager.LayoutParams cardParams = new WindowManager.LayoutParams(
-                        Math.min(context.getResources().getDisplayMetrics().widthPixels - dp(48), dp(440)),
-                        WindowManager.LayoutParams.WRAP_CONTENT,
+                        ReferenceUiScale.px(context, 500),
+                        ReferenceUiScale.px(context, 360),
                         WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                         WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                                 | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
