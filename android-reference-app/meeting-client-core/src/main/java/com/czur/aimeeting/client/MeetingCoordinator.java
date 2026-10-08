@@ -25,8 +25,6 @@ import com.czur.aimeeting.model.SummarySessionGrant;
 import com.czur.aimeeting.model.TranscriptEvent;
 import com.czur.aimeeting.model.TranslationEvent;
 import java.io.IOException;
-import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
 import java.util.HashSet;
 import java.util.Objects;
 import java.util.OptionalLong;
@@ -537,33 +535,16 @@ public final class MeetingCoordinator implements MeetingClient {
                 LOG.info("后端 Stop 已受理，结果尚需确认");
                 if (genTime == null) genTime = wallClockMs.getAsLong();
                 model.close();
-                if (audioFailed || options.resultDelivery() == MeetingOptions.ResultDelivery.TRACELESS) {
+                if (audioFailed || options.resultOptions().policy()
+                        == com.czur.aimeeting.client.result.ResultOptions.Policy.NO_ACTIVE_DELIVERY) {
                     enqueue(() -> endWithoutDelivery(audioFailed ? "音频输入已结束，本场已停止"
                             : "会议已结束；无痕互译不主动交付结果"));
                     return;
                 }
-                step = "读取实际 READY 清单/内容";
-                LOG.info("读取实际 READY 清单或内容开始");
-                MeetingResult result = server.readResult(meetingId, genTime,
-                        options.resultDelivery() == MeetingOptions.ResultDelivery.LOCAL);
-                if (options.resultDelivery() == MeetingOptions.ResultDelivery.LOCAL) {
-                    result = result.withDelivery(null, MeetingResult.DeliveryStatus.LOCAL_READY);
-                } else {
-                    String url = resultUrl(options.resultWebUrl(), meetingId, genTime);
-                    var delivery = MeetingResult.DeliveryStatus.WEB_AVAILABLE;
-                    if (options.resultDelivery() == MeetingOptions.ResultDelivery.EMAIL) {
-                        try {
-                            server.sendResultEmail(meetingId, options.resultEmails(), url);
-                            delivery = MeetingResult.DeliveryStatus.EMAIL_SENT;
-                            LOG.info("结果邮件交付完成");
-                        } catch (IOException emailFailure) {
-                            logFailure("结果邮件交付", emailFailure);
-                            delivery = MeetingResult.DeliveryStatus.EMAIL_FAILED;
-                        }
-                    }
-                    result = result.withDelivery(url, delivery);
-                }
-                MeetingResult finalResult = result;
+                step = "读取实际 READY 清单";
+                LOG.info("读取实际 READY 清单开始");
+                // 收口只确认产物事实；正文／链接／通知由READY后的显式动作处理。
+                MeetingResult finalResult = server.readResult(meetingId, genTime, false);
                 enqueue(() -> {
                     if (done) return;
                     done = true;
@@ -675,11 +656,4 @@ public final class MeetingCoordinator implements MeetingClient {
         LOG.warning("会议步骤失败 step=" + step + " type=" + failure.getClass().getSimpleName() + code);
     }
 
-    private static String resultUrl(String base, String meetingId, long genTime) {
-        int fragmentAt = base.indexOf('#');
-        String fragment = fragmentAt < 0 ? "" : base.substring(fragmentAt);
-        String path = fragmentAt < 0 ? base : base.substring(0, fragmentAt);
-        return path + (path.contains("?") ? "&" : "?") + "meetingId="
-                + URLEncoder.encode(meetingId, StandardCharsets.UTF_8) + "&genTime=" + genTime + fragment;
-    }
 }

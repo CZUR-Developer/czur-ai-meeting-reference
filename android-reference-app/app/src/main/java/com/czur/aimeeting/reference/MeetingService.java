@@ -26,6 +26,8 @@ import com.czur.aimeeting.client.MeetingResult;
 import com.czur.aimeeting.client.MeetingSession;
 import com.czur.aimeeting.client.MeetingSessionState;
 import com.czur.aimeeting.client.MeetingStarted;
+import com.czur.aimeeting.client.result.ResultActionContext;
+import com.czur.aimeeting.client.result.ResultActionOutcome;
 import com.czur.aimeeting.client.display.MeetingDisplaySnapshot;
 import com.czur.aimeeting.model.AudioInputErrorCode;
 import com.czur.aimeeting.model.AudioInputMode;
@@ -37,28 +39,20 @@ import com.czur.aimeeting.reference.meeting.MeetingReminderPresentation;
 import java.io.IOException;
 import java.util.List;
 import java.util.Set;
+import java.util.ArrayDeque;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
  * 单场参考会议的平台和 UI 所有者。完整 SDK 持有模型、音频、显示规则和 Server 流程；
- * Service 仅接收类型化快照，管理前台通知、悬浮窗、计时、屏采与本地 PDF。
+ * Service仅接收类型化快照，管理前台通知、悬浮窗、计时、屏采与READY后的通用动作。
  * Activity 离开只解除观察，持续会议由 Service 持有。所有业务回调使用主线程串行队列。
  */
 public final class MeetingService extends Service {
     static final String ACTION_BEGIN = "com.czur.aimeeting.reference.BEGIN";
     static final String ACTION_DEBUG_STOP = "com.czur.aimeeting.reference.DEBUG_STOP";
-    static final String EXTRA_MODE = "mode";
-    /** 字幕／互译模式之外独立携带总结选择，旧纪要模式的Intent仍默认开启。 */
-    static final String EXTRA_SUMMARY = "summaryEnabled";
-    static final String EXTRA_SOURCE = "source";
-    static final String EXTRA_TARGET = "target";
-    static final String EXTRA_PRESENTATION = "presentation";
     static final String EXTRA_PROJECTION_RESULT_CODE = "projectionResultCode";
     static final String EXTRA_PROJECTION_DATA = "projectionData";
-    static final String EXTRA_RESULT_WEB = "resultWeb";
-    static final String EXTRA_RESULT_DELIVERY = "resultDelivery";
-    static final String EXTRA_RESULT_EMAILS = "resultEmails";
     private static final String TAG = "AiMeetingReference";
     private static final String CHANNEL = "ai_meeting_active";
     private static final int NOTIFICATION_ID = 100;
@@ -76,8 +70,9 @@ public final class MeetingService extends Service {
         final boolean canStop;
         final boolean overlayShowing;
         final int transcriptVersion;
-        final String resultUrl;
-        final LocalPdfWriter.SavedPdf resultPdf;
+        final MeetingResult readyResult;
+        final ResultActionOutcome actionOutcome;
+        final boolean actionRunning;
         final String timeText;
         final MeetingReminderPresentation.Notice reminder;
         final MeetingSetup.Mode mode;
@@ -85,7 +80,8 @@ public final class MeetingService extends Service {
 
         State(MeetingDisplaySnapshot display, String status, String capabilityText, boolean busy,
                 boolean active, boolean canStop, boolean overlayShowing,
-                int transcriptVersion, String resultUrl, LocalPdfWriter.SavedPdf resultPdf,
+                int transcriptVersion, MeetingResult readyResult, ResultActionOutcome actionOutcome,
+                boolean actionRunning,
                 String timeText, MeetingReminderPresentation.Notice reminder, MeetingSetup.Mode mode,
                 boolean summaryEnabled) {
             this.display = display;
@@ -96,8 +92,9 @@ public final class MeetingService extends Service {
             this.canStop = canStop;
             this.overlayShowing = overlayShowing;
             this.transcriptVersion = transcriptVersion;
-            this.resultUrl = resultUrl;
-            this.resultPdf = resultPdf;
+            this.readyResult = readyResult;
+            this.actionOutcome = actionOutcome;
+            this.actionRunning = actionRunning;
             this.timeText = timeText;
             this.reminder = reminder;
             this.mode = mode;
@@ -158,6 +155,7 @@ public final class MeetingService extends Service {
     private MeetingClient client;
     private MeetingSession session;
     private MeetingTimeRule timing;
+    private MeetingTimeRule.Snapshot stoppedClock;
     private volatile PresentationCapture presentation;
     private MeetingSetup setup;
     private String meetingId;
@@ -165,15 +163,17 @@ public final class MeetingService extends Service {
     private String capabilityText = "本场功能将在创建会议后按后端能力显示";
     private AudioInputMode audioInputMode;
     private String audioErrorText;
-    private String resultUrl;
-    private LocalPdfWriter.SavedPdf resultPdf;
+    private MeetingAppAssembly.PreparedMeeting preparedMeeting;
+    private MeetingResult readyResult;
+    private ResultActionOutcome actionOutcome;
+    private boolean actionRunning;
+    /** 通用UI操作只在页面可呈现时消费；离开／重新绑定保留同一待执行操作。 */
+    private final ArrayDeque<Runnable> pendingUi = new ArrayDeque<>();
     private int transcriptVersion;
     private boolean busy;
     private boolean active;
     private boolean canStop;
     private boolean stopRequested;
-    /** onResult 先于 READY，PDF 写入完成前不能停止 Service 或关闭平台工作队列。 */
-    private boolean localResultPending;
     private boolean limitReminderLogged;
     private boolean idleReminderLogged;
     private boolean debugStopReceiverRegistered;
@@ -205,14 +205,14 @@ public final class MeetingService extends Service {
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null || !ACTION_BEGIN.equals(intent.getAction()) || busy)
             return START_NOT_STICKY;
-        String[] emails = intent.getStringArrayExtra(EXTRA_RESULT_EMAILS);
-        MeetingSetup.Mode mode = MeetingSetup.Mode.valueOf(intent.getStringExtra(EXTRA_MODE));
-        MeetingSetup requested = new MeetingSetup(mode, intent.getStringExtra(EXTRA_SOURCE),
-                intent.getStringExtra(EXTRA_TARGET), intent.getBooleanExtra(EXTRA_PRESENTATION, false),
-                MeetingSetup.ResultDelivery.valueOf(intent.getStringExtra(EXTRA_RESULT_DELIVERY)),
-                intent.getStringExtra(EXTRA_RESULT_WEB),
-                emails == null ? List.of() : java.util.Arrays.asList(emails),
-                intent.getBooleanExtra(EXTRA_SUMMARY, mode == MeetingSetup.Mode.MEETING_MINUTES));
+        MeetingAppAssembly.PreparedMeeting prepared = MeetingAppAssembly.consumePreparedMeeting();
+        if (prepared == null) {
+            status = "缺少本场会前准备，会议未创建";
+            publish();
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+        MeetingSetup requested = prepared.setup();
         if (requested.presentationCapture()) {
             projectionData = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
                     ? intent.getParcelableExtra(EXTRA_PROJECTION_DATA, Intent.class)
@@ -226,7 +226,7 @@ public final class MeetingService extends Service {
             }
         }
         startForegroundForMeeting(requested.presentationCapture());
-        begin(requested);
+        begin(prepared);
         return START_NOT_STICKY;
     }
 
@@ -252,16 +252,16 @@ public final class MeetingService extends Service {
     void unobserve(Observer old) { if (observer == old) { observer = null; publish(); } }
     void confirmReminder() { reminderPresentation.confirm(); publish(); }
 
-    String takeResultUrl() {
-        String result = resultUrl;
-        resultUrl = null;
-        return result;
-    }
+    /** Activity在主线程逐项消费；Service不识别插件页面或通知方式。 */
+    Runnable takeUiOperation() { return pendingUi.poll(); }
 
-    LocalPdfWriter.SavedPdf takeResultPdf() {
-        LocalPdfWriter.SavedPdf result = resultPdf;
-        resultPdf = null;
-        return result;
+    private void queueUiOperation(Runnable command) {
+        main.post(() -> {
+            if (command instanceof AppResultActionPlugin.UiOperation) {
+                pendingUi.add(command);
+                publish();
+            } else command.run();
+        });
     }
 
     void toggleOverlay() {
@@ -293,16 +293,20 @@ public final class MeetingService extends Service {
         Log.i(TAG, "双语分栏左右交换已请求 meetingId=" + meetingId);
     }
 
-    private void begin(MeetingSetup requested) {
+    private void begin(MeetingAppAssembly.PreparedMeeting prepared) {
+        releaseResultAccess();
+        MeetingSetup requested = prepared.setup();
+        preparedMeeting = prepared;
         setup = requested;
         busy = true;
         active = false;
         canStop = false;
         stopRequested = false;
-        localResultPending = false;
-        resultUrl = null;
-        resultPdf = null;
+        readyResult = null;
+        actionOutcome = null;
+        actionRunning = false;
         timing = null;
+        stoppedClock = null;
         meetingId = null;
         audioInputMode = null;
         audioErrorText = null;
@@ -331,15 +335,6 @@ public final class MeetingService extends Service {
                 }
 
                 @Override public void onState(MeetingSessionState next) {
-                    // 本地 PDF 已在 onResult 排到平台队列；READY 不关闭队列，也不覆盖保存提示。
-                    if (next.phase() == MeetingSessionState.Phase.READY && localResultPending) {
-                        active = false;
-                        canStop = false;
-                        main.removeCallbacks(clockTick);
-                        overlay.dismiss();
-                        publish();
-                        return;
-                    }
                     active = next.active();
                     canStop = next.canStop();
                     status = next.message();
@@ -347,7 +342,7 @@ public final class MeetingService extends Service {
                             + " savedEventCount=" + next.savedEventCount());
                     switch (next.phase()) {
                         case FAILED, ENDED, CLOSED -> finishWithStatus(next.message());
-                        case READY -> { /* 正常交付由先到的 onResult 完成，保留对应提示。 */ }
+                        case READY -> resultReady();
                         default -> publish();
                     }
                 }
@@ -396,7 +391,11 @@ public final class MeetingService extends Service {
                     });
                 }
 
-                @Override public void onResult(MeetingResult result) { deliverResult(result); }
+                @Override public void onResult(MeetingResult result) {
+                    // onResult先于READY状态：只存事实，不能提前关闭client或跳转页面。
+                    readyResult = result;
+                    Log.i(TAG, "已接收本场READY清单 meetingId=" + result.meetingId());
+                }
             });
         } catch (RuntimeException failure) {
             Log.e(TAG, "打开组合会议失败 errorType=" + failure.getClass().getSimpleName());
@@ -472,71 +471,91 @@ public final class MeetingService extends Service {
         session.requestStop();
     }
 
-    private void deliverResult(MeetingResult result) {
-        Log.i(TAG, "组合会议结果已就绪 delivery=" + result.deliveryStatus()
-                + " meetingId=" + result.meetingId());
-        switch (result.deliveryStatus()) {
-            case LOCAL_READY -> {
-                localResultPending = true;
-                active = false;
-                canStop = false;
-                main.removeCallbacks(clockTick);
-                overlay.dismiss();
-                status = "会议已结束，正在保存本地 PDF…";
-                publish();
-                platformWork.execute(() -> {
-                    try {
-                        LocalPdfWriter.SavedPdf savedPdf =
-                                new LocalPdfWriter(this).write(result.meetingId(), result);
-                        LocalResultActivity.remember(this, savedPdf, savedPdf.uri() != null);
-                        main.post(() -> {
-                            localResultPending = false;
-                            resultPdf = savedPdf;
-                            finishWithStatus(savedPdf.uri() == null
-                                    ? "会议已结束，PDF 已生成，请选择公共下载位置"
-                                    : "会议已结束，PDF 已保存到 下载/AI会议纪要");
-                        });
-                    } catch (IOException | RuntimeException failure) {
-                        Log.e(TAG, "本地 PDF 生成失败 errorType=" + failure.getClass().getSimpleName());
-                        main.post(() -> {
-                            localResultPending = false;
-                            finishWithStatus("会议已结束，但本地 PDF 保存失败");
-                        });
-                    }
-                });
-            }
-            case EMAIL_SENT -> finishWithStatus("会议已结束，结果链接已发送到邮箱");
-            case EMAIL_FAILED -> {
-                resultUrl = result.resultUrl();
-                finishWithStatus("会议已结束，邮件发送失败，可先查看网页结果");
-            }
-            case WEB_AVAILABLE -> {
-                resultUrl = result.resultUrl();
-                finishWithStatus("会议已结束，可查看结果页");
-            }
-            case NOT_REQUESTED -> finishWithStatus("会议已结束");
-        }
+    /** 真实READY通知后才派发，先停止所有会议UI资源，不提前释放结果协议访问。 */
+    private void resultReady() {
+        stopMeetingUi();
+        status = "本场结果已就绪";
+        publish();
+        executeResultAction();
     }
 
-    private void finishWithStatus(String message) {
-        active = false;
+    /** 普通失败由用户手动复用同一READY／genTime／准备闭包，不重新开会或Stop。 */
+    void retryResultAction() {
+        if (actionOutcome != null && actionOutcome.status() == ResultActionOutcome.Status.FAILED)
+            executeResultAction();
+    }
+
+    private void executeResultAction() {
+        if (actionRunning || readyResult == null || session == null || preparedMeeting == null
+                || preparedMeeting.action() == null) return;
+        actionRunning = true;
+        busy = true;
+        actionOutcome = null;
+        status = "本场结果已就绪，正在执行结果动作…";
+        publish();
+        var context = new ResultActionContext(readyResult, session.resultActionAccess(),
+                preparedMeeting.serviceCapabilities(), platformWork, this::queueUiOperation);
+        MeetingAppAssembly.resultRegistry().execute(preparedMeeting.action(), context, new MeetingClient.Callback<>() {
+            @Override public void onSuccess(ResultActionOutcome outcome) {
+                actionRunning = false;
+                busy = false;
+                actionOutcome = outcome;
+                status = "本场结果已就绪；" + outcome.message();
+                if (outcome.status() == ResultActionOutcome.Status.FAILED)
+                    Log.w(TAG, "结果动作失败，会议READY保持 id=" + outcome.actionId());
+                if (outcome.status() == ResultActionOutcome.Status.SUCCEEDED) {
+                    releaseResultAccess();
+                    stopSelf();
+                }
+                publish();
+            }
+            @Override public void onError(String message) {
+                onSuccess(ResultActionOutcome.failure(preparedMeeting.action().id(), message));
+            }
+        });
+    }
+
+    /** 用户放弃失败动作或开启下一场前关闭旧访问；不触发后端Stop。 */
+    void endResultInteraction() {
+        if (readyResult == null || actionRunning) return;
+        releaseResultAccess();
+        actionOutcome = null;
         busy = false;
+        status = "本场结果已就绪，结果交互已结束";
+        stopSelf();
+        publish();
+    }
+
+    private void releaseResultAccess() {
+        if (client != null) { client.close(); client = null; }
+        session = null;
+        pendingUi.clear();
+    }
+
+    private void stopMeetingUi() {
+        if (timing != null && stoppedClock == null) stoppedClock = timing.at(SystemClock.elapsedRealtime());
+        active = false;
         canStop = false;
-        status = message;
         main.removeCallbacks(clockTick);
         main.removeCallbacks(presentationTick);
         closePresentation();
         projectionData = null;
         overlay.dismiss();
-        if (client != null) { client.close(); client = null; }
-        session = null;
         stopForeground(STOP_FOREGROUND_REMOVE);
+    }
+
+    private void finishWithStatus(String message) {
+        stopMeetingUi();
+        busy = false;
+        canStop = false;
+        status = message;
+        releaseResultAccess();
         stopSelf();
         publish();
     }
 
     private void publish() {
-        MeetingTimeRule.Snapshot clock = timing == null ? null
+        MeetingTimeRule.Snapshot clock = stoppedClock != null ? stoppedClock : timing == null ? null
                 : timing.at(SystemClock.elapsedRealtime());
         String timeText = clock == null ? "" : "已进行 " + MeetingTimeRule.format(clock.elapsedMs())
                 + " · 剩余 " + MeetingTimeRule.format(clock.remainingMs());
@@ -545,7 +564,7 @@ public final class MeetingService extends Service {
         String audioText = audioInputMode == null ? "" : "\n音频来源：" + audioInputMode;
         if (audioErrorText != null) audioText += "\n" + audioErrorText;
         State state = new State(display, status, capabilityText + audioText, busy, active, canStop,
-                overlay.isShowing(), transcriptVersion, resultUrl, resultPdf, timeText, reminder,
+                overlay.isShowing(), transcriptVersion, readyResult, actionOutcome, actionRunning, timeText, reminder,
                 setup == null ? MeetingSetup.Mode.LIVE_TRANSCRIPT : setup.mode(),
                 setup != null && setup.summaryEnabled());
         overlay.render(display, state.mode, state.summaryEnabled, timeText, reminder, canStop, observer == null);
@@ -562,7 +581,7 @@ public final class MeetingService extends Service {
         main.removeCallbacks(presentationTick);
         closePresentation();
         overlay.dismiss();
-        if (client != null) client.close();
+        releaseResultAccess();
         platformWork.shutdownNow();
         super.onDestroy();
     }

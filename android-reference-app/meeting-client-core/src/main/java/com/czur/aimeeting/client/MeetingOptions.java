@@ -12,7 +12,7 @@ import com.czur.aimeeting.client.result.ResultOptions;
 public record MeetingOptions(Mode mode, String sourceLanguage, String targetLanguage,
         boolean presentationCapture, ResultDelivery resultDelivery, String resultWebUrl,
         List<String> resultEmails, boolean summaryEnabled, ResultOptions resultOptions) {
-    /** 保留原八参PUBLIC签名及原运行行为，新增动作选择从旧枚举转换。 */
+    /** 保留原八参PUBLIC签名，旧枚举仅转换动作选择；执行由宿主显式装配。 */
     public MeetingOptions(Mode mode, String sourceLanguage, String targetLanguage,
             boolean presentationCapture, ResultDelivery resultDelivery, String resultWebUrl,
             List<String> resultEmails, boolean summaryEnabled) {
@@ -22,8 +22,7 @@ public record MeetingOptions(Mode mode, String sourceLanguage, String targetLang
 
     /**
      * 用稳定字符串选择新动作；参数闭包由App插件prepare冻结，旧字段仅供兼容实现。
-     * 当前公共扩展切片仍保留旧App交付链；App通用派发切换后按resultOptions执行，
-     * 不从legacyDelivery占位值推断伙伴动作行为。
+     * 收口仅按resultOptions策略确认READY；不从legacyDelivery占位值推断伙伴动作行为。
      */
     public MeetingOptions(Mode mode, String sourceLanguage, String targetLanguage,
             boolean presentationCapture, ResultOptions resultOptions, String resultWebUrl,

@@ -2,17 +2,35 @@ package com.czur.aimeeting.reference.meeting;
 
 import com.czur.aimeeting.client.MeetingCapabilityState;
 import com.czur.aimeeting.client.MeetingOptions;
+import com.czur.aimeeting.client.result.ResultOptions;
 
 import java.util.List;
 
 /**
  * 用户在点击“开始会议”时冻结的本场会前设置。模型能力和结果交付能力彼此独立：
- * 前者进入组合入口的能力请求，后者交给组合入口处理网页/邮件；本地PDF绘制留在App。
+ * 前者进入组合入口的能力请求，后者由App会前准备并在READY后显式执行。
  * summaryEnabled与字幕／互译mode独立；旧MEETING_MINUTES仍表示字幕＋总结。
  */
 public record MeetingSetup(Mode mode, String sourceLanguage, String targetLanguage,
         boolean presentationCapture, ResultDelivery resultDelivery, String resultWebUrl,
-        List<String> resultEmails, boolean summaryEnabled) {
+        List<String> resultEmails, boolean summaryEnabled, ResultOptions resultOptions) {
+    /** 保留旧八参签名，旧枚举只映射动作选择，不隐式安装插件。 */
+    public MeetingSetup(Mode mode, String sourceLanguage, String targetLanguage,
+            boolean presentationCapture, ResultDelivery resultDelivery, String resultWebUrl,
+            List<String> resultEmails, boolean summaryEnabled) {
+        this(mode, sourceLanguage, targetLanguage, presentationCapture, resultDelivery, resultWebUrl,
+                resultEmails, summaryEnabled, ResultOptions.fromLegacy(
+                        MeetingOptions.ResultDelivery.valueOf(resultDelivery.name())));
+    }
+
+    /** 新字符串动作入口；插件自己的参数由设置组件一次冻结，不增加参数总线。 */
+    public MeetingSetup(Mode mode, String sourceLanguage, String targetLanguage,
+            boolean presentationCapture, ResultOptions resultOptions, String resultWebUrl,
+            List<String> resultEmails, boolean summaryEnabled) {
+        this(mode, sourceLanguage, targetLanguage, presentationCapture,
+                ResultDelivery.valueOf(resultOptions.legacyDelivery().name()), resultWebUrl,
+                resultEmails, summaryEnabled, resultOptions);
+    }
     /** 旧七参数构造器继续保持模式所对应的默认总结语义。 */
     public MeetingSetup(Mode mode, String sourceLanguage, String targetLanguage,
             boolean presentationCapture, ResultDelivery resultDelivery, String resultWebUrl,
@@ -27,6 +45,7 @@ public record MeetingSetup(Mode mode, String sourceLanguage, String targetLangua
     }
 
     public MeetingSetup {
+        java.util.Objects.requireNonNull(resultOptions, "resultOptions");
         resultEmails = List.copyOf(resultEmails);
         summaryEnabled = summaryEnabled || mode == Mode.MEETING_MINUTES;
     }
@@ -69,7 +88,7 @@ public record MeetingSetup(Mode mode, String sourceLanguage, String targetLangua
     public MeetingOptions toOptions() {
         return new MeetingOptions(MeetingOptions.Mode.valueOf(mode.name()), sourceLanguage,
                 targetLanguage, presentationCapture,
-                MeetingOptions.ResultDelivery.valueOf(resultDelivery.name()), resultWebUrl,
+                resultOptions, resultWebUrl,
                 resultEmails, summaryEnabled);
     }
 }

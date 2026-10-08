@@ -21,7 +21,7 @@ Mock 注入窄端口 `MeetingRuntimePort`；二者使用唯一 `MeetingCoordinat
 同进程基础输入、诊断和完整会议择一持有真实音源。
 
 正常链为当前身份读取 → 能力发现 → Create → Server 材料/新 Adapter → StartClient → 采音/模型 → 标准事件保存 →
-冻结采音用量提交 → 按能力总结 → Stop 输入受理 → 实际 READY/交付。后端仍负责身份、模型选择、计费和存储。
+冻结采音用量提交 → 按能力总结 → Stop 输入受理 → 实际 READY清单 → App显式动作。后端仍负责身份、模型选择、计费和存储。
 模型完整地址、短期材料及本场授权只取 Server，配置不接收模型地址或凭据。
 
 `MeetingClientConfig` 接受 Server URL、`IdentityProvider`、`ClientIdentity`、`MeetingProfile` 和
@@ -52,9 +52,9 @@ MeetingClientConfig config = new MeetingClientConfig(serverUrl, identity,
         clientIdentity, productProfile, mainThreadExecutor);
 ```
 
-参考App的`MeetingAppAssembly`集中注册来源并供Activity与Service共用；开始Intent只传会议设置，
+参考App的`MeetingAppAssembly`集中注册来源并供Activity与Service共用；开始时同进程交接冻结设置与动作，
 不复制可能过时的token。账号密码登录界面是默认示例，伙伴可替换页面动作和身份来源。
-CZUR系统token与默认参考token没有天然等价关系：私有身份及后端认可适配在P7-1c实施，
+CZUR系统token与默认参考token没有天然等价关系：私有身份及后端认可适配归P9，
 本接口及主机测试不代签CZUR生产账号联通。
 
 同一客户端同时只允许一场未完成会议，完成后可开下一场；`close()` 幂等取消，关闭后不可重用。
@@ -68,7 +68,7 @@ App 保留权限、前台服务、时长提醒/自动停止、页面/悬浮窗�
 | `onDisplay` | 同一份源句/译文、语义 A/B、`swapped` 和真实语言，UI 只呈现 |
 | `onTranscriptActivity(nowMs)` | 非空原文到达即排队，不等待 1.5 秒显示窗口；与起点共用单调时基 |
 | `onAudioInputMode/onAudioError` | 实际音源和类型化错误；SDK 不申请权限或自动重试 |
-| `onResult` | 实际 READY 后交付，先于 READY 状态；LOCAL 的 PDF 工作不应被该状态提前关闭 |
+| `onResult` | 只保存实际READY清单，先于READY状态；收到该状态后才派发动作 |
 
 Coordinator 使用轻量串行状态/方向/显示/deadline 队列和独立串行 HTTP/模型启动停止/总结队列；
 慢网络不会阻塞句开始、活跃事实和语种截止点。所有模式必需 `transcript.realtime`；互译另需
@@ -81,7 +81,7 @@ speaker 可选，未授予时移除字段、不拒绝开场；总结工厂独立
 总结仍在末尾最终字幕完成、标准事件提交后生成，并在后端Stop前保存；设置拆分不改变
 P6的采音、模型、DOA或尾部收口时序。
 
-### 可注册结果动作（P7-2a第一片）
+### 可注册结果动作
 
 公共`client.result`已提供`ResultActionPlugin`、构建期`ResultActionRegistry`、独立
 `ResultActionOutcome`和`ResultOptions`。注册清单就是产品开放清单，没有隐式默认插件。
@@ -113,10 +113,12 @@ registry.execute(prepared.action(), context, actionCallback);
 替换原`ResultDelivery`参数，支持伙伴字符串ID，不新增固定枚举。旧纪要模式和独立总结语义不变。
 `NO_ACTIVE_DELIVERY`仅表达既有不主动交付策略，不承诺删除服务端数据。
 
-当前第一片保留旧参考App和Coordinator的Web／LOCAL／EMAIL交付运行行为及下面的
-旧结果字段。新的App默认仅Web、通用派发、Manifest-only收口和完成提示替换例在第二片
-同步切换，尚未实施；本接口交付不能代签P7-2a整体完成。新字符串动作需显式准备／执行，
-本片不因一个新ID自动替换旧App交付，也不创建将被删除的过渡插件。
+通用Coordinator现在只读取Manifest确认READY，不生成链接、下载正文或发送通知。
+旧构造器仍可编译，枚举仅映射动作ID；旧`DeliveryStatus`／`withDelivery`保留用于兼容，
+正常结果为`NOT_REQUESTED`、`resultUrl=null`、`content=null`，并非“会议没有结果”。
+旧调用者需要按映射的ID显式注册、准备和执行对应插件，不能依赖Coordinator隐式交付。
+参考App默认仅Web，PDF／邮件为显式可选实现；最小Notice替换只改实现与App集中装配。
+真实平台UI／Web仍需设备验收，构建不代表部署完成。
 
 ### 正常停止与结果
 
@@ -137,11 +139,13 @@ SDK 复用本场唯一音源，标准 16kHz／mono／PCM16 的时长是实际完
 不重复衔接、停音源、已提交用量或纪要。
 首次 Stop 受理后生成一次 `genTime`，Manifest、Artifact、链接和邮件共用它；受理不等于 READY。
 
-- WEB：只读 READY 清单，`WEB_AVAILABLE` 和 URL，`content=null`。
-- LOCAL：下载真实内容，`LOCAL_READY`；App 用 typed 字幕/译文、全文、纪要和 JPEG 写 PDF。
-- EMAIL：只读清单、发送同一 URL；失败仍交付 URL 与 `EMAIL_FAILED`，不是结果失败。
-- TRACELESS：正常 Stop 后 `ENDED`，不读 Manifest、不触发 `onResult`，不新增删数据行为。
-  音频输入失败后的正常 Stop 同样不主动交付。
+- 正常策略：只读真实READY清单，`onResult`先保存事实，随后`onState(READY)`触发动作。
+  Web／纯提示不读取正文；需要正文或邮件的插件通过同场窄访问显式执行。
+- `NO_ACTIVE_DELIVERY`（旧TRACELESS）：正常Stop后ENDED，不读Manifest、不触发onResult，
+  仍保存标准事件，不新增删除数据或改变总结／计费。音频输入失败后正常Stop同样不主动交付。
+- READY后普通动作失败不进入STOP_PENDING；手动再执行沿用同一结果／genTime／冻结参数。
+  宿主停止计时、屏采和采音前台通知，但保留结果访问到动作成功或用户结束交互。
+  开始新场前关闭旧client；不增加自动重试或进程恢复。
 
 session/client `close()` 只是取消，不执行后端 Stop、不生成 READY/结果；希望交付应先正常停止。
 当前阶段为 CREATING/RUNNING/STOPPING/FINALIZING、必要时 STOP_PENDING，以及 READY/ENDED/FAILED；

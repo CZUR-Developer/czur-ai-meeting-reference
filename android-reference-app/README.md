@@ -14,7 +14,8 @@ P6核心音频底座和分层SDK已于2026-10-07完成对应新固件验收。�
 
 P7正在扩展参考产品：身份来源、可组合设置、结果动作与可选UI工具。当前新增设置将字幕／
 互译与“会后生成会议纪要”分别选择；语言直接消费后端发现协议的`languages`，没有固定中英文列表。
-结果动作整理后参考默认只提供Web；下文P5／P6的其他交付方式作为历史实现留痕。
+P7-2a源码已切换为默认仅Web与Manifest-only收口；PDF／邮件作为显式可选插件保留。
+下文P5／P6其他交付方式是历史证据，新接线仍待独立构建与设备Web验收。
 
 P7-1c的SDK会议入口复用正在使用的唯一音源累计完整标准PCM帧，停流及完整尾帧交付后
 一次冻结时长。组合层按“最终字幕／译文保存→冻结用量提交→按需总结→原Stop”执行；
@@ -61,7 +62,7 @@ P5-2 增加 `sample-json-ws` 第二格式样例：它的模型消息使用顶层
 已求交的 `availableCapabilities` 开放会前模式；发现失败时显示原因并保留账号切换入口，
 不创建会议。组合层读取 Create 响应的 `capabilityDecisions`，本场权益、
 模型与降级结果以该决策为准；必需能力不可用时不启动会议，可选能力不启用。
-P5-6 的参考结果方式以网页、本地 PDF、邮箱链接和互译无痕为准；扫码接收由合作伙伴
+P5-6历史参考结果方式包含网页、本地PDF、邮箱链接和互译无痕；P7默认仅Web。扫码接收由合作伙伴
 自行开发，并通过会前条件 Hook 扩展。
 
 `sdk` 模式已构建期登记公开的 `bailian-summary` 文本 Adapter。AI 会议纪要模式
@@ -125,7 +126,7 @@ adb shell am broadcast -a com.czur.aimeeting.reference.DEBUG_STOP -p com.czur.ai
 ```
 
 广播在主线程调用与页面、悬浮窗相同的 `requestStop()`，沿现有流程排空音频、等待
-模型最终字幕、保存结果并按本场结果方式交付；网页方式仍打开同场结果页。这是正常
+模型最终字幕、保存标准结果、确认READY清单后通用派发冻结动作；默认Web打开同场结果页。这是正常
 Stop，不是 `close()`、强停进程或可恢复的业务暂停。当前状态尚不能停止或已请求停止时，
 沿用原 `canStop` 判断。普通 Release APK 不注册接收器；调试接收器随 Service
 创建/销毁注册/注销，原 Service 仍不导出。此开关取决于 App 的调试标记，与注入的
@@ -202,22 +203,49 @@ Debug `AudioDiagnosticActivity` 同时显示模式、方向状态、帧数和峰
 回调；`13`／`14` 记录恢复权限后的重新取流和最终停止。这些证据验证模式与方向状态
 出口及 SDK 权限边界，不代签有效 DOA 左右分栏或物理旧系统的 MIC 取流。
 
-### 参考结果方式
+### 可注册结果动作：默认只Web
 
-结果方式包含网页查看、本地 PDF、按后端 SMTP 配置开放的邮箱链接，以及仅现场互译
-可选的无痕方式。参考 App 不提供扫码接收或小程序；需要接收者检查的合作伙伴可按下文
-在会前开会条件 Hook 注入自己的实现。参考链路不新增录音归档，模型音频仍直连模型，
-后端保存标准事件和已启用的结果产物。实时字幕模式可选择演示文稿，系统授权录屏后由会议 Service
-定时采集 JPEG，并在 Stop 前提交截图包；互译模式暂不开放演示文稿。用户点击开始时冻结本场设置；创建后
-还会核对后端 `capabilityDecisions`，能力不满足时不会启动客户端会议。
-Mock 模式最终字幕保存后可停止；SDK 模式随时可请求停止输入，等待模型最后一条
-字幕后再向后端结束会议。网页和邮箱方式需要填写已部署的静态 Web `index.html`
-地址；网页方式在 Stop 成功后由内置 WebView 打开含 `meetingId` 与 `genTime` 的
-结果链接，邮箱方式发送同一链接。本地方式生成 PDF，互译无痕方式不主动交付结果。
-这里的“无痕”沿用当前业务入口名称，当前参考实现仍向后端提交标准事件并保留结果；
-它不承诺无服务端记录。合作伙伴若需要真正的不留存流程，须自行调整后端与 App，
-不能仅依赖这个结果方式选项。
-Starry 设备无需外部浏览器。
+`MeetingAppAssembly`是构建期唯一清单，默认`List.of(new WebResultActionPlugin())`。
+后端链接服务可用时页面显示网页查看与地址输入；没有未装配邮件／PDF／小程序／无痕选项，
+也没有最近PDF按钮。后端邮件能力声明不会自动添加入口。模型音频仍直连模型，
+标准事件、用量、总结和屏采顺序不因动作变化而改变。
+
+伙伴新增`AppResultActionPlugin`实现并在Assembly登记即可：
+公共core接口负责稳定ID、名称、产物／服务依赖、`prepare`与异步执行；App薄接口
+`createSettings(Context)`返回插件自己的View及`freeze`工厂。
+页面仅在会前Hook读取一次输入，工厂返回只含不可变参数和Application Context的core插件；
+`prepare`产生本场闭包，不保留Activity／View。没有输入的动作返回空View，不需改MainActivity。
+后端需要提供什么服务由部署负责，不默认转到CZUR服务。
+
+`MeetingStartConditions.prepare`先检查原伙伴条件，再准备动作。屏采授权期间沿用同一
+`PreparedMeeting`，授权返回后通过Assembly暂存、Service一次消费；不重读输入或接收者状态。
+取消授权／启动失败清理暂存，不承诺进程恢复。
+正常Stop只读真实READY Manifest，`onResult`先存结果，随后实际READY状态停止
+计时／屏采／悬浮窗／采音前台通知，并使用冻结动作通用派发。
+Web生成含同场`meetingId/genTime`的链接，保留已有query／fragment，不读取正文。
+
+插件需要可见页面时向`context.uiExecutor()`提交`AppResultActionPlugin.UiOperation`：
+Service暂存通用操作，Activity重新绑定／恢复后消费；普通执行与完成回调仍走主线程，
+不因页面离开吞掉结果。耗时文件工作交`workExecutor`，协议交窄`access`；
+通用Service／MainActivity不识别PDF或邮件。普通失败只显示独立动作提示，提供“再次执行”
+和“结束本场结果交互”；重试沿用同一READY／genTime，不再Stop、采音、总结或计费。
+成功或结束交互释放原client；开始新场前也释放旧结果访问，仅支持当前进程交互。
+
+最小替换例，修改Assembly默认初始化即可（未加入默认清单）：
+
+```java
+private static List<AppResultActionPlugin> resultActions =
+        List.of(new CompletionNoticeAction()); // example.notice：同场READY完成提示，无正文或网络。
+// 显式可选：new LocalPdfResultActionPlugin()、new EmailResultActionPlugin()
+```
+
+PDF插件READY后按需读取typed正文，复用原`LocalPdfWriter`／`LocalResultActivity`；
+邮件插件冻结网页地址与收件人，通过本场窄`sendEmail`通知。二者均需显式注册，
+失败不改变READY。旧六／七／八参MeetingSetup及七／八参MeetingOptions保持可编译，
+旧枚举只映射动作ID，不隐式安装实现；旧`DeliveryStatus`字段仅兼容保留。
+旧无痕调用映射`NO_ACTIVE_DELIVERY`，仍保存标准事件、按原总结／计费规则Stop，
+ENDED且不读Manifest／主动交付，不承诺无服务端记录。
+源码和主机测试不代签新接线的设备UI、真实Web或PDF／SMTP部署。
 
 ### 完整会议入口与平台扩展点
 
@@ -237,7 +265,7 @@ MeetingSession session = client.start(setup.toOptions(), new MeetingListener() {
         continuation.run(); // 没有屏采时直接继续；详细接线见 MeetingService。
     }
     @Override public void onResult(MeetingResult result) {
-        // WEB/邮箱消费 resultUrl；LOCAL_READY 的 typed content 在 App 生成 PDF。
+        // 只保存同场READY清单；收到onState(READY)后再用冻结动作通用派发。
     }
 });
 // 稍后用户点击停止，且最近 onState 的 state.canStop() 为 true 时调用：
@@ -248,8 +276,8 @@ session.requestStop(); // 正常收口；client.close() 仅用于取消/释放�
 
 屏幕授权、周期 JPEG、PDF/MediaStore 和权限申请均在 App；截图通过
 `session.submitPresentation(offsetMs, jpeg)` 交组合层保存。系统单独停止投影只结束
-屏采，字幕会议继续。`onResult` 先于 READY 状态，LOCAL 的 PDF 队列在保存完成后才
-停止 Service；邮箱失败保留 SDK 返回的同一个网页链接。合作伙伴可更换这些平台/UI
+屏采，字幕会议继续。`onResult`先于READY状态，后者之后才执行冻结动作；正文或通知失败
+不回退会议READY，结果访问保留到成功或用户结束交互。合作伙伴可更换这些平台/UI
 实现，或在 SDK Factory 传入自定义 Adapter 工厂注册表，继续复用同一组合流程。
 
 ### 合作伙伴会前开会条件 Hook
@@ -257,8 +285,8 @@ session.requestStop(); // 正常收口；client.close() 仅用于取消/释放�
 `app/src/main/java/com/czur/aimeeting/reference/meeting/MeetingStartConditions.java`
 是唯一需要修改的装配入口。参考实现返回始终放行的 `MeetingStartCondition`；合作伙伴
 可新增自己的实现类，再让 `create(Context)` 返回该实现。`MainActivity` 在登录、模型能力
-和结果输入检查之后，申请录屏权限与启动会议 Service 之前，调用
-`check(MeetingSetup)`。返回 `Decision.block("请先完成接收者登记")` 时，页面显示该理由，
+检查之后，申请录屏权限与启动会议Service之前，通过`MeetingStartConditions.prepare`组合
+`check(MeetingSetup)`与动作准备。返回 `Decision.block("请先完成接收者登记")` 时，页面显示该理由，
 本场不会创建会议；返回 `Decision.allow()` 才继续原流程。后端 Create/Start 的权益
 判断仍是权威检查，Hook 不能代替后端鉴权。
 

@@ -112,9 +112,13 @@ public final class MeetingCoordinatorTest {
             assertEquals(List.of("discover", "create", "start", "event1", "event2", "capture1", "summary", "stop", "manifest"), f.server.steps);
             assertNull(f.server.transcripts.get(0).sessionSpeakerId());
             assertArrayEquals(new byte[]{1, 2}, f.server.jpeg);
-            assertEquals(MeetingResult.DeliveryStatus.LOCAL_READY, result.deliveryStatus());
-            assertNotNull(result.content());
-            assertTrue(f.server.includeContent);
+            assertEquals(MeetingResult.DeliveryStatus.NOT_REQUESTED, result.deliveryStatus());
+            assertNull(result.content());
+            assertFalse(f.server.includeContent);
+            f.probe.awaitPhase(MeetingSessionState.Phase.READY);
+            var content = new CompletableFuture<MeetingResultContent>();
+            f.session.resultActionAccess().readContent(resultCallback(content));
+            assertEquals("最终字幕", content.get(2, TimeUnit.SECONDS).transcriptText());
             assertEquals(555L, result.genTime());
         }
     }
@@ -132,8 +136,10 @@ public final class MeetingCoordinatorTest {
             assertEquals(List.of("discover", "create", "grant", "start", "capture1", "event1", "translation2", "usage", "stop", "manifest"), f.server.steps);
             assertEquals(List.of(0L), f.server.usages);
             assertFalse(f.server.includeContent);
-            assertEquals(MeetingResult.DeliveryStatus.WEB_AVAILABLE, result.deliveryStatus());
-            assertTrue(result.resultUrl().contains("genTime=555"));
+            assertEquals(MeetingResult.DeliveryStatus.NOT_REQUESTED, result.deliveryStatus());
+            assertNull(result.resultUrl());
+            assertNull(result.content());
+            assertEquals(555L, result.genTime());
             assertEquals(1, f.runtime.stopCalls);
             assertEquals(1, f.probe.beforeStopCalls.get());
             assertTrue(f.probe.info.startedAtMs() > 0);
@@ -225,9 +231,17 @@ public final class MeetingCoordinatorTest {
             f.runtime.duration = OptionalLong.of(2000); // 重试不重新读取／生成本场用量。
             f.session.requestStop();
             MeetingResult result = f.probe.result();
-            assertEquals(MeetingResult.DeliveryStatus.EMAIL_FAILED, result.deliveryStatus());
-            assertEquals(result.resultUrl(), f.server.emailUrl);
-            assertTrue(result.resultUrl().endsWith("genTime=555#section"));
+            assertEquals(MeetingResult.DeliveryStatus.NOT_REQUESTED, result.deliveryStatus());
+            assertNull(result.resultUrl());
+            assertFalse(f.server.steps.contains("email"));
+            f.probe.awaitPhase(MeetingSessionState.Phase.READY);
+            var failed = new CompletableFuture<Void>();
+            String link = "https://result.example.test/?meetingId=" + result.meetingId()
+                    + "&genTime=" + result.genTime() + "#section";
+            f.session.resultActionAccess().sendEmail(List.of("recipient@example.test"), link, resultCallback(failed));
+            assertThrows(java.util.concurrent.ExecutionException.class, () -> failed.get(2, TimeUnit.SECONDS));
+            assertEquals(link, f.server.emailUrl);
+            assertTrue(f.probe.states.isEmpty());
             assertEquals(List.of(555L), f.server.genTimes);
             assertEquals(1, f.clockCalls.get());
             assertEquals(1, f.runtime.stopCalls);
@@ -310,11 +324,11 @@ public final class MeetingCoordinatorTest {
             assertEquals("最终字幕", content.get(2, TimeUnit.SECONDS).transcriptText());
             f.server.failEmail = true;
             var failed = new CompletableFuture<Void>();
-            f.session.resultActionAccess().sendEmail(List.of("recipient@example.test"), result.resultUrl(), resultCallback(failed));
+            f.session.resultActionAccess().sendEmail(List.of("recipient@example.test"), "https://result.example.test/?meetingId=" + result.meetingId() + "&genTime=" + result.genTime(), resultCallback(failed));
             assertThrows(java.util.concurrent.ExecutionException.class, () -> failed.get(2, TimeUnit.SECONDS));
             f.server.failEmail = false;
             var sent = new CompletableFuture<Void>();
-            f.session.resultActionAccess().sendEmail(List.of("recipient@example.test"), result.resultUrl(), resultCallback(sent));
+            f.session.resultActionAccess().sendEmail(List.of("recipient@example.test"), "https://result.example.test/?meetingId=" + result.meetingId() + "&genTime=" + result.genTime(), resultCallback(sent));
             sent.get(2, TimeUnit.SECONDS);
             assertEquals("same-scene-fixture", f.sessionToken);
             assertEquals(MeetingResult.Status.READY, result.status());
@@ -335,6 +349,53 @@ public final class MeetingCoordinatorTest {
             assertThrows(java.util.concurrent.ExecutionException.class, () -> beforeReady.get(2, TimeUnit.SECONDS));
             assertFalse(f.server.steps.contains("manifest"));
             assertFalse(f.server.steps.contains("stop"));
+        }
+    }
+
+    @Test public void partnerStringActionOnlyReturnsManifestAndNeverLoadsOrNotifies() throws Exception {
+        try (Fixture f = new Fixture(false, Set.of(MeetingCapabilityState.TRANSCRIPT))) {
+            f.session = f.client.start(new MeetingOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT,
+                    "zh-CN", "en-US", false,
+                    com.czur.aimeeting.client.result.ResultOptions.action("partner.notice"),
+                    "", List.of(), false), f.probe);
+            assertTrue(f.runtime.started.await(2, TimeUnit.SECONDS));
+            f.runtime.emit("s1", 1, "zh-CN", "最终字幕", true);
+            f.probe.awaitCanStop();
+            f.session.requestStop();
+            MeetingResult result = f.probe.result();
+            f.probe.awaitPhase(MeetingSessionState.Phase.READY);
+            assertNull(result.content());
+            assertNull(result.resultUrl());
+            assertFalse(f.server.includeContent);
+            assertFalse(f.server.steps.contains("email"));
+            assertEquals(1, Collections.frequency(f.server.steps, "stop"));
+        }
+    }
+
+    @Test public void contentFailureCanReadSameReadyAgainWithoutRepeatingSummaryStopOrUsage() throws Exception {
+        try (Fixture f = new Fixture(false, ALL)) {
+            f.runtime.duration = OptionalLong.of(1000);
+            f.start(MeetingOptions.Mode.MEETING_MINUTES, MeetingOptions.ResultDelivery.LOCAL, false);
+            f.runtime.emit("s1", 1, "zh-CN", "最终字幕", true);
+            f.probe.awaitCanStop();
+            f.session.requestStop();
+            MeetingResult ready = f.probe.result();
+            f.probe.awaitPhase(MeetingSessionState.Phase.READY);
+            f.server.failContent = true;
+            var failed = new CompletableFuture<MeetingResultContent>();
+            f.session.resultActionAccess().readContent(resultCallback(failed));
+            assertThrows(java.util.concurrent.ExecutionException.class, () -> failed.get(2, TimeUnit.SECONDS));
+            f.server.failContent = false;
+            var retried = new CompletableFuture<MeetingResultContent>();
+            f.session.resultActionAccess().readContent(resultCallback(retried));
+            assertEquals("最终字幕", retried.get(2, TimeUnit.SECONDS).transcriptText());
+            assertEquals(MeetingResult.Status.READY, ready.status());
+            assertEquals(List.of(555L, 555L, 555L), f.server.genTimes);
+            assertEquals(1, Collections.frequency(f.server.steps, "summary"));
+            assertEquals(1, Collections.frequency(f.server.steps, "stop"));
+            assertEquals(1, Collections.frequency(f.server.steps, "usage"));
+            assertEquals(1, f.runtime.stopCalls);
+            assertTrue(f.probe.states.isEmpty());
         }
     }
 
@@ -467,6 +528,7 @@ public final class MeetingCoordinatorTest {
         volatile boolean blockAppend;
         boolean pendingStop;
         boolean failEmail;
+        boolean failContent;
         boolean failUsageOnce;
         boolean includeContent;
         byte[] jpeg;
@@ -508,8 +570,9 @@ public final class MeetingCoordinatorTest {
             boolean accepted = !pendingStop; pendingStop = false;
             return new StopMeetingResponse(accepted, accepted ? "INPUT_ACCEPTED" : "INPUT_COMPLETE_PENDING", accepted ? "receipt" : null, "GENERATING");
         }
-        @Override public MeetingResult readResult(String id, long genTime, boolean includeContent) {
+        @Override public MeetingResult readResult(String id, long genTime, boolean includeContent) throws IOException {
             steps.add("manifest"); genTimes.add(genTime); this.includeContent = includeContent;
+            if (includeContent && failContent) throw new IOException("受控正文读取失败");
             return new MeetingResult(id, "本场", genTime, MeetingResult.Status.READY, Set.of("transcript.final"),
                     includeContent ? new MeetingResultContent(Set.of("transcript.final"), "最终字幕", List.of(), List.of(), null, List.of()) : null);
         }

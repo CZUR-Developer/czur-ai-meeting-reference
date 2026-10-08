@@ -1,6 +1,8 @@
 package com.czur.aimeeting.reference.meeting;
 
 import android.content.Context;
+import com.czur.aimeeting.client.MeetingDiscovery;
+import com.czur.aimeeting.client.result.ResultActionPlugin;
 
 /**
  * 参考 App 的开会条件装配点。合作伙伴二次开发时，只需在 {@link #create(Context)}
@@ -17,5 +19,16 @@ public final class MeetingStartConditions {
      */
     public static MeetingStartCondition create(Context appContext) {
         return setup -> MeetingStartCondition.Decision.allow();
+    }
+
+    /**
+     * 会前唯一准备Hook：先保留伙伴条件，再检查并冻结动作；拒绝理由原样交页面。
+     * Android主线程调用一次，发生在屏采授权／Service／Create之前，授权返回不重做。
+     */
+    public static MeetingAppAssembly.StartPreparation prepare(MeetingStartCondition partner,
+            MeetingSetup setup, MeetingDiscovery discovery, ResultActionPlugin configuredPlugin) {
+        MeetingStartCondition.Decision decision = partner.check(setup);
+        if (!decision.allowed()) return new MeetingAppAssembly.StartPreparation(null, decision.message());
+        return MeetingAppAssembly.prepare(setup, discovery, configuredPlugin);
     }
 }

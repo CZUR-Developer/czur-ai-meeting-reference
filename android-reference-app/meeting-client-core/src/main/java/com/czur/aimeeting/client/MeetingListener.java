@@ -26,8 +26,8 @@ public interface MeetingListener {
      */
     default void beforeStop(Runnable continuation) { continuation.run(); }
     /**
-     * 实际 READY 后的类型化交付，先于 READY onState；LOCAL 在这里排队生成 PDF，
-     * 不应因紧随其后的状态通知提前关闭 PDF 队列。WEB/EMAIL 的 content 可为 null。
+     * 实际READY清单先于READY onState。这里只保存结果，收到READY状态后再通用派发动作，
+     * 不在此关闭client或宣称通知成功。正文／通知失败保持同一READY，允许宿主手动再执行。
      */
     default void onResult(MeetingResult result) { }
 }

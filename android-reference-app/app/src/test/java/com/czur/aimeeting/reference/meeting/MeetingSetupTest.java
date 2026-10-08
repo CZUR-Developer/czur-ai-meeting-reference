@@ -1,6 +1,7 @@
 package com.czur.aimeeting.reference.meeting;
 
 import com.czur.aimeeting.client.MeetingCapabilityState;
+import com.czur.aimeeting.client.result.ResultOptions;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -65,5 +66,16 @@ public final class MeetingSetupTest {
         assertFalse(MeetingSetup.transcript("zh-CN", "https://result.example.test").summaryEnabled());
         assertEquals(List.of(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.SUMMARY,
                 MeetingCapabilityState.SPEAKER), minutes.requestedCapabilities());
+    }
+
+    @Test public void newStringActionAndOldNoDeliveryKeepIndependentSummaryPolicy() {
+        var setup = new MeetingSetup(MeetingSetup.Mode.LIVE_TRANSLATION, "zh-CN", "en-US", false,
+                ResultOptions.action("example.notice"), "", List.of(), true);
+        assertEquals("example.notice", setup.toOptions().resultOptions().actionId());
+        assertTrue(setup.toOptions().summaryEnabled());
+        var old = new MeetingSetup(MeetingSetup.Mode.LIVE_TRANSLATION, "zh-CN", "en-US", false,
+                MeetingSetup.ResultDelivery.TRACELESS, "", List.of(), true);
+        assertEquals(ResultOptions.Policy.NO_ACTIVE_DELIVERY, old.toOptions().resultOptions().policy());
+        assertTrue(old.toOptions().summaryEnabled());
     }
 }

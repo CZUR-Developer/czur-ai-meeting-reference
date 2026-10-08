@@ -18,7 +18,6 @@ import android.os.Looper;
 import android.provider.Settings;
 import android.text.InputType;
 import android.util.Log;
-import android.util.Patterns;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.ArrayAdapter;
@@ -34,6 +33,8 @@ import android.widget.Spinner;
 import android.widget.TextView;
 import com.czur.aimeeting.client.MeetingClient;
 import com.czur.aimeeting.client.MeetingDiscovery;
+import com.czur.aimeeting.client.result.ResultOptions;
+import com.czur.aimeeting.client.result.ResultActionOutcome;
 import com.czur.aimeeting.client.server.ReferenceLoginSession;
 import com.czur.aimeeting.reference.meeting.DisplaySnapshotPresentation;
 import com.czur.aimeeting.reference.meeting.MeetingRuntimeFactory;
@@ -81,8 +82,9 @@ public final class MainActivity extends Activity {
     private EditText backendUrlView;
     private EditText usernameView;
     private EditText passwordView;
-    private EditText resultWebUrlView;
-    private EditText resultEmailsView;
+    private RadioGroup resultGroup;
+    private final Map<Integer, String> resultActionIds = new LinkedHashMap<>();
+    private final Map<String, AppResultActionPlugin.Settings> resultSettings = new LinkedHashMap<>();
     private TextView transcriptView;
     private TextView meetingTitle;
     private LinearLayout transcriptList;
@@ -101,12 +103,11 @@ public final class MainActivity extends Activity {
     private CheckBox summaryEnabledView;
     private RadioButton transcriptModeView;
     private RadioButton translationModeView;
-    private RadioButton webResultView;
-    private RadioButton localResultView;
-    private RadioButton emailResultView;
-    private RadioButton tracelessResultView;
+
     private Button startButton;
-    private Button recentPdfButton;
+    private Button retryActionButton;
+    private Button endResultButton;
+    private boolean resumed;
     private Button stopButton;
     private Button overlayButton;
     private Button swapColumnsButton;
@@ -117,9 +118,9 @@ public final class MainActivity extends Activity {
     private Set<String> deploymentCapabilities = Set.of();
     /** 按后端声明顺序保存code，Spinner标签仅负责呈现，不硬编码模型语言。 */
     private List<String> deploymentLanguages = List.of();
-    private long resultLinkTtlMs;
-    private boolean resultEmailEnabled;
-    private MeetingSetup pendingPresentationSetup;
+    private MeetingDiscovery discovery;
+    private MeetingAppAssembly.PreparedMeeting pendingPresentationMeeting;
+    private boolean hasReadyResult;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -218,68 +219,38 @@ public final class MainActivity extends Activity {
         modeGroup.setOnCheckedChangeListener((group, checkedId) -> {
             boolean translation = checkedId == translationModeView.getId();
             targetLanguageView.setEnabled(translation);
-            if (tracelessResultView != null) {
-                tracelessResultView.setEnabled(translation);
-                if (!translation && tracelessResultView.isChecked()) {
-                    webResultView.setChecked(true);
-                }
-            }
             boolean transcript = checkedId == transcriptModeView.getId();
             if (!transcript) presentationCaptureView.setChecked(false);
             presentationCaptureView.setEnabled(transcript);
         });
 
         TextView resultTitle = new TextView(this);
-        resultTitle.setText("结果获取方式");
+        resultTitle.setText("结果动作");
         layout.addView(resultTitle);
-        RadioGroup resultGroup = new RadioGroup(this);
-        webResultView = new RadioButton(this);
-        webResultView.setId(View.generateViewId());
-        webResultView.setText("网页查看");
-        webResultView.setChecked(true);
-        resultGroup.addView(webResultView);
-        localResultView = new RadioButton(this);
-        localResultView.setId(View.generateViewId());
-        localResultView.setText("本地保存 PDF（下载/AI会议纪要）");
-        resultGroup.addView(localResultView);
-        emailResultView = new RadioButton(this);
-        emailResultView.setId(View.generateViewId());
-        emailResultView.setText("邮箱（当前部署不可用）");
-        emailResultView.setEnabled(false);
-        resultGroup.addView(emailResultView);
-        tracelessResultView = new RadioButton(this);
-        tracelessResultView.setId(View.generateViewId());
-        tracelessResultView.setText("无痕（仅现场互译）");
-        tracelessResultView.setEnabled(false);
-        resultGroup.addView(tracelessResultView);
-        resultGroup.check(webResultView.getId());
+        resultGroup = new RadioGroup(this);
         layout.addView(resultGroup);
-
-        resultWebUrlView = new EditText(this);
-        resultWebUrlView.setSingleLine(true);
-        resultWebUrlView.setInputType(InputType.TYPE_CLASS_TEXT
-                | InputType.TYPE_TEXT_VARIATION_URI);
-        resultWebUrlView.setHint("网页结果地址，例如 http://192.168.1.10:8081/index.html");
-        layout.addView(resultWebUrlView);
-        resultEmailsView = new EditText(this);
-        resultEmailsView.setHint("收件邮箱，多个用逗号分隔（最多 10 个）");
-        resultEmailsView.setInputType(InputType.TYPE_CLASS_TEXT
-                | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS);
-        resultEmailsView.setVisibility(View.GONE);
-        layout.addView(resultEmailsView);
+        // 页面从构建清单呈现；服务声明不会生成未装配的邮件／PDF／无痕入口。
+        for (AppResultActionPlugin plugin : MeetingAppAssembly.resultActions()) {
+            RadioButton choice = new RadioButton(this);
+            choice.setId(View.generateViewId());
+            choice.setText(plugin.displayName());
+            resultActionIds.put(choice.getId(), plugin.id());
+            resultGroup.addView(choice);
+            AppResultActionPlugin.Settings settings = plugin.createSettings(this);
+            resultSettings.put(plugin.id(), settings);
+            if (settings.view() != null) {
+                settings.view().setVisibility(View.GONE);
+                layout.addView(settings.view());
+            }
+        }
         resultGroup.setOnCheckedChangeListener((group, checkedId) -> {
-            resultWebUrlView.setEnabled(checkedId != localResultView.getId()
-                    && checkedId != tracelessResultView.getId());
-            resultEmailsView.setVisibility(checkedId == emailResultView.getId()
-                    ? View.VISIBLE : View.GONE);
+            String selected = resultActionIds.get(checkedId);
+            resultSettings.forEach((id, settings) -> {
+                if (settings.view() != null) settings.view().setVisibility(
+                        id.equals(selected) ? View.VISIBLE : View.GONE);
+            });
         });
-        recentPdfButton = new Button(this);
-        recentPdfButton.setText("打开最近本地 PDF");
-        recentPdfButton.setOnClickListener(view -> {
-            Intent recent = LocalResultActivity.recentIntent(this);
-            if (recent != null) startActivity(recent);
-        });
-        layout.addView(recentPdfButton);
+        refreshResultAvailability();
 
         meetingTitle = new TextView(this);
         meetingTitle.setText("实时字幕 · 会议中");
@@ -336,7 +307,7 @@ public final class MainActivity extends Activity {
         layout.addView(startButton);
 
         stopButton = new Button(this);
-        stopButton.setText("停止会议并查看网页结果");
+        stopButton.setText("停止会议");
         stopButton.setEnabled(false);
         stopButton.setOnClickListener(view -> {
             if (meetingService != null) meetingService.requestStop();
@@ -356,6 +327,20 @@ public final class MainActivity extends Activity {
         statusView.setText("填写 HTTPS 后端地址和部署者预置的账号");
         statusView.setPadding(40, 12, 40, 24);
         root.addView(statusView);
+        retryActionButton = new Button(this);
+        retryActionButton.setText("再次执行结果动作");
+        retryActionButton.setVisibility(View.GONE);
+        retryActionButton.setOnClickListener(view -> {
+            if (meetingService != null) meetingService.retryResultAction();
+        });
+        root.addView(retryActionButton);
+        endResultButton = new Button(this);
+        endResultButton.setText("结束本场结果交互");
+        endResultButton.setVisibility(View.GONE);
+        endResultButton.setOnClickListener(view -> {
+            if (meetingService != null) meetingService.endResultInteraction();
+        });
+        root.addView(endResultButton);
         FrameLayout screen = new FrameLayout(this);
         screen.addView(root, new FrameLayout.LayoutParams(-1, -1));
         reminderPopup = new MeetingReminderPopup(this, false, () -> {
@@ -428,9 +413,8 @@ public final class MainActivity extends Activity {
         if (!loggedIn) {
             deploymentCapabilities = Set.of();
             refreshLanguageOptions(List.of());
-            resultLinkTtlMs = 0;
-            resultEmailEnabled = false;
-            if (!meetingBusy) statusView.setText(identity.message());
+            discovery = null;
+            if (!meetingBusy && !hasReadyResult) statusView.setText(identity.message());
         }
         refreshResultAvailability();
         refreshModeAvailability();
@@ -446,21 +430,20 @@ public final class MainActivity extends Activity {
                 // SDK已完成部署／本地能力求交；UI直接使用类型化结果，不创建Adapter。
                 deploymentCapabilities = discovery.availableCapabilities();
                 refreshLanguageOptions(discovery.deployment().languages());
-                resultLinkTtlMs = discovery.deployment().resultLinkTtlMs();
-                resultEmailEnabled = discovery.deployment().resultEmailEnabled();
+                MainActivity.this.discovery = discovery;
                 refreshResultAvailability();
                 refreshModeAvailability();
                 loginButton.setEnabled(!meetingBusy);
                 startButton.setEnabled(displayedIdentity != null && !meetingBusy
                         && deploymentCapabilities.contains(MeetingCapabilityState.TRANSCRIPT)
                         && !deploymentLanguages.isEmpty());
-                if (!meetingBusy) statusView.setText(deploymentLanguages.isEmpty()
+                if (!meetingBusy && !hasReadyResult) statusView.setText(deploymentLanguages.isEmpty()
                         ? "当前部署尚未声明会议语言" : "登录成功，可开始会议");
             }
             @Override public void onError(String message) {
                 loginButton.setEnabled(!meetingBusy);
                 startButton.setEnabled(false);
-                if (!meetingBusy) statusView.setText("登录成功；" + message);
+                if (!meetingBusy && !hasReadyResult) statusView.setText("登录成功；" + message);
             }
         });
     }
@@ -472,8 +455,7 @@ public final class MainActivity extends Activity {
         displayedIdentity = null;
         deploymentCapabilities = Set.of();
         refreshLanguageOptions(List.of());
-        resultLinkTtlMs = 0;
-        resultEmailEnabled = false;
+        discovery = null;
         refreshResultAvailability();
         refreshModeAvailability();
         backendUrlView.setEnabled(true);
@@ -532,11 +514,25 @@ public final class MainActivity extends Activity {
     }
 
     private void refreshResultAvailability() {
-        boolean available = displayedIdentity != null && resultLinkTtlMs > 0
-                && resultEmailEnabled;
-        emailResultView.setEnabled(available);
-        emailResultView.setText(available ? "邮箱" : "邮箱（当前部署不可用）");
-        if (!available && emailResultView.isChecked()) webResultView.setChecked(true);
+        Set<String> available = discovery == null ? Set.of()
+                : MeetingAppAssembly.resultRegistry().available(discovery).stream()
+                        .map(plugin -> plugin.id()).collect(java.util.stream.Collectors.toSet());
+        Integer first = null;
+        for (var entry : resultActionIds.entrySet()) {
+            View choice = resultGroup.findViewById(entry.getKey());
+            boolean visible = available.contains(entry.getValue());
+            choice.setVisibility(visible ? View.VISIBLE : View.GONE);
+            if (visible && first == null) first = entry.getKey();
+        }
+        String selected = resultActionIds.get(resultGroup.getCheckedRadioButtonId());
+        if (selected == null || !available.contains(selected)) {
+            if (first == null) {
+                resultGroup.clearCheck();
+                resultSettings.values().forEach(settings -> {
+                    if (settings.view() != null) settings.view().setVisibility(View.GONE);
+                });
+            } else resultGroup.check(first);
+        }
     }
 
     @Override
@@ -555,10 +551,11 @@ public final class MainActivity extends Activity {
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode != PRESENTATION_PERMISSION_REQUEST) return;
-        MeetingSetup approved = pendingPresentationSetup;
-        pendingPresentationSetup = null;
+        MeetingAppAssembly.PreparedMeeting approved = pendingPresentationMeeting;
+        pendingPresentationMeeting = null;
         if (approved == null) return;
         if (resultCode != RESULT_OK || data == null) {
+            MeetingAppAssembly.clearPreparedMeeting();
             statusView.setText("未授予系统屏幕采集权限，会议未开始");
             startButton.setEnabled(true);
             loginButton.setEnabled(true);
@@ -589,37 +586,33 @@ public final class MainActivity extends Activity {
             statusView.setText("当前部署尚未声明会议语言");
             return;
         }
+        if (resultGroup.getCheckedRadioButtonId() == -1 || discovery == null) {
+            statusView.setText("当前部署没有可用的已装配结果动作");
+            startButton.setEnabled(true);
+            loginButton.setEnabled(true);
+            return;
+        }
         // 点击开始时读取一次会前设置。会议进行中即使输入框变化，也使用这份快照。
         MeetingSetup setup = selectedSetup();
         if (!deploymentCapabilities.containsAll(setup.toOptions().requiredCapabilities())) {
             statusView.setText("本场选择的字幕／互译或纪要功能当前不可用");
             return;
         }
-        if (setup.resultDelivery() != MeetingSetup.ResultDelivery.LOCAL
-                && setup.resultDelivery() != MeetingSetup.ResultDelivery.TRACELESS
-                && setup.resultWebUrl().isEmpty()) {
-            statusView.setText("请填写网页结果地址");
+        String actionId = setup.resultOptions().actionId();
+        AppResultActionPlugin.Settings settings = resultSettings.get(actionId);
+        // 页面输入只在本次Hook读取一次；Service与屏幕授权返回不重新prepare。
+        var preparation = MeetingStartConditions.prepare(startCondition, setup, discovery,
+                settings == null ? null : settings.freeze().get());
+        if (!preparation.allowed()) {
+            Log.i(TAG, "会前结果动作准备未满足，会议未启动");
+            statusView.setText(preparation.message());
+            startButton.setEnabled(true);
+            loginButton.setEnabled(true);
             return;
         }
-        if (setup.resultDelivery() == MeetingSetup.ResultDelivery.EMAIL
-                && (setup.resultEmails().isEmpty() || setup.resultEmails().size() > 10
-                || setup.resultEmails().stream().distinct().count()
-                        != setup.resultEmails().size()
-                || setup.resultEmails().stream().anyMatch(email ->
-                        !Patterns.EMAIL_ADDRESS.matcher(email).matches()))) {
-            statusView.setText("请填写 1～10 个不重复的有效收件邮箱后开始会议");
-            return;
-        }
-        // 合作伙伴的附加开会条件只在此处接入。默认实现直接放行；二次开发可检查
-        // 已缓存的接收者人数或其他外部状态，而无需改动后面的会议创建/模型流程。
-        MeetingStartCondition.Decision decision = startCondition.check(setup);
-        if (!decision.allowed()) {
-            Log.i(TAG, "合作伙伴开会条件未满足，会议未启动 mode=" + setup.mode());
-            statusView.setText(decision.message());
-            return;
-        }
+        MeetingAppAssembly.PreparedMeeting prepared = preparation.meeting();
         if (setup.presentationCapture()) {
-            pendingPresentationSetup = setup;
+            pendingPresentationMeeting = prepared;
             startButton.setEnabled(false);
             loginButton.setEnabled(false);
             statusView.setText("请在系统弹窗中授权共享整个屏幕");
@@ -631,7 +624,8 @@ public final class MainActivity extends Activity {
                         : manager.createScreenCaptureIntent();
                 startActivityForResult(permission, PRESENTATION_PERMISSION_REQUEST);
             } catch (RuntimeException failure) {
-                pendingPresentationSetup = null;
+                pendingPresentationMeeting = null;
+                MeetingAppAssembly.clearPreparedMeeting();
                 startButton.setEnabled(true);
                 loginButton.setEnabled(true);
                 statusView.setText("无法打开系统屏幕采集授权弹窗");
@@ -639,40 +633,28 @@ public final class MainActivity extends Activity {
             }
             return;
         }
-        startMeeting(setup, 0, null);
+        startMeeting(prepared, 0, null);
     }
 
-    private void startMeeting(MeetingSetup setup, int projectionResultCode,
+    private void startMeeting(MeetingAppAssembly.PreparedMeeting prepared, int projectionResultCode,
             Intent projectionData) {
         startButton.setEnabled(false);
         loginButton.setEnabled(false);
         statusView.setText("正在创建会议…");
+        MeetingAppAssembly.handoff(prepared);
         Intent begin = new Intent(this, MeetingService.class);
         begin.setAction(MeetingService.ACTION_BEGIN);
-        begin.putExtra(MeetingService.EXTRA_MODE, setup.mode().name());
-        begin.putExtra(MeetingService.EXTRA_SUMMARY, setup.summaryEnabled());
-        begin.putExtra(MeetingService.EXTRA_SOURCE, setup.sourceLanguage());
-        begin.putExtra(MeetingService.EXTRA_TARGET, setup.targetLanguage());
-        begin.putExtra(MeetingService.EXTRA_PRESENTATION, setup.presentationCapture());
         if (projectionData != null) {
             begin.putExtra(MeetingService.EXTRA_PROJECTION_RESULT_CODE, projectionResultCode);
             begin.putExtra(MeetingService.EXTRA_PROJECTION_DATA, projectionData);
         }
-        begin.putExtra(MeetingService.EXTRA_RESULT_WEB, setup.resultWebUrl());
-        begin.putExtra(MeetingService.EXTRA_RESULT_DELIVERY, setup.resultDelivery().name());
-        begin.putExtra(MeetingService.EXTRA_RESULT_EMAILS,
-                setup.resultEmails().toArray(new String[0]));
-        stopButton.setText(switch (setup.resultDelivery()) {
-            case LOCAL -> "停止会议并保存本地 PDF";
-            case EMAIL -> "停止会议并发送邮箱结果";
-            case TRACELESS -> "结束无痕互译";
-            default -> "停止会议并查看网页结果";
-        });
+        stopButton.setText("停止会议");
         try {
-            // 用户仍在前台点击开始时启动 microphone 前台 Service，再由 Service 建会/开 MIC。
+            // 用户仍在前台开始；Service只消费这一份会前设置与准备闭包，不传Activity或凭据。
             startForegroundService(begin);
         } catch (RuntimeException failure) {
-            Log.e(TAG, "启动会议前台服务失败", failure);
+            MeetingAppAssembly.clearPreparedMeeting();
+            Log.e(TAG, "启动会议服务失败 type=" + failure.getClass().getSimpleName());
             statusView.setText("无法启动会议服务，请检查麦克风权限");
             startButton.setEnabled(true);
             loginButton.setEnabled(true);
@@ -682,20 +664,12 @@ public final class MainActivity extends Activity {
     private MeetingSetup selectedSetup() {
         MeetingSetup.Mode mode = translationModeView.isChecked() ? MeetingSetup.Mode.LIVE_TRANSLATION
                 : MeetingSetup.Mode.LIVE_TRANSCRIPT;
-        List<String> emails = new ArrayList<>();
-        for (String entry : resultEmailsView.getText().toString().split("[,，;；\\s]+")) {
-            if (!entry.isBlank()) emails.add(entry.trim());
-        }
+        String actionId = resultActionIds.get(resultGroup.getCheckedRadioButtonId());
         return new MeetingSetup(mode, deploymentLanguages.get(sourceLanguageView.getSelectedItemPosition()),
                 deploymentLanguages.get(targetLanguageView.getSelectedItemPosition()),
-                mode == MeetingSetup.Mode.LIVE_TRANSCRIPT
-                        && presentationCaptureView.isChecked(), localResultView.isChecked()
-                                ? MeetingSetup.ResultDelivery.LOCAL
-                                : emailResultView.isChecked() ? MeetingSetup.ResultDelivery.EMAIL
-                                : tracelessResultView.isChecked()
-                                        ? MeetingSetup.ResultDelivery.TRACELESS
-                                : MeetingSetup.ResultDelivery.WEB,
-                resultWebUrlView.getText().toString().trim(), emails, summaryEnabledView.isChecked());
+                mode == MeetingSetup.Mode.LIVE_TRANSCRIPT && presentationCaptureView.isChecked(),
+                ResultOptions.action(actionId), "", List.of(),
+                summaryEnabledView.isChecked());
     }
 
 
@@ -709,6 +683,11 @@ public final class MainActivity extends Activity {
     /** Service 每秒或状态变化时推送；Activity 重建后可直接重绘整场字幕。 */
     private void renderMeetingState(MeetingService.State state) {
         meetingBusy = state.busy;
+        hasReadyResult = state.readyResult != null;
+        boolean failedAction = state.actionOutcome != null
+                && state.actionOutcome.status() == ResultActionOutcome.Status.FAILED;
+        retryActionButton.setVisibility(failedAction ? View.VISIBLE : View.GONE);
+        endResultButton.setVisibility(failedAction ? View.VISIBLE : View.GONE);
         statusView.setText(state.status);
         capabilityView.setText(state.capabilityText);
         showMeetingScreen(state.active);
@@ -779,20 +758,10 @@ public final class MainActivity extends Activity {
         transcriptList.setVisibility(bilingual ? View.GONE : View.VISIBLE);
         transcriptView.setVisibility(!bilingual && transcriptRows.isEmpty()
                 ? View.VISIBLE : View.GONE);
-        if (state.resultUrl != null && meetingService != null) {
-            String resultUrl = meetingService.takeResultUrl();
-            Intent result = new Intent(this, ResultActivity.class);
-            result.putExtra(ResultActivity.EXTRA_RESULT_URL, resultUrl);
-            startActivity(result);
-        }
-        if (state.resultPdf != null && meetingService != null) {
-            LocalPdfWriter.SavedPdf pdf = meetingService.takeResultPdf();
-            Intent result = new Intent(this, LocalResultActivity.class);
-            if (pdf.uri() != null) result.putExtra(LocalResultActivity.EXTRA_URI,
-                    pdf.uri().toString());
-            result.putExtra(LocalResultActivity.EXTRA_CACHE_PATH, pdf.cachePath());
-            result.putExtra(LocalResultActivity.EXTRA_FILE_NAME, pdf.displayName());
-            startActivity(result);
+        // 通用UI操作由插件提供；页面不识别网页／PDF／邮件，重绑定消费同一待显示操作。
+        if (resumed && meetingService != null) {
+            Runnable operation;
+            while ((operation = meetingService.takeUiOperation()) != null) operation.run();
         }
     }
 
@@ -819,9 +788,14 @@ public final class MainActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
+        resumed = true;
+        if (meetingService != null) meetingService.observe(observer);
         refreshIdentity(deploymentCapabilities.isEmpty());
-        if (recentPdfButton != null) recentPdfButton.setVisibility(
-                LocalResultActivity.recentIntent(this) == null ? View.GONE : View.VISIBLE);
+    }
+
+    @Override protected void onPause() {
+        resumed = false;
+        super.onPause();
     }
 
     @Override protected void onStop() {

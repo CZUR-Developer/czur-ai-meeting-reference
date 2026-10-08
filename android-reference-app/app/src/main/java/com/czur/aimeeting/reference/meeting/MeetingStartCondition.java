@@ -3,7 +3,7 @@ package com.czur.aimeeting.reference.meeting;
 /**
  * 合作伙伴可扩展的会前开会条件。
  *
- * <p>参考 App 已经检查登录、模型能力和所选结果方式的基本输入；本接口只添加
+ * <p>参考App先检查登录／模型能力，再通过MeetingStartConditions组合本条件与动作prepare；本接口添加
  * 合作伙伴自己的条件，例如“外部接收者已登记”。检查发生在申请录屏权限、启动
  * 会议 Service 和向后端创建会议之前，因此拒绝不会启动模型或产生本场计费。
  * 后端的 Create/Start 权益决定仍然有效，本接口不能替代后端鉴权。</p>
