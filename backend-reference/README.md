@@ -193,6 +193,31 @@ try (var assembly = ReferenceMeetingHttpAssembly.start(
 此处交付后端协议与正常结算；SDK同流计数／提交、真实CZUR身份和会员适配仍在
 P7-1c后续小提交完成，不能以参考测试或结果READY代签生产功能已迁移。
 
+### 注入部署方模型发行器
+
+需要复用已有模型服务的部署，可在同一装配增加第六个参数：
+
+```java
+// issuer实现ModelSessionIssuer；自身远程服务和资源由部署方集中装配。
+try (var assembly = ReferenceMeetingHttpAssembly.start(
+        config, clock, artifactStore, identityProvider, entitlementPolicy, issuer)) {
+    // 对接原运行时和身份解析器，不另开后端进程或模型会话管理器。
+}
+// 停止外层HTTP／WSS并关闭assembly后，部署方按资源所有权关闭issuer。
+```
+
+非null发行器优先于配置中的sample／听悟默认实现，无需再配置参考听悟凭据。
+身份、PG会议事实、公开`:modelSession`响应及唯一V001基线保持不变；可信能力
+配置仍参与首次Create交集，不能仅凭注入实现启用翻译或总结。
+
+`ModelSessionIssuer.Request`新增`meetingId()`：原Lookup从已经验证归属的同一
+持久快照传入真实会议ID、首次原语／目标语和冻结`translationEnabled`。部署方
+发行器可直接将该ID传给已有模型服务，不从客户端正文另取或生成另一场ID。
+旧三参数Request构造器保留，未知ID为null；默认听悟／sample发行器仍按原语言
+与能力行为签发。原五参数Assembly重载保留，模型发行选择不变；新重载的issuer
+为null时也使用原默认选择。发行器须支持并发调用，其资源不会被Assembly代关。
+这里只开放普通Java扩展端口，不携带CZUR私有Feign接口、凭据或部署实现。
+
 ## P3-T04 Driver 契约测试
 
 `ModelDriverContractTestKit` 位于测试作用域，统一覆盖 `describe`、配置校验、

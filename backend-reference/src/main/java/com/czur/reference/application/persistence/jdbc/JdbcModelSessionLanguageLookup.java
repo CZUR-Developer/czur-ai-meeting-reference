@@ -92,7 +92,7 @@ public final class JdbcModelSessionLanguageLookup implements ModelSessionLanguag
                                     CapabilityIds.SUMMARY_STRUCTURED.equals(decision.capability())
                                     && decision.action() == CapabilityDecision.Action.ENABLE);
                     return new Facts(new ModelSessionIssuer.Request(request.languages().source(),
-                            request.languages().targets(), translationEnabled), summaryEnabled,
+                            request.languages().targets(), translationEnabled, meetingId), summaryEnabled,
                             clientStarted);
                 }
             }

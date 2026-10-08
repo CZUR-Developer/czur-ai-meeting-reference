@@ -36,7 +36,9 @@ class TingwuModelSessionIssuerTest {
                             + "\"wss://join.example.invalid/meeting?temporary=grant\"}}");
         }, CLOCK);
 
-        var session = issuer.issue(new ModelSessionIssuer.Request("zh-CN", List.of(), false));
+        var legacyRequest = new ModelSessionIssuer.Request("zh-CN", List.of(), false);
+        assertEquals(null, legacyRequest.meetingId());
+        var session = issuer.issue(legacyRequest);
         assertEquals("PUT", sent.get().method());
         assertEquals("type=realtime&RegionId=cn-beijing", sent.get().uri().getRawQuery());
         assertEquals("CreateTask", sent.get().headers().firstValue("X-Acs-Action").orElseThrow());
@@ -122,6 +124,28 @@ class TingwuModelSessionIssuerTest {
         var body = new ObjectMapper().readTree(readBody(sent.get()));
         assertEquals("cn", body.path("Input").path("SourceLanguage").asText());
         assertFalse(body.path("Parameters").has("TranslationEnabled"));
+    }
+
+    @Test void trustedMeetingIdKeepsDefaultTingwuMaterialsAndTaskBodyUnchanged() throws Exception {
+        AtomicReference<HttpRequest> sent = new AtomicReference<>();
+        var issuer = new TingwuModelSessionIssuer(CONFIG, request -> {
+            sent.set(request);
+            return new TingwuModelSessionIssuer.ProviderResponse(200,
+                    "{\"Data\":{\"TaskId\":\"task-owned\",\"MeetingJoinUrl\":"
+                            + "\"wss://join.example.invalid/meeting\"}}");
+        }, CLOCK);
+        var request = new ModelSessionIssuer.Request("zh-CN", List.of(), false,
+                "mtg_owned_meeting");
+
+        var session = issuer.issue(request);
+        assertEquals("mtg_owned_meeting", request.meetingId());
+        assertEquals("tingwu-realtime", session.adapterId());
+        assertEquals(Map.of("taskId", "task-owned"), session.initParams());
+        var body = new ObjectMapper().readTree(readBody(sent.get()));
+        assertEquals("cn", body.path("Input").path("SourceLanguage").asText());
+        assertFalse(body.path("Parameters").has("TranslationEnabled"));
+        assertFalse(body.toString().contains("mtg_owned_meeting"));
+        assertFalse(request.toString().contains("mtg_owned_meeting"));
     }
 
     @Test void remainsDisabledWithoutConfiguredCredentials() {

@@ -4,6 +4,7 @@ import com.czur.reference.application.bootstrap.ReferenceMeetingDeploymentConfig
 import com.czur.reference.application.bootstrap.ReferenceMeetingJdkHttpService;
 import com.czur.reference.application.bootstrap.ReferenceMeetingHttpAssembly;
 import com.czur.reference.application.model.BailianSummarySessionConfig;
+import com.czur.reference.application.model.ModelSessionIssuer;
 import com.czur.reference.application.artifact.filesystem.PersistentFileSystemMockArtifactStore;
 import com.czur.reference.application.entitlement.referencedev.ReferenceDevEntitlementPolicy;
 import com.czur.reference.application.finalization.DeterministicMockFinalizationPlanner;
@@ -451,6 +452,99 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
                     "", networkHeaders(TOKEN, null, false))));
             assertTrue(identityCalls.get() >= 6);
         }
+    }
+
+    @Test
+    void externalModelIssuerReceivesOwnedMeetingAndFrozenLanguageDecisions() throws Exception {
+        migrate(1);
+        Map<String, String> settings = enabledConfig();
+        settings.keySet().removeIf(key -> key.startsWith("REFERENCE_DEV_"));
+        settings.put(ReferenceMeetingDeploymentConfig.PROFILE_OPTIONAL_CAPABILITIES,
+                "translation.realtime");
+        settings.put(ReferenceMeetingDeploymentConfig.ENTITLEMENT_SUPPORTED_CAPABILITIES,
+                "transcript.realtime,translation.realtime");
+        settings.put(ReferenceMeetingDeploymentConfig.MOCK_CAPABILITIES,
+                "transcript.realtime,translation.realtime");
+        var config = ReferenceMeetingDeploymentConfig.fromEnvironmentWithExternalIdentity(
+                settings, "external-model-meeting", "external-model-android");
+        assertTrue(config.tingwuModelSession().isEmpty());
+        assertTrue(config.sampleJsonWsEndpoint().isEmpty());
+        IdentityProvider identity = request -> {
+            assertEquals("external-model-meeting", request.audience());
+            assertEquals("external-model-android", request.clientId());
+            boolean matches = request.credential().useBytes(bytes ->
+                    MessageDigest.isEqual(bytes, TOKEN.getBytes(StandardCharsets.US_ASCII)));
+            assertTrue(matches);
+            return IdentityProviderResult.success(new VerifiedIdentity(
+                    new Subject("external-model-subject", null), Set.of("USER"),
+                    Set.of(MeetingPermissions.CREATE, MeetingPermissions.STOP),
+                    NOW.minusSeconds(60), NOW.plusSeconds(600), null));
+        };
+        EntitlementIdGenerator ids = new EntitlementIdGenerator() {
+            @Override public String newGrantId() { return "grant_" + UUID.randomUUID(); }
+            @Override public String newReservationId() {
+                return "reservation_" + UUID.randomUUID();
+            }
+            @Override public String newLeaseToken() { return "lease_" + UUID.randomUUID(); }
+        };
+        var policy = new ReferenceDevEntitlementPolicy(config.entitlement(), CLOCK, ids);
+        AtomicReference<ModelSessionIssuer.Request> issued = new AtomicReference<>();
+        AtomicInteger issueCalls = new AtomicInteger();
+        AtomicInteger closeCalls = new AtomicInteger();
+        // 仅验证部署扩展与真实PG事实接线，不访问厂商或代签CZUR模型发行。
+        class ExternalIssuer implements ModelSessionIssuer, AutoCloseable {
+            @Override public Session issue(Request request) {
+                issued.set(request);
+                issueCalls.incrementAndGet();
+                return new Session("sample-json-ws", "ws://model.example.invalid/external",
+                        NOW.plusSeconds(300), Map.of("taskId", "external-test-task"));
+            }
+            @Override public void close() { closeCalls.incrementAndGet(); }
+        }
+        var issuer = new ExternalIssuer();
+        try (var assembly = ReferenceMeetingHttpAssembly.start(
+                config, CLOCK, null, identity, policy, issuer);
+             var network = assembly.newJdkHttpServer(new InetSocketAddress("127.0.0.1", 0))) {
+            network.start();
+            int port = network.address().getPort();
+            for (boolean translation : List.of(false, true)) {
+                String source = translation ? "zh-CN" : "en-US";
+                String target = translation ? "en-US" : "zh-CN";
+                String key = "external-model-create-" + translation + "-123456789";
+                String body = createRequest(key, "external-model-" + translation).body()
+                        .replace("\"source\":\"zh-CN\"", "\"source\":\"" + source + "\"")
+                        .replace("\"targets\":[]", "\"targets\":[\"" + target + "\"]");
+                if (translation) {
+                    body = body.replace("[\"transcript.realtime\"]",
+                            "[\"transcript.realtime\",\"translation.realtime\"]");
+                }
+                String created = exchange(port, "POST", "/v1/meetings", body,
+                        networkHeaders(TOKEN, key, true));
+                assertEquals(201, status(created));
+                String meetingId = ERROR_JSON.readTree(responseBody(created))
+                        .path("meetingId").asText();
+                String path = "/v1/meetings/" + meetingId + ":modelSession";
+                String response = exchange(port, "POST", path, "",
+                        networkHeaders(TOKEN, null, false));
+                assertEquals(200, status(response));
+                assertEquals(new ModelSessionIssuer.Request(source, List.of(target),
+                        translation, meetingId), issued.get());
+                JsonNode materials = ERROR_JSON.readTree(responseBody(response));
+                assertEquals(meetingId, materials.path("meetingId").asText());
+                assertEquals("sample-json-ws", materials.path("adapterId").asText());
+                assertEquals("external-test-task",
+                        materials.path("initParams").path("taskId").asText());
+                var firstRequest = issued.get();
+                assertEquals(200, status(exchange(port, "POST", path, "",
+                        networkHeaders(TOKEN, null, false))));
+                assertEquals(firstRequest, issued.get());
+            }
+            assertEquals(2, count("meeting"));
+            assertEquals(4, issueCalls.get());
+        }
+        assertEquals(0, closeCalls.get(), "外部发行器的生命周期仍由部署方持有");
+        issuer.close();
+        assertEquals(1, closeCalls.get());
     }
 
     /** 两种身份装配共用标准字幕→Stop→同键Stop重放，不调用外部模型。 */

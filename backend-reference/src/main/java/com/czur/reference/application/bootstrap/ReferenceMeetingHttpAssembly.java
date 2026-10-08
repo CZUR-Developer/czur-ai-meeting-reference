@@ -181,7 +181,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
         if (!config.identity().enabled()) {
             throw new IllegalArgumentException("外部身份配置须显式注入身份和权益策略");
         }
-        return start(config, clock, artifactStore, null, null, true);
+        return start(config, clock, artifactStore, null, null, null, true);
     }
 
     /**
@@ -207,15 +207,44 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
             ReferenceMeetingDeploymentConfig config, Clock clock,
             ArtifactStore artifactStore, IdentityProvider identityProvider,
             EntitlementPolicy entitlementPolicy) {
+        return start(config, clock, artifactStore, identityProvider, entitlementPolicy, null);
+    }
+
+    /**
+     * 注入部署方模型发行器，复用同一身份、会议事实和PostgreSQL运行时。
+     *
+     * <p>发行器收到已经验证会议归属的同场ID、首次Create语言和冻结能力决策，
+     * 只签发临时直连材料，不接收或转发音频。非null实现优先于配置中的默认
+     * sample／听悟发行器，无需再配置参考听悟凭据；配置中的能力声明仍参与
+     * Create交集，注入本身不授予翻译或总结能力。</p>
+     *
+     * <p>发行器须支持并发请求，其资源和生命周期由部署方持有。关闭本装配只
+     * 关闭自身HTTP运行时和PG池，不关闭外部发行器；调用方先停外层HTTP／WSS，
+     * 再关本装配，最后按自己的资源所有权释放发行器。</p>
+     *
+     * @param config 已冻结的可信部署配置，不自动迁移数据库
+     * @param clock 与身份和会议事实共用的服务端时钟
+     * @param artifactStore 部署方持久产物端口，沿用旧装配允许null的边界
+     * @param identityProvider 部署方真实凭据校验，不开放参考演示登录
+     * @param entitlementPolicy 部署方开会资格策略，持久账本仍由本装配负责
+     * @param modelSessionIssuer 部署方模型发行器；null保留原配置默认选择
+     * @return readiness通过的装配，不另建网络监听器或模型会话管理器
+     */
+    public static ReferenceMeetingHttpAssembly start(
+            ReferenceMeetingDeploymentConfig config, Clock clock,
+            ArtifactStore artifactStore, IdentityProvider identityProvider,
+            EntitlementPolicy entitlementPolicy, ModelSessionIssuer modelSessionIssuer) {
         Objects.requireNonNull(identityProvider, "identityProvider");
         Objects.requireNonNull(entitlementPolicy, "entitlementPolicy");
-        return start(config, clock, artifactStore, identityProvider, entitlementPolicy, false);
+        return start(config, clock, artifactStore, identityProvider, entitlementPolicy,
+                modelSessionIssuer, false);
     }
 
     private static ReferenceMeetingHttpAssembly start(
             ReferenceMeetingDeploymentConfig config, Clock clock,
             ArtifactStore artifactStore, IdentityProvider identityProvider,
-            EntitlementPolicy entitlementPolicy, boolean referenceDefaults) {
+            EntitlementPolicy entitlementPolicy, ModelSessionIssuer modelSessionIssuer,
+            boolean referenceDefaults) {
         Objects.requireNonNull(config, "config");
         Objects.requireNonNull(clock, "clock");
         JdbcDatabaseRuntime database = JdbcDatabaseRuntime.start(config.database());
@@ -310,7 +339,8 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
             var events = new JdbcMeetingEventLogPort(dataSource);
             // 只替换模型会话材料签发端口。旧 Create.realtime 与 WSS Mock
             // 继续保留既有语义，Android 直连模型的选择由 adapterId 驱动。
-            ModelSessionIssuer modelSessions = config.sampleJsonWsEndpoint()
+            ModelSessionIssuer modelSessions = modelSessionIssuer != null ? modelSessionIssuer
+                    : config.sampleJsonWsEndpoint()
                     .<ModelSessionIssuer>map(endpoint ->
                             new SampleJsonWsModelSessionIssuer(endpoint, clock))
                     .orElseGet(() -> config.tingwuModelSession()
@@ -322,7 +352,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                     : new JdbcModelSessionLanguageLookup(dataSource);
             if (config.createEnabled()) {
                 // 与查询、Stop、Delete 共用唯一连接池、身份 Provider、Clock 和错误映射。
-                // ID 仅由服务端安全随机源生成；首次公开响应由 V013 持久化。
+                // ID 仅由服务端安全随机源生成；首次公开响应由会议创建事实持久化。
                 var sessions = new ReferenceCreateRealtimeSessionAllocator(
                         config.wssOrigin(), config.wssTokenTtl(), clock, random);
                 var create = new AuthenticatedCompleteMeetingApplicationService(
@@ -347,9 +377,10 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                         referenceLogin, capabilities);
             }
             LOGGER.log(Level.INFO,
-                    "reference meeting HTTP 装配完成 createEnabled={0} realtimeRenewEnabled={1} identityMode={2}",
+                    "reference meeting HTTP 装配完成 createEnabled={0} realtimeRenewEnabled={1} identityMode={2} modelIssuerMode={3}",
                     new Object[]{config.createEnabled(), config.realtimeRenewEnabled(),
-                            referenceDefaults ? "REFERENCE" : "EXTERNAL"});
+                            referenceDefaults ? "REFERENCE" : "EXTERNAL",
+                            modelSessionIssuer == null ? "DEFAULT" : "EXTERNAL"});
             return new ReferenceMeetingHttpAssembly(database, config.deploymentScope(),
                     runtime, resolver, errors,
                     config.realtimeRenewEnabled(), realtimeVerifier, realtimeIngress,
