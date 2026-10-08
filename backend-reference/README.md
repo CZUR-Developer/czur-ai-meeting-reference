@@ -184,9 +184,14 @@ try (var assembly = ReferenceMeetingHttpAssembly.start(
   服务进程。消费方可在现有模块中装配公开端口；CZUR私有登录、会员和部署材料
   不进入本参考工程。
 
-本小步只开放装配边界。当前客户端事件Stop生成结果的路径尚未冻结实际采音用量、
-也未接上`commitUsage`；真实CZUR身份、会员及用量收口仍在P7-1c的后续小提交
-实现和验收，不能以注入测试或结果READY代签生产功能已迁移。
+客户端事件会议已开放`POST /v1/meetings/{meetingId}/usage:submit`：停止采音后
+提交`{"audioDurationMs":1000}`，首次返回201，同场同值重放返回200；不同值不能
+覆盖。后端同时保存首次Reservation版本，原Stop读取冻结值，通过共享Provider
+实际`commitUsage`后才生成READY。结果时长采用这份采音值，不把模型收口、总结
+等待计入。16kHz、单声道、PCM16沿用采音字节数除以32的整数毫秒口径，实测0可
+结算；旧没有提交用量的调用继续显示结果，不伪造零用量。Stop正文仍为空或`{}`。
+此处交付后端协议与正常结算；SDK同流计数／提交、真实CZUR身份和会员适配仍在
+P7-1c后续小提交完成，不能以参考测试或结果READY代签生产功能已迁移。
 
 ## P3-T04 Driver 契约测试
 

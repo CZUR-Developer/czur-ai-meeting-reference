@@ -367,6 +367,37 @@ paths:
                 $ref: "#/components/schemas/AppendPresentationCaptureChunkResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/meetings/{meetingId}/usage:submit:
+    post:
+      tags: [Meetings]
+      operationId: submitClientMeetingUsage
+      summary: App 在停止采音后冻结本场累计采音用量
+      description: 仅已启动的客户端事件会议可用。audioDurationMs 来自实际采音字节数；16kHz、单声道、PCM16采用总字节数除以32的整数毫秒，静音计入，模型重发与总结等待不计入。首次提交同时冻结当前 Reservation 版本；相同值可重放，不同值不可覆盖。实测零合法，未知值不提交。后续 Stop 使用该冻结值完成同场结算后生成 READY；Stop 正文仍为空或 {}。旧客户端没有冻结值时保留显示行为，不将未知用量当作零结算。
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/MeetingId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubmitClientUsageRequest"
+      responses:
+        "201":
+          description: 实际采音用量已首次冻结
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubmitClientUsageResponse"
+        "200":
+          description: 同场同值的幂等重放
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubmitClientUsageResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/meetings/{meetingId}/summary:submit:
     post:
       tags: [Meetings]
@@ -999,6 +1030,34 @@ components:
         frameCount:
           type: integer
           minimum: 1
+    SubmitClientUsageRequest:
+      type: object
+      additionalProperties: false
+      required: [audioDurationMs]
+      properties:
+        audioDurationMs:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9223372036854775807
+          description: 已停止采音后冻结的累计整数毫秒，零表示实测零。
+    SubmitClientUsageResponse:
+      type: object
+      additionalProperties: false
+      required: [meetingId, audioDurationMs, accepted]
+      properties:
+        meetingId:
+          type: string
+          pattern: "^mtg_[A-Za-z0-9_-]+$"
+          maxLength: 1024
+        audioDurationMs:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9223372036854775807
+        accepted:
+          type: boolean
+          const: true
     SubmitClientSummaryRequest:
       type: object
       additionalProperties: false

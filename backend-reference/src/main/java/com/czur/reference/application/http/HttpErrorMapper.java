@@ -168,6 +168,18 @@ public final class HttpErrorMapper {
         return clientInputFailure(((ClientMeetingInputPort.Rejected) result).reason());
     }
 
+    /** 首次冻结与同值重放返回同一累计值；价格／扣费规则不进入公共响应。 */
+    public HttpResponse usageSubmit(String meetingId,
+            ClientMeetingInputPort.UsageSubmitResult result) {
+        Objects.requireNonNull(result, "result");
+        if (result instanceof ClientMeetingInputPort.UsageSubmitted submitted) {
+            return success(submitted.created() ? 201 : 200, Map.of(
+                    "meetingId", meetingId, "audioDurationMs", submitted.audioDurationMs(),
+                    "accepted", true));
+        }
+        return clientInputFailure(((ClientMeetingInputPort.Rejected) result).reason());
+    }
+
     private HttpResponse clientInputFailure(ClientMeetingInputPort.Reason reason) {
         return switch (reason) {
             case NOT_FOUND -> error(404, HttpErrorEnvelope.Domain.SESSION,

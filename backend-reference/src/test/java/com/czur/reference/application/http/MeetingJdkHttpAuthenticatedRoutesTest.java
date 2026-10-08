@@ -89,6 +89,7 @@ class MeetingJdkHttpAuthenticatedRoutesTest {
         try (Fixture fixture = new Fixture()) {
             String start = "/v1/meetings/mtg_owned:startClient";
             String append = "/v1/meetings/mtg_owned/events:append";
+            String usage = "/v1/meetings/mtg_owned/usage:submit";
             assertEquals(401, fixture.status("POST", start, "", ""));
             assertEquals(403, fixture.status("POST", start,
                     auth("read-only-token"), ""));
@@ -98,6 +99,11 @@ class MeetingJdkHttpAuthenticatedRoutesTest {
             assertEquals(403, fixture.status("POST", append,
                     auth("read-only-token"), ""));
             assertEquals(501, fixture.status("POST", append,
+                    auth("owner-token"), ""));
+            assertEquals(401, fixture.status("POST", usage, "", ""));
+            assertEquals(403, fixture.status("POST", usage,
+                    auth("read-only-token"), ""));
+            assertEquals(501, fixture.status("POST", usage,
                     auth("owner-token"), ""));
             assertTrue(fixture.provider.allCredentialsClosed());
         }

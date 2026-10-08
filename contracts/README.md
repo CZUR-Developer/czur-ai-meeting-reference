@@ -25,6 +25,21 @@ one `transcriptUpsert` per request; the server assigns the canonical
 without a client-input marker keep the existing WSS audio behavior. See the
 `client-transcript-append` valid and invalid fixtures.
 
+## Client input usage compatibility
+
+`POST /v1/meetings/{meetingId}/usage:submit` freezes actual captured audio
+duration before the existing Stop operation. For standard 16 kHz mono PCM16,
+`audioDurationMs` is captured bytes divided by 32, truncated to whole
+milliseconds. Silence counts; retransmission and summary waiting do not.
+The server persists the first duration and Reservation version; same-value
+replay returns 200 and a different value returns a conflict. Measured zero
+is valid; missing usage remains unknown. Stop commits this same frozen usage
+before publishing READY, keeping the existing empty or `{}` Stop body.
+Older clients without this submission retain their result display behavior
+and do not create a zero-usage settlement. See `client-input-usage.valid.json`
+and `client-input-usage.negative.invalid.json`; the HTTP integration test
+consumes these fixtures directly.
+
 ## Meeting event replay compatibility
 
 `GET /v1/meetings/{meetingId}/events` uses one meeting-global

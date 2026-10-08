@@ -26,6 +26,29 @@ public interface ClientMeetingInputPort {
     AppendResult append(MeetingCommandContext context, String meetingId,
             ClientEvent request);
 
+    /**
+     * 在停止采音后提交本场冻结的累计采音时长，单位为整数毫秒。
+     *
+     * <p>调用方从实际标准PCM字节数计算，16kHz、单声道、PCM16采用字节数除以32；
+     * 静音帧计入，模型重发和总结等待不计入。零表示已确认没有采到音频，未知用量
+     * 不调用此方法。实现一次持久冻结用量与对应Reservation版本，相同值可重放，
+     * 不同值不能覆盖。后续Stop读取同一事实结算，不能改用墙钟或字幕末尾。</p>
+     *
+     * @param context 已认证的会议归属用户上下文
+     * @param meetingId 已启动客户端事件输入的同场会议
+     * @param audioDurationMs 已停止采音后冻结的累计值，不得为负数
+     * @return 首次冻结、同值重放或现有输入拒绝结果
+     */
+    default UsageSubmitResult submitUsage(MeetingCommandContext context,
+            String meetingId, long audioDurationMs) {
+        return new Rejected(Reason.STORAGE_UNAVAILABLE);
+    }
+
+    sealed interface UsageSubmitResult permits UsageSubmitted, Rejected { }
+
+    /** created=false表示已有同值事实，后续结算仍使用首次冻结的版本和身份。 */
+    record UsageSubmitted(long audioDurationMs, boolean created) implements UsageSubmitResult { }
+
     /** Stop 前提交本场唯一的标准纪要；相同正文重放安全，不能用新正文覆盖。 */
     default SummarySubmitResult submitSummary(MeetingCommandContext context,
             String meetingId, StructuredSummary summary) {
@@ -131,7 +154,7 @@ public interface ClientMeetingInputPort {
 
     /** 当前会议不可接受客户端事件；不会包含身份或正文。 */
     record Rejected(Reason reason) implements StartResult, AppendResult,
-            CaptureAppendResult, SummarySubmitResult {
+            CaptureAppendResult, SummarySubmitResult, UsageSubmitResult {
         public Rejected { Objects.requireNonNull(reason, "reason"); }
     }
 

@@ -4,6 +4,11 @@ import com.czur.aimeeting.contract.realtime.v1.TranscriptUpsert;
 import com.czur.aimeeting.contract.realtime.v1.TranslationUpsert;
 import com.czur.reference.application.port.ClientMeetingResultFinalizer;
 import com.czur.reference.application.port.FinalizationReceiptGenerator;
+import com.czur.reference.application.port.entitlement.CommitUsageRequest;
+import com.czur.reference.application.port.entitlement.EntitlementProvider;
+import com.czur.reference.application.port.entitlement.UsageActual;
+import com.czur.reference.application.port.entitlement.UsageOperationScopes;
+import com.czur.reference.application.port.entitlement.UsageUnit;
 import com.czur.reference.application.port.MeetingManifest;
 import com.czur.reference.application.port.artifact.ArtifactReadyMetadataStore;
 import com.czur.reference.application.port.artifact.ArtifactStore;
@@ -67,18 +72,36 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
     private final FinalizationReceiptGenerator receipts;
     private final Clock clock;
     private final ArtifactStore artifactStore;
+    private final EntitlementProvider entitlementProvider;
 
     public JdbcClientMeetingResultFinalizer(DataSource dataSource,
             FinalizationReceiptGenerator receipts, Clock clock, ArtifactStore artifactStore) {
+        this(dataSource, receipts, clock, artifactStore, null);
+    }
+
+    /**
+     * 为客户端会议装配实际采音用量结算。
+     *
+     * <p>Provider与Create／Worker使用同一实例。已有客户端提交冻结值时，在结果
+     * READY前提交同场累积用量；重复Stop也读取原值／版本／幂等材料。旧没有冻结值
+     * 的调用保留显示时长，不从墙钟猜计费用量。旧构造器仅保留这些兼容调用。</p>
+     */
+    public JdbcClientMeetingResultFinalizer(DataSource dataSource,
+            FinalizationReceiptGenerator receipts, Clock clock, ArtifactStore artifactStore,
+            EntitlementProvider entitlementProvider) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
         this.receipts = Objects.requireNonNull(receipts, "receipts");
         this.clock = Objects.requireNonNull(clock, "clock");
         // 无 Store 的旧装配仍可服务旧音频会议；客户端会议必须由完整进程装配提供 Store。
         this.artifactStore = artifactStore;
+        this.entitlementProvider = entitlementProvider;
     }
 
     @Override
     public boolean finalizeIfClient(String meetingId) {
+        // 先释放读取冻结事实的连接，再调用Provider，避免结果事务占用连接等待第二个池位。
+        // 本入口每次均经过账本，包括下方resultExists早返的正常Stop重放。
+        Long capturedDurationMs = commitClientUsage(meetingId);
         try (Connection connection = dataSource.getConnection()) {
             connection.setAutoCommit(false);
             try {
@@ -192,7 +215,9 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
                                 : projection.summary().path("title").asText(),
                         com.czur.reference.application.port.ManifestStatus.READY,
                         startedAt, endedAt,
-                        durationMs(startedAt, endedAt, projection.durationMs()),
+                        capturedDurationMs == null
+                                ? durationMs(startedAt, endedAt, projection.durationMs())
+                                : capturedDurationMs,
                         new MeetingManifest.Languages(projection.language(),
                                 projection.targetLanguages()),
                         artifactRefs, List.of());
@@ -245,6 +270,61 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
             throw new IllegalStateException("client result database unavailable");
         }
     }
+
+    /**
+     * 只从已持久的客户端输入事实恢复Commit，不制造durable_input_fact。
+     *
+     * <p>首次提交保存的expectedVersion不会随Reservation演进而变化。幂等键和摘要
+     * 只依赖同场稳定字段，Provider账本负责首次提交／重放。失败抛回原Stop编排，
+     * 维持已提交停止意图和待收口状态；本类不会在未结算时发布READY。</p>
+     */
+    private Long commitClientUsage(String meetingId) {
+        FrozenClientUsage usage = null;
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement("""
+                     SELECT m.deployment_scope, m.subject_scope, m.usage_reservation_id,
+                            i.audio_duration_ms, i.usage_submitted_at, i.usage_expected_version
+                     FROM meeting m JOIN meeting_client_input i USING (meeting_id)
+                     WHERE m.meeting_id=? AND m.state IN ('STOPPING', 'READY')
+                     """)) {
+            statement.setString(1, meetingId);
+            try (ResultSet rows = statement.executeQuery()) {
+                if (rows.next() && rows.getObject("audio_duration_ms", Long.class) != null) {
+                    usage = new FrozenClientUsage(rows.getString("deployment_scope"),
+                            rows.getString("subject_scope"), rows.getString("usage_reservation_id"),
+                            rows.getLong("audio_duration_ms"),
+                            rows.getTimestamp("usage_submitted_at").toInstant(),
+                            rows.getLong("usage_expected_version"));
+                }
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("client usage database unavailable");
+        }
+        if (usage == null) return null; // 未提供用量，不把未知值伪装成实测0。
+        if (entitlementProvider == null) {
+            throw new IllegalStateException("client usage settlement is not configured");
+        }
+        String identity = sha256(("client-input-usage/v1\u0000" + usage.deploymentScope()
+                + "\u0000" + usage.subjectScope() + "\u0000" + meetingId
+                + "\u0000" + usage.reservationId() + "\u0000" + usage.expectedVersion()
+                + "\u0000" + usage.audioDurationMs() + "\u0000" + usage.submittedAt())
+                .getBytes(StandardCharsets.UTF_8));
+        var request = new CommitUsageRequest(usage.deploymentScope(), usage.subjectScope(),
+                UsageOperationScopes.COMMIT,
+                "client-usage-" + sha256(meetingId.getBytes(StandardCharsets.UTF_8)),
+                identity, usage.reservationId(), usage.expectedVersion(),
+                new UsageActual(UsageUnit.MEETING_DURATION_MS, usage.audioDurationMs()));
+        var result = entitlementProvider.commitUsage(request);
+        if (!result.isSuccess()) {
+            LOGGER.log(Level.WARNING, "客户端采音用量尚未结算，结果保持待收口");
+            throw new IllegalStateException("client usage settlement unavailable");
+        }
+        LOGGER.log(Level.FINE, "客户端采音用量已确认结算 durationMs={0}", usage.audioDurationMs());
+        return usage.audioDurationMs();
+    }
+
+    private record FrozenClientUsage(String deploymentScope, String subjectScope,
+            String reservationId, long audioDurationMs, Instant submittedAt, long expectedVersion) { }
 
     /** 稳定 artifactId 使 Stop 重试可以复用已发布内容，不依赖数据库与存储的跨资源事务。 */
     private ArtifactDescriptor publish(WriteIntentSpec spec, byte[] content)

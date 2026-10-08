@@ -78,6 +78,8 @@ public final class MeetingHttpAdapter {
             "^/v1/meetings/(mtg_[A-Za-z0-9_-]+)/presentation-captures:append$");
     private static final Pattern SUMMARY_SUBMIT_PATH = Pattern.compile(
             "^/v1/meetings/(mtg_[A-Za-z0-9_-]+)/summary:submit$");
+    private static final Pattern USAGE_SUBMIT_PATH = Pattern.compile(
+            "^/v1/meetings/(mtg_[A-Za-z0-9_-]+)/usage:submit$");
     private static final Pattern RENEW_PATH = Pattern.compile(
             "^/v1/meetings/(mtg_[A-Za-z0-9_-]+):renewRealtimeToken$");
     private static final Pattern MANIFEST_PATH = Pattern.compile(
@@ -407,6 +409,7 @@ public final class MeetingHttpAdapter {
                 && (CLIENT_START_PATH.matcher(request.path()).matches()
                 || CLIENT_APPEND_PATH.matcher(request.path()).matches()
                 || PRESENTATION_APPEND_PATH.matcher(request.path()).matches()
+                || USAGE_SUBMIT_PATH.matcher(request.path()).matches()
                 || SUMMARY_SUBMIT_PATH.matcher(request.path()).matches())) {
             return AuthenticationRoute.CLIENT_WRITE;
         }
@@ -589,6 +592,17 @@ public final class MeetingHttpAdapter {
             }
             return errors.presentationAppend(clientInputPort.appendPresentation(context,
                     presentationAppend.group(1), decodePresentationChunk(request)));
+        }
+
+        Matcher usageSubmit = USAGE_SUBMIT_PATH.matcher(path);
+        if ("POST".equals(method) && usageSubmit.matches()) {
+            if (clientInputPort == null) return errors.notImplemented();
+            if (context == null) return errors.missingContext();
+            if (!request.query().isEmpty()) {
+                throw new IllegalArgumentException("usage query is invalid");
+            }
+            return errors.usageSubmit(usageSubmit.group(1), clientInputPort.submitUsage(
+                    context, usageSubmit.group(1), decodeAudioDuration(request)));
         }
 
         Matcher summarySubmit = SUMMARY_SUBMIT_PATH.matcher(path);
@@ -920,6 +934,26 @@ public final class MeetingHttpAdapter {
         };
     }
 
+    /** 采音冻结值采用与其他客户端提交相同的JSON解码边界，不接受模型厂商用量。 */
+    private static long decodeAudioDuration(HttpRequest request) {
+        String contentType = request.header("content-type");
+        if (contentType == null || !contentType.matches(
+                "(?i)application/json(?:[ \\t]*;[ \\t]*charset=utf-8)?")) {
+            throw new IllegalArgumentException("usage content-type is invalid");
+        }
+        try {
+            JsonNode root = JSON.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                    .with(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+                    .readTree(request.body());
+            requireFields(root, Set.of("audioDurationMs"));
+            long duration = longField(root, "audioDurationMs");
+            if (duration < 0) throw new IllegalArgumentException("audio duration is negative");
+            return duration;
+        } catch (JsonProcessingException failure) {
+            throw new IllegalArgumentException("usage JSON is invalid");
+        }
+    }
+
     private static ClientMeetingInputPort.StructuredSummary decodeSummary(HttpRequest request) {
         String contentType = request.header("content-type");
         if (contentType == null || !contentType.matches(
@@ -1017,6 +1051,8 @@ public final class MeetingHttpAdapter {
             return "appendPresentation";
         if ("POST".equals(request.method())
                 && SUMMARY_SUBMIT_PATH.matcher(request.path()).matches()) return "submitSummary";
+        if ("POST".equals(request.method())
+                && USAGE_SUBMIT_PATH.matcher(request.path()).matches()) return "submitUsage";
         if ("POST".equals(request.method()) && MEETINGS_PATH.equals(request.path())) {
             return "create";
         }

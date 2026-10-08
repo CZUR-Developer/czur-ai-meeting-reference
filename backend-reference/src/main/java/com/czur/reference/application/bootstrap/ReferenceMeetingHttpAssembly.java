@@ -271,7 +271,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
             var stopService = new AuthenticatedMeetingStopApplicationService(
                     config.deploymentScope(), identity, stop, query, inputReconciler,
                     new JdbcClientMeetingResultFinalizer(dataSource, ids::newReceipt,
-                            clock, artifactStore));
+                            clock, artifactStore, entitlement));
             var renewService = config.realtimeRenewEnabled()
                     ? new AuthenticatedRealtimeTokenRenewApplicationService(
                             config.deploymentScope(), identity,
@@ -394,7 +394,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
      *
      * <p>该实例使用本装配的会议数据源，不另建账本或复制资格策略。调用方不得
      * 关闭或转移连接池所有权；必须在本装配关闭前停止Worker调用。此访问器仅
-     * 开放已有权益端口，不表示客户端Stop的实际用量协议已完成。</p>
+     * 开放已有权益端口；客户端采音冻结值由用量提交接口提供，真实采音计数由SDK负责。</p>
      */
     public EntitlementProvider entitlementProvider() { return entitlementProvider; }
 

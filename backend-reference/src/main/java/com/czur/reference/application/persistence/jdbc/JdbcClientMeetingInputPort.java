@@ -55,6 +55,82 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
     private final ArtifactStore artifactStore;
 
     @Override
+    public UsageSubmitResult submitUsage(MeetingCommandContext context,
+            String meetingId, long audioDurationMs) {
+        Objects.requireNonNull(context, "context");
+        MeetingIdPolicy.requireValid(meetingId);
+        if (audioDurationMs < 0) throw new IllegalArgumentException("audio duration is negative");
+        try (Connection connection = dataSource.getConnection()) {
+            connection.setAutoCommit(false);
+            try {
+                MeetingRow meeting = lockMeeting(connection, meetingId);
+                Rejected rejected = checkOwner(context, meeting);
+                if (rejected != null) return rollback(connection, rejected);
+                if (!clientSourceExists(connection, meetingId)) {
+                    return rollback(connection, new Rejected(Reason.INPUT_SOURCE_CONFLICT));
+                }
+                Long previous;
+                try (PreparedStatement statement = connection.prepareStatement(
+                        "SELECT audio_duration_ms FROM meeting_client_input WHERE meeting_id=?")) {
+                    statement.setString(1, meetingId);
+                    try (ResultSet rows = statement.executeQuery()) {
+                        rows.next();
+                        previous = rows.getObject(1, Long.class);
+                    }
+                }
+                // 同场Stop完成后仍可重放原值；不能更新已冻结计费事实。
+                if (previous != null) {
+                    connection.rollback();
+                    LOGGER.log(Level.FINE, "客户端采音用量重放，原值保持");
+                    return previous == audioDurationMs ? new UsageSubmitted(previous, false)
+                            : new Rejected(Reason.EVENT_CONFLICT);
+                }
+                if (meeting.state() != MeetingState.STARTING
+                        && meeting.state() != MeetingState.RUNNING) {
+                    return rollback(connection, new Rejected(Reason.INVALID_STATE));
+                }
+                long reservationVersion;
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        SELECT r.version FROM meeting m JOIN usage_reservation r
+                          ON r.reservation_id=m.usage_reservation_id
+                         AND r.deployment_scope=m.deployment_scope
+                         AND r.subject_scope=m.subject_scope
+                        WHERE m.meeting_id=? AND r.bound_meeting_id=m.meeting_id
+                          AND r.record_format='V3' AND r.status='RESERVED'
+                        """)) {
+                    statement.setString(1, meetingId);
+                    try (ResultSet rows = statement.executeQuery()) {
+                        if (!rows.next()) {
+                            return rollback(connection, new Rejected(Reason.INVALID_STATE));
+                        }
+                        reservationVersion = rows.getLong(1);
+                    }
+                }
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        UPDATE meeting_client_input SET audio_duration_ms=?,
+                            usage_submitted_at=?, usage_expected_version=? WHERE meeting_id=?
+                        """)) {
+                    statement.setLong(1, audioDurationMs);
+                    statement.setTimestamp(2, Timestamp.from(
+                            clock.instant().truncatedTo(ChronoUnit.MICROS)));
+                    statement.setLong(3, reservationVersion);
+                    statement.setString(4, meetingId);
+                    statement.executeUpdate();
+                }
+                connection.commit();
+                LOGGER.log(Level.INFO, "客户端采音用量已冻结 durationMs={0}", audioDurationMs);
+                return new UsageSubmitted(audioDurationMs, true);
+            } catch (SQLException failure) {
+                rollbackQuietly(connection);
+                LOGGER.log(Level.WARNING, "客户端采音用量保存未完成");
+                return new Rejected(Reason.STORAGE_UNAVAILABLE);
+            }
+        } catch (SQLException failure) {
+            return new Rejected(Reason.STORAGE_UNAVAILABLE);
+        }
+    }
+
+    @Override
     public SummarySubmitResult submitSummary(MeetingCommandContext context,
             String meetingId, StructuredSummary summary) {
         Objects.requireNonNull(context, "context");

@@ -15,6 +15,9 @@ import com.czur.reference.application.http.HttpRequest;
 import com.czur.reference.application.http.MeetingJdkHttpServer;
 import com.czur.reference.application.http.ReferenceDevSessionLoginEndpoint;
 import com.czur.reference.application.command.MeetingPermissions;
+import com.czur.reference.application.command.AuthenticatedMeetingStopApplicationService;
+import com.czur.reference.application.command.AuthenticatedMeetingStopResult;
+import com.czur.reference.application.command.StopMeetingIntent;
 import com.czur.reference.application.port.OwnedMeetingCreationUnitOfWork;
 import com.czur.reference.application.port.IdempotencyScopeCodec;
 import com.czur.reference.application.port.MeetingStartExecutionUnitOfWork;
@@ -33,6 +36,10 @@ import com.czur.reference.application.port.artifact.ArtifactStore;
 import com.czur.reference.application.port.entitlement.AuthorizedProfileSnapshot;
 import com.czur.reference.application.port.entitlement.EntitlementIdGenerator;
 import com.czur.reference.application.port.entitlement.EntitlementPolicy;
+import com.czur.reference.application.port.entitlement.EntitlementProvider;
+import com.czur.reference.application.port.entitlement.EntitlementProviderError;
+import com.czur.reference.application.port.entitlement.CommitUsageRequest;
+import com.czur.reference.application.port.entitlement.CancelReservationRequest;
 import com.czur.reference.application.port.entitlement.EntitlementProviderResult;
 import com.czur.reference.application.port.entitlement.AuthorizeStartRequest;
 import com.czur.reference.application.port.entitlement.ReserveUsageRequest;
@@ -42,12 +49,15 @@ import com.czur.reference.application.port.entitlement.UsageOperationResult;
 import com.czur.reference.application.port.entitlement.UsageReservation;
 import com.czur.reference.application.port.entitlement.UsageUnit;
 import com.czur.reference.application.identity.referencedev.ReferenceDevIdentityConfig;
+import com.czur.reference.application.identity.referencedev.ReferenceDevIdentityProvider;
 import com.czur.reference.application.identity.referencedev.ReferenceDevLoginConfig;
 import com.czur.reference.application.port.identity.IdentityProvider;
 import com.czur.reference.application.port.identity.IdentityProviderResult;
 import com.czur.reference.application.port.identity.IdentityProviderError;
 import com.czur.reference.application.port.identity.Subject;
 import com.czur.reference.application.port.identity.VerifiedIdentity;
+import com.czur.reference.application.port.identity.IdentityVerificationRequest;
+import com.czur.reference.application.port.identity.SecretCredential;
 import com.czur.reference.application.manifest.ManifestResultAccessPolicy;
 import com.czur.reference.domain.meeting.MeetingState;
 import com.czur.reference.domain.meeting.MeetingAggregate;
@@ -94,6 +104,7 @@ import java.time.Duration;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.HashMap;
+import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
@@ -196,6 +207,155 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
                     "login-stop-key-123456789");
             assertEquals("READY", meetingState(meetingId));
             assertEquals(1, count("meeting_client_result"));
+            // 旧客户端没有采音事实时仍可显示结果，不生成实测0的结算。
+            assertEquals(1, count("usage_operation"));
+            assertEquals(0, countCommittedUsage());
+            assertEquals(1000, clientManifest(meetingId).durationMs());
+        }
+    }
+
+    @Test
+    void clientCapturedUsageSettlesOnceAndIgnoresSummaryWaiting(
+            @TempDir Path artifactRoot) throws Exception {
+        migrate(1);
+        MutableClock clock = new MutableClock(NOW, ZoneOffset.UTC);
+        try (var assembly = ReferenceMeetingHttpAssembly.start(enabledConfig(), clock,
+                new PersistentFileSystemMockArtifactStore(artifactRoot, 1024 * 1024));
+             var network = assembly.newJdkHttpServer(new InetSocketAddress("127.0.0.1", 0))) {
+            network.start();
+            int port = network.address().getPort();
+            String meetingId = createAndStartClient(port, "captured-usage");
+            appendClientTranscriptOverHttp(port, meetingId, TOKEN);
+            long originalVersion = reservationVersion(meetingId);
+            String usagePath = "/v1/meetings/" + meetingId + "/usage:submit";
+            String usage = contractFixture("client-input-usage.valid.json");
+            // 正负Fixture都通过正式HTTP解码边界，不另建一套Schema验证器。
+            assertEquals(400, status(exchange(port, "POST", usagePath,
+                    contractFixture("client-input-usage.negative.invalid.json"),
+                    networkHeaders(TOKEN, null, true))));
+            String submitted = exchange(port, "POST", usagePath, usage,
+                    networkHeaders(TOKEN, null, true));
+            assertEquals(201, status(submitted));
+            assertEquals(1000, ERROR_JSON.readTree(responseBody(submitted))
+                    .path("audioDurationMs").asLong());
+            assertEquals(200, status(exchange(port, "POST", usagePath, usage,
+                    networkHeaders(TOKEN, null, true))));
+            assertEquals(409, status(exchange(port, "POST", usagePath,
+                    "{\"audioDurationMs\":1001}", networkHeaders(TOKEN, null, true))));
+            // 模型收口／总结即使等待两分钟，实际采音用量仍为1000毫秒。
+            clock.advanceTo(NOW.plusSeconds(120));
+            String stopPath = "/v1/meetings/" + meetingId + ":stop";
+            String stopKey = "captured-usage-stop-key-123456789";
+            String stopped = exchange(port, "POST", stopPath, "",
+                    networkHeaders(TOKEN, stopKey, false));
+            assertEquals(200, status(stopped));
+            assertEquals("READY", meetingState(meetingId));
+            assertEquals(1000, clientManifest(meetingId).durationMs());
+            assertCommittedUsage(meetingId, 1000, originalVersion);
+            String replay = exchange(port, "POST", stopPath, "",
+                    networkHeaders(TOKEN, stopKey, false));
+            assertEquals(200, status(replay));
+            assertEquals(responseBody(stopped), responseBody(replay));
+            assertEquals(200, status(exchange(port, "POST", usagePath, usage,
+                    networkHeaders(TOKEN, null, true))));
+            assertCommittedUsage(meetingId, 1000, originalVersion);
+            assertEquals(1, countCommittedUsage());
+            assertEquals(2, count("usage_operation")); // 首次reserve＋唯一commit。
+            assertEquals(1, count("meeting_client_result"));
+        }
+    }
+
+    @Test
+    void measuredZeroClientUsageSettlesAndCreatesEmptyResult(
+            @TempDir Path artifactRoot) throws Exception {
+        migrate(1);
+        MutableClock clock = new MutableClock(NOW, ZoneOffset.UTC);
+        try (var assembly = ReferenceMeetingHttpAssembly.start(enabledConfig(), clock,
+                new PersistentFileSystemMockArtifactStore(artifactRoot, 1024 * 1024));
+             var network = assembly.newJdkHttpServer(new InetSocketAddress("127.0.0.1", 0))) {
+            network.start();
+            int port = network.address().getPort();
+            String meetingId = createAndStartClient(port, "measured-zero");
+            long originalVersion = reservationVersion(meetingId);
+            assertEquals(201, status(exchange(port, "POST", "/v1/meetings/" + meetingId
+                    + "/usage:submit", "{\"audioDurationMs\":0}",
+                    networkHeaders(TOKEN, null, true))));
+            clock.advanceTo(NOW.plusSeconds(45));
+            assertEquals(200, status(exchange(port, "POST", "/v1/meetings/" + meetingId
+                    + ":stop", "{}", networkHeaders(TOKEN,
+                    "measured-zero-stop-key-123456789", true))));
+            assertEquals("READY", meetingState(meetingId));
+            assertCommittedUsage(meetingId, 0, originalVersion);
+            assertEquals(1, countCommittedUsage());
+            assertEquals(0, clientManifest(meetingId).durationMs());
+            assertEquals(List.of(), clientManifest(meetingId).artifacts());
+        }
+    }
+
+    @Test
+    void clientResultWaitsForSettlementAndRetriesTheSameFrozenRequest(
+            @TempDir Path artifactRoot) throws Exception {
+        migrate(1);
+        var artifacts = new PersistentFileSystemMockArtifactStore(artifactRoot, 1024 * 1024);
+        try (var assembly = ReferenceMeetingHttpAssembly.start(enabledConfig(), CLOCK, artifacts);
+             var network = assembly.newJdkHttpServer(new InetSocketAddress("127.0.0.1", 0))) {
+            network.start();
+            int port = network.address().getPort();
+            String meetingId = createAndStartClient(port, "settlement-wait");
+            assertEquals(201, status(exchange(port, "POST", "/v1/meetings/" + meetingId
+                    + "/usage:submit", "{\"audioDurationMs\":1000}",
+                    networkHeaders(TOKEN, null, true))));
+            var requests = new ArrayList<CommitUsageRequest>();
+            EntitlementProvider delegate = assembly.entitlementProvider();
+            EntitlementProvider onceUnavailable = new EntitlementProvider() {
+                @Override public EntitlementProviderResult<MeetingGrant> authorizeStart(
+                        AuthorizeStartRequest request) { return delegate.authorizeStart(request); }
+                @Override public EntitlementProviderResult<UsageOperationResult> reserveUsage(
+                        ReserveUsageRequest request) { return delegate.reserveUsage(request); }
+                @Override public EntitlementProviderResult<UsageOperationResult> cancelReservation(
+                        CancelReservationRequest request) {
+                    return delegate.cancelReservation(request);
+                }
+                @Override public EntitlementProviderResult<UsageOperationResult> commitUsage(
+                        CommitUsageRequest request) {
+                    requests.add(request);
+                    return requests.size() == 1 ? EntitlementProviderResult.failure(
+                            new EntitlementProviderError(
+                                    EntitlementProviderError.Code.PROVIDER_UNAVAILABLE, true))
+                            : delegate.commitUsage(request);
+                }
+            };
+            var finalizer = new JdbcClientMeetingResultFinalizer(fixtureDataSource,
+                    () -> "receipt_" + UUID.randomUUID(), CLOCK, artifacts, onceUnavailable);
+            assertTrue(finalizer.finalizeIfClient(meetingId));
+            assertEquals(0, requests.size(), "尚未Stop时不得结算");
+            // 同一个认证Stop服务每次均提交／重放原停止意图，再触发同一Finalizer。
+            var stopService = new AuthenticatedMeetingStopApplicationService(SCOPE,
+                    new ReferenceDevIdentityProvider(
+                            ReferenceDevIdentityConfig.fromEnvironment(enabledConfig()), CLOCK),
+                    new JdbcOwnedMeetingStopUnitOfWork(fixtureDataSource, CLOCK),
+                    new JdbcMeetingQueryPort(fixtureDataSource,
+                            "assembly-page-secret-0123456789-abcdefgh"
+                                    .getBytes(StandardCharsets.UTF_8)),
+                    null, finalizer);
+            var stop = new StopMeetingIntent(meetingId,
+                    "settlement-wait-stop-key-123456789");
+            var first = assertInstanceOf(AuthenticatedMeetingStopResult.Success.class,
+                    stopService.stop(clientStopVerification(), stop));
+            assertEquals(MeetingState.STOPPING, first.meeting().state());
+            assertEquals(202, assembly.errorMapper().stop(first).status());
+            assertEquals("STOPPING", meetingState(meetingId));
+            assertEquals(0, count("meeting_client_result"));
+            assertEquals(0, countCommittedUsage());
+            var replay = assertInstanceOf(AuthenticatedMeetingStopResult.Success.class,
+                    stopService.stop(clientStopVerification(), stop));
+            assertEquals(MeetingState.READY, replay.meeting().state());
+            assertEquals(200, assembly.errorMapper().stop(replay).status());
+            assertEquals("READY", meetingState(meetingId));
+            assertEquals(2, requests.size());
+            assertEquals(requests.get(0), requests.get(1));
+            assertEquals(1, countCommittedUsage());
+            assertCommittedUsage(meetingId, 1000, requests.get(0).expectedVersion());
         }
     }
 
@@ -296,14 +456,7 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
     /** 两种身份装配共用标准字幕→Stop→同键Stop重放，不调用外部模型。 */
     private void completeClientTranscriptOverHttp(int port, String meetingId, String token,
             String stopKey) throws Exception {
-        String transcript = """
-                {"clientEventId":"client-transcript-1","clientSequence":1,
-                 "transcriptUpsert":{"segmentId":"source-1","revision":1,
-                 "operation":"UPSERT_OPERATION_UPSERT","startMs":0,"endMs":1000,
-                 "language":"zh-CN","text":"测试字幕","final":true}}
-                """;
-        assertEquals(201, status(exchange(port, "POST", "/v1/meetings/" + meetingId
-                + "/events:append", transcript, networkHeaders(token, null, true))));
+        appendClientTranscriptOverHttp(port, meetingId, token);
         String stopPath = "/v1/meetings/" + meetingId + ":stop";
         String stopped = exchange(port, "POST", stopPath, "",
                 networkHeaders(token, stopKey, false));
@@ -312,6 +465,101 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
                 networkHeaders(token, stopKey, false));
         assertEquals(200, status(replay));
         assertEquals(responseBody(stopped), responseBody(replay));
+    }
+
+    private void appendClientTranscriptOverHttp(int port, String meetingId, String token)
+            throws Exception {
+        String transcript = """
+                {"clientEventId":"client-transcript-1","clientSequence":1,
+                 "transcriptUpsert":{"segmentId":"source-1","revision":1,
+                 "operation":"UPSERT_OPERATION_UPSERT","startMs":0,"endMs":1000,
+                 "language":"zh-CN","text":"测试字幕","final":true}}
+                """;
+        assertEquals(201, status(exchange(port, "POST", "/v1/meetings/" + meetingId
+                + "/events:append", transcript, networkHeaders(token, null, true))));
+    }
+
+    private String createAndStartClient(int port, String name) throws Exception {
+        String key = name + "-create-key-123456789";
+        String created = exchange(port, "POST", "/v1/meetings",
+                createRequest(key, name).body(), networkHeaders(TOKEN, key, true));
+        assertEquals(201, status(created));
+        String meetingId = ERROR_JSON.readTree(responseBody(created)).path("meetingId").asText();
+        assertEquals(200, status(exchange(port, "POST", "/v1/meetings/" + meetingId
+                + ":startClient", "", networkHeaders(TOKEN, null, false))));
+        return meetingId;
+    }
+
+    private static String contractFixture(String name) throws IOException {
+        Path directory = Files.isDirectory(Path.of("contracts/fixtures"))
+                ? Path.of("contracts/fixtures") : Path.of("../contracts/fixtures");
+        return Files.readString(directory.resolve(name), StandardCharsets.UTF_8);
+    }
+
+    private static IdentityVerificationRequest clientStopVerification() {
+        return new IdentityVerificationRequest(
+                IdentityVerificationRequest.CredentialType.BEARER_TOKEN,
+                SecretCredential.copyOf(TOKEN.getBytes(StandardCharsets.US_ASCII)),
+                "assembly-audience", "assembly-client");
+    }
+
+    private long reservationVersion(String meetingId) throws SQLException {
+        try (var connection = fixtureDataSource.getConnection();
+             var statement = connection.prepareStatement("""
+                     SELECT r.version FROM meeting m JOIN usage_reservation r
+                       ON r.reservation_id=m.usage_reservation_id WHERE m.meeting_id=?
+                     """)) {
+            statement.setString(1, meetingId);
+            try (var rows = statement.executeQuery()) {
+                assertTrue(rows.next());
+                return rows.getLong(1);
+            }
+        }
+    }
+
+    private int countCommittedUsage() throws SQLException {
+        try (var connection = fixtureDataSource.getConnection();
+             var statement = connection.createStatement();
+             var rows = statement.executeQuery(
+                     "SELECT count(*) FROM usage_operation WHERE operation_scope='usage.commit.v1'")) {
+            assertTrue(rows.next());
+            return rows.getInt(1);
+        }
+    }
+
+    private void assertCommittedUsage(String meetingId, long actual, long expectedVersion)
+            throws SQLException {
+        try (var connection = fixtureDataSource.getConnection();
+             var statement = connection.prepareStatement("""
+                     SELECT r.status, r.actual_amount, r.version,
+                            i.audio_duration_ms, i.usage_expected_version, i.usage_submitted_at
+                     FROM meeting m JOIN meeting_client_input i USING (meeting_id)
+                     JOIN usage_reservation r ON r.reservation_id=m.usage_reservation_id
+                     WHERE m.meeting_id=?
+                     """)) {
+            statement.setString(1, meetingId);
+            try (var rows = statement.executeQuery()) {
+                assertTrue(rows.next());
+                assertEquals("COMMITTED", rows.getString("status"));
+                assertEquals(actual, rows.getLong("actual_amount"));
+                assertEquals(actual, rows.getLong("audio_duration_ms"));
+                assertEquals(expectedVersion, rows.getLong("usage_expected_version"));
+                assertTrue(rows.getLong("version") > expectedVersion);
+                assertTrue(rows.getTimestamp("usage_submitted_at") != null);
+            }
+        }
+    }
+
+    private MeetingManifest clientManifest(String meetingId) throws Exception {
+        try (var connection = fixtureDataSource.getConnection();
+             var statement = connection.prepareStatement(
+                     "SELECT manifest_json FROM meeting_client_result WHERE meeting_id=?")) {
+            statement.setString(1, meetingId);
+            try (var rows = statement.executeQuery()) {
+                assertTrue(rows.next());
+                return MeetingManifestJson.decode(rows.getString(1));
+            }
+        }
     }
 
     @Test

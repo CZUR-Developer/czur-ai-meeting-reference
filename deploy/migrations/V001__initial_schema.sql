@@ -269,7 +269,12 @@ END))),
 -- 客户端身份/顺序与服务端 event_sequence 分开保存；统一事件正文仍只有 meeting_event 一份。
 CREATE TABLE meeting_client_input (
     meeting_id text PRIMARY KEY,
-    started_at timestamp with time zone NOT NULL
+    started_at timestamp with time zone NOT NULL,
+    -- 旧客户端未上报时保持NULL；NULL和实测0毫秒分别表达。
+    -- 首次提交同时冻结Reservation版本，Stop重放不重新取演进后的版本。
+    audio_duration_ms bigint CHECK (audio_duration_ms >= 0),
+    usage_submitted_at timestamp with time zone,
+    usage_expected_version bigint CHECK (usage_expected_version >= 0)
 );
 
 CREATE TABLE meeting_client_event (
