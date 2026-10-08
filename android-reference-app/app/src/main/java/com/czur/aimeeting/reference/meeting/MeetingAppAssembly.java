@@ -4,6 +4,7 @@ import com.czur.aimeeting.client.ClientIdentity;
 import com.czur.aimeeting.client.MeetingClientConfig;
 import com.czur.aimeeting.client.MeetingProfile;
 import com.czur.aimeeting.client.MeetingDiscovery;
+import com.czur.aimeeting.client.ModelAdapterRegistry;
 import com.czur.aimeeting.client.result.ResultActionRegistry;
 import com.czur.aimeeting.client.result.ResultActionPlugin;
 import com.czur.aimeeting.client.result.ResultOptions;
@@ -20,7 +21,7 @@ import java.util.Set;
 import java.util.concurrent.Executor;
 
 /**
- * 参考App的集中装配入口：身份来源与构建期结果动作清单，默认只开放网页查看。
+ * 参考App的集中装配入口：身份、模型协议、结果动作和页面／窗口工厂，默认只开放网页查看。
  *
  * <p>默认内存Provider由Activity与会议Service共同使用。伙伴替换身份时调用
  * registerIdentityProvider，或直接替换默认初始化；实现只需返回自己后端接受的会话。
@@ -33,6 +34,8 @@ public final class MeetingAppAssembly {
     private static String serverUrl = "";
     private static String resultWebUrl = "";
     private static IdentityProvider identityProvider = new ReferenceIdentityProvider();
+    // 运行工厂首次取用时才创建默认表，单独装配页面／窗口不提前加载模型协议类。
+    private static ModelAdapterRegistry modelAdapters;
     // 替换提示例：List.of(new CompletionNoticeAction())；PDF／邮件也需在此显式注册。
     private static List<AppResultActionPlugin> resultActions = List.of(new WebResultActionPlugin());
     private static ResultActionRegistry resultRegistry = new ResultActionRegistry(resultActions);
@@ -41,6 +44,22 @@ public final class MeetingAppAssembly {
     private static MeetingPageViews.Factory pageFactory = new MeetingPageViews.DefaultFactory();
 
     private MeetingAppAssembly() {}
+
+    /**
+     * 构建期装配模型协议注册表；在首次创建会前／Service客户端前完成登记。
+     * Registry保存工厂，每次创建须返回新的Adapter；同ID可替换默认工厂。
+     * 注册能力只表示可解析格式，模型地址、材料及本场授权继续由对应后端下发。
+     * 替换装配只影响随后创建的客户端，已有客户端保留原注册表；会中不得修改该表。
+     */
+    public static synchronized void registerModelAdapters(ModelAdapterRegistry adapters) {
+        modelAdapters = Objects.requireNonNull(adapters, "adapters");
+    }
+
+    /** 会前与Service运行工厂共用此表；未注册时创建内置默认表，不创建某场Adapter。 */
+    public static synchronized ModelAdapterRegistry modelAdapters() {
+        if (modelAdapters == null) modelAdapters = new ModelAdapterRegistry();
+        return modelAdapters;
+    }
 
     /** 会前登记App页面工厂；只替换View，新Activity继续绑定同一身份、能力及Service链。 */
     public static synchronized void registerPageFactory(MeetingPageViews.Factory factory) {

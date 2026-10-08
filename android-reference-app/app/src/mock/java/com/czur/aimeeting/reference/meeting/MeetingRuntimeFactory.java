@@ -5,7 +5,6 @@ import com.czur.aimeeting.client.MeetingClient;
 import com.czur.aimeeting.client.MeetingClientConfig;
 import com.czur.aimeeting.client.MeetingCoordinator;
 import com.czur.aimeeting.client.MeetingRuntimePort;
-import com.czur.aimeeting.client.ModelAdapterRegistry;
 
 import android.content.Context;
 import android.os.SystemClock;
@@ -23,12 +22,15 @@ import com.czur.aimeeting.reference.mock.MockSummaryAdapter;
 import java.io.IOException;
 import java.util.Set;
 
-/** 无私有 AAR 时仅替换模型运行端口；其余登录、建会、显示与收口共用同一协调器。 */
+/**
+ * 无私有AAR时消费同一集中装配注册表，其余登录、建会、显示与收口共用同一协调器。
+ * 模型运行端口仍固定演示字幕／纪要，不领取真实模型材料，也不执行伙伴Adapter。
+ */
 public final class MeetingRuntimeFactory {
     private MeetingRuntimeFactory() {}
 
     public static MeetingClient create(Context context, MeetingClientConfig config) {
-        return new MeetingCoordinator(config, new ModelAdapterRegistry(), new MeetingRuntimePort() {
+        return new MeetingCoordinator(config, MeetingAppAssembly.modelAdapters(), new MeetingRuntimePort() {
             // 与 Service 计时、MediaProjection offset 使用同一个 Android 单调时钟。
             @Override public long elapsedRealtimeMs() { return SystemClock.elapsedRealtime(); }
             @Override public boolean usesServerModelMaterials() { return false; }

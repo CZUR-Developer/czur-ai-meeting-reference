@@ -4,6 +4,13 @@ import static org.junit.Assert.*;
 import com.czur.aimeeting.client.*;
 import com.czur.aimeeting.client.result.*;
 import com.czur.aimeeting.client.server.DeploymentOptions;
+import com.czur.aimeeting.client.provider.BailianSummaryAdapter;
+import com.czur.aimeeting.client.provider.SampleJsonModelAdapter;
+import com.czur.aimeeting.client.provider.TingwuModelAdapter;
+import com.czur.aimeeting.model.ModelAdapter;
+import com.czur.aimeeting.model.ModelSessionGrant;
+import com.czur.aimeeting.model.ModelSignal;
+import com.czur.aimeeting.model.TranscriptListener;
 import com.czur.aimeeting.reference.*;
 import com.czur.aimeeting.reference.ui.MeetingOverlayFactory;
 import com.czur.aimeeting.reference.ui.OverlayViewFactory;
@@ -19,10 +26,46 @@ import org.junit.Test;
 public final class MeetingAppAssemblyTest {
     @After public void restoreDefault() {
         MeetingAppAssembly.clearPreparedMeeting();
+        MeetingAppAssembly.registerModelAdapters(new ModelAdapterRegistry());
         MeetingAppAssembly.registerResultActions(List.of(new WebResultActionPlugin()));
         MeetingAppAssembly.registerOverlayFactory(new OverlayViewFactory());
         MeetingAppAssembly.registerPageFactory(new MeetingPageViews.DefaultFactory());
         MeetingAppAssembly.configureResultWeb("");
+    }
+
+    @Test public void defaultModelRegistryKeepsBuiltInAdaptersAndReadyCapabilities() {
+        ModelAdapterRegistry adapters = MeetingAppAssembly.modelAdapters();
+        assertEquals(TingwuModelAdapter.ID, adapters.create(TingwuModelAdapter.ID).id());
+        assertEquals(SampleJsonModelAdapter.ID, adapters.create(SampleJsonModelAdapter.ID).id());
+        assertEquals(BailianSummaryAdapter.ID, adapters.createSummary(BailianSummaryAdapter.ID).id());
+        assertEquals(Set.of(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.TRANSLATION,
+                MeetingCapabilityState.SUMMARY), adapters.setupCapabilities());
+    }
+
+    @Test public void partnerRegistryIsRegisteredAtAssemblyAndKeepsDefaults() {
+        ModelAdapterRegistry adapters = new ModelAdapterRegistry().register("partner-ws",
+                PartnerAdapter::new, Set.of(MeetingCapabilityState.TRANSCRIPT));
+        MeetingAppAssembly.registerModelAdapters(adapters);
+        assertSame(adapters, MeetingAppAssembly.modelAdapters());
+        assertEquals("partner-ws", MeetingAppAssembly.modelAdapters().create("partner-ws").id());
+        assertEquals(Set.of(MeetingCapabilityState.TRANSCRIPT),
+                MeetingAppAssembly.modelAdapters().realtimeCapabilities("partner-ws"));
+        assertEquals(TingwuModelAdapter.ID,
+                MeetingAppAssembly.modelAdapters().create(TingwuModelAdapter.ID).id());
+    }
+
+    @Test public void registeredFactoryCreatesIndependentAdapterForEachMeeting() {
+        AtomicInteger created = new AtomicInteger();
+        MeetingAppAssembly.registerModelAdapters(new ModelAdapterRegistry().register("partner-ws", () -> {
+            created.incrementAndGet();
+            return new PartnerAdapter();
+        }, Set.of(MeetingCapabilityState.TRANSCRIPT)));
+        // 装配只保存工厂，两场分别取得自己的解析状态，不复用上一场的Adapter。
+        assertEquals(0, created.get());
+        ModelAdapter first = MeetingAppAssembly.modelAdapters().create("partner-ws");
+        ModelAdapter second = MeetingAppAssembly.modelAdapters().create("partner-ws");
+        assertNotSame(first, second);
+        assertEquals(2, created.get());
     }
 
     @Test public void pageFactoryOnlyReplacesViewsAndKeepsDefaultWebAndWindow() {
@@ -174,6 +217,15 @@ public final class MeetingAppAssemblyTest {
         };
         assertEquals(ResultActionOutcome.Status.FAILED, execute(prepared, ready, access, Runnable::run).status());
         assertEquals(MeetingResult.Status.READY, ready.status());
+    }
+
+    /** 正常注册示例仅提供模型协议接口，不启动音源、网络或第二份会议状态。 */
+    private static final class PartnerAdapter implements ModelAdapter {
+        @Override public String id() { return "partner-ws"; }
+        @Override public String startMessage(ModelSessionGrant grant) { return "start"; }
+        @Override public ModelSignal onServerMessage(String message, TranscriptListener listener) {
+            return ModelSignal.NONE;
+        }
     }
 
     private static MeetingSetup setup(String id) {

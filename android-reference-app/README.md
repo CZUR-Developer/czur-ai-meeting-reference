@@ -95,8 +95,9 @@ Stop后由后端生成字幕和译文结果。2026-10-07实体MIC的字幕／单
 
 P5-2 增加 `sample-json-ws` 第二格式样例：它的模型消息使用顶层
 `type/segment/revision`，与听悟的 `header/payload` 格式不同；两者在
-`ModelAdapterRegistry` 中构建期注册，后端 `modelSession.adapterId` 决定本场选用哪一个。
-伙伴适配其他格式时新增 Adapter 并在注册表登记其实时能力，通用会议页面和 SDK
+`MeetingAppAssembly` 持有的 `ModelAdapterRegistry` 中构建期注册，后端
+`modelSession.adapterId` 决定本场选用哪一个。伙伴适配其他格式时新增 Adapter 并在集中装配点
+登记其实时能力，通用会议页面和 SDK
 不用修改。登录后参考 App 调用 `MeetingClient.discover`，直接读取部署与本地能力
 已求交的 `availableCapabilities` 开放会前模式；发现失败时显示原因并保留账号切换入口，
 不创建会议。组合层读取 Create 响应的 `capabilityDecisions`，本场权益、
@@ -357,10 +358,31 @@ ENDED且不读Manifest／主动交付，不承诺无服务端记录。
 
 ### 完整会议入口与平台扩展点
 
-`src/sdk/.../MeetingRuntimeFactory` 仅构造 `AiMeetingClient(context, config)`；Mock Factory
-为同一 `MeetingCoordinator` 注入现存固定字幕/纪要运行端口，不增加第二套业务流程。
+`src/sdk/.../MeetingRuntimeFactory` 构造
+`AiMeetingClient(context, config, MeetingAppAssembly.modelAdapters())`；Mock Factory
+为同一 `MeetingCoordinator` 注入同一注册表及现存固定字幕／纪要运行端口，不增加第二套业务流程。
 配置包含 Server 地址、登录 Token、客户端身份、会议档位和串行回调 Executor；Android
 使用主线程 Handler。Activity 的会前客户端和 Service 的会议客户端彼此独立。
+
+模型协议与身份、结果动作、页面／窗口工厂都在`MeetingAppAssembly`集中装配。
+运行工厂首次取用时创建的默认表包含听悟、`sample-json-ws`及百炼总结；单独使用页面／窗口装配不加载模型协议类。
+伙伴先实现公开`ModelAdapter`，
+再在首次创建Activity／Service客户端前（例如自己的`Application.onCreate`）注册：
+
+```java
+// PartnerModelAdapter是伙伴自己的协议实现；每次调用工厂须创建新实例。
+ModelAdapterRegistry adapters = new ModelAdapterRegistry();
+adapters.register(PartnerModelAdapter.ID, PartnerModelAdapter::new,
+        Set.of(MeetingCapabilityState.TRANSCRIPT));
+MeetingAppAssembly.registerModelAdapters(adapters);
+// 恢复默认组合：MeetingAppAssembly.registerModelAdapters(new ModelAdapterRegistry());
+```
+
+会后文本协议可在同一注册表调用`registerSummary(id, factory)`。相同ID后注册替换原工厂；
+解析能力须如实登记，后端仍决定本场`adapterId`、模型地址、短期材料与授权。
+装配只保存工厂，不保存某场Adapter；替换装配仅影响随后创建的客户端，会中不得修改原表。
+SDK版执行选中的真实Adapter；Mock版继续固定字幕／纪要演示，不领取真实材料、不执行伙伴Adapter，
+不能用Mock结果代签伙伴协议。更换模型实现只需新增实现并在此登记，无需修改两份运行工厂或SDK源码。
 
 ```java
 MeetingClient client = MeetingRuntimeFactory.create(context, config);
@@ -386,7 +408,7 @@ session.requestStop(); // 正常收口；client.close() 仅用于取消/释放�
 `session.submitPresentation(offsetMs, jpeg)` 交组合层保存。系统单独停止投影只结束
 屏采，字幕会议继续。`onResult`先于READY状态，后者之后才执行冻结动作；正文或通知失败
 不回退会议READY，结果访问保留到成功或用户结束交互。合作伙伴可更换这些平台/UI
-实现，或在 SDK Factory 传入自定义 Adapter 工厂注册表，继续复用同一组合流程。
+实现，或在`MeetingAppAssembly`登记自定义Adapter工厂注册表，继续复用同一组合流程。
 
 ### 合作伙伴会前开会条件 Hook
 
