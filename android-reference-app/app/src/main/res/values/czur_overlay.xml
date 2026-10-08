@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 国内版窗口只迁移通用显示语义；账户、会员及 Launcher 动作仍由伙伴装配。 -->
+    <string name="czur_overlay_stop">停止会议</string>
+    <string name="czur_overlay_collapse">收起窗口</string>
+    <string name="czur_overlay_restore">展开会议窗口</string>
+    <string name="czur_overlay_large">大窗口</string>
+    <string name="czur_overlay_normal">普通窗口</string>
+    <string name="czur_overlay_swap">交换左右</string>
+    <string name="czur_overlay_simple">简洁模式</string>
+    <string name="czur_overlay_simple_exit">退出简洁模式</string>
+    <string name="czur_overlay_open">返回会议</string>
+    <string name="czur_overlay_recording">记录中</string>
+    <string name="czur_overlay_recording_hint">发言后将显示实时字幕</string>
+</resources>

@@ -47,6 +47,10 @@ android {
 }
 
 dependencies {
+    // Mini 悬浮窗直接复用国内版 APNG 素材；只引入独立图片显示库，不带 Starry 业务依赖。
+    implementation("com.github.penfeizhou.android.animation:apng:3.0.5")
+    // APNG 的父类实现 Animatable2Compat，但其 POM 只声明运行依赖；显式补齐编译可见性。
+    implementation("androidx.vectordrawable:vectordrawable-animated:1.1.0")
     if (meetingUiAar != null) {
         // 裸 UI AAR 不带 core/contract/native，也没有其他运行依赖。
         implementation(files(meetingUiAar))

@@ -26,6 +26,28 @@ import org.robolectric.annotation.GraphicsMode;
 @Config(sdk = 35)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public class SubtitleViewFactoryTest {
+    @Test public void domesticHistoryAndCurrentPartsKeepFixedLineHeightAndIndependentFinal() {
+        SubtitleTextView text = subtitle(3, true);
+        SubtitleViewFactory.setLineHeightPx(text, 36);
+        SubtitleViewFactory.renderParts(text, List.of(
+                new DisplaySnapshotPresentation.SubtitleRow("history", "已完成。", 1f),
+                new DisplaySnapshotPresentation.SubtitleRow("current", "当前还在修订", 0.8f)));
+        measure(text);
+        assertEquals(36, text.getFixedLineHeightPx());
+        assertEquals("已完成。当前还在修订", text.getFullText().toString());
+        assertEquals(2, text.getParts().size());
+        assertTrue(text.getParts().get(0).isFinal());
+        assertFalse(text.getParts().get(1).isFinal());
+        assertEquals(108, text.getMeasuredHeight());
+        SubtitleViewFactory.renderParts(text, List.of(
+                new DisplaySnapshotPresentation.SubtitleRow("history", "已完成。", 1f),
+                new DisplaySnapshotPresentation.SubtitleRow("current", "修订完成", 1f)));
+        measure(text);
+        assertEquals("已完成。修订完成", text.getFullText().toString());
+        assertEquals(2, text.getParts().size());
+        assertTrue(text.getParts().get(1).isFinal());
+    }
+
     @Test public void pageAndOverlayUseSameLatestSegmentAndCompletionState() {
         var old = new MeetingDisplaySnapshot.Row("old",
                 new TranscriptEvent("old", 2, 0, 100, "zh-CN", "旧段迟到完成", true), null,
@@ -62,28 +84,25 @@ public class SubtitleViewFactoryTest {
                 new TranscriptEvent("pair", 1, 0, 100, "zh-CN", "原文仍在修订", false),
                 new TranslationEvent("translation", "pair", 1, "zh-CN", "en-US", "Translation done", true),
                 MeetingDisplaySnapshot.Side.B, DisplayRouter.Basis.STABLE_DIRECTION);
-        SubtitleTextView left = subtitle(3, true);
-        SubtitleTextView right = subtitle(3, true);
-        var normal = DisplaySnapshotPresentation.bilingual(row, false);
-        SubtitleViewFactory.render(left, normal.segmentId(), normal.left(), normal.leftAlpha());
-        SubtitleViewFactory.render(right, normal.segmentId(), normal.right(), normal.rightAlpha());
-        measure(left);
-        measure(right);
-        assertEquals("Translation done", left.getFullText().toString());
-        assertTrue(left.getParts().get(0).isFinal());
-        assertFalse(right.getParts().get(0).isFinal());
+        SubtitleTextView original = subtitle(3, true);
+        SubtitleTextView translated = subtitle(3, true);
+        var normal = DisplaySnapshotPresentation.speakerColumn(row, false);
+        assertEquals(MeetingDisplaySnapshot.Side.B, normal.side());
+        SubtitleViewFactory.render(original, normal.segmentId(), normal.source(), normal.sourceAlpha());
+        SubtitleViewFactory.render(translated, normal.segmentId(), normal.translated(), normal.translatedAlpha());
+        measure(original);
+        measure(translated);
+        assertEquals("Translation done", translated.getFullText().toString());
+        assertTrue(translated.getParts().get(0).isFinal());
+        assertFalse(original.getParts().get(0).isFinal());
 
-        var swapped = DisplaySnapshotPresentation.bilingual(row, true);
-        SubtitleViewFactory.render(left, swapped.segmentId(), swapped.left(), swapped.leftAlpha());
-        SubtitleViewFactory.render(right, swapped.segmentId(), swapped.right(), swapped.rightAlpha());
-        measure(left);
-        measure(right);
-        assertEquals("原文仍在修订", left.getFullText().toString());
-        assertFalse(left.getParts().get(0).isFinal());
-        assertTrue(right.getParts().get(0).isFinal());
-        assertEquals(1, left.getParts().size());
-        assertEquals(1.0f, left.getAlpha(), 0.0f);
-        assertEquals(1.0f, right.getAlpha(), 0.0f);
+        var swapped = DisplaySnapshotPresentation.speakerColumn(row, true);
+        assertEquals(MeetingDisplaySnapshot.Side.A, swapped.side());
+        assertEquals(normal.source(), swapped.source());
+        assertEquals(normal.translated(), swapped.translated());
+        assertEquals(1, original.getParts().size());
+        assertEquals(1.0f, original.getAlpha(), 0.0f);
+        assertEquals(1.0f, translated.getAlpha(), 0.0f);
     }
 
     private static SubtitleTextView subtitle(int maxLines, boolean reserve) {

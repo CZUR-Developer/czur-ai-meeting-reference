@@ -5,6 +5,9 @@ import android.util.TypedValue;
 import android.widget.TextView;
 import com.czur.aimeeting.ui.SubtitlePart;
 import com.czur.aimeeting.ui.SubtitleTextView;
+import com.czur.aimeeting.reference.meeting.DisplaySnapshotPresentation.SubtitleRow;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Collections;
 
 /**
@@ -32,6 +35,27 @@ public final class SubtitleViewFactory {
         view.setMaxVisibleLines(maxVisibleLines);
         view.setReserveLineSlots(reserveLineSlots);
         return view;
+    }
+
+    /**
+     * 主线程设置明确px固定行高，直接调用SDK既有显示接口。
+     * 国内24设计字号配36设计行高；不使用TextView行距绕过SDK控件的重排逻辑。
+     */
+    public static void setLineHeightPx(TextView view, int lineHeightPx) {
+        ((SubtitleTextView)view).setFixedLineHeightPx(lineHeightPx);
+    }
+
+    /**
+     * 主线程把已路由的final历史＋当前句交给SDK既有字幕排版。
+     * 国内历史与当前句连续显示，所以只设置空分隔符；SDK按完整富文本裁最近可见行。
+     * 原文／译文分别调用，各段保留自己的final状态，不新增文字账本或SDK协议。
+     */
+    public static void renderParts(TextView view, List<SubtitleRow> rows) {
+        SubtitleTextView subtitle = (SubtitleTextView)view;
+        List<SubtitlePart> parts = new ArrayList<>(rows.size());
+        for (SubtitleRow row : rows) parts.add(new SubtitlePart(row.segmentId(), row.text(), row.alpha() == 1f));
+        subtitle.setPartSeparator("");
+        subtitle.setParts(parts);
     }
 
     /**

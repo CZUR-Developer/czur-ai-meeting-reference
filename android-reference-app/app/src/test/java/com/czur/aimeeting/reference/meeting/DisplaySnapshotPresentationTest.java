@@ -8,54 +8,75 @@ import com.czur.aimeeting.model.TranslationEvent;
 import java.util.List;
 import org.junit.Test;
 
-/** 只验证 SDK 已决定事实的 UI 投影，不复制方向、语种或修订路由算法。 */
+/** 只验证SDK决定的事实如何呈现，不复制DOA／语言／修订路由算法。 */
 public final class DisplaySnapshotPresentationTest {
-    @Test public void emptyAndPartialFinalKeepExistingSubtitlePresentation() {
-        assertEquals("等待字幕…", DisplaySnapshotPresentation.latestSubtitle(snapshot(List.of(), null, false)).text());
-        var partial = row("one", "初稿", false, MeetingDisplaySnapshot.Side.A);
-        assertEquals(0.8f, DisplaySnapshotPresentation.subtitle(partial).alpha(), 0.0f);
-        var complete = row("one", "完整文字", true, MeetingDisplaySnapshot.Side.A);
-        assertEquals("完整文字", DisplaySnapshotPresentation.subtitle(complete).text());
-        assertEquals(1.0f, DisplaySnapshotPresentation.subtitle(complete).alpha(), 0.0f);
-    }
-
-    @Test public void semanticSideAndSwapWinWithoutInferringLanguageFromText() {
-        var row = new MeetingDisplaySnapshot.Row("one", source("one", "Hello", false),
+    @Test public void domesticSpeakerColumnKeepsOriginalAndTranslationTogetherAcrossSwap() {
+        var paired = new MeetingDisplaySnapshot.Row("one", source("one", "Hello", false),
                 new TranslationEvent("tr", "one", 1, "en-US", "zh-CN", "你好", true),
                 MeetingDisplaySnapshot.Side.A, DisplayRouter.Basis.STABLE_DIRECTION);
-        var normal = DisplaySnapshotPresentation.bilingual(row, false);
-        assertEquals("Hello", normal.left());
-        assertEquals("你好", normal.right());
-        assertEquals(0.8f, normal.leftAlpha(), 0.0f);
-        assertEquals(1.0f, normal.rightAlpha(), 0.0f);
-        assertFalse(normal.languageFallback());
-        var swapped = DisplaySnapshotPresentation.bilingual(row, true);
-        assertEquals("你好", swapped.left());
-        assertEquals("Hello", swapped.right());
-        assertEquals("English", DisplaySnapshotPresentation.leftLabel(snapshot(List.of(row), "one", true)));
-        assertEquals("中文", DisplaySnapshotPresentation.rightLabel(snapshot(List.of(row), "one", true)));
-        assertEquals("en-US", row.transcript().language());
+        var left = DisplaySnapshotPresentation.speakerColumn(paired, false);
+        assertEquals(MeetingDisplaySnapshot.Side.A, left.side());
+        assertEquals("Hello", left.source());
+        assertEquals("你好", left.translated());
+        assertEquals(0.8f, left.sourceAlpha(), 0f);
+        assertEquals(1f, left.translatedAlpha(), 0f);
+        var right = DisplaySnapshotPresentation.speakerColumn(paired, true);
+        assertEquals(MeetingDisplaySnapshot.Side.B, right.side());
+        assertEquals(left.source(), right.source());
+        assertEquals(left.translated(), right.translated());
+        assertEquals(MeetingDisplaySnapshot.Side.A, paired.sourceSide());
     }
 
-    @Test public void unresolvedSideKeepsPlaceholderWithoutChoosingASide() {
-        var row = new MeetingDisplaySnapshot.Row("one", source("one", "123", false), null,
+    @Test public void unresolvedSpeakerColumnDoesNotGuessPhysicalSide() {
+        var undecided = new MeetingDisplaySnapshot.Row("pending", null,
+                new TranslationEvent("tr", "pending", 1, "en-US", "zh-CN", "你好", false),
                 MeetingDisplaySnapshot.Side.UNRESOLVED, DisplayRouter.Basis.LANGUAGE_UNRESOLVED);
-        var rendered = DisplaySnapshotPresentation.bilingual(row, true);
-        assertEquals("语言识别中：123", rendered.left());
-        assertEquals("", rendered.right());
-        assertTrue(rendered.languageFallback());
-        assertEquals(MeetingDisplaySnapshot.Side.UNRESOLVED, row.sourceSide());
+        var rendered = DisplaySnapshotPresentation.speakerColumn(undecided, true);
+        assertEquals(MeetingDisplaySnapshot.Side.UNRESOLVED, rendered.side());
+        assertEquals("", rendered.source());
+        assertEquals("你好", rendered.translated());
+        assertEquals(0.8f, rendered.translatedAlpha(), 0f);
     }
 
-    @Test public void translationFirstCanBeShownWithoutInventingOriginalText() {
-        var row = new MeetingDisplaySnapshot.Row("one", null,
+    @Test public void emptyAndPartialFinalKeepSubtitlePresentation() {
+        assertEquals("等待字幕…", DisplaySnapshotPresentation.latestSubtitle(snapshot(List.of(), null, false)).text());
+        var partial = row("one", "初稿", false, MeetingDisplaySnapshot.Side.A);
+        assertEquals(0.8f, DisplaySnapshotPresentation.subtitle(partial).alpha(), 0f);
+        var complete = row("one", "完整文字", true, MeetingDisplaySnapshot.Side.A);
+        assertEquals("完整文字", DisplaySnapshotPresentation.subtitle(complete).text());
+        assertEquals(1f, DisplaySnapshotPresentation.subtitle(complete).alpha(), 0f);
+    }
+
+    @Test public void semanticSideWinsWithoutInferringLanguageFromText() {
+        var english = new MeetingDisplaySnapshot.Row("one", source("one", "Hello", false),
+                new TranslationEvent("tr", "one", 1, "en-US", "zh-CN", "你好", true),
+                MeetingDisplaySnapshot.Side.A, DisplayRouter.Basis.STABLE_DIRECTION);
+        var rendered = DisplaySnapshotPresentation.speakerColumn(english, false);
+        assertEquals(MeetingDisplaySnapshot.Side.A, rendered.side());
+        assertFalse(rendered.languageFallback());
+        assertEquals("en-US", english.transcript().language());
+        assertEquals("English", DisplaySnapshotPresentation.leftLabel(snapshot(List.of(english), "one", true)));
+        assertEquals("中文", DisplaySnapshotPresentation.rightLabel(snapshot(List.of(english), "one", true)));
+    }
+
+    @Test public void sourceBStaysRightAndSwapMovesWholePairLeft() {
+        var paired = row("right", "右侧原文", true, MeetingDisplaySnapshot.Side.B);
+        assertEquals(MeetingDisplaySnapshot.Side.B, DisplaySnapshotPresentation.speakerColumn(paired, false).side());
+        assertEquals(MeetingDisplaySnapshot.Side.A, DisplaySnapshotPresentation.speakerColumn(paired, true).side());
+        assertEquals("右侧原文", DisplaySnapshotPresentation.speakerColumn(paired, true).source());
+        assertEquals(MeetingDisplaySnapshot.Side.B, paired.sourceSide());
+    }
+
+    @Test public void translationFirstKeepsOriginalEmptyOnItsSpeakerSide() {
+        var paired = new MeetingDisplaySnapshot.Row("one", null,
                 new TranslationEvent("tr", "one", 1, "en-US", "zh-CN", "你好", false),
                 MeetingDisplaySnapshot.Side.B, DisplayRouter.Basis.MODEL_LANGUAGE);
-        assertNull(DisplaySnapshotPresentation.subtitle(row));
-        var rendered = DisplaySnapshotPresentation.bilingual(row, false);
-        assertEquals("你好", rendered.left());
-        assertEquals("", rendered.right());
-        assertEquals(0.8f, rendered.leftAlpha(), 0.0f);
+        assertNull(DisplaySnapshotPresentation.subtitle(paired));
+        var rendered = DisplaySnapshotPresentation.speakerColumn(paired, false);
+        assertEquals(MeetingDisplaySnapshot.Side.B, rendered.side());
+        assertEquals("", rendered.source());
+        assertEquals("你好", rendered.translated());
+        assertEquals(0.8f, rendered.translatedAlpha(), 0f);
     }
 
     @Test public void lateOldSegmentIsLatestSubtitleWhileHistoryOrderStaysStable() {
@@ -64,7 +85,7 @@ public final class DisplaySnapshotPresentationTest {
         var snapshot = snapshot(List.of(first, second), "first", false);
         assertEquals("旧段最新修订", DisplaySnapshotPresentation.latestSubtitle(snapshot).text());
         assertEquals("second", snapshot.rows().get(1).segmentId());
-        assertEquals("下一段", DisplaySnapshotPresentation.bilingual(second, false).right());
+        assertEquals("下一段", DisplaySnapshotPresentation.speakerColumn(second, false).source());
     }
 
     private static MeetingDisplaySnapshot snapshot(List<MeetingDisplaySnapshot.Row> rows,

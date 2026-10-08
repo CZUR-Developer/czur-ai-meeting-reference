@@ -12,8 +12,40 @@ public final class DisplaySnapshotPresentation {
     private DisplaySnapshotPresentation() { }
 
     public record SubtitleRow(String segmentId, String text, float alpha) { }
+    /** 公共扩展先小提交时保留旧页面编译入口；新页面／窗口只使用SpeakerColumnRow。 */
+    @Deprecated
     public record BilingualRow(String segmentId, String left, String right,
             float leftAlpha, float rightAlpha, boolean languageFallback) { }
+
+    /**
+     * 国内互译的一个发言条目：原文和译文始终在同一侧上下排列。
+     * side是交换后的物理显示侧：A表示左栏，B表示右栏，UNRESOLVED等待路由确定。
+     * 该值仅供View呈现，不会写回SDK、重判语言或改变发言人的真实来源。
+     */
+    public record SpeakerColumnRow(String segmentId, MeetingDisplaySnapshot.Side side,
+            String source, String translated, float sourceAlpha, float translatedAlpha,
+            boolean languageFallback) { }
+
+    /**
+     * 将SDK已配对的一整段原译投影到发言侧，符合国内item_trans_sentence上下显示语义。
+     * @param row SDK给出的同段原文、译文和sourceSide，任一文字尚未到达可为空
+     * @param swapped 用户的纯显示交换开关；只交换A/B，不为UNRESOLVED猜测发言侧
+     */
+    public static SpeakerColumnRow speakerColumn(MeetingDisplaySnapshot.Row row, boolean swapped) {
+        MeetingDisplaySnapshot.Side side = row.sourceSide();
+        if (swapped && side != MeetingDisplaySnapshot.Side.UNRESOLVED)
+            side = side == MeetingDisplaySnapshot.Side.A
+                    ? MeetingDisplaySnapshot.Side.B : MeetingDisplaySnapshot.Side.A;
+        boolean fallback = row.basis() == DisplayRouter.Basis.MODEL_LANGUAGE
+                || row.basis() == DisplayRouter.Basis.TEXT_LANGUAGE
+                || row.basis() == DisplayRouter.Basis.LANGUAGE_UNRESOLVED;
+        return new SpeakerColumnRow(row.segmentId(), side,
+                row.transcript() == null ? "" : row.transcript().text(),
+                row.translation() == null ? "" : row.translation().text(),
+                row.transcript() == null || row.transcript().isFinal() ? 1.0f : 0.8f,
+                row.translation() == null || row.translation().isFinal() ? 1.0f : 0.8f,
+                fallback);
+    }
 
     public static String leftLabel(MeetingDisplaySnapshot snapshot) {
         return languageLabel(snapshot.swapped() ? snapshot.languageB() : snapshot.languageA());
@@ -36,27 +68,20 @@ public final class DisplaySnapshotPresentation {
     }
 
     /**
-     * sourceSide 已是 SDK 的决定，不依据文字或语言再分栏。UNRESOLVED 沿用旧 UI 的
-     * “语言识别中”占位；原文和译文各自使用自己的 final 标记设置透明度。
+     * 旧参考UI的过渡编译入口。公共显示扩展独立提交后，原页面／窗仍可编译；
+     * 实际国内复刻全部使用speakerColumn，并在调用者迁移提交中移除此旧投影。
      */
+    @Deprecated
     public static BilingualRow bilingual(MeetingDisplaySnapshot.Row row, boolean swapped) {
-        String source = row.transcript() == null ? "" : row.transcript().text();
-        String translated = row.translation() == null ? "" : row.translation().text();
-        float sourceAlpha = row.transcript() == null || row.transcript().isFinal() ? 1.0f : 0.8f;
-        float translatedAlpha = row.translation() == null || row.translation().isFinal() ? 1.0f : 0.8f;
-        boolean fallback = row.basis() == DisplayRouter.Basis.MODEL_LANGUAGE
-                || row.basis() == DisplayRouter.Basis.TEXT_LANGUAGE
-                || row.basis() == DisplayRouter.Basis.LANGUAGE_UNRESOLVED;
-        if (row.sourceSide() == MeetingDisplaySnapshot.Side.UNRESOLVED) {
-            return new BilingualRow(row.segmentId(), "语言识别中：" + source, "",
-                    sourceAlpha, 1.0f, fallback);
-        }
-        boolean sourceOnLeft = (row.sourceSide() == MeetingDisplaySnapshot.Side.A) != swapped;
-        return sourceOnLeft
-                ? new BilingualRow(row.segmentId(), source, translated,
-                        sourceAlpha, translatedAlpha, fallback)
-                : new BilingualRow(row.segmentId(), translated, source,
-                        translatedAlpha, sourceAlpha, fallback);
+        var pair = speakerColumn(row, swapped);
+        if (pair.side() == MeetingDisplaySnapshot.Side.UNRESOLVED)
+            return new BilingualRow(pair.segmentId(), "语言识别中：" + pair.source(), "",
+                    pair.sourceAlpha(), 1f, pair.languageFallback());
+        return pair.side() == MeetingDisplaySnapshot.Side.A
+                ? new BilingualRow(pair.segmentId(), pair.source(), pair.translated(),
+                        pair.sourceAlpha(), pair.translatedAlpha(), pair.languageFallback())
+                : new BilingualRow(pair.segmentId(), pair.translated(), pair.source(),
+                        pair.translatedAlpha(), pair.sourceAlpha(), pair.languageFallback());
     }
 
     /**

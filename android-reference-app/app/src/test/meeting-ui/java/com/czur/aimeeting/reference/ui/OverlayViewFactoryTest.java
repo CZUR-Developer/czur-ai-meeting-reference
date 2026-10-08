@@ -3,8 +3,6 @@ package com.czur.aimeeting.reference.ui;
 import static org.junit.Assert.*;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.ProgressBar;
-import android.widget.TextView;
 import android.graphics.Rect;
 import com.czur.aimeeting.client.display.DisplayRouter;
 import com.czur.aimeeting.client.display.MeetingDisplaySnapshot;
@@ -46,14 +44,14 @@ public class OverlayViewFactoryTest {
         assertEquals("old revised", cell(controller, "overlay.subtitle").getParts().get(0).text().toString());
         assertEquals("old", cell(controller, "overlay.subtitle").getParts().get(0).id());
         assertFalse(cell(controller, "overlay.subtitle").getParts().get(0).isFinal());
+        assertEquals(2, cell(controller, "overlay.subtitle").getParts().size());
+        assertTrue(cell(controller, "overlay.subtitle").getParts().get(1).isFinal());
         visible(controller, "overlay.stop");
         window.overlay.collapse();
         assertEquals(126, controller.windowSpec().widthPx);
         assertEquals(60, controller.windowSpec().heightPx);
         measure(controller);
-        TextView mini = (TextView) controller.contentView();
-        assertTrue(mini.getPaint().measureText(mini.getText().toString())
-                <= mini.getWidth() - mini.getPaddingLeft() - mini.getPaddingRight());
+        visible(controller, "overlay.restore");
         window.overlay.hide();
         window.render(single("old final while hidden", true), MeetingSetup.Mode.LIVE_TRANSCRIPT,
                 false, "00:20", true, 73);
@@ -63,7 +61,7 @@ public class OverlayViewFactoryTest {
         measure(controller);
         assertEquals("old final while hidden", cell(controller, "overlay.subtitle").getParts().get(0).text().toString());
         assertTrue(cell(controller, "overlay.subtitle").getParts().get(0).isFinal());
-        assertEquals(73, ((ProgressBar) controller.contentView().findViewWithTag("overlay.level-bar")).getProgress());
+        assertEquals(73, ((CzurVoiceLevelView) controller.contentView().findViewWithTag("overlay.level")).getLevel());
         visible(controller, "overlay.open").performClick();
         visible(controller, "overlay.stop").performClick();
         assertEquals(1, opens.get());
@@ -83,9 +81,11 @@ public class OverlayViewFactoryTest {
         var controller = window.overlay.controller();
         assertEquals(293, controller.windowSpec().heightPx);
         measure(controller);
-        assertEquals("译文", cell(controller, "overlay.left").getParts().get(0).text().toString());
-        assertTrue(cell(controller, "overlay.left").getParts().get(0).isFinal());
+        assertTrue(cell(controller, "overlay.left").getParts().isEmpty());
+        assertEquals("source", cell(controller, "overlay.right").getParts().get(0).text().toString());
         assertFalse(cell(controller, "overlay.right").getParts().get(0).isFinal());
+        assertEquals("译文", cell(controller, "overlay.right-translation").getParts().get(0).text().toString());
+        assertTrue(cell(controller, "overlay.right-translation").getParts().get(0).isFinal());
         visible(controller, "overlay.swap").performClick();
         assertEquals(1, swaps.get());
         visible(controller, "overlay.size").performClick();
@@ -99,10 +99,53 @@ public class OverlayViewFactoryTest {
         measure(controller);
         assertEquals("source", cell(controller, "overlay.history-left").getParts().get(0).text().toString());
         assertFalse(cell(controller, "overlay.history-left").getParts().get(0).isFinal());
-        assertTrue(cell(controller, "overlay.history-right").getParts().get(0).isFinal());
+        assertEquals("译文", cell(controller, "overlay.history-left-translation").getParts().get(0).text().toString());
+        assertTrue(cell(controller, "overlay.history-left-translation").getParts().get(0).isFinal());
+        assertNull(controller.contentView().findViewWithTag("overlay.history-right"));
         window.overlay.showNormal();
         measure(controller);
         visible(controller, "overlay.stop");
+        window.dismiss();
+    }
+
+    @Test public void domesticSimpleModeKeepsSamePairedSideAndOriginalCallbacks() {
+        AtomicInteger swaps = new AtomicInteger(), stops = new AtomicInteger();
+        var window = (OverlayViewFactory.DefaultWindow) new OverlayViewFactory().create(
+                RuntimeEnvironment.getApplication(), () -> { }, swaps::incrementAndGet, stops::incrementAndGet);
+        window.show(bilingual(false));
+        window.render(bilingual(false), MeetingSetup.Mode.LIVE_TRANSLATION, false,
+                "已进行 00:01:30 · 剩余 00:20:00", true, 55);
+        var controller = window.overlay.controller();
+        measure(controller);
+        assertEquals(36, cell(controller, "overlay.right").getFixedLineHeightPx());
+        assertEquals(0xFFFFDB10, cell(controller, "overlay.right-translation").getCurrentTextColor());
+        var latest = bilingual(false).rows().get(0);
+        var older = new MeetingDisplaySnapshot.Row("older", new TranscriptEvent("older", 1, 0, 50,
+                "en-US", "earlier source ", true), new TranslationEvent("earlier-translation", "older", 1,
+                "en-US", "zh-CN", "之前译文 ", true), MeetingDisplaySnapshot.Side.B, DisplayRouter.Basis.MODEL_LANGUAGE);
+        var history = new MeetingDisplaySnapshot(true, "zh-CN", "en-US", false, List.of(older, latest), "source");
+        window.render(history, MeetingSetup.Mode.LIVE_TRANSLATION, false,
+                "已进行 00:01:30 · 剩余 00:20:00", true, 55);
+        assertEquals(2, cell(controller, "overlay.right").getParts().size());
+        assertTrue(cell(controller, "overlay.right").getParts().get(0).isFinal());
+        assertFalse(cell(controller, "overlay.right").getParts().get(1).isFinal());
+        visible(controller, "overlay.simple").performClick();
+        assertEquals(164, controller.windowSpec().heightPx);
+        measure(controller);
+        assertEquals(View.GONE, controller.contentView().findViewWithTag("overlay.level").getVisibility());
+        assertEquals(2, cell(controller, "overlay.right").getMaxVisibleLines());
+        assertEquals("source", cell(controller, "overlay.right").getParts().get(1).text().toString());
+        visible(controller, "overlay.collapse").performClick();
+        assertEquals(1, swaps.get());
+        assertEquals(DefaultMeetingOverlay.TRANSLATION_NORMAL, controller.currentFormId());
+        visible(controller, "overlay.stop").performClick();
+        assertEquals(1, stops.get());
+        visible(controller, "overlay.size").performClick();
+        assertEquals(DefaultMeetingOverlay.TRANSLATION_LARGE, controller.currentFormId());
+        window.overlay.showNormal();
+        assertEquals(293, controller.windowSpec().heightPx);
+        measure(controller);
+        assertEquals(3, cell(controller, "overlay.right").getMaxVisibleLines());
         window.dismiss();
     }
 

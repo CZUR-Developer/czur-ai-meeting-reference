@@ -1,7 +1,6 @@
 package com.czur.aimeeting.reference.ui;
 
 import static org.junit.Assert.*;
-import android.widget.ProgressBar;
 import com.czur.aimeeting.reference.meeting.MeetingAppAssembly;
 import com.czur.aimeeting.reference.meeting.MeetingSetup;
 import com.czur.aimeeting.ui.OverlayController;
@@ -37,8 +36,8 @@ public class SingleFormOverlayFactoryTest {
                 false, "00:20", true, 38);
         window.show(OverlayViewFactoryTest.single("unused", false));
         OverlayViewFactoryTest.measure(window.controller);
-        assertEquals("finished while hidden", OverlayViewFactoryTest.cell(window.controller, "single.subtitle").getParts().get(0).text().toString());
-        OverlayViewFactoryTest.visible(window.controller, "single.stop").performClick();
+        assertEquals("finished while hidden", OverlayViewFactoryTest.cell(window.controller, "overlay.subtitle").getParts().get(0).text().toString());
+        OverlayViewFactoryTest.visible(window.controller, "overlay.stop").performClick();
         assertEquals(1, stops.get());
         window.dismiss();
         assertEquals(OverlayController.State.RELEASED, window.controller.state());
@@ -52,16 +51,19 @@ public class SingleFormOverlayFactoryTest {
         window.render(OverlayViewFactoryTest.bilingual(false), MeetingSetup.Mode.LIVE_TRANSLATION,
                 true, "00:10", true, 66);
         OverlayViewFactoryTest.measure(window.controller);
-        assertEquals("译文", OverlayViewFactoryTest.cell(window.controller, "single.left").getParts().get(0).text().toString());
-        assertTrue(OverlayViewFactoryTest.cell(window.controller, "single.left").getParts().get(0).isFinal());
-        assertFalse(OverlayViewFactoryTest.cell(window.controller, "single.right").getParts().get(0).isFinal());
-        OverlayViewFactoryTest.visible(window.controller, "single.swap").performClick();
+        assertTrue(OverlayViewFactoryTest.cell(window.controller, "overlay.left").getParts().isEmpty());
+        assertEquals("source", OverlayViewFactoryTest.cell(window.controller, "overlay.right").getParts().get(0).text().toString());
+        assertEquals("译文", OverlayViewFactoryTest.cell(window.controller, "overlay.right-translation").getParts().get(0).text().toString());
+        assertTrue(OverlayViewFactoryTest.cell(window.controller, "overlay.right-translation").getParts().get(0).isFinal());
+        assertFalse(OverlayViewFactoryTest.cell(window.controller, "overlay.right").getParts().get(0).isFinal());
+        assertEquals(android.view.View.GONE, window.controller.contentView().findViewWithTag("overlay.size").getVisibility());
+        OverlayViewFactoryTest.visible(window.controller, "overlay.swap").performClick();
         assertEquals(1, swaps.get());
         window.render(OverlayViewFactoryTest.bilingual(true), MeetingSetup.Mode.LIVE_TRANSLATION,
                 true, "00:20", false, 0);
         OverlayViewFactoryTest.measure(window.controller);
-        assertEquals("source", OverlayViewFactoryTest.cell(window.controller, "single.left").getParts().get(0).text().toString());
-        assertFalse(OverlayViewFactoryTest.visible(window.controller, "single.stop").isEnabled());
+        assertEquals("source", OverlayViewFactoryTest.cell(window.controller, "overlay.left").getParts().get(0).text().toString());
+        assertFalse(OverlayViewFactoryTest.visible(window.controller, "overlay.stop").isEnabled());
         assertEquals(Set.of(SingleFormOverlayFactory.FORM_ID), window.controller.registeredFormIds());
         window.dismiss();
     }
