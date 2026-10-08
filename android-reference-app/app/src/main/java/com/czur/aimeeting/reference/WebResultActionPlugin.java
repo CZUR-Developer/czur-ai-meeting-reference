@@ -2,8 +2,7 @@ package com.czur.aimeeting.reference;
 
 import android.content.Context;
 import android.content.Intent;
-import android.text.InputType;
-import android.widget.EditText;
+import com.czur.aimeeting.reference.meeting.MeetingAppAssembly;
 import com.czur.aimeeting.client.MeetingOptions;
 import com.czur.aimeeting.client.result.ResultActionOutcome;
 import com.czur.aimeeting.client.result.ResultActionRegistry;
@@ -36,12 +35,9 @@ public final class WebResultActionPlugin implements AppResultActionPlugin {
 
     @Override public Settings createSettings(Context pageContext) {
         Context app = pageContext.getApplicationContext();
-        EditText input = new EditText(pageContext);
-        input.setSingleLine(true);
-        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        input.setHint("网页结果地址，例如 https://result.example.com/index.html");
-        return new Settings(input, () -> new WebResultActionPlugin(
-                input.getText().toString().trim(), url -> {
+        // 默认Web无会前输入View；freeze在点击开始时读取地址，不在打开页面时提前固定。
+        return new Settings(null, () -> new WebResultActionPlugin(
+                MeetingAppAssembly.resultWebUrl(), url -> {
                     Intent intent = new Intent(app, ResultActivity.class);
                     intent.putExtra(ResultActivity.EXTRA_RESULT_URL, url);
                     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);

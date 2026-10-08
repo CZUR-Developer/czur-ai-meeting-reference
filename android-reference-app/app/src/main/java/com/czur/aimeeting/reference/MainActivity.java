@@ -18,7 +18,6 @@ import android.os.Looper;
 import android.provider.Settings;
 import android.text.InputType;
 import android.util.Log;
-import android.view.Gravity;
 import android.view.View;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
@@ -28,7 +27,6 @@ import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
-import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.ProgressBar;
@@ -60,6 +58,7 @@ public final class MainActivity extends Activity {
     private static final String TAG = "AiMeetingReference";
     private static final int MIC_PERMISSION_REQUEST = 1001;
     private static final int PRESENTATION_PERMISSION_REQUEST = 1002;
+    private static final int CONNECTION_SETTINGS_REQUEST = 1003;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final MeetingService.Observer observer = this::renderMeetingState;
     private final ServiceConnection serviceConnection = new ServiceConnection() {
@@ -77,11 +76,9 @@ public final class MainActivity extends Activity {
     private MeetingStartCondition startCondition;
     private MeetingService meetingService;
     private boolean serviceBound;
-    private ScrollView setupScreen;
-    private ScrollView meetingScreen;
-    private LinearLayout meetingControls;
+    private MeetingPageViews page;
+    private android.app.AlertDialog loginDialog;
     private int renderedTranscriptVersion = -1;
-    private EditText backendUrlView;
     private EditText usernameView;
     private EditText passwordView;
     private RadioGroup resultGroup;
@@ -90,8 +87,6 @@ public final class MainActivity extends Activity {
     private TextView transcriptView;
     private TextView meetingTitle;
     private LinearLayout transcriptList;
-    private LinearLayout bilingualHeader;
-    private LinearLayout bilingualList;
     private TextView leftLanguageTitle;
     private TextView rightLanguageTitle;
     private final Map<String, TextView> transcriptRows = new LinkedHashMap<>();
@@ -116,6 +111,7 @@ public final class MainActivity extends Activity {
     private Button overlayButton;
     private Button swapColumnsButton;
     private Button loginButton;
+    private Button settingsButton;
     /** 只用于页面展示／入口开关；Service开始时仍通过Provider重新获取真实凭据。 */
     private IdentitySession displayedIdentity;
     private boolean meetingBusy;
@@ -131,109 +127,59 @@ public final class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         startCondition = MeetingStartConditions.create(getApplicationContext());
 
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        LinearLayout layout = new LinearLayout(this);
-        layout.setOrientation(LinearLayout.VERTICAL);
-        layout.setGravity(Gravity.CENTER);
-        layout.setPadding(40, 40, 40, 40);
-        setupScreen = new ScrollView(this);
-        setupScreen.setFillViewport(true);
-        setupScreen.addView(layout);
-        root.addView(setupScreen, new LinearLayout.LayoutParams(-1, 0, 1));
+        page = MeetingAppAssembly.pageFactory().create(this);
+        loginButton = page.account;
+        settingsButton = page.settings;
+        resultGroup = page.results;
+        transcriptView = page.placeholder;
+        meetingTitle = page.meetingTitle;
+        transcriptList = page.transcriptList;
+        leftLanguageTitle = page.leftTitle;
+        rightLanguageTitle = page.rightTitle;
+        elapsedView = page.elapsed;
+        audioLevelBar = page.level;
+        audioLevelView = page.levelText;
+        statusView = page.status;
+        capabilityView = page.capabilities;
+        sourceLanguageView = page.sourceLanguage;
+        targetLanguageView = page.targetLanguage;
+        presentationCaptureView = page.presentation;
+        summaryEnabledView = page.summary;
+        transcriptModeView = page.transcriptMode;
+        translationModeView = page.translationMode;
+        startButton = page.start;
+        stopButton = page.stop;
+        overlayButton = page.overlay;
+        swapColumnsButton = page.swapColumns;
+        retryActionButton = page.retry;
+        endResultButton = page.endResult;
 
-        LinearLayout meetingLayout = new LinearLayout(this);
-        meetingLayout.setOrientation(LinearLayout.VERTICAL);
-        meetingLayout.setPadding(40, 36, 40, 36);
-        meetingScreen = new ScrollView(this);
-        meetingScreen.addView(meetingLayout);
-        meetingScreen.setVisibility(View.GONE);
-        root.addView(meetingScreen, new LinearLayout.LayoutParams(-1, 0, 1));
-
-        // 会中操作留在滚动区之外，持续新增字幕时仍可直接停止。
-        meetingControls = new LinearLayout(this);
-        meetingControls.setOrientation(LinearLayout.VERTICAL);
-        meetingControls.setPadding(40, 0, 40, 12);
-        meetingControls.setVisibility(View.GONE);
-        root.addView(meetingControls, new LinearLayout.LayoutParams(-1, -2));
-
-        backendUrlView = new EditText(this);
-        backendUrlView.setSingleLine(true);
-        backendUrlView.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        backendUrlView.setHint("后端地址，例如 https://meeting.example.com");
-        backendUrlView.setText(MeetingAppAssembly.serverUrl());
-        layout.addView(backendUrlView);
-
-        usernameView = new EditText(this);
-        usernameView.setSingleLine(true);
-        usernameView.setHint("终端用户账号");
-        layout.addView(usernameView);
-
-        passwordView = new EditText(this);
-        passwordView.setSingleLine(true);
-        passwordView.setInputType(InputType.TYPE_CLASS_TEXT
-                | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        passwordView.setHint("密码");
-        layout.addView(passwordView);
-
-        loginButton = new Button(this);
-        loginButton.setText("登录");
         loginButton.setOnClickListener(view -> {
-            if (displayedIdentity == null) login();
-            else logout();
+            if (displayedIdentity != null) logout();
+            showLoginDialog();
         });
-        layout.addView(loginButton);
-
-        TextView modeTitle = new TextView(this);
-        modeTitle.setText("会中显示");
-        layout.addView(modeTitle);
-        RadioGroup modeGroup = new RadioGroup(this);
-        transcriptModeView = new RadioButton(this);
-        transcriptModeView.setId(View.generateViewId());
-        transcriptModeView.setText("实时字幕");
-        transcriptModeView.setChecked(true);
-        modeGroup.addView(transcriptModeView);
-        translationModeView = new RadioButton(this);
-        translationModeView.setId(View.generateViewId());
-        modeGroup.addView(translationModeView);
-        modeGroup.check(transcriptModeView.getId());
-        layout.addView(modeGroup);
-
-        summaryEnabledView = new CheckBox(this);
-        summaryEnabledView.setText("会后生成会议纪要");
-        layout.addView(summaryEnabledView);
-
-        TextView sourceTitle = new TextView(this);
-        sourceTitle.setText("源语言");
-        layout.addView(sourceTitle);
-        sourceLanguageView = new Spinner(this);
-        layout.addView(sourceLanguageView);
-
-        TextView targetTitle = new TextView(this);
-        targetTitle.setText("互译目标语言");
-        layout.addView(targetTitle);
-        targetLanguageView = new Spinner(this);
-        targetLanguageView.setEnabled(false);
-        layout.addView(targetLanguageView);
-        presentationCaptureView = new CheckBox(this);
-        presentationCaptureView.setText("演示文稿（每10秒采集屏幕，开始时需系统授权）");
-        layout.addView(presentationCaptureView);
+        settingsButton.setOnClickListener(view -> startActivityForResult(
+                new Intent(this, ConnectionSettingsActivity.class), CONNECTION_SETTINGS_REQUEST));
+        page.modes.setOnCheckedChangeListener((group, checkedId) -> {
+            boolean translation = checkedId == translationModeView.getId();
+            targetLanguageView.setEnabled(translation && deploymentLanguages.size() >= 2);
+            if (translation) presentationCaptureView.setChecked(false);
+            presentationCaptureView.setEnabled(!translation);
+            page.showSetupMode(translation);
+        });
+        summaryEnabledView.setOnCheckedChangeListener((button, checked) ->
+                page.showSetupMode(translationModeView.isChecked()));
+        page.swapLanguages.setOnClickListener(view -> {
+            int source = sourceLanguageView.getSelectedItemPosition();
+            int target = targetLanguageView.getSelectedItemPosition();
+            if (source >= 0 && target >= 0) {
+                sourceLanguageView.setSelection(target);
+                targetLanguageView.setSelection(source);
+            }
+        });
         refreshLanguageOptions(List.of());
         refreshModeAvailability();
-        modeGroup.setOnCheckedChangeListener((group, checkedId) -> {
-            boolean translation = checkedId == translationModeView.getId();
-            targetLanguageView.setEnabled(translation);
-            boolean transcript = checkedId == transcriptModeView.getId();
-            if (!transcript) presentationCaptureView.setChecked(false);
-            presentationCaptureView.setEnabled(transcript);
-        });
-
-        TextView resultTitle = new TextView(this);
-        resultTitle.setText("结果动作");
-        layout.addView(resultTitle);
-        resultGroup = new RadioGroup(this);
-        layout.addView(resultGroup);
-        // 页面从构建清单呈现；服务声明不会生成未装配的邮件／PDF／无痕入口。
+        // 只呈现构建期实际注册的结果动作，伙伴自己的设置View仍有独立宿主槽。
         for (AppResultActionPlugin plugin : MeetingAppAssembly.resultActions()) {
             RadioButton choice = new RadioButton(this);
             choice.setId(View.generateViewId());
@@ -244,7 +190,7 @@ public final class MainActivity extends Activity {
             resultSettings.put(plugin.id(), settings);
             if (settings.view() != null) {
                 settings.view().setVisibility(View.GONE);
-                layout.addView(settings.view());
+                page.pluginSettingsHost.addView(settings.view());
             }
         }
         resultGroup.setOnCheckedChangeListener((group, checkedId) -> {
@@ -255,110 +201,55 @@ public final class MainActivity extends Activity {
             });
         });
         refreshResultAvailability();
-
-        meetingTitle = new TextView(this);
-        meetingTitle.setText("实时字幕 · 会议中");
-        meetingTitle.setTextSize(26);
-        meetingLayout.addView(meetingTitle);
-
-        elapsedView = new TextView(this);
-        elapsedView.setText("已进行 00:00:00 · 剩余 00:00:00");
-        meetingLayout.addView(elapsedView);
-
-        audioLevelView = new TextView(this);
-        audioLevelView.setText(MeetingRuntimeFactory.requiresMicrophone()
-                ? "输入电平：等待输入" : "输入电平：Mock 未实采");
-        meetingLayout.addView(audioLevelView);
-        audioLevelBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
-        audioLevelBar.setMax(100);
-        meetingLayout.addView(audioLevelBar, new LinearLayout.LayoutParams(-1, -2));
-
-        transcriptView = SubtitleViewFactory.create(this, 28, 3, false);
-        SubtitleViewFactory.render(transcriptView, "", "等待字幕…", 0.8f);
-        transcriptView.setPadding(0, 36, 0, 36);
-        meetingLayout.addView(transcriptView);
-        transcriptList = new LinearLayout(this);
-        transcriptList.setOrientation(LinearLayout.VERTICAL);
-        meetingLayout.addView(transcriptList);
-
-        bilingualHeader = new LinearLayout(this);
-        bilingualHeader.setOrientation(LinearLayout.HORIZONTAL);
-        leftLanguageTitle = new TextView(this);
-        bilingualHeader.addView(leftLanguageTitle, new LinearLayout.LayoutParams(0, -2, 1));
-        rightLanguageTitle = new TextView(this);
-        bilingualHeader.addView(rightLanguageTitle, new LinearLayout.LayoutParams(0, -2, 1));
-        bilingualHeader.setVisibility(View.GONE);
-        meetingLayout.addView(bilingualHeader);
-        bilingualList = new LinearLayout(this);
-        bilingualList.setOrientation(LinearLayout.VERTICAL);
-        bilingualList.setVisibility(View.GONE);
-        meetingLayout.addView(bilingualList);
-
-        swapColumnsButton = new Button(this);
-        swapColumnsButton.setText("交换左右栏");
-        swapColumnsButton.setOnClickListener(view -> {
-            if (meetingService != null) meetingService.swapDisplayColumns();
-        });
-        swapColumnsButton.setVisibility(View.GONE);
-        meetingControls.addView(swapColumnsButton);
-
-        startButton = new Button(this);
-        startButton.setText("开始会议");
-        startButton.setEnabled(false);
         startButton.setOnClickListener(view -> {
             if (MeetingRuntimeFactory.requiresMicrophone()
                     && checkSelfPermission(Manifest.permission.RECORD_AUDIO)
                     != PackageManager.PERMISSION_GRANTED) {
-                requestPermissions(new String[] {Manifest.permission.RECORD_AUDIO},
-                        MIC_PERMISSION_REQUEST);
-            } else {
-                createAndStartMeeting();
-            }
+                requestPermissions(new String[] {Manifest.permission.RECORD_AUDIO}, MIC_PERMISSION_REQUEST);
+            } else createAndStartMeeting();
         });
-        layout.addView(startButton);
-
-        stopButton = new Button(this);
-        stopButton.setText("停止会议");
-        stopButton.setEnabled(false);
         stopButton.setOnClickListener(view -> {
             if (meetingService != null) meetingService.requestStop();
         });
-        meetingControls.addView(stopButton);
-
-        overlayButton = new Button(this);
-        overlayButton.setText("显示跨应用悬浮字幕");
+        swapColumnsButton.setOnClickListener(view -> {
+            if (meetingService != null) meetingService.swapDisplayColumns();
+        });
         overlayButton.setOnClickListener(view -> toggleOverlay());
-        meetingControls.addView(overlayButton);
-
-        capabilityView = new TextView(this);
-        capabilityView.setText("本场功能将在创建会议后按后端能力显示");
-        meetingLayout.addView(capabilityView);
-
-        statusView = new TextView(this);
-        statusView.setText("填写 HTTPS 后端地址和部署者预置的账号");
-        statusView.setPadding(40, 12, 40, 24);
-        root.addView(statusView);
-        retryActionButton = new Button(this);
-        retryActionButton.setText("再次执行结果动作");
-        retryActionButton.setVisibility(View.GONE);
         retryActionButton.setOnClickListener(view -> {
             if (meetingService != null) meetingService.retryResultAction();
         });
-        root.addView(retryActionButton);
-        endResultButton = new Button(this);
-        endResultButton.setText("结束本场结果交互");
-        endResultButton.setVisibility(View.GONE);
         endResultButton.setOnClickListener(view -> {
             if (meetingService != null) meetingService.endResultInteraction();
         });
-        root.addView(endResultButton);
-        FrameLayout screen = new FrameLayout(this);
-        screen.addView(root, new FrameLayout.LayoutParams(-1, -1));
+        audioLevelView.setText(MeetingRuntimeFactory.requiresMicrophone()
+                ? "输入电平：等待输入" : "输入电平：Mock 未实采");
         reminderPopup = new MeetingReminderPopup(this, false, () -> {
             if (meetingService != null) meetingService.confirmReminder();
         });
-        screen.addView(reminderPopup.view(), new FrameLayout.LayoutParams(-1, -1));
-        setContentView(screen);
+        page.root.addView(reminderPopup.view(), new FrameLayout.LayoutParams(-1, -1));
+        setContentView(page.root);
+    }
+
+    /** 独立参考账号入口，沿用原登录调用；凭据仅交给本进程身份Provider。 */
+    private void showLoginDialog() {
+        LinearLayout fields = new LinearLayout(this);
+        fields.setOrientation(LinearLayout.VERTICAL);
+        int padding = Math.round(24 * getResources().getDisplayMetrics().density);
+        fields.setPadding(padding, padding, padding, padding);
+        usernameView = new EditText(this);
+        usernameView.setSingleLine(true);
+        usernameView.setHint("终端用户账号");
+        passwordView = new EditText(this);
+        passwordView.setSingleLine(true);
+        passwordView.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        passwordView.setHint("密码");
+        fields.addView(usernameView);
+        fields.addView(passwordView);
+        loginDialog = new android.app.AlertDialog.Builder(this).setTitle("参考账号登录")
+                .setView(fields).setNegativeButton("返回", null).setPositiveButton("登录", null).create();
+        loginDialog.setOnShowListener(dialog -> loginDialog.getButton(
+                android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> login()));
+        loginDialog.show();
     }
 
     /**
@@ -367,14 +258,14 @@ public final class MainActivity extends Activity {
      * CZUR系统账号、设备登录与参考默认会话互不依赖。
      */
     private void login() {
-        String baseUrl = backendUrlView.getText().toString().trim();
+        String baseUrl = MeetingAppAssembly.serverUrl();
         String username = usernameView.getText().toString().trim();
         String password = passwordView.getText().toString();
         if (baseUrl.isEmpty() || username.isEmpty() || password.isEmpty()) {
-            statusView.setText("请填写后端地址、账号和密码");
+            statusView.setText("请先在连接设置配置后端，并填写账号和密码");
             return;
         }
-        loginButton.setEnabled(false);
+        setConfigurationEnabled(false);
         statusView.setText("正在登录…");
         if (preMeetingClient != null) preMeetingClient.close();
         MeetingAppAssembly.configureBackend(baseUrl);
@@ -383,12 +274,13 @@ public final class MainActivity extends Activity {
         preMeetingClient.login(username, password, new MeetingClient.Callback<ReferenceLoginSession>() {
             @Override public void onSuccess(ReferenceLoginSession loginSession) {
                 passwordView.setText("");
+                if (loginDialog != null) loginDialog.dismiss();
                 statusView.setText("登录成功，正在获取可用功能…");
                 Log.i(TAG, "参考账号登录成功");
                 refreshIdentity(true);
             }
             @Override public void onError(String message) {
-                loginButton.setEnabled(true);
+                setConfigurationEnabled(true);
                 statusView.setText(message);
                 Log.w(TAG, "参考账号登录失败");
             }
@@ -414,13 +306,8 @@ public final class MainActivity extends Activity {
     private void renderIdentity(IdentityResult identity) {
         displayedIdentity = identity.session();
         boolean loggedIn = identity.status() == IdentityResult.Status.LOGGED_IN;
-        backendUrlView.setEnabled(!loggedIn);
-        usernameView.setEnabled(!loggedIn);
-        passwordView.setEnabled(!loggedIn);
-        loginButton.setText(loggedIn ? "切换账号" : "登录");
-        loginButton.setEnabled(!meetingBusy);
-        if (loggedIn && !displayedIdentity.displayName().isEmpty())
-            usernameView.setText(displayedIdentity.displayName());
+        loginButton.setText(loggedIn ? "切换账号" : "账号登录");
+        setConfigurationEnabled(!meetingBusy);
         if (!loggedIn) {
             deploymentCapabilities = Set.of();
             refreshLanguageOptions(List.of());
@@ -444,7 +331,7 @@ public final class MainActivity extends Activity {
                 MainActivity.this.discovery = discovery;
                 refreshResultAvailability();
                 refreshModeAvailability();
-                loginButton.setEnabled(!meetingBusy);
+                setConfigurationEnabled(!meetingBusy);
                 startButton.setEnabled(displayedIdentity != null && !meetingBusy
                         && deploymentCapabilities.contains(MeetingCapabilityState.TRANSCRIPT)
                         && !deploymentLanguages.isEmpty());
@@ -452,7 +339,7 @@ public final class MainActivity extends Activity {
                         ? "当前部署尚未声明会议语言" : "登录成功，可开始会议");
             }
             @Override public void onError(String message) {
-                loginButton.setEnabled(!meetingBusy);
+                setConfigurationEnabled(!meetingBusy);
                 startButton.setEnabled(false);
                 if (!meetingBusy && !hasReadyResult) statusView.setText("登录成功；" + message);
             }
@@ -469,10 +356,7 @@ public final class MainActivity extends Activity {
         discovery = null;
         refreshResultAvailability();
         refreshModeAvailability();
-        backendUrlView.setEnabled(true);
-        usernameView.setEnabled(true);
-        passwordView.setEnabled(true);
-        loginButton.setText("登录");
+        loginButton.setText("账号登录");
         startButton.setEnabled(false);
         statusView.setText("已退出，请重新登录");
         Log.i(TAG, "参考账号已退出");
@@ -494,6 +378,7 @@ public final class MainActivity extends Activity {
             transcriptModeView.setChecked(true);
         }
         targetLanguageView.setEnabled(translation && translationModeView.isChecked());
+        page.showSetupMode(translationModeView.isChecked());
     }
 
     /** 保留仍可用的已选语言；初次发现使用后端前两项作为默认原文／目标语言。 */
@@ -561,6 +446,21 @@ public final class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == CONNECTION_SETTINGS_REQUEST) {
+            if (resultCode == RESULT_OK) {
+                // onResume用新装配刷新；旧客户端不能继续访问原部署或保留原发现能力。
+                if (preMeetingClient != null) preMeetingClient.close();
+                preMeetingClient = null;
+                displayedIdentity = null;
+                deploymentCapabilities = Set.of();
+                refreshLanguageOptions(List.of());
+                discovery = null;
+                refreshResultAvailability();
+                refreshModeAvailability();
+                startButton.setEnabled(false);
+            }
+            return;
+        }
         if (requestCode != PRESENTATION_PERMISSION_REQUEST) return;
         MeetingAppAssembly.PreparedMeeting approved = pendingPresentationMeeting;
         pendingPresentationMeeting = null;
@@ -569,7 +469,7 @@ public final class MainActivity extends Activity {
             MeetingAppAssembly.clearPreparedMeeting();
             statusView.setText("未授予系统屏幕采集权限，会议未开始");
             startButton.setEnabled(true);
-            loginButton.setEnabled(true);
+            setConfigurationEnabled(true);
             return;
         }
         startMeeting(approved, resultCode, data);
@@ -581,7 +481,7 @@ public final class MainActivity extends Activity {
             return;
         }
         startButton.setEnabled(false);
-        loginButton.setEnabled(false);
+        setConfigurationEnabled(false);
         preMeetingClient.refreshIdentity(new MeetingClient.Callback<IdentityResult>() {
             @Override public void onSuccess(IdentityResult identity) {
                 renderIdentity(identity);
@@ -600,7 +500,7 @@ public final class MainActivity extends Activity {
         if (resultGroup.getCheckedRadioButtonId() == -1 || discovery == null) {
             statusView.setText("当前部署没有可用的已装配结果动作");
             startButton.setEnabled(true);
-            loginButton.setEnabled(true);
+            setConfigurationEnabled(true);
             return;
         }
         // 点击开始时读取一次会前设置。会议进行中即使输入框变化，也使用这份快照。
@@ -618,14 +518,14 @@ public final class MainActivity extends Activity {
             Log.i(TAG, "会前结果动作准备未满足，会议未启动");
             statusView.setText(preparation.message());
             startButton.setEnabled(true);
-            loginButton.setEnabled(true);
+            setConfigurationEnabled(true);
             return;
         }
         MeetingAppAssembly.PreparedMeeting prepared = preparation.meeting();
         if (setup.presentationCapture()) {
             pendingPresentationMeeting = prepared;
             startButton.setEnabled(false);
-            loginButton.setEnabled(false);
+            setConfigurationEnabled(false);
             statusView.setText("请在系统弹窗中授权共享整个屏幕");
             try {
                 MediaProjectionManager manager = getSystemService(MediaProjectionManager.class);
@@ -638,7 +538,7 @@ public final class MainActivity extends Activity {
                 pendingPresentationMeeting = null;
                 MeetingAppAssembly.clearPreparedMeeting();
                 startButton.setEnabled(true);
-                loginButton.setEnabled(true);
+                setConfigurationEnabled(true);
                 statusView.setText("无法打开系统屏幕采集授权弹窗");
                 Log.e(TAG, "请求屏幕采集授权失败", failure);
             }
@@ -650,7 +550,7 @@ public final class MainActivity extends Activity {
     private void startMeeting(MeetingAppAssembly.PreparedMeeting prepared, int projectionResultCode,
             Intent projectionData) {
         startButton.setEnabled(false);
-        loginButton.setEnabled(false);
+        setConfigurationEnabled(false);
         statusView.setText("正在创建会议…");
         MeetingAppAssembly.handoff(prepared);
         Intent begin = new Intent(this, MeetingService.class);
@@ -668,7 +568,7 @@ public final class MainActivity extends Activity {
             Log.e(TAG, "启动会议服务失败 type=" + failure.getClass().getSimpleName());
             statusView.setText("无法启动会议服务，请检查麦克风权限");
             startButton.setEnabled(true);
-            loginButton.setEnabled(true);
+            setConfigurationEnabled(true);
         }
     }
 
@@ -686,9 +586,7 @@ public final class MainActivity extends Activity {
 
     /** 只切换页面；模型会话与悬浮窗均由前台 Service 持有。 */
     private void showMeetingScreen(boolean visible) {
-        setupScreen.setVisibility(visible ? View.GONE : View.VISIBLE);
-        meetingScreen.setVisibility(visible ? View.VISIBLE : View.GONE);
-        meetingControls.setVisibility(visible ? View.VISIBLE : View.GONE);
+        page.showMeeting(visible);
     }
 
     /** Service 每秒或状态变化时推送；Activity 重建后可直接重绘整场字幕。 */
@@ -705,7 +603,7 @@ public final class MainActivity extends Activity {
         startButton.setEnabled(displayedIdentity != null && !state.busy
                 && deploymentCapabilities.contains(MeetingCapabilityState.TRANSCRIPT)
                 && !deploymentLanguages.isEmpty());
-        loginButton.setEnabled(!state.busy);
+        setConfigurationEnabled(!state.busy);
         stopButton.setEnabled(state.canStop);
         overlayButton.setText(state.overlayShowing
                 ? "关闭跨应用悬浮字幕" : "显示跨应用悬浮字幕");
@@ -719,34 +617,30 @@ public final class MainActivity extends Activity {
             if (state.display.rows().isEmpty()) {
                 transcriptRows.clear();
                 transcriptList.removeAllViews();
+                transcriptList.addView(transcriptView);
             }
             for (MeetingDisplaySnapshot.Row source : state.display.rows()) {
                 DisplaySnapshotPresentation.SubtitleRow segment = DisplaySnapshotPresentation.subtitle(source);
                 if (segment == null) continue;
                 TextView row = transcriptRows.get(segment.segmentId());
                 if (row == null) {
-                    row = SubtitleViewFactory.create(this, 28, Integer.MAX_VALUE, false);
-                    row.setPadding(0, 8, 0, 8);
+                    row = page.textRow(28, false);
                     transcriptRows.put(segment.segmentId(), row);
                     transcriptList.addView(row);
                 }
                 SubtitleViewFactory.render(row, segment.segmentId(), segment.text(), segment.alpha());
             }
             if (state.display.bilingual()) {
-                bilingualList.removeAllViews();
+                page.leftList.removeAllViews();
+                page.rightList.removeAllViews();
                 for (MeetingDisplaySnapshot.Row source : state.display.rows()) {
                     var segment = DisplaySnapshotPresentation.bilingual(source, state.display.swapped());
-                    LinearLayout row = new LinearLayout(this);
-                    row.setOrientation(LinearLayout.HORIZONTAL);
-                    TextView left = SubtitleViewFactory.create(this, 26, Integer.MAX_VALUE, false);
+                    TextView left = page.textRow(26, false);
                     SubtitleViewFactory.render(left, segment.segmentId(), segment.left(), segment.leftAlpha());
-                    left.setPadding(0, 8, 12, 8);
-                    row.addView(left, new LinearLayout.LayoutParams(0, -2, 1));
-                    TextView right = SubtitleViewFactory.create(this, 26, Integer.MAX_VALUE, false);
+                    page.leftList.addView(left);
+                    TextView right = page.textRow(26, true);
                     SubtitleViewFactory.render(right, segment.segmentId(), segment.right(), segment.rightAlpha());
-                    right.setPadding(12, 8, 0, 8);
-                    row.addView(right, new LinearLayout.LayoutParams(0, -2, 1));
-                    bilingualList.addView(row);
+                    page.rightList.addView(right);
                 }
             }
             renderedTranscriptVersion = state.transcriptVersion;
@@ -761,10 +655,7 @@ public final class MainActivity extends Activity {
                         ? "AI 会议纪要 · 会议中" : "实时字幕 · 会议中");
         leftLanguageTitle.setText(DisplaySnapshotPresentation.leftLabel(state.display));
         rightLanguageTitle.setText(DisplaySnapshotPresentation.rightLabel(state.display));
-        bilingualHeader.setVisibility(bilingual ? View.VISIBLE : View.GONE);
-        bilingualList.setVisibility(bilingual ? View.VISIBLE : View.GONE);
-        swapColumnsButton.setVisibility(bilingual ? View.VISIBLE : View.GONE);
-        transcriptList.setVisibility(bilingual ? View.GONE : View.VISIBLE);
+        page.showBilingual(bilingual);
         transcriptView.setVisibility(!bilingual && transcriptRows.isEmpty()
                 ? View.VISIBLE : View.GONE);
         // 通用UI操作由插件提供；页面不识别网页／PDF／邮件，重绑定消费同一待显示操作。
@@ -787,6 +678,15 @@ public final class MainActivity extends Activity {
             return;
         }
         meetingService.toggleOverlay();
+    }
+
+    /** 会中及屏采授权等待期间不开放部署／账号修改，已准备的本场配置保持原快照。 */
+    private void setConfigurationEnabled(boolean enabled) {
+        boolean available = enabled && !meetingBusy && pendingPresentationMeeting == null;
+        loginButton.setEnabled(available);
+        settingsButton.setEnabled(available);
+        if (loginDialog != null && loginDialog.isShowing())
+            loginDialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setEnabled(available);
     }
 
     @Override protected void onStart() {

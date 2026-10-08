@@ -21,6 +21,30 @@ public final class MeetingAppAssemblyTest {
         MeetingAppAssembly.clearPreparedMeeting();
         MeetingAppAssembly.registerResultActions(List.of(new WebResultActionPlugin()));
         MeetingAppAssembly.registerOverlayFactory(new OverlayViewFactory());
+        MeetingAppAssembly.registerPageFactory(new MeetingPageViews.DefaultFactory());
+        MeetingAppAssembly.configureResultWeb("");
+    }
+
+    @Test public void pageFactoryOnlyReplacesViewsAndKeepsDefaultWebAndWindow() {
+        MeetingPageViews.Factory factory = activity -> { throw new AssertionError("尚未创建页面"); };
+        MeetingAppAssembly.registerPageFactory(factory);
+        assertSame(factory, MeetingAppAssembly.pageFactory());
+        assertTrue(MeetingAppAssembly.overlayFactory() instanceof OverlayViewFactory);
+        assertEquals(List.of("web"), MeetingAppAssembly.resultActions().stream().map(plugin -> plugin.id()).toList());
+    }
+
+    @Test public void processWebConfigurationDoesNotChangePreparedSameMeetingClosure() {
+        AtomicReference<String> opened = new AtomicReference<>();
+        MeetingAppAssembly.configureResultWeb("https://first.example.test/index.html");
+        var prepared = MeetingAppAssembly.prepare(setup("web"), discovery(),
+                new WebResultActionPlugin(MeetingAppAssembly.resultWebUrl(), opened::set)).meeting();
+        MeetingAppAssembly.configureResultWeb("https://next.example.test/index.html");
+        assertEquals("https://next.example.test/index.html", MeetingAppAssembly.resultWebUrl());
+        MeetingAppAssembly.handoff(prepared);
+        assertSame(prepared, MeetingAppAssembly.consumePreparedMeeting());
+        assertEquals(ResultActionOutcome.Status.SUCCEEDED,
+                execute(prepared, ready(), noProtocols(), Runnable::run).status());
+        assertEquals("https://first.example.test/index.html?meetingId=mtg_same&genTime=555", opened.get());
     }
 
     @Test public void windowFactoryReplacesOnlyAssemblyWithoutCreatingMeetingOrWindow() {

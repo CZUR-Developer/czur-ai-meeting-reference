@@ -9,6 +9,7 @@ import com.czur.aimeeting.client.result.ResultActionPlugin;
 import com.czur.aimeeting.client.result.ResultOptions;
 import com.czur.aimeeting.reference.AppResultActionPlugin;
 import com.czur.aimeeting.reference.WebResultActionPlugin;
+import com.czur.aimeeting.reference.MeetingPageViews;
 import com.czur.aimeeting.reference.ui.MeetingOverlayFactory;
 import com.czur.aimeeting.reference.ui.OverlayViewFactory;
 import com.czur.aimeeting.client.identity.IdentityProvider;
@@ -30,14 +31,28 @@ import java.util.concurrent.Executor;
  */
 public final class MeetingAppAssembly {
     private static String serverUrl = "";
+    private static String resultWebUrl = "";
     private static IdentityProvider identityProvider = new ReferenceIdentityProvider();
     // 替换提示例：List.of(new CompletionNoticeAction())；PDF／邮件也需在此显式注册。
     private static List<AppResultActionPlugin> resultActions = List.of(new WebResultActionPlugin());
     private static ResultActionRegistry resultRegistry = new ResultActionRegistry(resultActions);
     private static PreparedMeeting pendingMeeting;
     private static MeetingOverlayFactory overlayFactory = new OverlayViewFactory();
+    private static MeetingPageViews.Factory pageFactory = new MeetingPageViews.DefaultFactory();
 
     private MeetingAppAssembly() {}
+
+    /** 会前登记App页面工厂；只替换View，新Activity继续绑定同一身份、能力及Service链。 */
+    public static synchronized void registerPageFactory(MeetingPageViews.Factory factory) {
+        pageFactory = Objects.requireNonNull(factory, "factory");
+    }
+    public static synchronized MeetingPageViews.Factory pageFactory() { return pageFactory; }
+
+    /** 本进程部署配置；Web插件在点击开始时冻结，已准备会议保留原同场执行闭包。 */
+    public static synchronized void configureResultWeb(String url) {
+        resultWebUrl = Objects.requireNonNull(url, "url");
+    }
+    public static synchronized String resultWebUrl() { return resultWebUrl; }
 
     /**
      * 构建期替换窗口内容／策略，例如有 UI AAR 时注册 new SingleFormOverlayFactory()。

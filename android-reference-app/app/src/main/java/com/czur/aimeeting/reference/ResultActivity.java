@@ -12,9 +12,10 @@ public final class ResultActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        webView = new WebView(this);
+        setContentView(R.layout.reference_result_page);
+        webView = findViewById(R.id.result_web);
         webView.getSettings().setJavaScriptEnabled(true);
-        setContentView(webView);
+        findViewById(R.id.result_back).setOnClickListener(view -> finish());
         webView.loadUrl(getIntent().getStringExtra(EXTRA_RESULT_URL));
     }
 

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" android:layout_width="match_parent" android:layout_height="match_parent" android:orientation="vertical" android:padding="32dp" android:background="@color/reference_background">
+    <TextView style="@style/ReferenceLabel" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="连接设置" android:textSize="26sp" />
+    <TextView style="@style/ReferenceLabel" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="24dp" android:text="参考后端" />
+    <EditText android:id="@+id/backend_url" android:layout_width="match_parent" android:layout_height="wrap_content" android:inputType="textUri" android:singleLine="true" android:hint="@string/reference_backend_hint" />
+    <TextView style="@style/ReferenceLabel" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="20dp" android:text="Web 结果页" />
+    <EditText android:id="@+id/web_url" android:layout_width="match_parent" android:layout_height="wrap_content" android:inputType="textUri" android:singleLine="true" android:hint="@string/reference_web_hint" />
+    <TextView android:id="@+id/connection_message" style="@style/ReferenceLabel" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="20dp" android:text="地址仅保存在本次进程；更换后端后请重新登录。部署方负责其后端、网页与认证。" />
+    <Space android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" />
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="end" android:orientation="horizontal">
+        <Button android:id="@+id/connection_back" style="@style/ReferenceButton" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="返回" />
+        <Button android:id="@+id/connection_save" style="@style/ReferenceButton" android:layout_width="180dp" android:layout_height="wrap_content" android:text="保存并返回" />
+    </LinearLayout>
+</LinearLayout>

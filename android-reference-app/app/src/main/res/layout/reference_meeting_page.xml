@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/reference_screen" android:layout_width="match_parent" android:layout_height="match_parent"
+    android:background="@color/reference_background">
+    <LinearLayout android:layout_width="match_parent" android:layout_height="match_parent" android:orientation="vertical">
+        <FrameLayout android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1">
+            <LinearLayout android:id="@+id/setup_card" android:layout_width="match_parent" android:layout_height="match_parent"
+                android:layout_gravity="center" android:orientation="vertical" android:background="#FFFFFF">
+                <LinearLayout android:id="@+id/setup_header" android:layout_width="match_parent" android:layout_height="64dp"
+                    android:orientation="horizontal" android:gravity="center_vertical" android:paddingHorizontal="20dp" android:background="@color/reference_blue">
+                    <TextView android:id="@+id/setup_title" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+                        android:text="@string/reference_setup_title" android:textColor="#FFFFFF" android:textSize="24sp" />
+                    <Button android:id="@+id/account_button" style="@style/ReferenceButton" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/reference_account" />
+                    <Button android:id="@+id/settings_button" style="@style/ReferenceButton" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/reference_settings" />
+                </LinearLayout>
+                <ScrollView android:id="@+id/setup_scroll" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:fillViewport="true">
+                    <LinearLayout android:id="@+id/setup_content" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="24dp">
+                        <TextView style="@style/ReferenceLabel" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="会中显示" />
+                        <RadioGroup android:id="@+id/mode_group" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal">
+                            <RadioButton android:id="@+id/transcript_mode" style="@style/ReferenceLabel" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:checked="true" android:text="实时字幕" />
+                            <RadioButton android:id="@+id/translation_mode" style="@style/ReferenceLabel" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="AI 双语互译" />
+                        </RadioGroup>
+                        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="16dp" android:orientation="horizontal" android:gravity="center_vertical">
+                            <LinearLayout android:id="@+id/source_language_container" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:orientation="vertical">
+                                <TextView style="@style/ReferenceLabel" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/reference_source" />
+                                <Spinner android:id="@+id/source_language" android:layout_width="match_parent" android:layout_height="48dp" />
+                            </LinearLayout>
+                            <Button android:id="@+id/swap_languages" style="@style/ReferenceButton" android:layout_width="56dp" android:layout_height="48dp" android:text="⇄" android:visibility="gone" />
+                            <LinearLayout android:id="@+id/target_language_container" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:orientation="vertical" android:visibility="gone">
+                                <TextView style="@style/ReferenceLabel" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/reference_target" />
+                                <Spinner android:id="@+id/target_language" android:layout_width="match_parent" android:layout_height="48dp" />
+                            </LinearLayout>
+                        </LinearLayout>
+                        <CheckBox android:id="@+id/summary_enabled" style="@style/ReferenceLabel" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="16dp" android:text="会后生成会议纪要" />
+                        <CheckBox android:id="@+id/presentation_capture" style="@style/ReferenceLabel" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="演示文稿（开始时授权屏幕采集）" />
+                        <TextView style="@style/ReferenceLabel" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="16dp" android:text="会议结果" />
+                        <RadioGroup android:id="@+id/result_group" android:layout_width="match_parent" android:layout_height="wrap_content" />
+                        <TextView android:id="@+id/result_description" style="@style/ReferenceLabel" android:layout_width="match_parent" android:layout_height="wrap_content" android:padding="14dp" android:textSize="16sp" android:background="@color/reference_background" android:text="@string/reference_result_description" />
+                        <LinearLayout android:id="@+id/result_settings_host" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" />
+                    </LinearLayout>
+                </ScrollView>
+                <LinearLayout android:id="@+id/setup_footer" android:layout_width="match_parent" android:layout_height="64dp" android:orientation="horizontal" android:gravity="center_vertical" android:paddingHorizontal="24dp">
+                    <TextView android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="选择会议功能后开始" style="@style/ReferenceLabel" />
+                    <Button android:id="@+id/start_meeting" style="@style/ReferenceButton" android:layout_width="180dp" android:layout_height="match_parent" android:text="开始会议" android:enabled="false" />
+                </LinearLayout>
+            </LinearLayout>
+            <LinearLayout android:id="@+id/meeting_panel" android:layout_width="match_parent" android:layout_height="match_parent" android:orientation="vertical" android:padding="24dp" android:visibility="gone" android:background="@color/reference_dark">
+                <TextView android:id="@+id/meeting_title" style="@style/ReferenceDarkLabel" android:layout_width="match_parent" android:layout_height="wrap_content" android:textSize="24sp" android:text="实时字幕 · 会议中" />
+                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="center_vertical">
+                    <TextView android:id="@+id/elapsed" style="@style/ReferenceDarkLabel" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="已进行 00:00:00 · 剩余 00:00:00" />
+                    <TextView android:id="@+id/audio_level_text" style="@style/ReferenceDarkLabel" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="输入电平：等待输入" />
+                    <ProgressBar android:id="@+id/audio_level" style="?android:attr/progressBarStyleHorizontal" android:layout_width="120dp" android:layout_height="24dp" android:layout_marginStart="12dp" android:max="100" />
+                </LinearLayout>
+                <TextView android:id="@+id/capabilities" style="@style/ReferenceDarkLabel" android:layout_width="match_parent" android:layout_height="wrap_content" android:textSize="14sp" />
+                <LinearLayout android:id="@+id/bilingual_header" android:layout_width="match_parent" android:layout_height="48dp" android:orientation="horizontal" android:visibility="gone">
+                    <TextView android:id="@+id/left_language_title" style="@style/ReferenceDarkLabel" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" android:gravity="center" />
+                    <TextView android:id="@+id/right_language_title" style="@style/ReferenceDarkLabel" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" android:gravity="center" android:textColor="@color/reference_translation" />
+                </LinearLayout>
+                <ScrollView android:id="@+id/transcript_scroll" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:fillViewport="true" android:background="@color/reference_dark_panel">
+                    <LinearLayout android:id="@+id/transcript_list" android:layout_width="match_parent" android:layout_height="wrap_content" android:padding="20dp" android:orientation="vertical" />
+                </ScrollView>
+                <LinearLayout android:id="@+id/bilingual_text_area" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:orientation="horizontal" android:visibility="gone" android:background="@color/reference_dark_panel">
+                    <ScrollView android:id="@+id/left_scroll" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" android:fillViewport="true">
+                        <LinearLayout android:id="@+id/left_text_list" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="20dp" />
+                    </ScrollView>
+                    <View android:layout_width="1dp" android:layout_height="match_parent" android:background="#526078" />
+                    <ScrollView android:id="@+id/right_scroll" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" android:fillViewport="true">
+                        <LinearLayout android:id="@+id/right_text_list" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="20dp" />
+                    </ScrollView>
+                </LinearLayout>
+                <LinearLayout android:id="@+id/meeting_controls" android:layout_width="match_parent" android:layout_height="64dp" android:orientation="horizontal" android:gravity="center">
+                    <Button android:id="@+id/swap_columns" style="@style/ReferenceButton" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="交换左右栏" android:visibility="gone" />
+                    <Button android:id="@+id/overlay_button" style="@style/ReferenceButton" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="显示跨应用悬浮字幕" />
+                    <Button android:id="@+id/stop_meeting" style="@style/ReferenceButton" android:layout_width="180dp" android:layout_height="wrap_content" android:text="停止会议" android:enabled="false" />
+                </LinearLayout>
+            </LinearLayout>
+        </FrameLayout>
+        <TextView android:id="@+id/status" style="@style/ReferenceLabel" android:layout_width="match_parent" android:layout_height="wrap_content" android:paddingHorizontal="24dp" android:paddingVertical="8dp" android:text="请在连接设置配置地址，再从账号入口登录" />
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="center">
+            <Button android:id="@+id/retry_result" style="@style/ReferenceButton" android:layout_width="wrap_content" android:layout_height="wrap_content" android:visibility="gone" android:text="再次执行结果动作" />
+            <Button android:id="@+id/end_result" style="@style/ReferenceButton" android:layout_width="wrap_content" android:layout_height="wrap_content" android:visibility="gone" android:text="结束本场结果交互" />
+        </LinearLayout>
+    </LinearLayout>
+</FrameLayout>
