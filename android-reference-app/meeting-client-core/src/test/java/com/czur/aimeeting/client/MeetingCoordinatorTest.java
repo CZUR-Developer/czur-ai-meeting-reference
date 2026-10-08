@@ -20,6 +20,7 @@ import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -292,6 +293,56 @@ public final class MeetingCoordinatorTest {
     private static MeetingOptions options(MeetingOptions.Mode mode, MeetingOptions.ResultDelivery delivery, boolean capture) {
         return new MeetingOptions(mode, "zh-CN", "en-US", capture, delivery,
                 "https://result.example.test/index.html?existing=1#section", List.of("recipient@example.test"));
+    }
+
+    @Test public void readyAccessKeepsSameResultAfterEmailFailureAndManualExecution() throws Exception {
+        ReferenceIdentityProvider identity = new ReferenceIdentityProvider("same-scene-fixture");
+        try (Fixture f = new Fixture(false, Set.of(MeetingCapabilityState.TRANSCRIPT), identity)) {
+            f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.WEB, false);
+            f.runtime.emit("s1", 1, "zh-CN", "最终字幕", true);
+            f.probe.awaitCanStop();
+            f.session.requestStop();
+            MeetingResult result = f.probe.result();
+            f.probe.awaitPhase(MeetingSessionState.Phase.READY);
+            identity.clearSession();
+            var content = new CompletableFuture<MeetingResultContent>();
+            f.session.resultActionAccess().readContent(resultCallback(content));
+            assertEquals("最终字幕", content.get(2, TimeUnit.SECONDS).transcriptText());
+            f.server.failEmail = true;
+            var failed = new CompletableFuture<Void>();
+            f.session.resultActionAccess().sendEmail(List.of("recipient@example.test"), result.resultUrl(), resultCallback(failed));
+            assertThrows(java.util.concurrent.ExecutionException.class, () -> failed.get(2, TimeUnit.SECONDS));
+            f.server.failEmail = false;
+            var sent = new CompletableFuture<Void>();
+            f.session.resultActionAccess().sendEmail(List.of("recipient@example.test"), result.resultUrl(), resultCallback(sent));
+            sent.get(2, TimeUnit.SECONDS);
+            assertEquals("same-scene-fixture", f.sessionToken);
+            assertEquals(MeetingResult.Status.READY, result.status());
+            assertEquals(List.of(555L, 555L), f.server.genTimes);
+            assertEquals(1, f.clockCalls.get());
+            assertEquals(1, f.runtime.stopCalls);
+            assertEquals(1, Collections.frequency(f.server.steps, "stop"));
+            assertEquals(2, Collections.frequency(f.server.steps, "email"));
+            assertTrue("结果访问不会更新会议阶段", f.probe.states.isEmpty());
+        }
+    }
+
+    @Test public void resultAccessBeforeReadyNeverStartsResultProtocol() throws Exception {
+        try (Fixture f = new Fixture(false, Set.of(MeetingCapabilityState.TRANSCRIPT))) {
+            f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.WEB, false);
+            var beforeReady = new CompletableFuture<MeetingResultContent>();
+            f.session.resultActionAccess().readContent(resultCallback(beforeReady));
+            assertThrows(java.util.concurrent.ExecutionException.class, () -> beforeReady.get(2, TimeUnit.SECONDS));
+            assertFalse(f.server.steps.contains("manifest"));
+            assertFalse(f.server.steps.contains("stop"));
+        }
+    }
+
+    private static <T> MeetingClient.Callback<T> resultCallback(CompletableFuture<T> future) {
+        return new MeetingClient.Callback<>() {
+            @Override public void onSuccess(T result) { future.complete(result); }
+            @Override public void onError(String message) { future.completeExceptionally(new IOException(message)); }
+        };
     }
 
     private static final class Fixture implements AutoCloseable {

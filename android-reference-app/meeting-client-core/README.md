@@ -81,6 +81,43 @@ speaker 可选，未授予时移除字段、不拒绝开场；总结工厂独立
 总结仍在末尾最终字幕完成、标准事件提交后生成，并在后端Stop前保存；设置拆分不改变
 P6的采音、模型、DOA或尾部收口时序。
 
+### 可注册结果动作（P7-2a第一片）
+
+公共`client.result`已提供`ResultActionPlugin`、构建期`ResultActionRegistry`、独立
+`ResultActionOutcome`和`ResultOptions`。注册清单就是产品开放清单，没有隐式默认插件。
+插件声明稳定字符串ID、名称、所需真实产物及结果服务；会前在App既有Hook调用`prepare`，
+只读本地已准备状态并冻结参数闭包，阻止时不建会。网络／扫码准备由App提前异步完成。
+
+`ResultActionRegistry.serviceCapabilities(discovery)`将已有部署链接期限和邮件开关
+适配成`result.link`／`result.email`，不混入模型Adapter能力。会前只确认服务，执行前
+再检查SDK真实READY的`artifactTypes`。声明服务不会为App安装不存在的插件。
+
+真实READY后，App用同场`session.resultActionAccess()`取得异步`readContent`／`sendEmail`，
+SDK内部沿用开始时冻结的身份和本场`genTime`，不向插件暴露token、原Server client或JSON。
+Web／纯提示不调用正文读取；PDF等显式动作才按需读取。请求走既有IO队列，结果回配置的
+串行callbackExecutor。动作失败与READY分开；App可用同一准备闭包、READY和访问对象
+手动再执行，不重新Stop、采音、总结或计费。结果交互结束后关闭原client，关闭后不再派发回调。
+
+```java
+ResultActionRegistry registry = new ResultActionRegistry(List.of(myNoticePlugin));
+// 先在会前Hook主线程准备；prepared应在开始时冻结并由Service持有。
+var prepared = registry.prepare("partner.notice", options, discovery);
+if (!prepared.allowed()) showMessage(prepared.message());
+// 下方只能在SDK已经确认同场READY后执行；平台工作／UI队列由App提供。
+var context = new ResultActionContext(readyResult, session.resultActionAccess(),
+        ResultActionRegistry.serviceCapabilities(discovery), platformWork, mainExecutor);
+registry.execute(prepared.action(), context, actionCallback);
+```
+
+`MeetingOptions`原七／八参构造器保留并转换旧结果枚举；新八参构造器用`ResultOptions`
+替换原`ResultDelivery`参数，支持伙伴字符串ID，不新增固定枚举。旧纪要模式和独立总结语义不变。
+`NO_ACTIVE_DELIVERY`仅表达既有不主动交付策略，不承诺删除服务端数据。
+
+当前第一片保留旧参考App和Coordinator的Web／LOCAL／EMAIL交付运行行为及下面的
+旧结果字段。新的App默认仅Web、通用派发、Manifest-only收口和完成提示替换例在第二片
+同步切换，尚未实施；本接口交付不能代签P7-2a整体完成。新字符串动作需显式准备／执行，
+本片不因一个新ID自动替换旧App交付，也不创建将被删除的过渡插件。
+
 ### 正常停止与结果
 
 `requestStop()` 只在 `canStop=true` 时受理：先冲刷显示，再调用 `beforeStop(continuation)`。

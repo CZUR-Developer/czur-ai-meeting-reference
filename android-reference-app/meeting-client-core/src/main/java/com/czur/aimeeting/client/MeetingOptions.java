@@ -2,6 +2,7 @@ package com.czur.aimeeting.client;
 
 import java.util.List;
 import java.util.ArrayList;
+import com.czur.aimeeting.client.result.ResultOptions;
 
 /**
  * 本场会前快照。mode决定会中字幕／互译呈现，summaryEnabled独立决定会后是否生成纪要。
@@ -10,7 +11,26 @@ import java.util.ArrayList;
  */
 public record MeetingOptions(Mode mode, String sourceLanguage, String targetLanguage,
         boolean presentationCapture, ResultDelivery resultDelivery, String resultWebUrl,
-        List<String> resultEmails, boolean summaryEnabled) {
+        List<String> resultEmails, boolean summaryEnabled, ResultOptions resultOptions) {
+    /** 保留原八参PUBLIC签名及原运行行为，新增动作选择从旧枚举转换。 */
+    public MeetingOptions(Mode mode, String sourceLanguage, String targetLanguage,
+            boolean presentationCapture, ResultDelivery resultDelivery, String resultWebUrl,
+            List<String> resultEmails, boolean summaryEnabled) {
+        this(mode, sourceLanguage, targetLanguage, presentationCapture, resultDelivery,
+                resultWebUrl, resultEmails, summaryEnabled, ResultOptions.fromLegacy(resultDelivery));
+    }
+
+    /**
+     * 用稳定字符串选择新动作；参数闭包由App插件prepare冻结，旧字段仅供兼容实现。
+     * 当前公共扩展切片仍保留旧App交付链；App通用派发切换后按resultOptions执行，
+     * 不从legacyDelivery占位值推断伙伴动作行为。
+     */
+    public MeetingOptions(Mode mode, String sourceLanguage, String targetLanguage,
+            boolean presentationCapture, ResultOptions resultOptions, String resultWebUrl,
+            List<String> resultEmails, boolean summaryEnabled) {
+        this(mode, sourceLanguage, targetLanguage, presentationCapture, resultOptions.legacyDelivery(),
+                resultWebUrl, resultEmails, summaryEnabled, resultOptions);
+    }
     /** 兼容既有模式调用：仅旧MEETING_MINUTES默认开启总结。 */
     public MeetingOptions(Mode mode, String sourceLanguage, String targetLanguage,
             boolean presentationCapture, ResultDelivery resultDelivery, String resultWebUrl,
@@ -20,6 +40,7 @@ public record MeetingOptions(Mode mode, String sourceLanguage, String targetLang
     }
 
     public MeetingOptions {
+        java.util.Objects.requireNonNull(resultOptions, "resultOptions");
         resultEmails = List.copyOf(resultEmails);
         // 旧枚举始终表示纪要，避免新构造器把相同旧模式解释为“关闭总结”。
         summaryEnabled = summaryEnabled || mode == Mode.MEETING_MINUTES;

@@ -2,6 +2,7 @@ package com.czur.aimeeting.client;
 
 import com.czur.aimeeting.client.display.MeetingDisplaySnapshot;
 import com.czur.aimeeting.client.display.MeetingDisplayState;
+import com.czur.aimeeting.client.result.ResultActionAccess;
 import com.czur.aimeeting.client.provider.TingwuModelAdapter;
 import com.czur.aimeeting.client.server.CreatedMeeting;
 import com.czur.aimeeting.client.server.HttpMeetingServerClient;
@@ -213,6 +214,7 @@ public final class MeetingCoordinator implements MeetingClient {
         private boolean usageSubmitted;
         private boolean summarySubmitted;
         private Long genTime;
+        private volatile MeetingResult readyResult;
 
         Session(MeetingOptions options, MeetingListener listener) {
             this.options = Objects.requireNonNull(options, "options");
@@ -567,6 +569,7 @@ public final class MeetingCoordinator implements MeetingClient {
                     done = true;
                     active = false;
                     phase = MeetingSessionState.Phase.READY;
+                    readyResult = finalResult;
                     notifyListener(() -> listener.onResult(finalResult));
                     publish("本场结果已就绪");
                     LOG.info("会议结果已就绪");
@@ -605,17 +608,61 @@ public final class MeetingCoordinator implements MeetingClient {
             publish(message);
         }
 
+        @Override public ResultActionAccess resultActionAccess() {
+            return new ResultActionAccess() {
+                @Override public void readContent(Callback<MeetingResultContent> callback) {
+                    accessResult("读取结果内容", callback, result -> result.content() != null
+                            ? result.content() : server.readResult(result.meetingId(), result.genTime(), true).content());
+                }
+                @Override public void sendEmail(java.util.List<String> recipients, String url,
+                        Callback<Void> callback) {
+                    var frozenRecipients = java.util.List.copyOf(recipients);
+                    accessResult("发送结果邮件", callback, result -> {
+                        server.sendResultEmail(result.meetingId(), frozenRecipients, url);
+                        return null;
+                    });
+                }
+            };
+        }
+
+        private <T> void accessResult(String step, Callback<T> callback, ResultCall<T> call) {
+            Objects.requireNonNull(callback, "callback");
+            enqueue(() -> {
+                if (closed || cancelled) return;
+                MeetingResult result = readyResult;
+                if (result == null) {
+                    notifyListener(() -> callback.onError("本场结果尚未就绪"));
+                    return;
+                }
+                io.execute(() -> {
+                    if (closed || cancelled) return;
+                    try {
+                        LOG.fine("同场结果访问开始 step=" + step);
+                        T value = call.call(result);
+                        notifyListener(() -> callback.onSuccess(value));
+                    } catch (IOException | RuntimeException failure) {
+                        logFailure(step, failure);
+                        notifyListener(() -> callback.onError(step + "失败，请再次执行"));
+                    }
+                });
+            });
+        }
+
         @Override public void close() { enqueue(this::cancel); }
 
         private void cancel() {
             if (cancelled) return;
             cancelled = true;
+            readyResult = null;
             done = true;
             active = false;
             cancelDeadline();
             if (model != null) io.execute(model::close);
         }
     }
+
+    @FunctionalInterface
+    private interface ResultCall<T> { T call(MeetingResult result) throws IOException; }
 
     private static void logFailure(String step, Throwable failure) {
         String code = "";
