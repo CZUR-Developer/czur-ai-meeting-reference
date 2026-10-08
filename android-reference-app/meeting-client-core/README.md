@@ -68,9 +68,16 @@ App 保留权限、前台服务、时长提醒/自动停止、页面/悬浮窗�
 | `onDisplay` | 同一份源句/译文、语义 A/B、`swapped` 和真实语言，UI 只呈现 |
 | `onTranscriptActivity(nowMs)` | 非空原文到达即排队，不等待 1.5 秒显示窗口；与起点共用单调时基 |
 | `onAudioInputMode/onAudioError` | 实际音源和类型化错误；SDK 不申请权限或自动重试 |
+| `onAudioLevel` | 同流0～100的RMS显示电平及elapsedRealtime单调测量毫秒时刻，不交付PCM |
 | `onResult` | 只保存实际READY清单，先于READY状态；收到该状态后才派发动作 |
 
 Coordinator 使用轻量串行状态/方向/显示/deadline 队列和独立串行 HTTP/模型启动停止/总结队列；
+`onAudioLevel`沿用串行callbackExecutor，正常停止受理、输入结束或关闭后不再派发在途电平。
+Android SDK每三个完整100ms PCM16LE帧测当次帧，约300ms通知一次；旧RMS相对满幅
+-60～0dB映射0～100，不是物理环境分贝，也不是300ms累计窗口。App停止时复位显示，
+不通过电平改变无字幕超时、发言判断、结果事件或计费。基础`AudioInput.Listener`同样
+使用default回调，但在采音线程交付，由调用方快速返回并自行切换UI线程；Mock不伪造测量。
+
 慢网络不会阻塞句开始、活跃事实和语种截止点。所有模式必需 `transcript.realtime`；互译另需
 `translation.realtime`；独立`summaryEnabled`开启时另需`summary.structured`。
 互译＋总结同时请求／要求两项能力，缺少用户选择的必需能力不启动模型。

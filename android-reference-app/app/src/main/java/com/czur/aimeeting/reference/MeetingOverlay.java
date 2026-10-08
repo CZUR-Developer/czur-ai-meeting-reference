@@ -12,10 +12,12 @@ import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.ProgressBar;
 import com.czur.aimeeting.client.display.MeetingDisplaySnapshot;
 import com.czur.aimeeting.reference.meeting.DisplaySnapshotPresentation;
 import com.czur.aimeeting.reference.meeting.MeetingReminderPresentation;
 import com.czur.aimeeting.reference.meeting.MeetingSetup;
+import com.czur.aimeeting.reference.meeting.MeetingRuntimeFactory;
 import com.czur.aimeeting.reference.meeting.OverlayLayoutState;
 import java.util.List;
 
@@ -38,6 +40,8 @@ final class MeetingOverlay {
     private TextView leftView;
     private TextView rightView;
     private TextView elapsedView;
+    private ProgressBar audioLevelBar;
+    private TextView audioLevelView;
     private View reminderScrim;
     private MeetingReminderPopup reminderPopup;
     private Runnable onConfirmReminder;
@@ -54,6 +58,7 @@ final class MeetingOverlay {
             MeetingReminderPresentation.Notice.NONE;
     private boolean lastAllowReminder;
     private boolean lastCanStop;
+    private int lastAudioLevel;
 
     MeetingOverlay(Context context) {
         this.context = context;
@@ -100,6 +105,12 @@ final class MeetingOverlay {
         elapsedView.setTextColor(Color.WHITE);
         controls.addView(elapsedView);
         expandedPanel.addView(controls);
+        audioLevelView = new TextView(context);
+        audioLevelView.setTextColor(Color.WHITE);
+        expandedPanel.addView(audioLevelView);
+        audioLevelBar = new ProgressBar(context, null, android.R.attr.progressBarStyleHorizontal);
+        audioLevelBar.setMax(100);
+        expandedPanel.addView(audioLevelBar, new LinearLayout.LayoutParams(-1, -2));
         transcriptView = new TextView(context);
         transcriptView.setTextSize(22);
         transcriptView.setTextColor(Color.WHITE);
@@ -185,6 +196,13 @@ final class MeetingOverlay {
     void render(MeetingDisplaySnapshot state, MeetingSetup.Mode mode, boolean summaryEnabled,
             String timeText, MeetingReminderPresentation.Notice reminder, boolean canStop,
             boolean allowOverlayReminder) {
+        render(state, mode, summaryEnabled, timeText, reminder, canStop, allowOverlayReminder, 0);
+    }
+
+    /** 电平来自 Service 的同场快照，窗口不订阅音源；Mini 也更新同一值。 */
+    void render(MeetingDisplaySnapshot state, MeetingSetup.Mode mode, boolean summaryEnabled,
+            String timeText, MeetingReminderPresentation.Notice reminder, boolean canStop,
+            boolean allowOverlayReminder, int audioLevel) {
         if (root == null) return;
         lastDisplay = state;
         lastMode = mode;
@@ -193,6 +211,12 @@ final class MeetingOverlay {
         lastReminder = reminder;
         lastAllowReminder = allowOverlayReminder;
         lastCanStop = canStop;
+        lastAudioLevel = audioLevel;
+        audioLevelBar.setProgress(audioLevel);
+        audioLevelView.setText(MeetingRuntimeFactory.requiresMicrophone()
+                ? "输入电平：" + audioLevel + "/100" : "输入电平：Mock 未实采");
+        miniButton.setText(MeetingRuntimeFactory.requiresMicrophone()
+                ? "AI 会议 · 恢复 · " + audioLevel + "/100" : "AI 会议 · 恢复");
         renderReminder(reminder, allowOverlayReminder);
         if (layout.current() == OverlayLayoutState.Type.MINI) return;
         boolean bilingual = state.bilingual();
@@ -314,7 +338,7 @@ final class MeetingOverlay {
 
     private void renderLastState() {
         if (lastDisplay != null) render(lastDisplay, lastMode, lastSummaryEnabled, lastTimeText, lastReminder,
-                lastCanStop, lastAllowReminder);
+                lastCanStop, lastAllowReminder, lastAudioLevel);
     }
 
     /** Mini 调整成右上角的小入口；展开后仍使用原会话窗口和最近的字幕快照。 */
@@ -349,6 +373,8 @@ final class MeetingOverlay {
         leftView = null;
         rightView = null;
         elapsedView = null;
+        audioLevelBar = null;
+        audioLevelView = null;
         onConfirmReminder = null;
         stopButton = null;
         swapButton = null;

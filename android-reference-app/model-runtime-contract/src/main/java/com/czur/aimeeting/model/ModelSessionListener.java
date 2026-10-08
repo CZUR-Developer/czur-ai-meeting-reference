@@ -9,6 +9,14 @@ public interface ModelSessionListener {
     default void onAudioInputMode(AudioInputMode mode) {}
 
     /**
+     * 正在使用的同一 PCM 流的 RMS 显示电平，默认约 300 ms 一次；不另开音源。
+     * 与本场技术回调串行交付，可能来自非 UI 线程，调用方应快速返回。
+     * stopInput、输入结束或 close 后不再通知，已进入的回调允许返回；宿主停止时复位 UI。
+     * 默认空实现使旧运行时、仅字幕调用和没有实际 PCM 的 Mock 保持兼容。
+     */
+    default void onAudioLevel(AudioInputLevel level) {}
+
+    /**
      * 当前系统方向样本，NO_DIRECTION 如实表示本次无有效读数。是否保留历史稳定角属于
      * 上层显示策略：国内组合规则保留 NO_DIRECTION 之前的有效角，UNSUPPORTED 按语种
      * 降级。基础层不把缓存角伪装成本次 AVAILABLE；已锁侧片段始终保持原栏。

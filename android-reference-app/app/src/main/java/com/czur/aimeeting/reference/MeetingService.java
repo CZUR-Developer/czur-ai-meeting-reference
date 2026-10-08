@@ -31,6 +31,7 @@ import com.czur.aimeeting.client.result.ResultActionOutcome;
 import com.czur.aimeeting.client.display.MeetingDisplaySnapshot;
 import com.czur.aimeeting.model.AudioInputErrorCode;
 import com.czur.aimeeting.model.AudioInputMode;
+import com.czur.aimeeting.model.AudioInputLevel;
 import com.czur.aimeeting.reference.meeting.MeetingRuntimeFactory;
 import com.czur.aimeeting.reference.meeting.MeetingAppAssembly;
 import com.czur.aimeeting.reference.meeting.MeetingSetup;
@@ -77,13 +78,15 @@ public final class MeetingService extends Service {
         final MeetingReminderPresentation.Notice reminder;
         final MeetingSetup.Mode mode;
         final boolean summaryEnabled;
+        /** 同场最近一次实际输入电平；尚未实采或停止后为 null，显示方据此复位为 0。 */
+        final AudioInputLevel audioLevel;
 
         State(MeetingDisplaySnapshot display, String status, String capabilityText, boolean busy,
                 boolean active, boolean canStop, boolean overlayShowing,
                 int transcriptVersion, MeetingResult readyResult, ResultActionOutcome actionOutcome,
                 boolean actionRunning,
                 String timeText, MeetingReminderPresentation.Notice reminder, MeetingSetup.Mode mode,
-                boolean summaryEnabled) {
+                boolean summaryEnabled, AudioInputLevel audioLevel) {
             this.display = display;
             this.status = status;
             this.capabilityText = capabilityText;
@@ -99,6 +102,7 @@ public final class MeetingService extends Service {
             this.reminder = reminder;
             this.mode = mode;
             this.summaryEnabled = summaryEnabled;
+            this.audioLevel = audioLevel;
         }
     }
 
@@ -163,6 +167,7 @@ public final class MeetingService extends Service {
     private String capabilityText = "本场功能将在创建会议后按后端能力显示";
     private AudioInputMode audioInputMode;
     private String audioErrorText;
+    private AudioInputLevel audioLevel;
     private MeetingAppAssembly.PreparedMeeting preparedMeeting;
     private MeetingResult readyResult;
     private ResultActionOutcome actionOutcome;
@@ -310,6 +315,7 @@ public final class MeetingService extends Service {
         meetingId = null;
         audioInputMode = null;
         audioErrorText = null;
+        audioLevel = null;
         display = new MeetingDisplaySnapshot(
                 requested.mode() == MeetingSetup.Mode.LIVE_TRANSLATION,
                 requested.sourceLanguage(), requested.targetLanguage(), false, List.of(), null);
@@ -337,6 +343,7 @@ public final class MeetingService extends Service {
                 @Override public void onState(MeetingSessionState next) {
                     active = next.active();
                     canStop = next.canStop();
+                    if (next.phase() != MeetingSessionState.Phase.RUNNING) audioLevel = null;
                     status = next.message();
                     Log.d(TAG, "组合会议状态 phase=" + next.phase()
                             + " savedEventCount=" + next.savedEventCount());
@@ -370,7 +377,17 @@ public final class MeetingService extends Service {
                     publish();
                 }
 
+                @Override public void onAudioLevel(AudioInputLevel level) {
+                    // 页面、窗口共用此值；Stop 点击即关门，忽略主线程队列中的在途电平。
+                    if (!active || stopRequested || audioErrorText != null) return;
+                    audioLevel = level;
+                    Log.d(TAG, "同场输入电平 level=" + level.level()
+                            + " sampledAtMs=" + level.sampledAtElapsedRealtimeMs());
+                    publish();
+                }
+
                 @Override public void onAudioError(AudioInputErrorCode code, String message) {
+                    audioLevel = null;
                     audioErrorText = code == AudioInputErrorCode.PERMISSION_DENIED
                             ? "没有麦克风权限，请在应用中授予权限后重新开始会议"
                             : "音频输入失败：" + message;
@@ -465,6 +482,7 @@ public final class MeetingService extends Service {
     private void requestStop(String progressText) {
         if (!active || !canStop || session == null) return;
         stopRequested = true;
+        audioLevel = null;
         canStop = false;
         status = progressText;
         publish();
@@ -533,6 +551,7 @@ public final class MeetingService extends Service {
     }
 
     private void stopMeetingUi() {
+        audioLevel = null;
         if (timing != null && stoppedClock == null) stoppedClock = timing.at(SystemClock.elapsedRealtime());
         active = false;
         canStop = false;
@@ -566,12 +585,14 @@ public final class MeetingService extends Service {
         State state = new State(display, status, capabilityText + audioText, busy, active, canStop,
                 overlay.isShowing(), transcriptVersion, readyResult, actionOutcome, actionRunning, timeText, reminder,
                 setup == null ? MeetingSetup.Mode.LIVE_TRANSCRIPT : setup.mode(),
-                setup != null && setup.summaryEnabled());
-        overlay.render(display, state.mode, state.summaryEnabled, timeText, reminder, canStop, observer == null);
+                setup != null && setup.summaryEnabled(), audioLevel);
+        overlay.render(display, state.mode, state.summaryEnabled, timeText, reminder, canStop,
+                observer == null, audioLevel == null ? 0 : audioLevel.level());
         if (observer != null) observer.onMeetingState(state);
     }
 
     @Override public void onDestroy() {
+        audioLevel = null;
         if (debugStopReceiverRegistered) {
             unregisterReceiver(debugStopReceiver);
             debugStopReceiverRegistered = false;

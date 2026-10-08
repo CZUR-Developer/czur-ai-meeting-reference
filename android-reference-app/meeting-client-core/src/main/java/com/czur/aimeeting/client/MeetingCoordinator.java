@@ -14,6 +14,7 @@ import com.czur.aimeeting.client.identity.ReferenceIdentityProvider;
 import com.czur.aimeeting.model.AudioDirectionSample;
 import com.czur.aimeeting.model.AudioInputErrorCode;
 import com.czur.aimeeting.model.AudioInputMode;
+import com.czur.aimeeting.model.AudioInputLevel;
 import com.czur.aimeeting.model.ModelAdapter;
 import com.czur.aimeeting.model.ModelSession;
 import com.czur.aimeeting.model.ModelSessionGrant;
@@ -187,6 +188,8 @@ public final class MeetingCoordinator implements MeetingClient {
         private final FinalTranscriptCollector finals = new FinalTranscriptCollector();
         private volatile boolean done;
         private volatile boolean cancelled;
+        // 状态队列关门后，callbackExecutor 中尚未派发的电平也不能再次点亮 UI。
+        private volatile boolean audioLevelActive;
         private String meetingId;
         private Set<String> available = Set.of();
         private ModelSession model;
@@ -316,6 +319,14 @@ public final class MeetingCoordinator implements MeetingClient {
                             @Override public void onAudioInputMode(AudioInputMode mode) {
                                 enqueue(() -> { if (!done) notifyListener(() -> listener.onAudioInputMode(mode)); });
                             }
+                            @Override public void onAudioLevel(AudioInputLevel level) {
+                                enqueue(() -> {
+                                    if (!audioLevelActive) return;
+                                    notifyListener(() -> {
+                                        if (audioLevelActive) listener.onAudioLevel(level);
+                                    });
+                                });
+                            }
                             @Override public void onAudioDirection(AudioDirectionSample sample) {
                                 enqueue(() -> { if (!done) display.updateAudioDirection(sample); });
                             }
@@ -331,6 +342,7 @@ public final class MeetingCoordinator implements MeetingClient {
                                     if (done) return;
                                     audioFailed = true;
                                     modelFinished = true;
+                                    audioLevelActive = false;
                                     LOG.warning("本场音频输入终止 code=" + code);
                                     notifyListener(() -> listener.onAudioError(code, message));
                                     publish("音频输入已结束，请检查权限或音频连接后停止本场会议");
@@ -341,6 +353,7 @@ public final class MeetingCoordinator implements MeetingClient {
                                 enqueue(() -> {
                                     if (done) return;
                                     modelFinished = true;
+                                    audioLevelActive = false;
                                     LOG.warning("本场模型运行时终止");
                                     publish("模型会话已结束，请检查连接或停止本场会议");
                                     maybeComplete();
@@ -348,6 +361,7 @@ public final class MeetingCoordinator implements MeetingClient {
                             }
                         });
                 active = true;
+                audioLevelActive = true;
                 canStop = runtime.waitsForModelFinish();
                 acceptingPresentation = options.presentationCapture();
                 phase = MeetingSessionState.Phase.RUNNING;
@@ -430,6 +444,7 @@ public final class MeetingCoordinator implements MeetingClient {
         private void finished() {
             if (done || modelFinished) return;
             modelFinished = true;
+            audioLevelActive = false;
             if (display.flushPendingLanguages()) showDisplay();
             cancelDeadline();
             publish(stopRequested ? "模型最终输出已接收，正在收口" : "模型已完成，可结束会议");
@@ -456,6 +471,7 @@ public final class MeetingCoordinator implements MeetingClient {
             enqueue(() -> {
                 if (done || !active || !canStop) return;
                 stopRequested = true;
+                audioLevelActive = false;
                 canStop = false;
                 phase = MeetingSessionState.Phase.STOPPING;
                 if (display.flushPendingLanguages()) showDisplay();
@@ -580,6 +596,7 @@ public final class MeetingCoordinator implements MeetingClient {
 
         private void failStart(String message) {
             if (done) return;
+            audioLevelActive = false;
             done = true;
             active = false;
             canStop = false;
@@ -634,6 +651,7 @@ public final class MeetingCoordinator implements MeetingClient {
         private void cancel() {
             if (cancelled) return;
             cancelled = true;
+            audioLevelActive = false;
             readyResult = null;
             done = true;
             active = false;

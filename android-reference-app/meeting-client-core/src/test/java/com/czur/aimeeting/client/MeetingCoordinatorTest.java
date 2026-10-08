@@ -33,6 +33,44 @@ public final class MeetingCoordinatorTest {
     private static final Set<String> ALL = Set.of(MeetingCapabilityState.TRANSCRIPT,
             MeetingCapabilityState.TRANSLATION, MeetingCapabilityState.SUMMARY, MeetingCapabilityState.SPEAKER);
 
+    @Test public void sameStreamLevelUsesCallbackExecutorAndQueuedLevelStopsWithNormalStop() throws Exception {
+        BlockingQueue<Runnable> callbacks = new LinkedBlockingQueue<>();
+        try (Fixture f = new Fixture(true, Set.of(MeetingCapabilityState.TRANSCRIPT),
+                new ReferenceIdentityProvider("test-token"), callbacks::add)) {
+            f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.WEB, false);
+            Runnable task;
+            while ((task = callbacks.poll()) != null) task.run();
+            AudioInputLevel level = new AudioInputLevel(50, 1200);
+            f.runtime.listener.onAudioLevel(level);
+            task = callbacks.poll(2, TimeUnit.SECONDS);
+            assertNotNull(task);
+            assertTrue("配置的执行器派发前不进入宿主", f.probe.levels.isEmpty());
+            task.run();
+            assertSame(level, f.probe.levels.poll(2, TimeUnit.SECONDS));
+
+            f.runtime.listener.onAudioLevel(new AudioInputLevel(80, 1500));
+            Runnable queuedLevel = callbacks.poll(2, TimeUnit.SECONDS);
+            assertNotNull(queuedLevel);
+            f.session.requestStop();
+            Runnable stoppingState = callbacks.poll(2, TimeUnit.SECONDS);
+            assertNotNull(stoppingState); // 状态队列已经受理正常 Stop 并关电平门。
+            queuedLevel.run();
+            assertTrue(f.probe.levels.isEmpty());
+            stoppingState.run();
+            f.probe.awaitPhase(MeetingSessionState.Phase.STOPPING);
+            while (f.probe.results.isEmpty()) {
+                task = callbacks.poll(3, TimeUnit.SECONDS);
+                assertNotNull("正常停止应继续完成READY", task);
+                task.run();
+            }
+            assertNotNull(f.probe.result());
+            f.runtime.listener.onAudioLevel(new AudioInputLevel(100, 1800));
+            while ((task = callbacks.poll(100, TimeUnit.MILLISECONDS)) != null) task.run();
+            assertTrue(f.probe.levels.isEmpty());
+            assertEquals(1, f.runtime.stopCalls);
+        }
+    }
+
     @Test public void missingIdentityIsVisibleAndNeverCreatesMeeting() throws Exception {
         try (Fixture f = new Fixture(false, Set.of(MeetingCapabilityState.TRANSCRIPT),
                 new ReferenceIdentityProvider())) {
@@ -418,10 +456,14 @@ public final class MeetingCoordinatorTest {
             this(real, granted, new ReferenceIdentityProvider("test-token"));
         }
         Fixture(boolean real, Set<String> granted, IdentityProvider identity) {
+            this(real, granted, identity, Runnable::run);
+        }
+        Fixture(boolean real, Set<String> granted, IdentityProvider identity,
+                java.util.concurrent.Executor callbackExecutor) {
             server = new Server(granted);
             runtime = new Runtime(real);
             var config = new MeetingClientConfig("http://127.0.0.1", identity,
-                    ClientIdentity.reference(), MeetingProfile.reference(), Runnable::run);
+                    ClientIdentity.reference(), MeetingProfile.reference(), callbackExecutor);
             client = new MeetingCoordinator(config,
                     new ModelAdapterRegistry(), runtime, resolved -> { sessionToken = resolved.accessToken(); return server; },
                     () -> System.nanoTime() / 1_000_000L, () -> { clockCalls.incrementAndGet(); return 555; });
@@ -437,6 +479,7 @@ public final class MeetingCoordinatorTest {
         final BlockingQueue<MeetingSessionState> states = new LinkedBlockingQueue<>();
         final BlockingQueue<MeetingDisplaySnapshot> displays = new LinkedBlockingQueue<>();
         final BlockingQueue<MeetingResult> results = new LinkedBlockingQueue<>();
+        final BlockingQueue<AudioInputLevel> levels = new LinkedBlockingQueue<>();
         final CountDownLatch activity = new CountDownLatch(1);
         final AtomicInteger beforeStopCalls = new AtomicInteger();
         java.util.function.Consumer<Runnable> beforeStop = Runnable::run;
@@ -445,6 +488,7 @@ public final class MeetingCoordinatorTest {
         @Override public void onState(MeetingSessionState state) { states.add(state); }
         @Override public void onDisplay(MeetingDisplaySnapshot display) { displays.add(display); }
         @Override public void onTranscriptActivity(long nowMs) { activity.countDown(); }
+        @Override public void onAudioLevel(AudioInputLevel level) { levels.add(level); }
         @Override public void beforeStop(Runnable continuation) { beforeStopCalls.incrementAndGet(); beforeStop.accept(continuation); }
         @Override public void onResult(MeetingResult result) { results.add(result); }
         MeetingSessionState awaitPhase(MeetingSessionState.Phase phase) throws Exception {

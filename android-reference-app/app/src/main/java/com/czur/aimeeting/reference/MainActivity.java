@@ -31,6 +31,7 @@ import android.widget.RadioGroup;
 import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
+import android.widget.ProgressBar;
 import com.czur.aimeeting.client.MeetingClient;
 import com.czur.aimeeting.client.MeetingDiscovery;
 import com.czur.aimeeting.client.result.ResultOptions;
@@ -94,6 +95,8 @@ public final class MainActivity extends Activity {
     private TextView rightLanguageTitle;
     private final Map<String, TextView> transcriptRows = new LinkedHashMap<>();
     private TextView elapsedView;
+    private ProgressBar audioLevelBar;
+    private TextView audioLevelView;
     private MeetingReminderPopup reminderPopup;
     private TextView statusView;
     private TextView capabilityView;
@@ -260,6 +263,14 @@ public final class MainActivity extends Activity {
         elapsedView = new TextView(this);
         elapsedView.setText("已进行 00:00:00 · 剩余 00:00:00");
         meetingLayout.addView(elapsedView);
+
+        audioLevelView = new TextView(this);
+        audioLevelView.setText(MeetingRuntimeFactory.requiresMicrophone()
+                ? "输入电平：等待输入" : "输入电平：Mock 未实采");
+        meetingLayout.addView(audioLevelView);
+        audioLevelBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        audioLevelBar.setMax(100);
+        meetingLayout.addView(audioLevelBar, new LinearLayout.LayoutParams(-1, -2));
 
         transcriptView = new TextView(this);
         transcriptView.setTextSize(28);
@@ -699,6 +710,10 @@ public final class MainActivity extends Activity {
         overlayButton.setText(state.overlayShowing
                 ? "关闭跨应用悬浮字幕" : "显示跨应用悬浮字幕");
         elapsedView.setText(state.timeText);
+        int audioLevel = state.audioLevel == null ? 0 : state.audioLevel.level();
+        audioLevelBar.setProgress(audioLevel);
+        audioLevelView.setText(MeetingRuntimeFactory.requiresMicrophone()
+                ? "输入电平：" + audioLevel + "/100" : "输入电平：Mock 未实采");
         reminderPopup.render(state.reminder);
         if (renderedTranscriptVersion != state.transcriptVersion) {
             if (state.display.rows().isEmpty()) {

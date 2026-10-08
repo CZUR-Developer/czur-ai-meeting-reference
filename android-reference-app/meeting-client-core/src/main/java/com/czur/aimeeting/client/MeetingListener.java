@@ -3,6 +3,7 @@ package com.czur.aimeeting.client;
 import com.czur.aimeeting.client.display.MeetingDisplaySnapshot;
 import com.czur.aimeeting.model.AudioInputErrorCode;
 import com.czur.aimeeting.model.AudioInputMode;
+import com.czur.aimeeting.model.AudioInputLevel;
 
 /** 所有回调使用配置的串行 callbackExecutor；不提供原始音频/模型消息/访问材料。 */
 public interface MeetingListener {
@@ -16,6 +17,13 @@ public interface MeetingListener {
     default void onTranscriptActivity(long nowMs) { }
     /** 实际音源模式；组合层仍独占同一音源，App 不应再启动基础入口订阅。 */
     default void onAudioInputMode(AudioInputMode mode) { }
+    /**
+     * 本场唯一实际输入流的 0～100 RMS 显示电平与单调测量时刻，约 300 ms 一次。
+     * 使用配置的串行 callbackExecutor；Android UI 仍由 App 切到主线程。
+     * 不提供 PCM，不启动第二音源，也不将电平提交后端或用于计费／无字幕超时。
+     * 正常停止受理、输入结束或关闭后停止通知；App 在停止状态复位显示。
+     */
+    default void onAudioLevel(AudioInputLevel level) { }
     /** App 处理权限/UI 提示；SDK 不申请权限、不自动重试。本场仍可正常 Stop，但不主动交付结果。 */
     default void onAudioError(AudioInputErrorCode code, String message) { }
     /**
