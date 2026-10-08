@@ -120,9 +120,13 @@ public class OverlayViewFactoryTest {
         assertEquals(36, cell(controller, "overlay.right").getFixedLineHeightPx());
         assertEquals(0xFFFFDB10, cell(controller, "overlay.right-translation").getCurrentTextColor());
         var latest = bilingual(false).rows().get(0);
+        // 实图暴露的是长文字的实际布局；不能只断言“已设置两行”而继续使用单行样本。
+        // 历史与当前句仍为原来的两段输入，简洁裁切只能影响可见尾部，不删改业务内容。
+        String olderSource = "earlier source with enough words to wrap across the ordinary window ".repeat(8);
+        String olderTranslation = "之前的译文需要覆盖普通窗口的多行排版，保留完整输入并只显示最近内容。".repeat(8);
         var older = new MeetingDisplaySnapshot.Row("older", new TranscriptEvent("older", 1, 0, 50,
-                "en-US", "earlier source ", true), new TranslationEvent("earlier-translation", "older", 1,
-                "en-US", "zh-CN", "之前译文 ", true), MeetingDisplaySnapshot.Side.B, DisplayRouter.Basis.MODEL_LANGUAGE);
+                "en-US", olderSource, true), new TranslationEvent("earlier-translation", "older", 1,
+                "en-US", "zh-CN", olderTranslation, true), MeetingDisplaySnapshot.Side.B, DisplayRouter.Basis.MODEL_LANGUAGE);
         var history = new MeetingDisplaySnapshot(true, "zh-CN", "en-US", false, List.of(older, latest), "source");
         window.render(history, MeetingSetup.Mode.LIVE_TRANSLATION, false,
                 "已进行 00:01:30 · 剩余 00:20:00", true, 55);
@@ -134,6 +138,17 @@ public class OverlayViewFactoryTest {
         measure(controller);
         assertEquals(View.GONE, controller.contentView().findViewWithTag("overlay.level").getVisibility());
         assertEquals(2, cell(controller, "overlay.right").getMaxVisibleLines());
+        assertEquals(2, cell(controller, "overlay.right-translation").getMaxVisibleLines());
+        assertEquals(2, cell(controller, "overlay.right").getLineCount());
+        assertEquals(2, cell(controller, "overlay.right-translation").getLineCount());
+        visible(controller, "overlay.right");
+        visible(controller, "overlay.right-translation");
+        var sourceCell = cell(controller, "overlay.right");
+        var translatedCell = cell(controller, "overlay.right-translation");
+        assertTrue("原文不能越过简洁列底部", sourceCell.getBottom() <= ((View) sourceCell.getParent()).getHeight());
+        assertTrue("译文不能越过简洁列底部", translatedCell.getBottom() <= ((View) translatedCell.getParent()).getHeight());
+        assertEquals(olderSource + "source", sourceCell.getFullText().toString());
+        assertEquals(olderTranslation + "译文", translatedCell.getFullText().toString());
         assertEquals("source", cell(controller, "overlay.right").getParts().get(1).text().toString());
         visible(controller, "overlay.collapse").performClick();
         assertEquals(1, swaps.get());
@@ -146,6 +161,11 @@ public class OverlayViewFactoryTest {
         assertEquals(293, controller.windowSpec().heightPx);
         measure(controller);
         assertEquals(3, cell(controller, "overlay.right").getMaxVisibleLines());
+        assertEquals(3, cell(controller, "overlay.right-translation").getMaxVisibleLines());
+        assertEquals(3, cell(controller, "overlay.right").getLineCount());
+        assertEquals(3, cell(controller, "overlay.right-translation").getLineCount());
+        assertEquals(olderSource + "source", cell(controller, "overlay.right").getFullText().toString());
+        assertEquals(olderTranslation + "译文", cell(controller, "overlay.right-translation").getFullText().toString());
         window.dismiss();
     }
 
