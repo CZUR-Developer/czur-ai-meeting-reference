@@ -16,6 +16,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
@@ -120,13 +121,15 @@ public final class MeetingCoordinatorTest {
     @Test public void serverGrantChoosesFreshAdapterAndTailEventsAreSavedBeforeStop() throws Exception {
         try (Fixture f = new Fixture(true, Set.of(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.TRANSLATION))) {
             f.runtime.emitTail = true;
+            f.runtime.duration = OptionalLong.of(0);
             f.start(MeetingOptions.Mode.LIVE_TRANSLATION, MeetingOptions.ResultDelivery.WEB, true);
             assertEquals(TingwuModelAdapter.ID, f.runtime.adapter.id());
             assertEquals("wss://model.example.test/signed", f.runtime.grant.endpoint());
             f.probe.beforeStop = continuation -> { f.session.submitPresentation(1500, new byte[]{3}); continuation.run(); };
             f.session.requestStop();
             MeetingResult result = f.probe.result();
-            assertEquals(List.of("discover", "create", "grant", "start", "capture1", "event1", "translation2", "stop", "manifest"), f.server.steps);
+            assertEquals(List.of("discover", "create", "grant", "start", "capture1", "event1", "translation2", "usage", "stop", "manifest"), f.server.steps);
+            assertEquals(List.of(0L), f.server.usages);
             assertFalse(f.server.includeContent);
             assertEquals(MeetingResult.DeliveryStatus.WEB_AVAILABLE, result.deliveryStatus());
             assertTrue(result.resultUrl().contains("genTime=555"));
@@ -140,6 +143,7 @@ public final class MeetingCoordinatorTest {
     @Test public void translationSummaryWaitsForTailAndSavesBothBeforeStop() throws Exception {
         try (Fixture f = new Fixture(true, ALL)) {
             f.runtime.emitTail = true;
+            f.runtime.duration = OptionalLong.of(1000);
             f.session = f.client.start(new MeetingOptions(MeetingOptions.Mode.LIVE_TRANSLATION,
                     "zh-CN", "en-US", false, MeetingOptions.ResultDelivery.WEB,
                     "https://result.example.test", List.of(), true), f.probe);
@@ -150,7 +154,8 @@ public final class MeetingCoordinatorTest {
             assertTrue(f.probe.info.availableCapabilities().contains(MeetingCapabilityState.SUMMARY));
             assertEquals("最后字幕", f.runtime.summaryInput.transcript());
             assertEquals(List.of("discover", "create", "grant", "start", "event1", "translation2",
-                    "summaryGrant", "summary", "stop", "manifest"), f.server.steps);
+                    "usage", "summaryGrant", "summary", "stop", "manifest"), f.server.steps);
+            assertEquals(List.of(1000L), f.server.usages);
             assertTrue(f.server.requested.summaryEnabled());
         }
     }
@@ -208,6 +213,7 @@ public final class MeetingCoordinatorTest {
         try (Fixture f = new Fixture(false, Set.of(MeetingCapabilityState.TRANSCRIPT))) {
             f.server.pendingStop = true;
             f.server.failEmail = true;
+            f.runtime.duration = OptionalLong.of(1000);
             f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.EMAIL, false);
             f.runtime.emit("s1", 1, "zh-CN", "最终字幕", true);
             f.probe.awaitCanStop();
@@ -215,6 +221,7 @@ public final class MeetingCoordinatorTest {
             f.probe.awaitPhase(MeetingSessionState.Phase.STOP_PENDING);
             assertEquals(0, f.clockCalls.get());
             assertTrue(f.server.genTimes.isEmpty());
+            f.runtime.duration = OptionalLong.of(2000); // 重试不重新读取／生成本场用量。
             f.session.requestStop();
             MeetingResult result = f.probe.result();
             assertEquals(MeetingResult.DeliveryStatus.EMAIL_FAILED, result.deliveryStatus());
@@ -224,6 +231,29 @@ public final class MeetingCoordinatorTest {
             assertEquals(1, f.clockCalls.get());
             assertEquals(1, f.runtime.stopCalls);
             assertEquals(1, f.probe.beforeStopCalls.get());
+            assertEquals(1, f.runtime.durationReads);
+            assertEquals(List.of(1000L), f.server.usages);
+        }
+    }
+
+    @Test public void usageConfirmationRetryKeepsFrozenSnapshotBeforeSummaryAndStop() throws Exception {
+        try (Fixture f = new Fixture(true, ALL)) {
+            f.runtime.emitTail = true;
+            f.runtime.duration = OptionalLong.of(1000);
+            f.server.failUsageOnce = true;
+            f.start(MeetingOptions.Mode.MEETING_MINUTES, MeetingOptions.ResultDelivery.WEB, false);
+            f.session.requestStop();
+            f.probe.awaitPhase(MeetingSessionState.Phase.STOP_PENDING);
+            assertFalse(f.server.steps.contains("summary"));
+            assertFalse(f.server.steps.contains("stop"));
+            f.runtime.duration = OptionalLong.of(2000);
+            f.session.requestStop();
+            assertNotNull(f.probe.result());
+            assertEquals(List.of("discover", "create", "grant", "start", "event1", "usage", "usage",
+                    "summaryGrant", "summary", "stop", "manifest"), f.server.steps);
+            assertEquals(List.of(1000L, 1000L), f.server.usages);
+            assertEquals(1, f.runtime.durationReads);
+            assertEquals(1, f.runtime.stopCalls);
         }
     }
 
@@ -339,6 +369,8 @@ public final class MeetingCoordinatorTest {
         volatile int stopCalls;
         boolean emitTail;
         boolean emitFinished = true;
+        volatile OptionalLong duration = OptionalLong.empty();
+        volatile int durationReads;
         Runtime(boolean real) { this.real = real; }
         @Override public boolean usesServerModelMaterials() { return real; }
         @Override public Set<String> localCapabilities() { return ALL; }
@@ -357,6 +389,11 @@ public final class MeetingCoordinatorTest {
                     }
                 }
                 @Override public void close() { }
+                @Override public OptionalLong frozenAudioDurationMs() {
+                    ++durationReads;
+                    assertTrue("协调器必须在停止输入后读取用量", stopCalls > 0);
+                    return duration;
+                }
             };
         }
         void emit(String id, int revision, String language, String text, boolean end) {
@@ -373,11 +410,13 @@ public final class MeetingCoordinatorTest {
         final List<String> steps = Collections.synchronizedList(new ArrayList<>());
         final List<TranscriptEvent> transcripts = Collections.synchronizedList(new ArrayList<>());
         final List<Long> genTimes = Collections.synchronizedList(new ArrayList<>());
+        final List<Long> usages = Collections.synchronizedList(new ArrayList<>());
         final CountDownLatch appendEntered = new CountDownLatch(1);
         final CountDownLatch releaseAppend = new CountDownLatch(1);
         volatile boolean blockAppend;
         boolean pendingStop;
         boolean failEmail;
+        boolean failUsageOnce;
         boolean includeContent;
         byte[] jpeg;
         String emailUrl;
@@ -408,6 +447,11 @@ public final class MeetingCoordinatorTest {
         @Override public void appendTranslation(String id, int number, TranslationEvent event) { steps.add("translation" + number); }
         @Override public void appendPresentation(String id, int number, long offset, byte[] jpeg) { steps.add("capture" + number); this.jpeg = jpeg; }
         @Override public void submitSummary(String id, SummaryResult summary) { steps.add("summary"); }
+        @Override public void submitUsage(String id, long duration) throws IOException {
+            assertEquals("mtg_test", id);
+            steps.add("usage"); usages.add(duration);
+            if (failUsageOnce) { failUsageOnce = false; throw new IOException("受控用量响应未确认"); }
+        }
         @Override public StopMeetingResponse stopMeeting(String id) {
             steps.add("stop");
             boolean accepted = !pendingStop; pendingStop = false;

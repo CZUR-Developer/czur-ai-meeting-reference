@@ -28,6 +28,7 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.HashSet;
 import java.util.Objects;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -206,6 +207,10 @@ public final class MeetingCoordinator implements MeetingClient {
         private ScheduledFuture<?> deadline;
         // 仅 io 队列访问；所有 append 在 complete 前入队。
         private boolean appendFailed;
+        // 第一次正常收口时读取模型已经冻结的值，同场重试复用该快照。
+        private OptionalLong frozenAudioDuration = OptionalLong.empty();
+        private boolean usageRead;
+        private boolean usageSubmitted;
         private boolean summarySubmitted;
         private Long genTime;
 
@@ -498,6 +503,18 @@ public final class MeetingCoordinator implements MeetingClient {
             String step = "检查标准事件保存";
             try {
                 if (appendFailed) throw new IOException("标准事件或截图提交失败");
+                step = "提交冻结采音用量";
+                if (!usageRead) {
+                    frozenAudioDuration = model.frozenAudioDurationMs();
+                    usageRead = true;
+                }
+                if (frozenAudioDuration.isPresent() && !usageSubmitted) {
+                    long durationMs = frozenAudioDuration.getAsLong();
+                    LOG.info("冻结采音用量提交开始 durationMs=" + durationMs);
+                    server.submitUsage(meetingId, durationMs);
+                    usageSubmitted = true;
+                    LOG.info("冻结采音用量已确认");
+                }
                 if (input != null && !summarySubmitted) {
                     step = "生成/提交标准纪要";
                     LOG.info("标准纪要生成开始");

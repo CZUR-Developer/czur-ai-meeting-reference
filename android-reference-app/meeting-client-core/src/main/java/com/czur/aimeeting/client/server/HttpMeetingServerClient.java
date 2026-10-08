@@ -208,6 +208,21 @@ public final class HttpMeetingServerClient implements MeetingServerClient {
         }
     }
 
+    @Override public void submitUsage(String meetingId, long audioDurationMs) throws IOException {
+        try {
+            JSONObject response = parseJson(post("/v1/meetings/" + meetingId + "/usage:submit",
+                    new JSONObject().put("audioDurationMs", audioDurationMs).toString(),
+                    null, 201, 200).body);
+            if (!meetingId.equals(response.getString("meetingId"))
+                    || audioDurationMs != response.getLong("audioDurationMs")
+                    || !response.getBoolean("accepted")) {
+                throw new IOException("采音用量确认与本场冻结值不一致");
+            }
+        } catch (JSONException invalidResponse) {
+            throw new IOException("采音用量响应格式错误", invalidResponse);
+        }
+    }
+
     @Override public void submitSummary(String meetingId, SummaryResult summary)
             throws IOException {
         try {

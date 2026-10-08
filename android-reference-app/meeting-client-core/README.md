@@ -21,7 +21,7 @@ Mock 注入窄端口 `MeetingRuntimePort`；二者使用唯一 `MeetingCoordinat
 同进程基础输入、诊断和完整会议择一持有真实音源。
 
 正常链为当前身份读取 → 能力发现 → Create → Server 材料/新 Adapter → StartClient → 采音/模型 → 标准事件保存 →
-按能力总结 → Stop 输入受理 → 实际 READY/交付。后端仍负责身份、模型选择、计费和存储。
+冻结采音用量提交 → 按能力总结 → Stop 输入受理 → 实际 READY/交付。后端仍负责身份、模型选择、计费和存储。
 模型完整地址、短期材料及本场授权只取 Server，配置不接收模型地址或凭据。
 
 `MeetingClientConfig` 接受 Server URL、`IdentityProvider`、`ClientIdentity`、`MeetingProfile` 和
@@ -89,8 +89,15 @@ App 停截图 tick，在工作线程完成最后有效截图的 `submitPresentat
 JPEG 在调用时复制，`offsetMs` 相对 `startedAtMs`，序号由组合层分配。
 
 随后停止同一音源、排完完整 PCM 尾帧，等待末尾字幕/译文与 FINISHED；
-标准事件、截图和按能力生成的纪要均排在后端 Stop 前。
-Stop 202 只到 `STOP_PENDING/canStop=true`，用户可再确认，不重复衔接、停音源或已提交纪要。
+标准事件和截图先保存，再读取 `ModelSession.frozenAudioDurationMs()`，通过
+`POST /v1/meetings/{meetingId}/usage:submit` 提交已冻结整数毫秒，随后按需总结和后端 Stop。
+SDK 复用本场唯一音源，标准 16kHz／mono／PCM16 的时长是实际完整帧字节数／32，
+静音、模型连接前采音和完整尾帧计入，网络重发及总结等待不计入。App无需自行计数或提交。
+旧模型／Mock 默认返回 empty，维持原结果链，不提交虚构的零；明确冻结的0会真实提交。
+自定义端口应实现 `MeetingServerClient.submitUsage()`，其默认兼容方法会明确报未实现。
+同场首次收口保存一次冻结快照，未确认用量时沿用 `STOP_PENDING`、以同值重试；
+已确认用量后不重复提交。Stop 202 也只到 `STOP_PENDING/canStop=true`，用户可再确认，
+不重复衔接、停音源、已提交用量或纪要。
 首次 Stop 受理后生成一次 `genTime`，Manifest、Artifact、链接和邮件共用它；受理不等于 READY。
 
 - WEB：只读 READY 清单，`WEB_AVAILABLE` 和 URL，`content=null`。
@@ -152,4 +159,4 @@ SDK 从公共契约 JAR 以 `compileOnly` 编译，App 打包唯一一份契约�
 P6-5 与 P6-6 两片已独立签收；组合入口使用相同源码生成的 JAR 作为 SDK 输入。
 P6-7 继续迁移实际 App Service/页面链路并回归真机，主机环回或 AAR/APK 不代签真实听悟、实体方向、采集或 PDF。
 日志 INFO 记录阶段开始/结束/结果，逐段诊断为 FINE；不记录原文、原始载荷、URL、token 或 Throwable 正文。
-本轮不建设缓存、备份恢复、通用重试/安全矩阵或新后端协议。
+本轮仅接入既有后端冻结用量端口，不建设缓存、备份恢复、通用重试或安全矩阵。

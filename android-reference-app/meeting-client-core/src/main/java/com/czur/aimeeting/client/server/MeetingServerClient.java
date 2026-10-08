@@ -43,6 +43,18 @@ public interface MeetingServerClient {
     void appendPresentation(String meetingId, int chunkSequence, long offsetMs, byte[] jpeg)
             throws IOException;
 
+    /**
+     * 提交本场停止采音后冻结的累计时长，单位为整数毫秒，允许实测零。
+     * 同场重试必须提交同一值；成功返回表示后端已接管该值，价格及扣费规则由后端负责。
+     * 调用顺序为最终事件保存之后、总结及 Stop 之前，在协调器的同一 IO 队列执行。
+     *
+     * <p>只有模型会话明确提供冻结值时才调用。默认方法保留旧实现源码兼容，
+     * 但会明确报错，不将未实现误当作已提交；旧会话默认 empty 不会走此端口。
+     */
+    default void submitUsage(String meetingId, long audioDurationMs) throws IOException {
+        throw new IOException("当前后端端口未实现采音用量提交");
+    }
+
     /** 在 Stop 前提交已归一化的本场纪要；后端不接收厂商原始输出。 */
     void submitSummary(String meetingId, SummaryResult summary) throws IOException;
 

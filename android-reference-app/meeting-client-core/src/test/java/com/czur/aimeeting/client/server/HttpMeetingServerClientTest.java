@@ -96,6 +96,25 @@ public final class HttpMeetingServerClientTest {
         }
     }
 
+    @Test public void frozenUsageUsesSameAuthenticatedBodyForFirstSubmitAndReplay() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            String confirmation = "{\"meetingId\":\"mtg_usage\",\"audioDurationMs\":1000,\"accepted\":true}";
+            fixture.reply(201, confirmation);
+            fixture.reply(200, confirmation);
+            HttpMeetingServerClient client = fixture.client();
+            client.submitUsage("mtg_usage", 1000);
+            client.submitUsage("mtg_usage", 1000);
+            Request first = fixture.request();
+            Request replay = fixture.request();
+            assertEquals("/v1/meetings/mtg_usage/usage:submit", first.path());
+            assertEquals(first.path(), replay.path());
+            assertEquals(first.body(), replay.body());
+            assertEquals(1000, new JSONObject(first.body()).getLong("audioDurationMs"));
+            assertEquals("Bearer test-token", first.authorization());
+            assertEquals(first.authorization(), replay.authorization());
+        }
+    }
+
     @Test public void readyMetadataDoesNotDownloadArtifactsForWebOrEmail() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.reply(200, "{\"status\":\"READY_WITH_WARNINGS\",\"title\":\"本场\",\"artifacts\":["
