@@ -47,6 +47,7 @@ import com.czur.aimeeting.client.identity.IdentityResult;
 import com.czur.aimeeting.client.identity.IdentitySession;
 import com.czur.aimeeting.reference.meeting.MeetingStartCondition;
 import com.czur.aimeeting.reference.meeting.MeetingStartConditions;
+import com.czur.aimeeting.reference.ui.SubtitleViewFactory;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.LinkedHashMap;
@@ -272,9 +273,8 @@ public final class MainActivity extends Activity {
         audioLevelBar.setMax(100);
         meetingLayout.addView(audioLevelBar, new LinearLayout.LayoutParams(-1, -2));
 
-        transcriptView = new TextView(this);
-        transcriptView.setTextSize(28);
-        transcriptView.setText("等待字幕…");
+        transcriptView = SubtitleViewFactory.create(this, 28, 3, false);
+        SubtitleViewFactory.render(transcriptView, "", "等待字幕…", 0.8f);
         transcriptView.setPadding(0, 36, 0, 36);
         meetingLayout.addView(transcriptView);
         transcriptList = new LinearLayout(this);
@@ -725,14 +725,12 @@ public final class MainActivity extends Activity {
                 if (segment == null) continue;
                 TextView row = transcriptRows.get(segment.segmentId());
                 if (row == null) {
-                    row = new TextView(this);
-                    row.setTextSize(28);
+                    row = SubtitleViewFactory.create(this, 28, Integer.MAX_VALUE, false);
                     row.setPadding(0, 8, 0, 8);
                     transcriptRows.put(segment.segmentId(), row);
                     transcriptList.addView(row);
                 }
-                row.setText(segment.text());
-                row.setAlpha(segment.alpha());
+                SubtitleViewFactory.render(row, segment.segmentId(), segment.text(), segment.alpha());
             }
             if (state.display.bilingual()) {
                 bilingualList.removeAllViews();
@@ -740,16 +738,12 @@ public final class MainActivity extends Activity {
                     var segment = DisplaySnapshotPresentation.bilingual(source, state.display.swapped());
                     LinearLayout row = new LinearLayout(this);
                     row.setOrientation(LinearLayout.HORIZONTAL);
-                    TextView left = new TextView(this);
-                    left.setTextSize(26);
-                    left.setText(segment.left());
-                    left.setAlpha(segment.leftAlpha());
+                    TextView left = SubtitleViewFactory.create(this, 26, Integer.MAX_VALUE, false);
+                    SubtitleViewFactory.render(left, segment.segmentId(), segment.left(), segment.leftAlpha());
                     left.setPadding(0, 8, 12, 8);
                     row.addView(left, new LinearLayout.LayoutParams(0, -2, 1));
-                    TextView right = new TextView(this);
-                    right.setTextSize(26);
-                    right.setText(segment.right());
-                    right.setAlpha(segment.rightAlpha());
+                    TextView right = SubtitleViewFactory.create(this, 26, Integer.MAX_VALUE, false);
+                    SubtitleViewFactory.render(right, segment.segmentId(), segment.right(), segment.rightAlpha());
                     right.setPadding(12, 8, 0, 8);
                     row.addView(right, new LinearLayout.LayoutParams(0, -2, 1));
                     bilingualList.addView(row);

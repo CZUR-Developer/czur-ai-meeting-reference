@@ -7,6 +7,14 @@ require(meetingRuntime == "mock" || meetingRuntime == "sdk") {
     "meetingRuntime must be mock or sdk"
 }
 val sdkAar = providers.gradleProperty("meetingSdkAar").orNull
+// UI 与音源/会议 SDK 独立选择；干净 Mock 不需要任何闭源 AAR。
+val meetingUiAar = providers.gradleProperty("meetingUiAar").orNull
+if (meetingUiAar != null) {
+    require(meetingUiAar.isNotBlank() && file(meetingUiAar).isFile) {
+        "meetingUiAar requires /absolute/path/ai-meeting-ui-0.1.0-release.aar"
+    }
+}
+val subtitleUiSource = if (meetingUiAar == null) "basic-ui" else "meeting-ui"
 if (meetingRuntime == "sdk") {
     require(!sdkAar.isNullOrBlank() && file(sdkAar).isFile) {
         "sdk mode requires -PmeetingSdkAar=/absolute/path/ai-meeting-sdk-0.5.0-release.aar"
@@ -32,9 +40,18 @@ android {
 
     sourceSets.getByName("main").java.srcDir("src/$meetingRuntime/java")
     sourceSets.getByName("test").java.srcDir("src/test/$meetingRuntime/java")
+    // 同名薄工厂互斥编译，不反射加载 UI，不复制会议编排。
+    sourceSets.getByName("main").java.srcDir("src/$subtitleUiSource/java")
+    sourceSets.getByName("test").java.srcDir("src/test/$subtitleUiSource/java")
+    testOptions { unitTests.isIncludeAndroidResources = meetingUiAar != null }
 }
 
 dependencies {
+    if (meetingUiAar != null) {
+        // 裸 UI AAR 不带 core/contract/native，也没有其他运行依赖。
+        implementation(files(meetingUiAar))
+        testImplementation("org.robolectric:robolectric:4.16.1")
+    }
     implementation(project(":model-runtime-contract"))
     if (meetingRuntime == "mock") {
         implementation(project(":meeting-client-core"))

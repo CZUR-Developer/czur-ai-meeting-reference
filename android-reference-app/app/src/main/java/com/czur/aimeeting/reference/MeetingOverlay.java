@@ -19,6 +19,7 @@ import com.czur.aimeeting.reference.meeting.MeetingReminderPresentation;
 import com.czur.aimeeting.reference.meeting.MeetingSetup;
 import com.czur.aimeeting.reference.meeting.MeetingRuntimeFactory;
 import com.czur.aimeeting.reference.meeting.OverlayLayoutState;
+import com.czur.aimeeting.reference.ui.SubtitleViewFactory;
 import java.util.List;
 
 /**
@@ -111,22 +112,19 @@ final class MeetingOverlay {
         audioLevelBar = new ProgressBar(context, null, android.R.attr.progressBarStyleHorizontal);
         audioLevelBar.setMax(100);
         expandedPanel.addView(audioLevelBar, new LinearLayout.LayoutParams(-1, -2));
-        transcriptView = new TextView(context);
-        transcriptView.setTextSize(22);
+        transcriptView = SubtitleViewFactory.create(context, 22, 3, true);
         transcriptView.setTextColor(Color.WHITE);
         transcriptView.setPadding(0, 10, 0, 10);
         expandedPanel.addView(transcriptView);
 
         bilingualRow = new LinearLayout(context);
         bilingualRow.setOrientation(LinearLayout.HORIZONTAL);
-        leftView = new TextView(context);
+        leftView = SubtitleViewFactory.create(context, 22, 3, true);
         leftView.setTextColor(Color.WHITE);
-        leftView.setTextSize(22);
         leftView.setPadding(0, 10, 12, 10);
         bilingualRow.addView(leftView, new LinearLayout.LayoutParams(0, -2, 1));
-        rightView = new TextView(context);
+        rightView = SubtitleViewFactory.create(context, 22, 3, true);
         rightView.setTextColor(Color.WHITE);
-        rightView.setTextSize(22);
         rightView.setPadding(12, 10, 0, 10);
         bilingualRow.addView(rightView, new LinearLayout.LayoutParams(0, -2, 1));
         bilingualRow.setVisibility(View.GONE);
@@ -237,17 +235,15 @@ final class MeetingOverlay {
         sizeButton.setVisibility(bilingual ? View.VISIBLE : View.GONE);
         sizeButton.setText(large ? "普通窗" : "大窗");
         var latestSubtitle = DisplaySnapshotPresentation.latestSubtitle(state);
-        transcriptView.setText(latestSubtitle.text());
-        transcriptView.setAlpha(latestSubtitle.alpha());
+        SubtitleViewFactory.render(transcriptView, latestSubtitle.segmentId(),
+                latestSubtitle.text(), latestSubtitle.alpha());
         if (bilingual) {
             if (current != null) {
-                leftView.setText(current.left());
-                leftView.setAlpha(current.leftAlpha());
-                rightView.setText(current.right());
-                rightView.setAlpha(current.rightAlpha());
+                SubtitleViewFactory.render(leftView, current.segmentId(), current.left(), current.leftAlpha());
+                SubtitleViewFactory.render(rightView, current.segmentId(), current.right(), current.rightAlpha());
             } else {
-                leftView.setText("等待字幕…");
-                rightView.setText("");
+                SubtitleViewFactory.render(leftView, "", "等待字幕…", 0.8f);
+                SubtitleViewFactory.render(rightView, "", "", 1.0f);
             }
             if (large) renderHistory(state);
         }
@@ -308,9 +304,9 @@ final class MeetingOverlay {
         List<MeetingDisplaySnapshot.Row> rows = snapshot.rows();
         historyRows.removeAllViews();
         if (rows.isEmpty()) {
-            TextView waiting = new TextView(context);
-            waiting.setText("等待字幕…");
+            TextView waiting = SubtitleViewFactory.create(context, 20, 3, false);
             waiting.setTextColor(Color.WHITE);
+            SubtitleViewFactory.render(waiting, "", "等待字幕…", 0.8f);
             historyRows.addView(waiting);
             return;
         }
@@ -318,20 +314,18 @@ final class MeetingOverlay {
             var segment = DisplaySnapshotPresentation.bilingual(rows.get(index), snapshot.swapped());
             LinearLayout row = new LinearLayout(context);
             row.setOrientation(LinearLayout.HORIZONTAL);
-            TextView left = historyCell(segment.left(), segment.leftAlpha());
-            TextView right = historyCell(segment.right(), segment.rightAlpha());
+            TextView left = historyCell(segment.segmentId(), segment.left(), segment.leftAlpha());
+            TextView right = historyCell(segment.segmentId(), segment.right(), segment.rightAlpha());
             row.addView(left, new LinearLayout.LayoutParams(0, -2, 1));
             row.addView(right, new LinearLayout.LayoutParams(0, -2, 1));
             historyRows.addView(row);
         }
     }
 
-    private TextView historyCell(String text, float alpha) {
-        TextView cell = new TextView(context);
-        cell.setText(text);
+    private TextView historyCell(String segmentId, String text, float alpha) {
+        TextView cell = SubtitleViewFactory.create(context, 20, Integer.MAX_VALUE, false);
         cell.setTextColor(Color.WHITE);
-        cell.setTextSize(20);
-        cell.setAlpha(alpha);
+        SubtitleViewFactory.render(cell, segmentId, text, alpha);
         cell.setPadding(0, 8, 12, 8);
         return cell;
     }

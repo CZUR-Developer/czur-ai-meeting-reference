@@ -24,6 +24,11 @@ P7-3a在基础音频与完整会议入口增加同流输入电平：`AudioInputL
 正式会议不另开Monitor／MIC；Mock没有实际PCM，页面明确“Mock 未实采”。本项源码与
 主机构建、独立验收及设备演示分别记录，不把Mock或APK构建当成实采电平证明。
 
+P7-3b通过独立可选UI AAR装配字幕控件。页面历史单元、最新字幕浮窗及互译两栏共用
+`SubtitleViewFactory`，消费同一已路由快照；每次完整替换文字，partial为80%、final为100%，
+View自身alpha保持1。该接线的源码、构建和真实设备效果分别验收，不代签P7-3c窗口工具
+或P7-3d完整国内版式。
+
 P7-1c的SDK会议入口复用正在使用的唯一音源累计完整标准PCM帧，停流及完整尾帧交付后
 一次冻结时长。组合层按“最终字幕／译文保存→冻结用量提交→按需总结→原Stop”执行；
 App不计数、不额外采音。时长沿用16kHz／mono／PCM16字节数除以32的整数毫秒口径，
@@ -93,6 +98,37 @@ P5-6历史参考结果方式包含网页、本地PDF、邮箱链接和互译无�
   -PmeetingRuntime=sdk \
   -PmeetingSdkAar=/absolute/path/ai-meeting-sdk-0.5.0-release.aar
 ```
+
+### 可选字幕UI工具：构建期注入
+
+UI工具独立于主音源／会议SDK。干净Mock不需要闭源输入；提供`meetingUiAar`时，
+Mock与SDK使用同一独立UI AAR。正式SDK参考交付同时注入主AAR和UI AAR：
+
+```bash
+# Mock＋UI：core仍来自源码，勿用主SDK AAR充当UI依赖
+./gradlew :app:assembleDebug :app:testDebugUnitTest \
+  -PmeetingUiAar=/absolute/path/ai-meeting-ui-0.1.0-release.aar
+
+# SDK＋UI：core仅来自主SDK AAR，contract仍由公开源码模块提供
+./gradlew :app:assembleDebug :app:testDebugUnitTest \
+  -PmeetingRuntime=sdk \
+  -PmeetingSdkAar=/absolute/path/ai-meeting-sdk-0.5.0-release.aar \
+  -PmeetingUiAar=/absolute/path/ai-meeting-ui-0.1.0-release.aar
+```
+
+`src/meeting-ui/.../ui/SubtitleViewFactory.java`直接调用UI工具；未提供UI AAR时只编译
+`src/basic-ui/.../ui/SubtitleViewFactory.java`基础TextView版。两份工厂互斥，不反射加载，
+也不在公开仓提交AAR。基础版保障可重建和正常文字显示，不复制完整最近文字裁切功能。
+UI AAR只含控件和必要呈现类型，无core、contract、网络或原生采音，也没有其他运行依赖。
+
+工厂只接收`DisplaySnapshotPresentation`已投影的段ID、文字和各自1.0／0.8状态；
+原文迟到修订时，单语窗仍按`latestTranscriptSegmentId`选段，互译按SDK源侧及交换显示。
+参考宿主把原有sp字号换成明确px交给工具，行高为字号的1.3倍；窗口保留三行槽位，
+历史列表单元保留整段。缩窄／放大从完整输入重新排版，不改会议快照。
+占位也用工厂render→setParts提交，避免继承setText在重排时被旧字幕覆盖。
+页面与窗口的电平、Stop、结果Web及Service生命周期继续沿同一业务链。
+伙伴换字幕控件时只改对应薄工厂及构建输入；无需修改音源、Adapter或会议收口。
+本期未提取窗口管理，窗口权限与WindowManager仍由App持有。
 
 排查真实模型字幕但设备 MIC 声学入口不确定时，可将同一 SDK Module 的
 `ai-meeting-sdk-0.5.0-debug.aar` 注入上面的 `meetingSdkAar` 参数。调试 AAR 若在
