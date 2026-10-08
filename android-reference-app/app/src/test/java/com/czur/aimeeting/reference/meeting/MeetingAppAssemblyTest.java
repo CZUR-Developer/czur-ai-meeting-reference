@@ -5,6 +5,8 @@ import com.czur.aimeeting.client.*;
 import com.czur.aimeeting.client.result.*;
 import com.czur.aimeeting.client.server.DeploymentOptions;
 import com.czur.aimeeting.reference.*;
+import com.czur.aimeeting.reference.ui.MeetingOverlayFactory;
+import com.czur.aimeeting.reference.ui.OverlayViewFactory;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -18,6 +20,15 @@ public final class MeetingAppAssemblyTest {
     @After public void restoreDefault() {
         MeetingAppAssembly.clearPreparedMeeting();
         MeetingAppAssembly.registerResultActions(List.of(new WebResultActionPlugin()));
+        MeetingAppAssembly.registerOverlayFactory(new OverlayViewFactory());
+    }
+
+    @Test public void windowFactoryReplacesOnlyAssemblyWithoutCreatingMeetingOrWindow() {
+        assertTrue(MeetingAppAssembly.overlayFactory() instanceof OverlayViewFactory);
+        MeetingOverlayFactory factory = (context, open, swap, stop) -> { throw new AssertionError("尚未显示窗口"); };
+        MeetingAppAssembly.registerOverlayFactory(factory);
+        assertSame(factory, MeetingAppAssembly.overlayFactory());
+        assertEquals(List.of("web"), MeetingAppAssembly.resultActions().stream().map(plugin -> plugin.id()).toList());
     }
 
     @Test public void defaultOnlyWebEvenWhenEmailServiceIsAvailable() {

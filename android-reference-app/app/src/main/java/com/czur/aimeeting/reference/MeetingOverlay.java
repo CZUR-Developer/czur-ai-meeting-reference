@@ -1,254 +1,69 @@
 package com.czur.aimeeting.reference;
 
 import android.content.Context;
-import android.graphics.Color;
-import android.graphics.Typeface;
-import android.graphics.drawable.GradientDrawable;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.view.WindowManager;
-import android.widget.Button;
-import android.widget.LinearLayout;
-import android.widget.ScrollView;
-import android.widget.TextView;
-import android.widget.ProgressBar;
 import com.czur.aimeeting.client.display.MeetingDisplaySnapshot;
-import com.czur.aimeeting.reference.meeting.DisplaySnapshotPresentation;
+import com.czur.aimeeting.reference.meeting.MeetingAppAssembly;
 import com.czur.aimeeting.reference.meeting.MeetingReminderPresentation;
 import com.czur.aimeeting.reference.meeting.MeetingSetup;
-import com.czur.aimeeting.reference.meeting.MeetingRuntimeFactory;
-import com.czur.aimeeting.reference.meeting.OverlayLayoutState;
-import com.czur.aimeeting.reference.ui.SubtitleViewFactory;
-import java.util.List;
+import com.czur.aimeeting.reference.ui.MeetingOverlayFactory;
 
 /**
- * 参考 App 的最小跨应用字幕窗。只负责展示和转发停止点击；模型连接、会议收口和
- * 字幕修订由 SDK 管理，窗口和页面读取同一不可变快照。只在用户主动打开且授予悬浮窗权限后创建。
+ * 参考 App 的薄悬浮窗宿主。窗口内容由集中装配的工厂提供，仍读取 Service 的同一快照，
+ * Stop／交换回调沿用原入口；权限申请、前台 Service、提醒及屏采继续由 App 持有。
+ * 全部入口由原 Service 在主线程调用，隐藏／释放不停止会议或改变音源。
  */
 final class MeetingOverlay {
     private static final String TAG = "AiMeetingReference";
     private final Context context;
     private final WindowManager windowManager;
-    private View root;
-    private WindowManager.LayoutParams params;
-    private OverlayLayoutState layout;
-    private LinearLayout expandedPanel;
-    private Button miniButton;
-    private TextView titleView;
-    private TextView transcriptView;
-    private LinearLayout bilingualRow;
-    private TextView leftView;
-    private TextView rightView;
-    private TextView elapsedView;
-    private ProgressBar audioLevelBar;
-    private TextView audioLevelView;
+    private MeetingOverlayFactory.Window window;
     private View reminderScrim;
     private MeetingReminderPopup reminderPopup;
     private Runnable onConfirmReminder;
-    private Button stopButton;
-    private Button swapButton;
-    private Button sizeButton;
-    private ScrollView historyScroll;
-    private LinearLayout historyRows;
-    private MeetingDisplaySnapshot lastDisplay;
-    private MeetingSetup.Mode lastMode = MeetingSetup.Mode.LIVE_TRANSCRIPT;
-    private boolean lastSummaryEnabled;
-    private String lastTimeText = "";
-    private MeetingReminderPresentation.Notice lastReminder =
-            MeetingReminderPresentation.Notice.NONE;
-    private boolean lastAllowReminder;
-    private boolean lastCanStop;
-    private int lastAudioLevel;
 
     MeetingOverlay(Context context) {
         this.context = context;
         windowManager = (WindowManager) context.getSystemService(Context.WINDOW_SERVICE);
     }
 
-    boolean isShowing() { return root != null; }
+    boolean isShowing() { return window != null && window.isShowing(); }
 
     void show(MeetingDisplaySnapshot state, Runnable onOpenApp, Runnable onSwapColumns,
             Runnable onConfirmReminder, Runnable onStop) {
-        if (root != null) return;
+        if (isShowing()) return;
         this.onConfirmReminder = onConfirmReminder;
-        layout = new OverlayLayoutState(state.bilingual());
-        LinearLayout panel = new LinearLayout(context);
-        panel.setOrientation(LinearLayout.VERTICAL);
-        GradientDrawable background = new GradientDrawable();
-        background.setColor(0xE6222933);
-        background.setCornerRadius(18);
-        panel.setBackground(background);
-        expandedPanel = new LinearLayout(context);
-        expandedPanel.setOrientation(LinearLayout.VERTICAL);
-        expandedPanel.setPadding(24, 18, 24, 18);
-        panel.addView(expandedPanel);
-        miniButton = new Button(context);
-        miniButton.setText("AI 会议 · 恢复");
-        miniButton.setOnClickListener(view -> {
-            layout.restore();
-            Log.i(TAG, "悬浮窗已从 Mini 恢复为 " + layout.current());
-            applyLayout();
-            renderLastState();
-        });
-        miniButton.setVisibility(View.GONE);
-        panel.addView(miniButton);
-
-        LinearLayout controls = new LinearLayout(context);
-        controls.setGravity(Gravity.CENTER_VERTICAL);
-        titleView = new TextView(context);
-        titleView.setText("实时字幕");
-        titleView.setTextColor(Color.WHITE);
-        titleView.setTypeface(null, Typeface.BOLD);
-        controls.addView(titleView, new LinearLayout.LayoutParams(0,
-                LinearLayout.LayoutParams.WRAP_CONTENT, 1));
-        elapsedView = new TextView(context);
-        elapsedView.setTextColor(Color.WHITE);
-        controls.addView(elapsedView);
-        expandedPanel.addView(controls);
-        audioLevelView = new TextView(context);
-        audioLevelView.setTextColor(Color.WHITE);
-        expandedPanel.addView(audioLevelView);
-        audioLevelBar = new ProgressBar(context, null, android.R.attr.progressBarStyleHorizontal);
-        audioLevelBar.setMax(100);
-        expandedPanel.addView(audioLevelBar, new LinearLayout.LayoutParams(-1, -2));
-        transcriptView = SubtitleViewFactory.create(context, 22, 3, true);
-        transcriptView.setTextColor(Color.WHITE);
-        transcriptView.setPadding(0, 10, 0, 10);
-        expandedPanel.addView(transcriptView);
-
-        bilingualRow = new LinearLayout(context);
-        bilingualRow.setOrientation(LinearLayout.HORIZONTAL);
-        leftView = SubtitleViewFactory.create(context, 22, 3, true);
-        leftView.setTextColor(Color.WHITE);
-        leftView.setPadding(0, 10, 12, 10);
-        bilingualRow.addView(leftView, new LinearLayout.LayoutParams(0, -2, 1));
-        rightView = SubtitleViewFactory.create(context, 22, 3, true);
-        rightView.setTextColor(Color.WHITE);
-        rightView.setPadding(12, 10, 0, 10);
-        bilingualRow.addView(rightView, new LinearLayout.LayoutParams(0, -2, 1));
-        bilingualRow.setVisibility(View.GONE);
-        expandedPanel.addView(bilingualRow);
-
-        historyRows = new LinearLayout(context);
-        historyRows.setOrientation(LinearLayout.VERTICAL);
-        historyScroll = new ScrollView(context);
-        historyScroll.addView(historyRows);
-        historyScroll.setVisibility(View.GONE);
-        expandedPanel.addView(historyScroll, new LinearLayout.LayoutParams(-1, dp(400)));
-
-        LinearLayout actions = new LinearLayout(context);
-        actions.setGravity(Gravity.END);
-        Button openButton = new Button(context);
-        openButton.setText("返回会议");
-        openButton.setOnClickListener(view -> onOpenApp.run());
-        actions.addView(openButton);
-        swapButton = new Button(context);
-        swapButton.setText("交换左右");
-        swapButton.setOnClickListener(view -> onSwapColumns.run());
-        actions.addView(swapButton);
-        sizeButton = new Button(context);
-        sizeButton.setOnClickListener(view -> {
-            if (layout.current() == OverlayLayoutState.Type.TRANSLATION_NORMAL) layout.showLarge();
-            else layout.showNormal();
-            Log.i(TAG, "互译悬浮窗切换为 " + layout.current());
-            applyLayout();
-            renderLastState();
-        });
-        actions.addView(sizeButton);
-        Button collapseButton = new Button(context);
-        collapseButton.setText("收起");
-        collapseButton.setOnClickListener(view -> {
-            layout.collapse();
-            Log.i(TAG, "悬浮窗已收起到 Mini");
-            applyLayout();
-        });
-        actions.addView(collapseButton);
-        stopButton = new Button(context);
-        stopButton.setText("停止");
-        stopButton.setOnClickListener(view -> onStop.run());
-        actions.addView(stopButton);
-        expandedPanel.addView(actions);
-
-        params = new WindowManager.LayoutParams(
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.WRAP_CONTENT,
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                        | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
-                android.graphics.PixelFormat.TRANSLUCENT);
-        params.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
-        params.y = 24;
-        windowManager.addView(panel, params);
-        root = panel;
+        window = MeetingAppAssembly.overlayFactory().create(context, onOpenApp, onSwapColumns, onStop);
+        if (!window.show(state)) {
+            window.dismiss();
+            window = null;
+            Log.w(TAG, "跨应用窗口需要显示权限");
+        }
     }
 
     void render(MeetingDisplaySnapshot state, MeetingSetup.Mode mode, String timeText,
-            MeetingReminderPresentation.Notice reminder, boolean canStop,
-            boolean allowOverlayReminder) {
-        render(state, mode, mode == MeetingSetup.Mode.MEETING_MINUTES, timeText,
-                reminder, canStop, allowOverlayReminder);
+            MeetingReminderPresentation.Notice reminder, boolean canStop, boolean allowOverlayReminder) {
+        render(state, mode, mode == MeetingSetup.Mode.MEETING_MINUTES, timeText, reminder,
+                canStop, allowOverlayReminder);
     }
 
-    /** 同一会中模式可选择总结；窗口仅显示本场快照，不改变模型或收口流程。 */
+    /** 同一会中模式可选择总结；窗口不改变模型或收口流程。 */
     void render(MeetingDisplaySnapshot state, MeetingSetup.Mode mode, boolean summaryEnabled,
             String timeText, MeetingReminderPresentation.Notice reminder, boolean canStop,
             boolean allowOverlayReminder) {
         render(state, mode, summaryEnabled, timeText, reminder, canStop, allowOverlayReminder, 0);
     }
 
-    /** 电平来自 Service 的同场快照，窗口不订阅音源；Mini 也更新同一值。 */
+    /** 电平来自 Service 的同场快照；窗口不订阅音源，提醒仍是 App 的原窗口。 */
     void render(MeetingDisplaySnapshot state, MeetingSetup.Mode mode, boolean summaryEnabled,
             String timeText, MeetingReminderPresentation.Notice reminder, boolean canStop,
             boolean allowOverlayReminder, int audioLevel) {
-        if (root == null) return;
-        lastDisplay = state;
-        lastMode = mode;
-        lastSummaryEnabled = summaryEnabled;
-        lastTimeText = timeText;
-        lastReminder = reminder;
-        lastAllowReminder = allowOverlayReminder;
-        lastCanStop = canStop;
-        lastAudioLevel = audioLevel;
-        audioLevelBar.setProgress(audioLevel);
-        audioLevelView.setText(MeetingRuntimeFactory.requiresMicrophone()
-                ? "输入电平：" + audioLevel + "/100" : "输入电平：Mock 未实采");
-        miniButton.setText(MeetingRuntimeFactory.requiresMicrophone()
-                ? "AI 会议 · 恢复 · " + audioLevel + "/100" : "AI 会议 · 恢复");
-        renderReminder(reminder, allowOverlayReminder);
-        if (layout.current() == OverlayLayoutState.Type.MINI) return;
-        boolean bilingual = state.bilingual();
-        boolean large = layout.current() == OverlayLayoutState.Type.TRANSLATION_LARGE;
-        var current = !bilingual || state.rows().isEmpty() ? null
-                : DisplaySnapshotPresentation.bilingual(
-                        state.rows().get(state.rows().size() - 1), state.swapped());
-        titleView.setText(bilingual ? "双语互译" + (summaryEnabled ? "＋纪要" : "")
-                + "  " + DisplaySnapshotPresentation.leftLabel(state) + " / "
-                + DisplaySnapshotPresentation.rightLabel(state)
-                + (large ? " · 大窗" : " · 普通窗")
-                + (current != null && current.languageFallback() ? "（语种降级）" : "")
-                : summaryEnabled ? "AI 会议纪要" : "实时字幕");
-        transcriptView.setVisibility(bilingual ? View.GONE : View.VISIBLE);
-        bilingualRow.setVisibility(bilingual && !large ? View.VISIBLE : View.GONE);
-        historyScroll.setVisibility(bilingual && large ? View.VISIBLE : View.GONE);
-        swapButton.setVisibility(bilingual ? View.VISIBLE : View.GONE);
-        sizeButton.setVisibility(bilingual ? View.VISIBLE : View.GONE);
-        sizeButton.setText(large ? "普通窗" : "大窗");
-        var latestSubtitle = DisplaySnapshotPresentation.latestSubtitle(state);
-        SubtitleViewFactory.render(transcriptView, latestSubtitle.segmentId(),
-                latestSubtitle.text(), latestSubtitle.alpha());
-        if (bilingual) {
-            if (current != null) {
-                SubtitleViewFactory.render(leftView, current.segmentId(), current.left(), current.leftAlpha());
-                SubtitleViewFactory.render(rightView, current.segmentId(), current.right(), current.rightAlpha());
-            } else {
-                SubtitleViewFactory.render(leftView, "", "等待字幕…", 0.8f);
-                SubtitleViewFactory.render(rightView, "", "", 1.0f);
-            }
-            if (large) renderHistory(state);
-        }
-        elapsedView.setText(timeText);
-        stopButton.setEnabled(canStop);
+        if (window == null) return;
+        window.render(state, mode, summaryEnabled, timeText, canStop, audioLevel);
+        renderReminder(reminder, allowOverlayReminder && window.isShowing());
     }
 
     private void renderReminder(MeetingReminderPresentation.Notice notice, boolean allowed) {
@@ -267,8 +82,8 @@ final class MeetingOverlay {
                         android.graphics.PixelFormat.TRANSLUCENT));
                 reminderPopup = new MeetingReminderPopup(context, true, onConfirmReminder);
                 WindowManager.LayoutParams cardParams = new WindowManager.LayoutParams(
-                        Math.min(context.getResources().getDisplayMetrics().widthPixels - dp(48),
-                                dp(440)), WindowManager.LayoutParams.WRAP_CONTENT,
+                        Math.min(context.getResources().getDisplayMetrics().widthPixels - dp(48), dp(440)),
+                        WindowManager.LayoutParams.WRAP_CONTENT,
                         WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                         WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                                 | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
@@ -278,19 +93,14 @@ final class MeetingOverlay {
                 windowManager.addView(reminderPopup.view(), cardParams);
             } catch (RuntimeException unavailable) {
                 clearReminder();
-                Log.w(TAG, "跨应用提醒窗不可用 reason="
-                        + unavailable.getClass().getSimpleName());
+                Log.w(TAG, "跨应用提醒窗不可用 reason=" + unavailable.getClass().getSimpleName());
             }
-        } else {
-            reminderPopup.render(notice);
-        }
+        } else reminderPopup.render(notice);
     }
 
     private void clearReminder() {
         if (reminderPopup != null) {
-            if (reminderPopup.view().getParent() != null) {
-                windowManager.removeView(reminderPopup.view());
-            }
+            if (reminderPopup.view().getParent() != null) windowManager.removeView(reminderPopup.view());
             reminderPopup = null;
         }
         if (reminderScrim != null) {
@@ -299,82 +109,13 @@ final class MeetingOverlay {
         }
     }
 
-    /** 大窗展示最近几行；行数据始终取自 Service 的同一份已路由会议状态。 */
-    private void renderHistory(MeetingDisplaySnapshot snapshot) {
-        List<MeetingDisplaySnapshot.Row> rows = snapshot.rows();
-        historyRows.removeAllViews();
-        if (rows.isEmpty()) {
-            TextView waiting = SubtitleViewFactory.create(context, 20, 3, false);
-            waiting.setTextColor(Color.WHITE);
-            SubtitleViewFactory.render(waiting, "", "等待字幕…", 0.8f);
-            historyRows.addView(waiting);
-            return;
-        }
-        for (int index = Math.max(0, rows.size() - 8); index < rows.size(); index++) {
-            var segment = DisplaySnapshotPresentation.bilingual(rows.get(index), snapshot.swapped());
-            LinearLayout row = new LinearLayout(context);
-            row.setOrientation(LinearLayout.HORIZONTAL);
-            TextView left = historyCell(segment.segmentId(), segment.left(), segment.leftAlpha());
-            TextView right = historyCell(segment.segmentId(), segment.right(), segment.rightAlpha());
-            row.addView(left, new LinearLayout.LayoutParams(0, -2, 1));
-            row.addView(right, new LinearLayout.LayoutParams(0, -2, 1));
-            historyRows.addView(row);
-        }
-    }
+    private int dp(int value) { return Math.round(value * context.getResources().getDisplayMetrics().density); }
 
-    private TextView historyCell(String segmentId, String text, float alpha) {
-        TextView cell = SubtitleViewFactory.create(context, 20, Integer.MAX_VALUE, false);
-        cell.setTextColor(Color.WHITE);
-        SubtitleViewFactory.render(cell, segmentId, text, alpha);
-        cell.setPadding(0, 8, 12, 8);
-        return cell;
-    }
-
-    private void renderLastState() {
-        if (lastDisplay != null) render(lastDisplay, lastMode, lastSummaryEnabled, lastTimeText, lastReminder,
-                lastCanStop, lastAllowReminder, lastAudioLevel);
-    }
-
-    /** Mini 调整成右上角的小入口；展开后仍使用原会话窗口和最近的字幕快照。 */
-    private void applyLayout() {
-        boolean mini = layout.current() == OverlayLayoutState.Type.MINI;
-        expandedPanel.setVisibility(mini ? View.GONE : View.VISIBLE);
-        miniButton.setVisibility(mini ? View.VISIBLE : View.GONE);
-        params.width = mini ? dp(180) : WindowManager.LayoutParams.MATCH_PARENT;
-        params.height = WindowManager.LayoutParams.WRAP_CONTENT;
-        params.gravity = mini ? Gravity.TOP | Gravity.END : Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
-        params.x = mini ? dp(16) : 0;
-        params.y = dp(24);
-        windowManager.updateViewLayout(root, params);
-    }
-
-    private int dp(int value) {
-        return Math.round(value * context.getResources().getDisplayMetrics().density);
-    }
-
+    /** 宿主结束／退出时只释放显示资源；正常 Stop 仍由原 Service 请求。 */
     void dismiss() {
-        if (root == null) return;
         clearReminder();
-        windowManager.removeView(root);
-        root = null;
-        params = null;
-        layout = null;
-        expandedPanel = null;
-        miniButton = null;
-        titleView = null;
-        transcriptView = null;
-        bilingualRow = null;
-        leftView = null;
-        rightView = null;
-        elapsedView = null;
-        audioLevelBar = null;
-        audioLevelView = null;
+        if (window != null) window.dismiss();
+        window = null;
         onConfirmReminder = null;
-        stopButton = null;
-        swapButton = null;
-        sizeButton = null;
-        historyScroll = null;
-        historyRows = null;
-        lastDisplay = null;
     }
 }

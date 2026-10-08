@@ -11,7 +11,7 @@ val sdkAar = providers.gradleProperty("meetingSdkAar").orNull
 val meetingUiAar = providers.gradleProperty("meetingUiAar").orNull
 if (meetingUiAar != null) {
     require(meetingUiAar.isNotBlank() && file(meetingUiAar).isFile) {
-        "meetingUiAar requires /absolute/path/ai-meeting-ui-0.1.0-release.aar"
+        "meetingUiAar requires /absolute/path/ai-meeting-ui-0.2.0-release.aar"
     }
 }
 val subtitleUiSource = if (meetingUiAar == null) "basic-ui" else "meeting-ui"

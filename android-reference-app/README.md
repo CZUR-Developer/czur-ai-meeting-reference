@@ -26,8 +26,8 @@ P7-3a在基础音频与完整会议入口增加同流输入电平：`AudioInputL
 
 P7-3b通过独立可选UI AAR装配字幕控件。页面历史单元、最新字幕浮窗及互译两栏共用
 `SubtitleViewFactory`，消费同一已路由快照；每次完整替换文字，partial为80%、final为100%，
-View自身alpha保持1。该接线的源码、构建和真实设备效果分别验收，不代签P7-3c窗口工具
-或P7-3d完整国内版式。
+View自身alpha保持1。3b已独立验收并本地提交；本步3c在同一UI AAR增加基础／默认
+窗口和单形态可编辑例，源码、构建、独立验收与真实设备效果分别记录，不代签3d完整国内版式。
 
 P7-1c的SDK会议入口复用正在使用的唯一音源累计完整标准PCM帧，停流及完整尾帧交付后
 一次冻结时长。组合层按“最终字幕／译文保存→冻结用量提交→按需总结→原Stop”执行；
@@ -99,7 +99,7 @@ P5-6历史参考结果方式包含网页、本地PDF、邮箱链接和互译无�
   -PmeetingSdkAar=/absolute/path/ai-meeting-sdk-0.5.0-release.aar
 ```
 
-### 可选字幕UI工具：构建期注入
+### 可选字幕／窗口UI工具：构建期注入
 
 UI工具独立于主音源／会议SDK。干净Mock不需要闭源输入；提供`meetingUiAar`时，
 Mock与SDK使用同一独立UI AAR。正式SDK参考交付同时注入主AAR和UI AAR：
@@ -107,13 +107,13 @@ Mock与SDK使用同一独立UI AAR。正式SDK参考交付同时注入主AAR和U
 ```bash
 # Mock＋UI：core仍来自源码，勿用主SDK AAR充当UI依赖
 ./gradlew :app:assembleDebug :app:testDebugUnitTest \
-  -PmeetingUiAar=/absolute/path/ai-meeting-ui-0.1.0-release.aar
+  -PmeetingUiAar=/absolute/path/ai-meeting-ui-0.2.0-release.aar
 
 # SDK＋UI：core仅来自主SDK AAR，contract仍由公开源码模块提供
 ./gradlew :app:assembleDebug :app:testDebugUnitTest \
   -PmeetingRuntime=sdk \
   -PmeetingSdkAar=/absolute/path/ai-meeting-sdk-0.5.0-release.aar \
-  -PmeetingUiAar=/absolute/path/ai-meeting-ui-0.1.0-release.aar
+  -PmeetingUiAar=/absolute/path/ai-meeting-ui-0.2.0-release.aar
 ```
 
 `src/meeting-ui/.../ui/SubtitleViewFactory.java`直接调用UI工具；未提供UI AAR时只编译
@@ -128,7 +128,45 @@ UI AAR只含控件和必要呈现类型，无core、contract、网络或原生�
 占位也用工厂render→setParts提交，避免继承setText在重排时被旧字幕覆盖。
 页面与窗口的电平、Stop、结果Web及Service生命周期继续沿同一业务链。
 伙伴换字幕控件时只改对应薄工厂及构建输入；无需修改音源、Adapter或会议收口。
-本期未提取窗口管理，窗口权限与WindowManager仍由App持有。
+3c默认会议窗口的WindowManager操作由UI工具持有；权限申请和提醒窗口仍留App。
+
+### 窗口工厂：默认四形态与一个形态的替换例
+
+`MeetingOverlay`只保留原Service调用签名、提醒和工厂句柄，不再持有第二份四形态状态。
+默认`MeetingAppAssembly.overlayFactory()`为构建期互斥的`OverlayViewFactory`：
+
+- 无UI AAR的`basic-ui`版是单个基础字幕／双栏窗口，保留返回、交换、停止及同场电平；
+  不复制完整四形态、Mini或最近文字排版工具。
+- 有UI AAR的`meeting-ui`版装配`DefaultMeetingOverlay`，默认注册字幕、普通互译、大互译、Mini。
+  普通互译显示最新双栏，大窗沿原参考上限取最近8行；Mini恢复之前形态。窗口隐藏／切换
+  只影响UI，不暂停会议或修改音源、模型、计费及收口。
+
+`meeting-ui/.../ui/OverlayViewFactory.java`同时是公开可编辑的px布局和内容装配例。
+App按1920×1080设计尺度等比换算：宽1800、字幕高222、普通互译293、大互译1008，
+Mini126×60；位置由App决定。样式26px字号／34px行高／12px边距／44px控制行，
+字幕三行共102px，222px窗内各部分共216px；Mini文本和恢复按钮也在固定尺寸内。
+这些数值先在App换算，再交UI工具；不使用Starry私有pt／AutoSize、机型或品牌资源。
+
+`OverlayViewFactory.presentation`只调用原`DisplaySnapshotPresentation`转数据，保留
+`latestTranscriptSegmentId`、源侧／交换和原／译文各自final；不改分栏或选段。
+窗口Stop／交换／返回回调继续由同一Service提供，时长、电平来自其同一State。
+提醒仍由原App卡片及规则管理，没有放入UI AAR。宿主结束／退出时调用dismiss释放窗口，
+不是另发一次Stop。
+
+伙伴只要一个形态时，直接使用可编辑的`SingleFormOverlayFactory.java`：
+
+```java
+// 有 meetingUiAar 的构建，在首次显示之前（例如伙伴 Application.onCreate）显式装配：
+MeetingAppAssembly.registerOverlayFactory(new SingleFormOverlayFactory());
+// 默认恢复：MeetingAppAssembly.registerOverlayFactory(new OverlayViewFactory());
+```
+
+例子只注册`partner.single`，替换自己的View／位置尺寸，消费同一已投影字幕／双栏输入，
+不用实现默认四项，也没有专用演示页面或运行时插件加载。App扩展接口是
+`MeetingOverlayFactory`及其最小`Window`句柄；工具扩展接口是`OverlayController`嵌套
+`ContentFactory`／`Content`／`LayoutPolicy`／`WindowSpec`／`StateListener`。
+只改实现与Assembly注册，不修改Service、音源、Adapter、模型通信、分栏或会议收口。
+已创建的窗口继续使用自己的句柄；新装配从下一次创建窗口生效。
 
 排查真实模型字幕但设备 MIC 声学入口不确定时，可将同一 SDK Module 的
 `ai-meeting-sdk-0.5.0-debug.aar` 注入上面的 `meetingSdkAar` 参数。调试 AAR 若在
@@ -186,8 +224,8 @@ Service 的同一份“已进行 / 剩余”状态。上限超过 20 分钟时�
 悬浮窗的“收起”会变为右上角 Mini，点击 Mini 恢复到收起前的字幕窗或互译窗；
 互译普通窗显示最新双栏，大窗显示最近的双栏记录，两种窗都读取同一份会议状态。
 Mini 期间会议仍继续采音、收模型结果和提交标准事件，恢复后能看到新内容。
-国内版字幕 Mini 虽调用 `setAsrSdkEnabled(false)`，当前 Cloud ASR AIDL 实现仅记录日志、
-没有真正的暂停接口；参考版因此只实现窗口收起，不声称 Mini 暂停识别或计费。
+国内版字幕收起的清空文字／暂停ASR入口属于P9产品规则，本步不迁移；
+参考版只实现窗口收起，不声称Mini暂停识别或计费。
 
 P5-4 的会前入口先填写设备可达的后端地址，以及部署者预置的终端用户账号和密码。
 App调用`MeetingClient.login`更新集中装配的参考内存身份，Service用同一Provider创建独立会议客户端。

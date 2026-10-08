@@ -9,6 +9,8 @@ import com.czur.aimeeting.client.result.ResultActionPlugin;
 import com.czur.aimeeting.client.result.ResultOptions;
 import com.czur.aimeeting.reference.AppResultActionPlugin;
 import com.czur.aimeeting.reference.WebResultActionPlugin;
+import com.czur.aimeeting.reference.ui.MeetingOverlayFactory;
+import com.czur.aimeeting.reference.ui.OverlayViewFactory;
 import com.czur.aimeeting.client.identity.IdentityProvider;
 import com.czur.aimeeting.client.identity.ReferenceIdentityProvider;
 import java.util.Objects;
@@ -33,8 +35,21 @@ public final class MeetingAppAssembly {
     private static List<AppResultActionPlugin> resultActions = List.of(new WebResultActionPlugin());
     private static ResultActionRegistry resultRegistry = new ResultActionRegistry(resultActions);
     private static PreparedMeeting pendingMeeting;
+    private static MeetingOverlayFactory overlayFactory = new OverlayViewFactory();
 
     private MeetingAppAssembly() {}
+
+    /**
+     * 构建期替换窗口内容／策略，例如有 UI AAR 时注册 new SingleFormOverlayFactory()。
+     * 在首次显示前调用；已经创建的窗口继续使用自己的工厂句柄，不重开会议或音源。
+     * 工厂不应持有 Activity 或会议凭据，提醒、权限和前台 Service 仍归 App。
+     */
+    public static synchronized void registerOverlayFactory(MeetingOverlayFactory factory) {
+        overlayFactory = Objects.requireNonNull(factory, "factory");
+    }
+
+    /** 默认来自当前 basic-ui／meeting-ui 构建的工厂，不反射加载闭源类。 */
+    public static synchronized MeetingOverlayFactory overlayFactory() { return overlayFactory; }
 
     /**
      * 在创建会前客户端前配置部署地址。默认参考账号切换到不同后端时清除旧内存会话；
