@@ -59,6 +59,8 @@ public class ReferenceMeetingPageTest {
         cleanup.destroy();
     }
 
+    // 同一个会前正常用例使用1.5密度：能捕获shape逐角／selector遗漏换算的实际视觉差异。
+    @Config(qualifiers = "w1280dp-h720dp-hdpi")
     @Test public void centeredCardHasSingleLanguageAndFixedStartOutsideScroll() {
         Activity activity = Robolectric.buildActivity(Activity.class).create().get();
         MeetingPageViews page = new MeetingPageViews.DefaultFactory().create(activity);
@@ -76,6 +78,15 @@ public class ReferenceMeetingPageTest {
         Rect start = bounds(page.root, page.start);
         assertEquals(180, start.width());
         assertEquals(50, start.height());
+        var header = (android.graphics.drawable.GradientDrawable)
+                page.root.findViewById(R.id.setup_header).getBackground();
+        assertArrayEquals(new float[] {40, 40, 40, 40, 0, 0, 0, 0}, header.getCornerRadii(), 0f);
+        var buttons = (android.graphics.drawable.DrawableContainer.DrawableContainerState)
+                page.start.getBackground().getConstantState();
+        assertEquals(3, buttons.getChildCount());
+        // Android inflate圆角先取整像素（hdpi的15dp成为23px），设计换算允许不足半像素舍入。
+        for (int index = 0; index < buttons.getChildCount(); index++)
+            assertEquals(15f, ((android.graphics.drawable.GradientDrawable)buttons.getChild(index)).getCornerRadius(), 0.5f);
         assertTrue(start.bottom <= card.bottom && start.top >= card.top);
         assertNull(page.root.findViewById(R.id.backend_url));
         assertNull(page.root.findViewById(R.id.web_url));
@@ -84,6 +95,8 @@ public class ReferenceMeetingPageTest {
         assertEquals(View.VISIBLE, page.swapLanguages.getVisibility());
         assertEquals(View.GONE, page.presentation.getVisibility());
         assertEquals("AI双语互译", page.setupTitle.getText().toString());
+        assertEquals("（实时将两种语言进行互译）",
+                ((TextView)page.root.findViewById(R.id.setup_subtitle)).getText().toString());
     }
 
     @Test public void accountEntryAndConnectionReturnCloseOldClientAndClearOldCapabilities() throws Exception {

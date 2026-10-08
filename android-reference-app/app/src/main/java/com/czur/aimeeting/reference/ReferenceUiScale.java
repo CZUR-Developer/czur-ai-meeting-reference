@@ -1,6 +1,8 @@
 package com.czur.aimeeting.reference;
 
 import android.content.Context;
+import android.graphics.drawable.Drawable;
+import android.graphics.drawable.DrawableContainer;
 import android.graphics.drawable.GradientDrawable;
 import android.util.TypedValue;
 import android.view.View;
@@ -68,7 +70,8 @@ final class ReferenceUiScale {
         final View view;
         final int width, height, left, top, right, bottom, start, end;
         final int padLeft, padTop, padRight, padBottom, minimumWidth, minimumHeight;
-        final float textSize, cornerRadius;
+        final float textSize;
+        final List<Shape> shapes = new ArrayList<>();
         Item(View view) {
             this.view = view;
             var params = view.getLayoutParams();
@@ -85,7 +88,19 @@ final class ReferenceUiScale {
             padRight = view.getPaddingRight(); padBottom = view.getPaddingBottom();
             minimumWidth = view.getMinimumWidth(); minimumHeight = view.getMinimumHeight();
             textSize = view instanceof TextView text ? text.getTextSize() : 0;
-            cornerRadius = view.getBackground() instanceof GradientDrawable shape ? shape.getCornerRadius() : 0;
+            Drawable background = view.getBackground();
+            if (background != null) collectShapes(background.mutate());
+        }
+
+        /**
+         * 标题使用逐角shape，按钮使用selector中的shape，都要和布局共用首次设计尺寸。
+         * 使用API19已有的DrawableContainerState，避免只为枚举状态要求伙伴Android29以上。
+         * mutate后仅调整本View背景，不改变其他控件共享的资源常量状态。
+         */
+        private void collectShapes(Drawable drawable) {
+            if (drawable instanceof GradientDrawable gradient) shapes.add(new Shape(gradient));
+            else if (drawable.getConstantState() instanceof DrawableContainer.DrawableContainerState states)
+                for (int index = 0; index < states.getChildCount(); index++) collectShapes(states.getChild(index));
         }
         void apply(float factor, float textFactor) {
             var params = view.getLayoutParams();
@@ -104,8 +119,29 @@ final class ReferenceUiScale {
             view.setMinimumWidth(Math.round(minimumWidth * factor));
             view.setMinimumHeight(Math.round(minimumHeight * factor));
             if (view instanceof TextView text) text.setTextSize(TypedValue.COMPLEX_UNIT_PX, textSize * textFactor);
-            if (cornerRadius > 0 && view.getBackground() instanceof GradientDrawable shape)
-                ((GradientDrawable)shape.mutate()).setCornerRadius(cornerRadius * factor);
+            for (Shape shape : shapes) shape.apply(factor);
+            // clipToOutline的卡片随背景半径重建裁剪，和标题实际轮廓保持同一个尺度。
+            if (!shapes.isEmpty()) view.invalidateOutline();
+        }
+    }
+
+    /** 背景只保留首次半径，反复布局时不把已缩放半径再次缩放。 */
+    private static final class Shape {
+        final GradientDrawable drawable;
+        final float radius;
+        final float[] radii;
+        Shape(GradientDrawable drawable) {
+            this.drawable = drawable;
+            radius = drawable.getCornerRadius();
+            radii = drawable.getCornerRadii();
+        }
+        void apply(float factor) {
+            if (radii == null) drawable.setCornerRadius(radius * factor);
+            else {
+                float[] scaled = radii.clone();
+                for (int index = 0; index < scaled.length; index++) scaled[index] *= factor;
+                drawable.setCornerRadii(scaled);
+            }
         }
     }
 }

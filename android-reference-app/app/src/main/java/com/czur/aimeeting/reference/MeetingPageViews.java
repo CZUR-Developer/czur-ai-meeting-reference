@@ -155,7 +155,7 @@ public final class MeetingPageViews {
         languageHint.setTypeface(null, translation ? android.graphics.Typeface.NORMAL : android.graphics.Typeface.BOLD);
         setupTitle.setText(translation ? "AI双语互译" : "AI会议纪要");
         ((TextView)root.findViewById(R.id.setup_subtitle)).setText(
-                translation ? "（将两种语言进行互译）" : "（实时将声音转文字）");
+                translation ? "（实时将两种语言进行互译）" : "（实时将声音转文字）");
     }
 
     /** 国内原文白色、译文黄色，24字号／36固定行高；不判断发言侧或模型数据。 */
