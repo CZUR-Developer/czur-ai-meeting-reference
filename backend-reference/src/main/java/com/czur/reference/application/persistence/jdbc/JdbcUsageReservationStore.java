@@ -14,6 +14,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -213,7 +214,13 @@ final class JdbcUsageReservationStore {
         }
     }
 
-    /** 插入首次完整 Reservation 快照；ID 碰撞交给数据库唯一约束拒绝。 */
+    /**
+     * 插入首次完整 Reservation 快照；ID 碰撞交给数据库唯一约束拒绝。
+     *
+     * <p>首次结果 JSON 保留策略返回的原始时间。这里明确写入其微秒截断值，
+     * 与 {@link OwnedMeetingCreationFacts} 的持久事实投影一致，避免 PostgreSQL
+     * 对纳秒值向上舍入后跨微秒边界，导致正常 Create 被误判为事实损坏。</p>
+     */
     static void insertReservation(Connection connection, UsageReservation reservation)
             throws SQLException {
         Objects.requireNonNull(connection, "connection");
@@ -225,15 +232,18 @@ final class JdbcUsageReservationStore {
         }
         try (PreparedStatement statement = connection.prepareStatement(INSERT_RESERVATION_SQL)) {
             statement.setString(1, reservation.reservationId());
-            statement.setTimestamp(2, Timestamp.from(reservation.createdAt()));
-            statement.setTimestamp(3, Timestamp.from(reservation.createdAt()));
+            statement.setTimestamp(2, Timestamp.from(
+                    reservation.createdAt().truncatedTo(ChronoUnit.MICROS)));
+            statement.setTimestamp(3, Timestamp.from(
+                    reservation.createdAt().truncatedTo(ChronoUnit.MICROS)));
             statement.setString(4, reservation.deploymentScope());
             statement.setString(5, reservation.subjectScope());
             statement.setString(6, reservation.grantId());
             statement.setString(7, reservation.expectedMeetingId());
             statement.setString(8, reservation.reservedUsage().unit().name());
             statement.setBigDecimal(9, BigDecimal.valueOf(reservation.reservedUsage().amount()));
-            statement.setTimestamp(10, Timestamp.from(reservation.expiresAt()));
+            statement.setTimestamp(10, Timestamp.from(
+                    reservation.expiresAt().truncatedTo(ChronoUnit.MICROS)));
             if (statement.executeUpdate() != 1) {
                 throw new SQLException("usage reservation insert count is not one");
             }

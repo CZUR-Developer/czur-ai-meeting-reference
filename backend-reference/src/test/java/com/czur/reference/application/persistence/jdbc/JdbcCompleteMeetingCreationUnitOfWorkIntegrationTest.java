@@ -5,18 +5,26 @@ import com.czur.reference.application.command.CreateMeetingRequestSnapshot;
 import com.czur.reference.application.command.CreateMeetingResponseFact;
 import com.czur.reference.application.command.MeetingCommandEventFactory;
 import com.czur.reference.application.command.MeetingRequestCanonicalizer;
+import com.czur.reference.application.entitlement.referencedev.ReferenceDevEntitlementPolicy;
+import com.czur.reference.application.entitlement.referencedev.ReferenceDevEntitlementPolicyConfig;
 import com.czur.reference.application.port.CompleteMeetingCreationUnitOfWork;
 import com.czur.reference.application.port.CompleteMeetingCreateReplayLookup;
 import com.czur.reference.application.port.IdempotencyScopeCodec;
 import com.czur.reference.application.port.entitlement.AuthorizedProfileSnapshot;
+import com.czur.reference.application.port.entitlement.AuthorizeStartRequest;
+import com.czur.reference.application.port.entitlement.EntitlementIdGenerator;
 import com.czur.reference.application.port.entitlement.MeetingGrant;
+import com.czur.reference.application.port.entitlement.ReserveUsageRequest;
 import com.czur.reference.application.port.entitlement.UsageEstimate;
 import com.czur.reference.application.port.entitlement.UsageOperationResult;
+import com.czur.reference.application.port.entitlement.UsageOperationScopes;
 import com.czur.reference.application.port.entitlement.UsageReservation;
 import com.czur.reference.application.port.entitlement.UsageUnit;
 import com.czur.reference.application.port.model.AudioProfile;
+import com.czur.reference.application.port.identity.Subject;
 import com.czur.reference.domain.meeting.MeetingAggregate;
 import com.czur.reference.domain.meeting.MeetingState;
+import com.czur.reference.protocol.json.CreateMeetingResponseFactJson;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -33,8 +41,10 @@ import java.sql.ResultSet;
 import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -82,6 +92,69 @@ class JdbcCompleteMeetingCreationUnitOfWorkIntegrationTest {
             try (Connection connection = admin.getConnection(); Statement statement = connection.createStatement()) {
                 statement.execute("DROP SCHEMA IF EXISTS " + quote(schema) + " CASCADE");
             }
+        }
+    }
+
+    @Test
+    void nonMicrosecondFirstReserveSurvivesPostgresRoundTripAndCompleteCreate()
+            throws Exception {
+        // 原缺陷会把 .940612929 向上舍入成 .940613，跨过事实比较的微秒边界。
+        Instant at = Instant.parse("2030-01-01T00:00:00.940612929Z");
+        Clock clock = Clock.fixed(at, ZoneOffset.UTC);
+        var policy = new ReferenceDevEntitlementPolicy(
+                new ReferenceDevEntitlementPolicyConfig(DEPLOYMENT, "standard", 1,
+                        CAPABILITIES, 3_600_000, Duration.ofSeconds(120),
+                        Duration.ofSeconds(90)),
+                clock, new EntitlementIdGenerator() {
+                    public String newGrantId() { return "grant-microsecond"; }
+                    public String newReservationId() { return "reservation-microsecond"; }
+                    public String newLeaseToken() { return "unused-lease-token"; }
+                });
+        var provider = new JdbcReferenceDevEntitlementProvider(dataSource, policy, clock);
+        var estimate = new UsageEstimate(UsageUnit.MEETING_DURATION_MS, 60_000);
+        var grant = provider.authorizeStart(new AuthorizeStartRequest(
+                DEPLOYMENT, new Subject(SUBJECT), "standard", 1, CAPABILITIES,
+                estimate, "session-microsecond")).valueOrThrow();
+        var reserveRequest = new ReserveUsageRequest(DEPLOYMENT, SUBJECT,
+                UsageOperationScopes.RESERVE, "reserve-key-microsecond",
+                "reserve-digest-microsecond", grant, estimate, "mtg_complete_microsecond");
+        var reserve = provider.reserveUsage(reserveRequest).valueOrThrow();
+        assertEquals(at, reserve.reservation().createdAt());
+        assertEquals(at.plusSeconds(90), reserve.reservation().expiresAt());
+
+        try (Connection connection = dataSource.getConnection()) {
+            var row = JdbcUsageReservationStore.findOperation(connection, DEPLOYMENT,
+                    SUBJECT, reserve.operationScope(), reserve.idempotencyKey()).orElseThrow();
+            var frozen = UsageOperationResultJson.decode(row.resultBody(), DEPLOYMENT,
+                    SUBJECT, reserve.operationScope(), reserve.idempotencyKey(),
+                    reserve.requestDigest());
+            assertEquals(reserve, frozen, "首次返回与冻结 JSON 仍保留同一份纳秒事实");
+            var current = JdbcUsageReservationStore.findReservation(connection,
+                    DEPLOYMENT, SUBJECT, reserve.reservation().reservationId()).orElseThrow();
+            assertEquals(at.truncatedTo(ChronoUnit.MICROS), current.createdAt());
+            assertEquals(at.plusSeconds(90).truncatedTo(ChronoUnit.MICROS),
+                    current.expiresAt());
+            assertEquals(current.createdAt(), instant(connection,
+                    "SELECT updated_at FROM usage_reservation"));
+            assertTrue(OwnedMeetingCreationFacts.sameInitialReservationFacts(
+                    current, frozen.reservation()));
+        }
+        assertEquals(reserve, provider.reserveUsage(reserveRequest).valueOrThrow());
+
+        // 同一非整微秒时钟继续走真实完整 Create，不等待时钟推进掩盖首次写入问题。
+        var initial = request(reserve, KEY, null, "microsecond-token");
+        var first = success(unitOfWork(at).create(initial));
+        assertEquals(CompleteMeetingCreationUnitOfWork.SuccessCode.CREATED, first.code());
+        var replay = success(unitOfWork(at).create(initial));
+        assertEquals(CompleteMeetingCreationUnitOfWork.SuccessCode.REPLAYED, replay.code());
+        assertEquals(CreateMeetingResponseFactJson.encode(first.response()),
+                CreateMeetingResponseFactJson.encode(replay.response()));
+        try (Connection connection = dataSource.getConnection()) {
+            assertEquals(1, count(connection, "SELECT count(*) FROM meeting"));
+            assertEquals(1, count(connection, "SELECT count(*) FROM meeting_create_fact"));
+            assertEquals(1, count(connection, "SELECT count(*) FROM outbox_event"));
+            assertEquals(at.truncatedTo(ChronoUnit.MICROS), instant(connection,
+                    "SELECT bound_at FROM usage_reservation"));
         }
     }
 
