@@ -359,12 +359,20 @@ Debug `AudioDiagnosticActivity` 同时显示模式、方向状态、帧数和峰
 也没有最近PDF按钮。后端邮件能力声明不会自动添加入口。模型音频仍直连模型，
 标准事件、用量、总结和屏采顺序不因动作变化而改变。
 
-伙伴新增`AppResultActionPlugin`实现并在Assembly登记即可：
+伙伴新增`AppResultActionPlugin`实现并在Assembly登记结果动作：
 公共core接口负责稳定ID、名称、产物／服务依赖、`prepare`与异步执行；App薄接口
 `createSettings(Context)`返回插件自己的View及`freeze`工厂。
 页面仅在会前Hook读取一次输入，工厂返回只含不可变参数和Application Context的core插件；
 `prepare`产生本场闭包，不保留Activity／View。没有输入的动作返回空View，不需改MainActivity。
 后端需要提供什么服务由部署负责，不默认转到CZUR服务。
+
+当前结果服务发现由`ResultActionRegistry.serviceCapabilities()`映射两类已有部署字段：
+`resultLinkTtlMs > 0`表示`result.link`，`resultEmailEnabled == true`表示`result.email`。
+已发现服务必须包含结果动作的全部`requiredServiceCapabilities()`；后端声明能力不会自动注册App插件。
+伙伴增加其他后端专属服务依赖时，需要同步扩展发现协议、后端声明、客户端解析及服务映射，
+再在Assembly装配对应插件；仅注册一个新服务ID不会让当前客户端发现该服务。
+纯本地动作无需增加后端服务发现，例如完成提示例沿用空的`requiredServiceCapabilities()`；
+如动作需要特定产物，仍由`requiredArtifactTypes()`声明，并在真实READY后校验。
 
 `MeetingStartConditions.prepare`先检查原伙伴条件，再准备动作。屏采授权期间沿用同一
 `PreparedMeeting`，授权返回后通过Assembly暂存、Service一次消费；不重读输入或接收者状态。
