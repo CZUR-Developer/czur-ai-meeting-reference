@@ -13,6 +13,7 @@ import com.czur.reference.application.http.AuthenticatedMeetingHttpContextResolv
 import com.czur.reference.application.http.CreateMeetingHttpRequestDecoder;
 import com.czur.reference.application.http.HttpErrorMapper;
 import com.czur.reference.application.http.MeetingJdkHttpServer;
+import com.czur.reference.application.http.MeetingHttpDispatcher;
 import com.czur.reference.application.http.MeetingHttpRuntime;
 import com.czur.reference.application.http.ReferenceMeetingHttpRequestDecoder;
 import com.czur.reference.application.http.ReferenceDevSessionLoginEndpoint;
@@ -107,6 +108,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
     private final JdbcDatabaseRuntime database;
     private final String deploymentScope;
     private final MeetingHttpRuntime runtime;
+    private final MeetingHttpDispatcher dispatcher;
     private final AuthenticatedMeetingHttpContextResolver contextResolver;
     private final HttpErrorMapper errors;
     private final boolean realtimeRenewEnabled;
@@ -116,7 +118,6 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
     private final MeetingInputReconciler inputReconciler;
     private final JdbcMeetingEventLogPort eventLog;
     private final Clock clock;
-    private final ResultEmailEndpoint resultEmail;
     private final EntitlementProvider entitlementProvider;
     private final AtomicBoolean closed = new AtomicBoolean();
 
@@ -142,7 +143,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
         this.inputReconciler = Objects.requireNonNull(inputReconciler, "inputReconciler");
         this.eventLog = Objects.requireNonNull(eventLog, "eventLog");
         this.clock = clock;
-        this.resultEmail = resultEmail;
+        this.dispatcher = new MeetingHttpDispatcher(runtime, errors, contextResolver, resultEmail);
         this.entitlementProvider = entitlementProvider;
     }
 
@@ -453,6 +454,15 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
     /** 返回已装配的 transport-neutral 运行时；调用方不得单独关闭。 */
     public MeetingHttpRuntime runtime() { return runtime; }
 
+    /**
+     * 返回JDK及部署方HTTP transport共用的唯一业务分发器。
+     *
+     * <p>宿主只把已约束的HttpRequest交给handle并写回HttpResponse，不重写路由
+     * 或认证选择，不另启第二listener。本访问器不转移运行时／数据库所有权；
+     * 调用方仍须先停止所有transport接收，再关闭本装配根。</p>
+     */
+    public MeetingHttpDispatcher dispatcher() { return dispatcher; }
+
     /** 返回 GET/list/DELETE 的可信身份上下文解析器。 */
     public AuthenticatedMeetingHttpContextResolver contextResolver() {
         return contextResolver;
@@ -500,11 +510,10 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
         if (closed.get()) {
             throw new IllegalStateException("reference meeting HTTP assembly is closed");
         }
-        return new MeetingJdkHttpServer(address, runtime, errors, contextResolver,
+        return new MeetingJdkHttpServer(address, dispatcher,
                 () -> database.checkReadiness().ready()
                         && (!realtimeRenewEnabled
-                                || database.checkRealtimeCredentialReadiness().ready()),
-                resultEmail);
+                                || database.checkRealtimeCredentialReadiness().ready()));
     }
 
     /**

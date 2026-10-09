@@ -28,7 +28,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * JDK HTTP server 到 {@link MeetingHttpRuntime} 的最小网络字节边界。
+ * JDK HTTP server 到 {@link MeetingHttpDispatcher} 的最小网络字节边界。
  *
  * <p>调用方必须显式指定监听地址，负责本对象和运行时的关闭顺序。本类不装配
  * 业务或数据库；可选的可信身份解析器只用于已匹配的查询/删除路由，Stop/Create
@@ -59,11 +59,9 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
                     "allow", "GET"), "{\"status\":\"METHOD_NOT_ALLOWED\"}");
     private final HttpServer server;
     private final InetSocketAddress bindAddress;
-    private final MeetingHttpRuntime runtime;
+    private final MeetingHttpDispatcher dispatcher;
     private final HttpErrorMapper errors;
-    private final AuthenticatedMeetingHttpContextResolver contextResolver;
     private final BooleanSupplier readinessCheck;
-    private final ResultEmailEndpoint resultEmail;
     private final RequestExecutor requests;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final AtomicBoolean started = new AtomicBoolean();
@@ -117,6 +115,18 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
     }
 
     /**
+     * 使用装配根已经创建的同一业务分发器，不重复装配身份、邮件或会议运行时。
+     * 健康路径和网络生命周期仍由本listener负责；本构造器不启动监听。
+     *
+     * @param dispatcher 与其他HTTP transport共享的业务入口，不转移资源所有权
+     * @param readinessCheck 同一装配根的只读数据库就绪探针
+     */
+    public MeetingJdkHttpServer(InetSocketAddress address, MeetingHttpDispatcher dispatcher,
+            BooleanSupplier readinessCheck) throws IOException {
+        this(address, dispatcher, readinessCheck, DEFAULT_WORKERS, DEFAULT_QUEUE_CAPACITY);
+    }
+
+    /**
      * 供小型网络实例和测试夹具配置有界执行器；至少两个 worker，使一个慢
      * readiness 或业务调用不占住唯一 liveness 执行线程。
      */
@@ -133,13 +143,14 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
             AuthenticatedMeetingHttpContextResolver contextResolver,
             BooleanSupplier readinessCheck, ResultEmailEndpoint resultEmail,
             int workers, int queueCapacity) throws IOException {
-        this.runtime = Objects.requireNonNull(runtime, "runtime");
-        this.errors = Objects.requireNonNull(errors, "errors");
-        if (contextResolver != null && contextResolver.errorMapper() != errors) {
-            throw new IllegalArgumentException("HTTP error mapper must be shared");
-        }
-        this.contextResolver = contextResolver;
-        this.resultEmail = resultEmail;
+        this(address, new MeetingHttpDispatcher(runtime, errors, contextResolver, resultEmail),
+                readinessCheck, workers, queueCapacity);
+    }
+
+    private MeetingJdkHttpServer(InetSocketAddress address, MeetingHttpDispatcher dispatcher,
+            BooleanSupplier readinessCheck, int workers, int queueCapacity) throws IOException {
+        this.dispatcher = Objects.requireNonNull(dispatcher, "dispatcher");
+        this.errors = dispatcher.errorMapper();
         this.readinessCheck = Objects.requireNonNull(readinessCheck, "readinessCheck");
         this.requests = new RequestExecutor(workers, queueCapacity);
         this.bindAddress = Objects.requireNonNull(address, "address");
@@ -250,37 +261,7 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
         if (LIVENESS_PATH.equals(request.path()) || READINESS_PATH.equals(request.path())) {
             return health(request);
         }
-        if (ResultEmailEndpoint.matches(request)) {
-            if (resultEmail == null) return errors.notImplemented();
-            if (contextResolver == null) return errors.missingContext();
-            var resolution = contextResolver.forClientWrite(request);
-            if (resolution instanceof AuthenticatedMeetingHttpContextResolver.Rejected rejected) {
-                return rejected.response();
-            }
-            return resultEmail.handle(request,
-                    ((AuthenticatedMeetingHttpContextResolver.Ready) resolution).context());
-        }
-        if (contextResolver == null) {
-            return runtime.handle(request, null);
-        }
-        MeetingHttpAdapter.AuthenticationRoute route =
-                MeetingHttpAdapter.authenticationRoute(request);
-        if (route == MeetingHttpAdapter.AuthenticationRoute.NONE) {
-            return runtime.handle(request, null);
-        }
-        AuthenticatedMeetingHttpContextResolver.Resolution resolution = switch (route) {
-            case READ -> contextResolver.forRead(request);
-            case DELETE -> contextResolver.forDelete(request);
-            case CLIENT_WRITE -> contextResolver.forClientWrite(request);
-            case NONE -> throw new IllegalStateException("unreachable authentication route");
-        };
-        if (resolution instanceof AuthenticatedMeetingHttpContextResolver.Rejected rejected) {
-            return rejected.response();
-        }
-        if (resolution instanceof AuthenticatedMeetingHttpContextResolver.Ready ready) {
-            return runtime.handle(request, ready.context());
-        }
-        throw new IllegalStateException("unknown authentication resolution");
+        return dispatcher.handle(request);
     }
 
     private HttpResponse health(HttpRequest request) {

@@ -169,9 +169,9 @@ var config = ReferenceMeetingDeploymentConfig.fromEnvironmentWithExternalIdentit
 // clock、artifactStore与这两个实现均由部署方集中装配，示例中不携带真实凭据。
 try (var assembly = ReferenceMeetingHttpAssembly.start(
         config, clock, artifactStore, identityProvider, entitlementPolicy)) {
-    var runtime = assembly.runtime();
-    var contextResolver = assembly.contextResolver();
-    // 部署方自己的HTTP入口对接上述运行时；Gateway只做协议转发。
+    var dispatcher = assembly.dispatcher();
+    // 部署方HTTP入口将已约束的HttpRequest交给dispatcher.handle(request)，
+    // 再写回HttpResponse；Gateway只做协议转发，不另启第二listener。
     // 既有收口Worker复用assembly.entitlementProvider()，不另建一套默认权益实现。
 }
 ```
@@ -189,6 +189,22 @@ try (var assembly = ReferenceMeetingHttpAssembly.start(
 - Maven仍输出普通`backend-reference-0.1.0-SNAPSHOT.jar`，无需Spring或新的
   服务进程。消费方可在现有模块中装配公开端口；CZUR私有登录、会员和部署材料
   不进入本参考工程。
+
+### 同一公共HTTP分发入口
+
+`ReferenceMeetingHttpAssembly`只创建一份`MeetingHttpDispatcher`，通过
+`dispatcher()`提供给部署方Servlet／Spring等HTTP transport；显式创建的
+`newJdkHttpServer(address)`也使用该同一实例。原`runtime()`、`contextResolver()`
+和全部JDK构造器继续保留。部署方不必重写`MeetingHttpAdapter`路由选择，也不应
+另外启动一个JDK listener来转发本进程的业务请求。
+
+Dispatcher仅提取原JDK业务分发顺序：可选`ResultEmailEndpoint`未装配仍返回501，
+装配后使用既有客户端写入认证；读取／删除／客户端写入使用既有
+`authenticationRoute`及可信上下文解析器；Create／Stop仍由自身应用服务认证。
+原JDK内部健康路径、原始网络字节检查、有界执行器和关闭门留在JDK listener，
+不进入公共业务dispatcher。其他transport负责自身的网络边界与健康入口；应先
+停止请求接收，再关闭Assembly及其唯一PG池。此扩展不新增路由、鉴权规则、
+会议状态机或部署事实，不修改V001、模型和权益行为。
 
 ### 装配部署方结算装饰器
 
