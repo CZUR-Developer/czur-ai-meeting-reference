@@ -40,6 +40,12 @@ App 按公开 Adapter 接口直连听悟，后端继续只保存标准事件。�
 Create v1 的 `realtime` 响应或旧 WSS 路径。部署变量及启用窗口见
 `deploy/README.md`。
 
+单语字幕与已获准的中英双语任务均显式设置
+`Parameters.Transcription.RealtimeDiarizationEnabled=true`、
+`DiarizationEnabled=true` 和 `Diarization.SpeakerCount=0`，按会议未知人数请求
+说话人分离。此参数修正不增加语种或私有会议账本；当前语言仍限 `zh-CN/en-US`，
+连接材料默认五分钟期限保持。请求形状的定向测试不代替真实说话人准确率验收。
+
 ## P5-2 模型能力与第二格式样例
 
 后端现有完整 Create 会把 Product Profile、终端本场请求、权益授权、

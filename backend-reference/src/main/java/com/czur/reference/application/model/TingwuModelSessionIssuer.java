@@ -133,8 +133,10 @@ public final class TingwuModelSessionIssuer implements ModelSessionIssuer {
         String source = providerLanguage(request.sourceLanguage());
         Map<String, Object> input = Map.of("SourceLanguage", source, "Format", "pcm",
                 "SampleRate", 16000, "EnableWords", true);
+        // 会议发言人数未知；显式采用不限人数配置，而不只设置说话人分离开关。
         Map<String, Object> transcription = Map.of("OutputLevel", 2,
-                "RealtimeDiarizationEnabled", true, "DiarizationEnabled", true);
+                "RealtimeDiarizationEnabled", true, "DiarizationEnabled", true,
+                "Diarization", Map.of("SpeakerCount", 0));
         Map<String, Object> parameters = Map.of("Transcription", transcription);
         if (request.translationEnabled()) {
             if (request.targetLanguages().size() != 1) throw new SessionIssueException();

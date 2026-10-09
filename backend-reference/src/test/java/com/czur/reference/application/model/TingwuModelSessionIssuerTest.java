@@ -54,6 +54,11 @@ class TingwuModelSessionIssuerTest {
         assertEquals("pcm", input.path("Format").asText());
         assertFalse(input.has("LanguageHints"));
         var parameters = new ObjectMapper().readTree(body).path("Parameters");
+        var transcription = parameters.path("Transcription");
+        assertTrue(transcription.path("RealtimeDiarizationEnabled").asBoolean());
+        assertTrue(transcription.path("DiarizationEnabled").asBoolean());
+        assertTrue(transcription.path("Diarization").has("SpeakerCount"));
+        assertEquals(0, transcription.path("Diarization").path("SpeakerCount").asInt());
         assertFalse(parameters.has("TranslationEnabled"));
         assertFalse(parameters.has("Translation"));
         assertEquals("tingwu-realtime", session.adapterId());
@@ -103,6 +108,11 @@ class TingwuModelSessionIssuerTest {
                 body.path("Input").path("LanguageHints"),
                 new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {}));
         assertTrue(body.path("Parameters").path("TranslationEnabled").asBoolean());
+        var transcription = body.path("Parameters").path("Transcription");
+        assertTrue(transcription.path("RealtimeDiarizationEnabled").asBoolean());
+        assertTrue(transcription.path("DiarizationEnabled").asBoolean());
+        assertTrue(transcription.path("Diarization").has("SpeakerCount"));
+        assertEquals(0, transcription.path("Diarization").path("SpeakerCount").asInt());
         assertEquals(List.of("cn", "en"), new ObjectMapper().convertValue(
                 body.path("Parameters").path("Translation").path("TargetLanguages"),
                 new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {}));
