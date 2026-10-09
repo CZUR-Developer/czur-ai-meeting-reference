@@ -85,6 +85,10 @@
                 android:background="@drawable/czur_ref_subtitle_background" android:padding="40dp">
                 <TextView android:id="@+id/meeting_title" style="@style/ReferenceDarkLabel" android:layout_width="match_parent"
                     android:layout_height="38dp" android:gravity="center" android:textSize="28sp" android:text="AI字幕纪要"/>
+                <!-- 仅必要截图消息占用一条简短提示；正常会议保持国内原有的简洁布局。 -->
+                <TextView android:id="@+id/presentation_notice" android:layout_width="match_parent"
+                    android:layout_height="wrap_content" android:gravity="center" android:textSize="20sp"
+                    android:textColor="@color/reference_translation" android:visibility="gone"/>
                 <FrameLayout android:id="@+id/single_controls_slot" android:layout_width="match_parent" android:layout_height="76dp">
                     <LinearLayout android:id="@+id/meeting_controls" android:layout_width="match_parent" android:layout_height="match_parent"
                         android:orientation="horizontal" android:gravity="center">

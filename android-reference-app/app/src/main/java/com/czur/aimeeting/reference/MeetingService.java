@@ -64,6 +64,8 @@ public final class MeetingService extends Service {
         final MeetingDisplaySnapshot display;
         final String status;
         final String capabilityText;
+        /** 本场必要截图提示；独立于SDK阶段消息，避免字幕或普通状态刷新将提示覆盖。 */
+        final String presentationNotice;
         final boolean busy;
         final boolean active;
         final boolean canStop;
@@ -84,10 +86,11 @@ public final class MeetingService extends Service {
                 int transcriptVersion, MeetingResult readyResult, ResultActionOutcome actionOutcome,
                 boolean actionRunning,
                 String timeText, MeetingReminderPresentation.Notice reminder, MeetingSetup.Mode mode,
-                boolean summaryEnabled, AudioInputLevel audioLevel) {
+                boolean summaryEnabled, AudioInputLevel audioLevel, String presentationNotice) {
             this.display = display;
             this.status = status;
             this.capabilityText = capabilityText;
+            this.presentationNotice = presentationNotice;
             this.busy = busy;
             this.active = active;
             this.canStop = canStop;
@@ -162,7 +165,8 @@ public final class MeetingService extends Service {
     private volatile PresentationCapture presentation;
     /** 正常Stop的末帧异步完成闭包；用户撤销授权时也结束本次等待，不影响模型收口。 */
     private Runnable presentationStopContinuation;
-    private String presentationCapability = "";
+    /** 只保存用户需要知道的截图限制／失败；SDK诊断细节留在日志，不出现在提示条中。 */
+    private String presentationNotice = "";
     private MeetingSetup setup;
     private String meetingId;
     private String status = "请先登录，再开始会议";
@@ -328,7 +332,7 @@ public final class MeetingService extends Service {
         canStop = false;
         stopRequested = false;
         presentationStopContinuation = null;
-        presentationCapability = "";
+        presentationNotice = "";
         readyResult = null;
         actionOutcome = null;
         actionRunning = false;
@@ -450,14 +454,14 @@ public final class MeetingService extends Service {
                     projectionData, command -> main.post(command), this::onPresentationStopped);
             presentation = new PresentationCapture(source, startedAtMs, platformWork,
                     command -> main.post(command));
-            presentationCapability = source.supportsWindowExclusion() ? ""
+            presentationNotice = source.supportsWindowExclusion() ? ""
                     : "当前系统仅支持整屏截图，演示图片会包含悬浮窗";
             main.postDelayed(presentationTick, PRESENTATION_INTERVAL_MS);
             Log.i(TAG, "SDK演示采集已开始 mode=" + source.mode()
                     + " excludeWindows=" + source.supportsWindowExclusion() + " meetingId=" + meetingId);
         } catch (RuntimeException failure) {
             Log.e(TAG, "演示文稿屏幕采集启动失败 errorType=" + failure.getClass().getSimpleName());
-            status = "屏幕采集启动失败；字幕会议继续，可停止后重试";
+            presentationNotice = "屏幕采集启动失败；字幕会议继续，可停止后重试";
         } finally { projectionData = null; }
     }
 
@@ -496,7 +500,7 @@ public final class MeetingService extends Service {
         if (destroyed) return;
         Log.w(TAG, "演示截图未完成：" + message);
         main.removeCallbacks(presentationTick);
-        if (!stopRequested) status = "演示截图采集失败；字幕会议继续";
+        if (!stopRequested) presentationNotice = "演示截图采集失败；字幕会议继续";
         publish();
     }
 
@@ -517,11 +521,10 @@ public final class MeetingService extends Service {
 
     private void onPresentationStopped() {
         closePresentation();
-        presentationCapability = "";
         main.removeCallbacks(presentationTick);
         if (presentationStopContinuation != null) finishPresentationStop();
         if (active && !stopRequested) {
-            status = "系统已结束屏幕共享，字幕会议继续";
+            presentationNotice = "系统已结束屏幕共享，字幕会议继续";
             publish();
         }
     }
@@ -642,12 +645,10 @@ public final class MeetingService extends Service {
                 ? reminderPresentation.at(clock) : MeetingReminderPresentation.Notice.NONE;
         String audioText = audioInputMode == null ? "" : "\n音频来源：" + audioInputMode;
         if (audioErrorText != null) audioText += "\n" + audioErrorText;
-        String visibleStatus = status + (active && !presentationCapability.isEmpty()
-                ? "\n" + presentationCapability : "");
-        State state = new State(display, visibleStatus, capabilityText + audioText, busy, active, canStop,
+        State state = new State(display, status, capabilityText + audioText, busy, active, canStop,
                 overlay.isShowing(), transcriptVersion, readyResult, actionOutcome, actionRunning, timeText, reminder,
                 setup == null ? MeetingSetup.Mode.LIVE_TRANSCRIPT : setup.mode(),
-                setup != null && setup.summaryEnabled(), audioLevel);
+                setup != null && setup.summaryEnabled(), audioLevel, presentationNotice);
         overlay.render(display, state.mode, state.summaryEnabled, timeText, reminder, canStop,
                 observer == null, audioLevel == null ? 0 : audioLevel.level());
         if (observer != null) observer.onMeetingState(state);

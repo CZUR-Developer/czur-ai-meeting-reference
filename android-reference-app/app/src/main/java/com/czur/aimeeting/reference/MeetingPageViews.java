@@ -39,6 +39,8 @@ public final class MeetingPageViews {
     public final View setupCard, meetingPanel, transcriptScroll, bilingualArea, targetContainer;
     public final LinearLayout controls, transcriptList, bilingualHeader, leftList, rightList, pluginSettingsHost;
     public final TextView setupTitle, meetingTitle, elapsed, levelText, status, capabilities, leftTitle, rightTitle, placeholder;
+    /** 会中只显示必要截图消息；常规阶段和平台诊断继续留在原隐藏控件或日志中。 */
+    public final TextView presentationNotice;
     public final Button account, settings, start, stop, overlay, swapColumns, swapLanguages, retry, endResult;
     public final Spinner sourceLanguage, targetLanguage;
     public final CheckBox summary, presentation;
@@ -69,6 +71,7 @@ public final class MeetingPageViews {
         elapsed = root.findViewById(R.id.elapsed);
         levelText = root.findViewById(R.id.audio_level_text);
         status = root.findViewById(R.id.status);
+        presentationNotice = root.findViewById(R.id.presentation_notice);
         capabilities = root.findViewById(R.id.capabilities);
         leftTitle = root.findViewById(R.id.left_language_title);
         rightTitle = root.findViewById(R.id.right_language_title);
@@ -172,6 +175,15 @@ public final class MeetingPageViews {
         setupCard.setVisibility(active ? View.GONE : View.VISIBLE);
         meetingPanel.setVisibility(active ? View.VISIBLE : View.GONE);
         status.setVisibility(active ? View.GONE : View.VISIBLE);
+    }
+
+    /**
+     * 在会中标题下呈现Service提供的简短业务提示。正常采集时不占空间，停止后随会中面板
+     * 隐藏；不从普通SDK状态字符串猜测错误，也不显示原始异常或调试信息。
+     */
+    public void showPresentationNotice(boolean active, String message) {
+        presentationNotice.setText(message);
+        presentationNotice.setVisibility(active && !message.isEmpty() ? View.VISIBLE : View.GONE);
     }
 
     /**

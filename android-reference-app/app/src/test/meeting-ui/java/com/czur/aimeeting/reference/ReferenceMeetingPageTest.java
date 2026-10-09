@@ -210,6 +210,48 @@ public class ReferenceMeetingPageTest {
                 opened.getStringExtra(ResultActivity.EXTRA_RESULT_URL));
     }
 
+    @Test public void necessaryCaptureNoticesRenderThroughRealServiceStateWithoutShowingDiagnostics() throws Exception {
+        var serviceHost = Robolectric.buildService(MeetingService.class).create();
+        MeetingService service = serviceHost.get();
+        // 真实可见生命周期会执行bindService；为Robolectric提供本场实际LocalBinder。
+        shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(
+                new ComponentName(RuntimeEnvironment.getApplication(), MeetingService.class), service.onBind(new Intent()));
+        var activityHost = Robolectric.buildActivity(MainActivity.class).create().start().resume().visible();
+        MainActivity activity = activityHost.get();
+        MeetingPageViews page = (MeetingPageViews) field(activity, "page");
+        try {
+            field(service, "active", true);
+            invoke(service, "publish");
+            assertEquals(View.GONE, page.presentationNotice.getVisibility());
+            String compatibility = "当前系统仅支持整屏截图，演示图片会包含悬浮窗";
+            field(service, "presentationNotice", compatibility);
+            invoke(service, "publish");
+            measure(page.root);
+            assertEquals(View.VISIBLE, page.presentationNotice.getVisibility());
+            assertEquals(compatibility, page.presentationNotice.getText().toString());
+            assertTrue(page.presentationNotice.isShown());
+            // SDK阶段更新只修改status；用真实publish→Activity渲染确认专用消息继续存在。
+            field(service, "status", "会议进行中 · savedEventCount=42");
+            invoke(service, "publish");
+            assertEquals(compatibility, page.presentationNotice.getText().toString());
+            assertEquals(View.GONE, page.status.getVisibility());
+            assertEquals(View.GONE, page.capabilities.getVisibility());
+            invoke(service, "presentationFailed", String.class, "fixture底层采集失败诊断");
+            assertEquals("演示截图采集失败；字幕会议继续", page.presentationNotice.getText().toString());
+            assertTrue(page.presentationNotice.isShown());
+            invoke(service, "onPresentationStopped");
+            assertEquals("系统已结束屏幕共享，字幕会议继续", page.presentationNotice.getText().toString());
+            assertTrue(page.presentationNotice.isShown());
+            field(service, "active", false);
+            invoke(service, "publish");
+            assertEquals(View.GONE, page.presentationNotice.getVisibility());
+            assertEquals(View.VISIBLE, page.status.getVisibility());
+        } finally {
+            activityHost.pause().stop().destroy();
+            serviceHost.destroy();
+        }
+    }
+
     @Test public void backgroundReadyWebSurvivesServiceDestroyAndVisibleActivityConsumesOnce() throws Exception {
         try (var fixture = new ResultUiFixture(false)) {
             fixture.ready();
@@ -470,7 +512,7 @@ public class ReferenceMeetingPageTest {
         method.invoke(activity, new MeetingService.State(display, "会议中", "本场功能", true, true, true, false,
                 version, null, null, false, "已进行 00:01:00", MeetingReminderPresentation.Notice.NONE,
                 display.bilingual() ? MeetingSetup.Mode.LIVE_TRANSLATION : MeetingSetup.Mode.LIVE_TRANSCRIPT,
-                false, new AudioInputLevel(level, 1000)));
+                false, new AudioInputLevel(level, 1000), ""));
     }
     private static Object field(Object target, String name) throws Exception {
         Field field = target.getClass().getDeclaredField(name);

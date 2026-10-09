@@ -628,6 +628,7 @@ public final class MainActivity extends Activity {
         statusView.setText(state.status);
         capabilityView.setText(state.capabilityText);
         showMeetingScreen(state.active);
+        page.showPresentationNotice(state.active, state.presentationNotice);
         startButton.setEnabled(displayedIdentity != null && !state.busy
                 && deploymentCapabilities.contains(MeetingCapabilityState.TRANSCRIPT)
                 && !deploymentLanguages.isEmpty());
