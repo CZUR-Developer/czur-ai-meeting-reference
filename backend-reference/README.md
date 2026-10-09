@@ -46,6 +46,18 @@ Create v1 的 `realtime` 响应或旧 WSS 路径。部署变量及启用窗口�
 说话人分离。此参数修正不增加语种或私有会议账本；当前语言仍限 `zh-CN/en-US`，
 连接材料默认五分钟期限保持。请求形状的定向测试不代替真实说话人准确率验收。
 
+## 对象存储传输扩展
+
+`S3ArtifactStore` 还提供公开的 `ObjectsApi` 和四参数构造器：
+`S3ArtifactStore(objects, objectPrefix, namespace, maxArtifactBytes)`。
+部署方可实现原生 OSS 等对象传输的 `get`／`putAbsent`／`delete`／`close`，
+复用唯一的产物写入、发布和读取逻辑，无需复制 Store 状态机或使用 S3 网络协议。
+`putAbsent` 使用实际存储的条件写入，不覆盖已存对象；其网络兼容性须在真实端点验收。
+`namespace` 明确标识部署、端点和 Bucket，相同物理存储与前缀使用相同值。
+Store 关闭时关闭传输客户端，原 S3 配置入口及公开 Artifact 协议保持。
+该实现全量读取小产物，配置大小上限；长会音频使用单独的流式上传能力。
+本扩展不自动承担部署方已有的存储计费、配额或旧资源登记。
+
 ## P5-2 模型能力与第二格式样例
 
 后端现有完整 Create 会把 Product Profile、终端本场请求、权益授权、

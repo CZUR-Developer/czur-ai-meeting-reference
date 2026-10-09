@@ -89,6 +89,30 @@ public final class S3ArtifactStore implements ArtifactStore, AutoCloseable {
         this.maxArtifactBytes = maxArtifactBytes;
     }
 
+    /**
+     * 通过部署方的原生对象传输复用同一产物状态机，不要求存储实现兼容 S3 网络协议。
+     *
+     * <p>例如 CZUR 可以注入阿里 OSS 传输，仍由本类唯一处理 intent、正文、发布标记
+     * 和删除标记。此入口不改变不透明 binding 和产物协议，传输层不操作会议、会员
+     * 或 Manifest。对象内容会在内存中读取，适用于受配置上限约束的文本等产物；
+     * 长会录音应使用流式上传能力，不能把整段录音交给本实现。</p>
+     *
+     * @param objects 实际存储传输；所有权交给 Store，{@link #close()} 时关闭
+     * @param objectPrefix 部署方专用的相对对象前缀，末尾斜线由本类补齐
+     * @param namespace 同进程共享的存储身份，须包含部署、端点和 Bucket；相同
+     *                  物理存储与前缀应使用相同值，供现有单进程锁协调
+     * @param maxArtifactBytes 单个产物的配置大小上限，单位字节
+     */
+    public S3ArtifactStore(ObjectsApi objects, String objectPrefix, String namespace,
+            long maxArtifactBytes) {
+        this.objects = Objects.requireNonNull(objects, "objects");
+        requireNonBlank(namespace, "namespace");
+        this.objectPrefix = normalizePrefix(objectPrefix);
+        this.lockNamespace = namespace + "/" + this.objectPrefix;
+        if (maxArtifactBytes <= 0) throw new IllegalArgumentException("maxArtifactBytes");
+        this.maxArtifactBytes = maxArtifactBytes;
+    }
+
     @Override
     public PrepareResult createWriteIntent(WriteIntentSpec spec) throws ArtifactStoreException {
         Objects.requireNonNull(spec, "spec");
@@ -400,11 +424,24 @@ public final class S3ArtifactStore implements ArtifactStore, AutoCloseable {
         return new ArtifactStoreException(code, "s3-artifact-store");
     }
 
-    /** 对象传输最小边界，供不依赖外部 S3 的本机契约测试替换。 */
-    interface ObjectsApi extends AutoCloseable {
+    /**
+     * 原始对象传输端口；部署方只实现存取，产物状态与发布顺序由 Store 负责。
+     *
+     * <p>key 是本 Store 已生成的相对对象键，传输仅补充自己的端点和 Bucket。
+     * 该接口用于受上限约束的小产物，不提供会议录音的流式传输。实现不得记录
+     * 内容或凭据；调用失败转换为 {@link ArtifactStoreException}。</p>
+     */
+    public interface ObjectsApi extends AutoCloseable {
+        /** 返回完整正文；仅对象不存在时返回 null，其他失败明确抛出异常。 */
         byte[] get(String key) throws ArtifactStoreException;
+        /**
+         * 仅在对象不存在时写入，创建成功返回 true，已有对象返回 false。
+         * 必须使用存储的条件写入能力，不覆盖原赢家，也不以 HEAD 后 PUT 代替。
+         */
         boolean putAbsent(String key, byte[] bytes) throws ArtifactStoreException;
+        /** 幂等删除指定对象；对象已不存在也视为成功。 */
         void delete(String key) throws ArtifactStoreException;
+        /** 释放此传输持有的客户端；由 Store 生命周期统一调用。 */
         @Override void close();
     }
 

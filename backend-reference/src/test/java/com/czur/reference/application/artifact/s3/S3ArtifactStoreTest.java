@@ -89,6 +89,29 @@ class S3ArtifactStoreTest {
     }
 
     @Test
+    void externalObjectTransportReusesPublishedContentAndClosesItsClient() throws Exception {
+        InMemoryObjects objects = new InMemoryObjects();
+        byte[] content = "部署方对象传输复用唯一产物实现".getBytes(StandardCharsets.UTF_8);
+        var definition = spec("external-transport", content);
+        var store = new S3ArtifactStore(objects, "meeting-artifacts", "local/endpoint/bucket", 1024);
+        var intent = store.createWriteIntent(definition).intent();
+        var staged = store.writeContent(intent, new ByteArrayInputStream(content));
+        store.completeWrite(intent, staged.content());
+
+        try (var reopened = new S3ArtifactStore(objects, "meeting-artifacts/",
+                "local/endpoint/bucket", 1024)) {
+            assertEquals(intent, reopened.createWriteIntent(definition).intent());
+            assertEquals(ArtifactStore.StoreState.READY, reopened.inspect(definition).state());
+            try (var read = reopened.openRead(intent.binding())) {
+                assertArrayEquals(content, read.content().readAllBytes());
+            }
+        }
+        assertTrue(objects.objects.keySet().stream()
+                .allMatch(key -> key.startsWith("meeting-artifacts/")));
+        assertEquals(1, objects.closeCalls);
+    }
+
+    @Test
     void sameIdDifferentDefinitionPreservesFirstWinner() throws Exception {
         InMemoryObjects objects = new InMemoryObjects();
         S3ArtifactStore store = new S3ArtifactStore(objects, "test/artifacts/", 1024);
@@ -129,12 +152,13 @@ class S3ArtifactStoreTest {
 
     private static final class InMemoryObjects implements S3ArtifactStore.ObjectsApi {
         private final ConcurrentHashMap<String, byte[]> objects = new ConcurrentHashMap<>();
+        private int closeCalls;
 
         @Override public byte[] get(String key) { return objects.get(key); }
         @Override public boolean putAbsent(String key, byte[] bytes) {
             return objects.putIfAbsent(key, bytes.clone()) == null;
         }
         @Override public void delete(String key) { objects.remove(key); }
-        @Override public void close() { }
+        @Override public void close() { closeCalls++; }
     }
 }
