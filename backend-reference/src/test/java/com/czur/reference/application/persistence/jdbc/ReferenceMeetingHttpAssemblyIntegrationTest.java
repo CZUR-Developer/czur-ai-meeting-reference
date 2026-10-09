@@ -117,6 +117,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.UnaryOperator;
 import java.util.logging.Handler;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
@@ -126,6 +127,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -358,6 +360,164 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
             assertEquals(1, countCommittedUsage());
             assertCommittedUsage(meetingId, 1000, requests.get(0).expectedVersion());
         }
+    }
+
+    @Test
+    void entitlementDecoratorIsSharedByCreateStopAndWorkerAccessor(
+            @TempDir Path artifactRoot) throws Exception {
+        migrate(1);
+        var config = ReferenceMeetingDeploymentConfig.fromEnvironment(enabledConfig());
+        var identity = new ReferenceDevIdentityProvider(config.identity(), CLOCK);
+        var policy = new ReferenceDevEntitlementPolicy(config.entitlement(), CLOCK,
+                new EntitlementIdGenerator() {
+                    @Override public String newGrantId() { return "grant_" + UUID.randomUUID(); }
+                    @Override public String newReservationId() { return "reserve_" + UUID.randomUUID(); }
+                    @Override public String newLeaseToken() { return "lease_" + UUID.randomUUID(); }
+                });
+        AtomicInteger factoryCalls = new AtomicInteger();
+        AtomicInteger authorizeCalls = new AtomicInteger();
+        AtomicInteger reserveCalls = new AtomicInteger();
+        var commitRequests = new ArrayList<CommitUsageRequest>();
+        AtomicReference<EntitlementProvider> shared = new AtomicReference<>();
+        UnaryOperator<EntitlementProvider> factory = delegate -> {
+            factoryCalls.incrementAndGet();
+            assertInstanceOf(JdbcReferenceDevEntitlementProvider.class, delegate);
+            EntitlementProvider decorated = new EntitlementProvider() {
+                @Override public EntitlementProviderResult<MeetingGrant> authorizeStart(
+                        AuthorizeStartRequest request) {
+                    authorizeCalls.incrementAndGet();
+                    return delegate.authorizeStart(request);
+                }
+                @Override public EntitlementProviderResult<UsageOperationResult> reserveUsage(
+                        ReserveUsageRequest request) {
+                    reserveCalls.incrementAndGet();
+                    return delegate.reserveUsage(request);
+                }
+                @Override public EntitlementProviderResult<UsageOperationResult> cancelReservation(
+                        CancelReservationRequest request) {
+                    return delegate.cancelReservation(request);
+                }
+                @Override public EntitlementProviderResult<UsageOperationResult> commitUsage(
+                        CommitUsageRequest request) {
+                    commitRequests.add(request);
+                    var persisted = delegate.commitUsage(request);
+                    assertTrue(persisted.isSuccess());
+                    // 模拟PG已提交但部署方外部结算尚未确认，不能提前发布READY。
+                    return commitRequests.size() == 1 ? EntitlementProviderResult.failure(
+                            new EntitlementProviderError(
+                                    EntitlementProviderError.Code.PROVIDER_UNAVAILABLE, true))
+                            : persisted;
+                }
+            };
+            shared.set(decorated);
+            return decorated;
+        };
+        try (var assembly = ReferenceMeetingHttpAssembly.start(config, CLOCK,
+                new PersistentFileSystemMockArtifactStore(artifactRoot, 1024 * 1024),
+                identity, policy, null, factory);
+             var network = assembly.newJdkHttpServer(new InetSocketAddress("127.0.0.1", 0))) {
+            assertEquals(1, factoryCalls.get());
+            assertSame(shared.get(), assembly.entitlementProvider());
+            network.start();
+            int port = network.address().getPort();
+            String key = "decorator-create-key-123456789";
+            String body = createRequest(key, "decorator-session").body();
+            String created = exchange(port, "POST", "/v1/meetings", body,
+                    networkHeaders(TOKEN, key, true));
+            assertEquals(201, status(created));
+            String meetingId = ERROR_JSON.readTree(responseBody(created))
+                    .path("meetingId").asText();
+            String replay = exchange(port, "POST", "/v1/meetings", body,
+                    networkHeaders(TOKEN, key, true));
+            assertEquals(responseBody(created), responseBody(replay));
+            assertEquals(1, authorizeCalls.get());
+            assertEquals(1, reserveCalls.get());
+            assertEquals(1, count("usage_reservation"));
+            assertEquals(1, count("usage_operation"));
+            long version = reservationVersion(meetingId);
+            assertEquals(200, status(exchange(port, "POST", "/v1/meetings/" + meetingId
+                    + ":startClient", "", networkHeaders(TOKEN, null, false))));
+            appendClientTranscriptOverHttp(port, meetingId, TOKEN);
+            assertEquals(201, status(exchange(port, "POST", "/v1/meetings/" + meetingId
+                    + "/usage:submit", "{\"audioDurationMs\":1000}",
+                    networkHeaders(TOKEN, null, true))));
+            String stopPath = "/v1/meetings/" + meetingId + ":stop";
+            String stopKey = "decorator-stop-key-123456789";
+            assertEquals(202, status(exchange(port, "POST", stopPath, "",
+                    networkHeaders(TOKEN, stopKey, false))));
+            assertEquals("STOPPING", meetingState(meetingId));
+            assertEquals(0, count("meeting_client_result"));
+            assertEquals(1, commitRequests.size());
+            assertCommittedUsage(meetingId, 1000, version);
+            assertEquals(200, status(exchange(port, "POST", stopPath, "",
+                    networkHeaders(TOKEN, stopKey, false))));
+            assertEquals("READY", meetingState(meetingId));
+            assertEquals(2, commitRequests.size());
+            assertEquals(commitRequests.get(0), commitRequests.get(1));
+            assertEquals(1, countCommittedUsage());
+            assertEquals(2, count("usage_operation"));
+            assertEquals(1, count("meeting_client_result"));
+            // Worker接线只能取得同一装饰器；PG重放也继续经过部署方确认。
+            assertTrue(assembly.entitlementProvider().commitUsage(
+                    commitRequests.get(0)).isSuccess());
+            assertEquals(3, commitRequests.size());
+            assertEquals(1, factoryCalls.get());
+            assertEquals(1, countCommittedUsage());
+        }
+    }
+
+    @Test
+    void entitlementDecoratorFailureClosesPoolAndRejectsNullResult() throws Exception {
+        migrate(1);
+        String applicationName = "hook_failure_" + UUID.randomUUID().toString().replace("-", "");
+        Map<String, String> settings = enabledConfig();
+        settings.compute(DatabaseRuntimeConfig.DATABASE_URL,
+                (key, value) -> value + "&ApplicationName=" + applicationName);
+        var config = ReferenceMeetingDeploymentConfig.fromEnvironment(settings);
+        var identity = new ReferenceDevIdentityProvider(config.identity(), CLOCK);
+        EntitlementPolicy unusedPolicy = new EntitlementPolicy() {
+            @Override public EntitlementProviderResult<MeetingGrant> authorizeStart(
+                    AuthorizeStartRequest request) { throw new AssertionError("不得调用资格策略"); }
+            @Override public EntitlementProviderResult<UsageReservation> prepareReservation(
+                    ReserveUsageRequest request) { throw new AssertionError("不得预占用量"); }
+        };
+        List<UnaryOperator<EntitlementProvider>> factories = List.of(
+                delegate -> { throw new IllegalStateException("test decorator unavailable"); },
+                delegate -> null);
+        for (UnaryOperator<EntitlementProvider> factory : factories) {
+            assertThrows(RuntimeException.class, () -> ReferenceMeetingHttpAssembly.start(
+                    config, CLOCK, null, identity, unusedPolicy, null, factory));
+            try (var connection = fixtureDataSource.getConnection();
+                 var statement = connection.prepareStatement(
+                         "SELECT count(*) FROM pg_stat_activity WHERE application_name=?")) {
+                statement.setString(1, applicationName);
+                try (var rows = statement.executeQuery()) {
+                    assertTrue(rows.next());
+                    assertEquals(0, rows.getInt(1), "装饰工厂失败后不得遗留PG池连接");
+                }
+            }
+            assertEquals(0, count("usage_operation"));
+            assertEquals(0, count("meeting"));
+        }
+    }
+
+    @Test
+    void nullEntitlementDecoratorIsRejectedBeforeOpeningDatabase() {
+        Map<String, String> settings = enabledConfig();
+        settings.put(DatabaseRuntimeConfig.DATABASE_URL,
+                "jdbc:postgresql://127.0.0.1:1/unreachable");
+        var config = ReferenceMeetingDeploymentConfig.fromEnvironment(settings);
+        var identity = new ReferenceDevIdentityProvider(config.identity(), CLOCK);
+        EntitlementPolicy unusedPolicy = new EntitlementPolicy() {
+            @Override public EntitlementProviderResult<MeetingGrant> authorizeStart(
+                    AuthorizeStartRequest request) { throw new AssertionError("不得调用资格策略"); }
+            @Override public EntitlementProviderResult<UsageReservation> prepareReservation(
+                    ReserveUsageRequest request) { throw new AssertionError("不得预占用量"); }
+        };
+        var failure = assertThrows(NullPointerException.class,
+                () -> ReferenceMeetingHttpAssembly.start(
+                        config, CLOCK, null, identity, unusedPolicy, null, null));
+        assertEquals("entitlementProviderDecorator", failure.getMessage());
     }
 
     @Test

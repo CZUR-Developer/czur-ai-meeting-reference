@@ -184,6 +184,32 @@ try (var assembly = ReferenceMeetingHttpAssembly.start(
   服务进程。消费方可在现有模块中装配公开端口；CZUR私有登录、会员和部署材料
   不进入本参考工程。
 
+### 装配部署方结算装饰器
+
+已有外部用量拥有者的部署可增加第七个参数
+`UnaryOperator<EntitlementProvider>`，薄装饰同一个持久Provider：
+
+```java
+// decoratorFactory接收唯一JDBC Provider，返回部署方自己的线程安全装饰器。
+try (var assembly = ReferenceMeetingHttpAssembly.start(
+        config, clock, artifactStore, identityProvider, entitlementPolicy,
+        issuer, decoratorFactory)) {
+    // Create、客户端Stop和Worker访问器共享工厂返回的同一个实例。
+    var workerEntitlement = assembly.entitlementProvider();
+}
+```
+
+工厂在PG readiness通过后仅调用一次；`issuer`仍可为`null`以保留默认模型选择。
+旧`start`重载使用identity工厂，默认参考链和原外部身份／模型接线保持不变。
+工厂及其返回值不可为`null`；工厂失败时启动失败并关闭已创建的PG池。
+
+装饰器不取代PG预占绑定、版本检查或稳定操作重放：`authorizeStart`保持只读，
+其余用量方法须委托输入Provider。需要外部结算时，`commitUsage`可在PG委托
+成功后确认同场外部幂等操作；外部未确认须返回失败，原Stop保留待收口状态，
+重复Stop使用同一冻结请求重试。PG成功或重放不表示外部已结算，不能因此跳过
+未确认操作，也不能提前发布READY。装饰器的外部资源由部署方负责关闭。
+本扩展只提供普通Java装配边界；参考测试使用替身确认时序，不代签真实账号扣费。
+
 客户端事件会议已开放`POST /v1/meetings/{meetingId}/usage:submit`：停止采音后
 提交`{"audioDurationMs":1000}`，首次返回201，同场同值重放返回200；不同值不能
 覆盖。后端同时保存首次Reservation版本，原Stop读取冻结值，通过共享Provider

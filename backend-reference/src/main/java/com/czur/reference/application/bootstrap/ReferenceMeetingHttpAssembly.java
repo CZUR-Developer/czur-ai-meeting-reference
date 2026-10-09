@@ -81,6 +81,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.UnaryOperator;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -181,7 +182,8 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
         if (!config.identity().enabled()) {
             throw new IllegalArgumentException("外部身份配置须显式注入身份和权益策略");
         }
-        return start(config, clock, artifactStore, null, null, null, true);
+        return start(config, clock, artifactStore, null, null, null,
+                UnaryOperator.identity(), true);
     }
 
     /**
@@ -234,16 +236,54 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
             ReferenceMeetingDeploymentConfig config, Clock clock,
             ArtifactStore artifactStore, IdentityProvider identityProvider,
             EntitlementPolicy entitlementPolicy, ModelSessionIssuer modelSessionIssuer) {
+        return start(config, clock, artifactStore, identityProvider, entitlementPolicy,
+                modelSessionIssuer, UnaryOperator.identity());
+    }
+
+    /**
+     * 在唯一持久权益Provider外装配部署方结算装饰器，不替换会议账本。
+     *
+     * <p>工厂在数据库readiness通过后仅调用一次，输入为本装配创建的JDBC
+     * Provider，输出实例由Create、客户端Stop收口及{@link #entitlementProvider()}
+     * 共享。部署方Worker须复用该访问器，不能另建默认Provider绕过装饰器。
+     * 原有start重载使用identity工厂，保留参考及外部身份的既有行为。</p>
+     *
+     * <p>装饰器须保留authorizeStart只读语义，并将reserve、commit和cancel
+     * 委托给输入Provider，以保留PG预占绑定、版本检查和稳定操作重放。需要外部
+     * 结算的部署可在commit委托成功后确认同场外部操作；外部未确认时必须返回
+     * 失败，不能将本地COMMIT当作外部已结算。重试须复用同一冻结请求和幂等键，
+     * 即使PG已重放成功，也不能跳过尚未确认的外部操作。</p>
+     *
+     * <p>工厂和返回值均不可为null；工厂抛错或返回null时启动失败，已创建的
+     * PG池会关闭。装饰器须支持并发调用，其外部资源由部署方管理；关闭本装配
+     * 不会代关外部服务资源。工厂只负责装配，不在启动时登记会议或扣费。</p>
+     *
+     * @param config 可信运行配置，仍使用同一V001基线和PG数据源
+     * @param clock 身份、会议和权益事实共用的服务端时钟
+     * @param artifactStore 部署方持久产物端口，沿用允许null的边界
+     * @param identityProvider 部署方真实身份校验，不开放参考演示登录
+     * @param entitlementPolicy 部署方只读资格和首次预占候选策略
+     * @param modelSessionIssuer 部署方模型发行器；null保留原默认选择
+     * @param entitlementProviderDecorator 输入唯一JDBC Provider并返回共享装饰实例
+     * @return readiness通过的装配，不另建会议状态机、账本或网络监听器
+     */
+    public static ReferenceMeetingHttpAssembly start(
+            ReferenceMeetingDeploymentConfig config, Clock clock,
+            ArtifactStore artifactStore, IdentityProvider identityProvider,
+            EntitlementPolicy entitlementPolicy, ModelSessionIssuer modelSessionIssuer,
+            UnaryOperator<EntitlementProvider> entitlementProviderDecorator) {
         Objects.requireNonNull(identityProvider, "identityProvider");
         Objects.requireNonNull(entitlementPolicy, "entitlementPolicy");
+        Objects.requireNonNull(entitlementProviderDecorator, "entitlementProviderDecorator");
         return start(config, clock, artifactStore, identityProvider, entitlementPolicy,
-                modelSessionIssuer, false);
+                modelSessionIssuer, entitlementProviderDecorator, false);
     }
 
     private static ReferenceMeetingHttpAssembly start(
             ReferenceMeetingDeploymentConfig config, Clock clock,
             ArtifactStore artifactStore, IdentityProvider identityProvider,
             EntitlementPolicy entitlementPolicy, ModelSessionIssuer modelSessionIssuer,
+            UnaryOperator<EntitlementProvider> entitlementProviderDecorator,
             boolean referenceDefaults) {
         Objects.requireNonNull(config, "config");
         Objects.requireNonNull(clock, "clock");
@@ -274,8 +314,12 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
             EntitlementPolicy policy = referenceDefaults
                     ? new ReferenceDevEntitlementPolicy(config.entitlement(), clock, ids)
                     : entitlementPolicy;
-            // Create与Worker复用同一个Provider；所有预占／用量操作仍在会议库持久化。
-            var entitlement = new JdbcReferenceDevEntitlementProvider(dataSource, policy, clock);
+            // 工厂只装配一次；Create、Stop与Worker访问器共用同一装饰实例。
+            // 输入Provider仍在唯一会议库保存所有预占／用量操作和绑定事实。
+            var jdbcEntitlement = new JdbcReferenceDevEntitlementProvider(dataSource, policy, clock);
+            EntitlementProvider entitlement = Objects.requireNonNull(
+                    entitlementProviderDecorator.apply(jdbcEntitlement),
+                    "entitlementProviderDecorator result");
             var errors = new HttpErrorMapper();
             var referenceLogin = referenceDefaults ? config.login()
                     .map(login -> new ReferenceDevSessionLoginEndpoint(login, errors, clock))
@@ -421,11 +465,12 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
     public JdbcDatabaseRuntime databaseRuntime() { return database; }
 
     /**
-     * 返回与Create共用的持久权益Provider，供部署方装配既有收口Worker。
+     * 返回与Create和客户端Stop共用的持久权益Provider，供部署方装配既有收口Worker。
      *
      * <p>该实例使用本装配的会议数据源，不另建账本或复制资格策略。调用方不得
      * 关闭或转移连接池所有权；必须在本装配关闭前停止Worker调用。此访问器仅
-     * 开放已有权益端口；客户端采音冻结值由用量提交接口提供，真实采音计数由SDK负责。</p>
+     * 开放已有权益端口；存在装饰器时返回同一装饰实例，不能绕过外部结算确认。
+     * 客户端采音冻结值由用量提交接口提供，真实采音计数由SDK负责。</p>
      */
     public EntitlementProvider entitlementProvider() { return entitlementProvider; }
 
