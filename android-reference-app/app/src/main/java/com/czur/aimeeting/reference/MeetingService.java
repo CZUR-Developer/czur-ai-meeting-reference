@@ -165,6 +165,8 @@ public final class MeetingService extends Service {
     private volatile PresentationCapture presentation;
     /** 正常Stop的末帧异步完成闭包；用户撤销授权时也结束本次等待，不影响模型收口。 */
     private Runnable presentationStopContinuation;
+    /** 仅悬浮窗Stop登记：末帧完成后才回会议页，避免自己的整页内容进入最后一帧。 */
+    private boolean returnToMeetingAfterPresentation;
     /** 只保存用户需要知道的截图限制／失败；SDK诊断细节留在日志，不出现在提示条中。 */
     private String presentationNotice = "";
     private MeetingSetup setup;
@@ -300,12 +302,23 @@ public final class MeetingService extends Service {
             Log.i(TAG, "跨应用字幕窗已关闭");
         } else {
             overlay.show(display, this::openMeetingPage, this::swapDisplayColumns,
-                    this::confirmReminder, () -> {
-                        if (canStop) { openMeetingPage(); requestStop(); }
-                    });
+                    this::confirmReminder, this::requestStopFromOverlay);
             Log.i(TAG, "跨应用字幕窗已显示");
         }
         publish();
+    }
+
+    /**
+     * 主线程窗口按钮入口，仍调用正常requestStop。存在本场采集时，页面跳转延后到末帧
+     * 交付／提交之后；未开启截图或授权已经结束时，沿用立即返回会议页的交互。
+     */
+    private void requestStopFromOverlay() {
+        if (!active || !canStop || session == null) return;
+        returnToMeetingAfterPresentation = presentation != null;
+        Log.i(TAG, "悬浮窗请求正常停止 waitForFinalFrame=" + returnToMeetingAfterPresentation
+                + " meetingId=" + meetingId);
+        if (!returnToMeetingAfterPresentation) openMeetingPage();
+        requestStop();
     }
 
     private void openMeetingPage() {
@@ -332,6 +345,7 @@ public final class MeetingService extends Service {
         canStop = false;
         stopRequested = false;
         presentationStopContinuation = null;
+        returnToMeetingAfterPresentation = false;
         presentationNotice = "";
         readyResult = null;
         actionOutcome = null;
@@ -507,7 +521,7 @@ public final class MeetingService extends Service {
     /** 既有beforeStop入口的异步平台衔接；主线程调用，正常末帧完成后延续SDK收口。 */
     void stopPresentationBefore(Runnable continuation) {
         main.removeCallbacks(presentationTick);
-        // 不同步等待SDK主线程回调：末帧经同一JPEG队列处理／提交后关闭授权再续接。
+        // 不同步等待SDK主线程回调：末帧经同一JPEG队列处理／提交后发出关闭请求再续接。
         presentationStopContinuation = continuation;
         captureAndSubmit(this::finishPresentationStop);
     }
@@ -515,7 +529,15 @@ public final class MeetingService extends Service {
     private void finishPresentationStop() {
         Runnable continuation = presentationStopContinuation;
         presentationStopContinuation = null;
-        try { closePresentation(); }
+        try {
+            // SDK的close会异步释放平台资源；这里保证末帧已处理，不等待系统关闭完成。
+            closePresentation();
+            if (returnToMeetingAfterPresentation) {
+                returnToMeetingAfterPresentation = false;
+                Log.i(TAG, "停止末帧处理结束，返回会议页面 meetingId=" + meetingId);
+                openMeetingPage();
+            }
+        }
         finally { if (continuation != null) continuation.run(); }
     }
 
@@ -613,6 +635,7 @@ public final class MeetingService extends Service {
     }
 
     private void stopMeetingUi() {
+        returnToMeetingAfterPresentation = false;
         audioLevel = null;
         if (timing != null && stoppedClock == null) stoppedClock = timing.at(SystemClock.elapsedRealtime());
         active = false;
@@ -657,6 +680,7 @@ public final class MeetingService extends Service {
     @Override public void onDestroy() {
         destroyed = true;
         presentationStopContinuation = null;
+        returnToMeetingAfterPresentation = false;
         observer = null;
         MeetingAppAssembly.unobserveResultUi(resultUiAvailable);
         audioLevel = null;

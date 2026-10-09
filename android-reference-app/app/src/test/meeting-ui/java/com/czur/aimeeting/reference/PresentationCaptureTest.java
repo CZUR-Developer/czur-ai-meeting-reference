@@ -5,6 +5,7 @@ import static org.junit.Assert.*;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
+import android.content.Intent;
 import android.os.IBinder;
 import android.os.SystemClock;
 import android.view.View;
@@ -16,6 +17,7 @@ import com.czur.aimeeting.reference.meeting.MeetingSetup;
 import com.czur.aimeeting.reference.ui.MeetingOverlayFactory;
 import com.czur.aimeeting.reference.ui.OverlayViewFactory;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
@@ -29,6 +31,8 @@ import org.robolectric.RuntimeEnvironment;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
 import org.robolectric.shadows.ShadowSettings;
+import org.robolectric.Shadows;
+import org.robolectric.android.controller.ServiceController;
 
 /** 正常SDK图像接入、JPEG策略和Service异步末帧；不操作设备或连接会议后端。 */
 @RunWith(RobolectricTestRunner.class)
@@ -141,6 +145,106 @@ public class PresentationCaptureTest {
         work.drain(); callbacks.drain();
     }
 
+    @Test public void actualOverlayStopWaitsForFinalFrameBeforeReturningAndContinuing() throws Exception {
+        try (var fixture = new OverlayStopFixture(true)) {
+            fixture.clickStop();
+            assertEquals(List.of("stop"), fixture.events);
+            assertNull(Shadows.shadowOf(RuntimeEnvironment.getApplication()).getNextStartedActivity());
+            assertEquals(1, fixture.source.pending.size());
+            fixture.source.deliver();
+            fixture.work.drain();
+            assertEquals(List.of("stop"), fixture.events);
+            assertNull(Shadows.shadowOf(RuntimeEnvironment.getApplication()).getNextStartedActivity());
+            fixture.callbacks.drain();
+            assertEquals(List.of("stop", "submit", "close", "return", "continue"), fixture.events);
+            assertNull(get(fixture.service, "presentation"));
+            assertFalse((boolean) get(fixture.service, "canStop"));
+        }
+    }
+
+    @Test public void actualOverlayStopWithoutCaptureKeepsImmediateReturnAndNormalStop() throws Exception {
+        try (var fixture = new OverlayStopFixture(false)) {
+            fixture.clickStop();
+            assertEquals(List.of("return", "stop", "continue"), fixture.events);
+            assertFalse((boolean) get(fixture.service, "canStop"));
+            assertNull(Shadows.shadowOf(RuntimeEnvironment.getApplication()).getNextStartedActivity());
+        }
+    }
+
+    @Test public void revokedCaptureContinuesOverlayStopWithoutDuplicateReturnFromLateFrame() throws Exception {
+        try (var fixture = new OverlayStopFixture(true)) {
+            fixture.clickStop();
+            Method revoked = MeetingService.class.getDeclaredMethod("onPresentationStopped");
+            revoked.setAccessible(true);
+            revoked.invoke(fixture.service);
+            assertEquals(List.of("stop", "close", "return", "continue"), fixture.events);
+            // 撤销时末帧尚在途：沿原SDK回调结束，不再回页或重复续接停止。
+            Bitmap late = fixture.source.deliver();
+            assertTrue(late.isRecycled());
+            fixture.work.drain();
+            fixture.callbacks.drain();
+            assertEquals(List.of("stop", "close", "return", "continue"), fixture.events);
+            assertNull(Shadows.shadowOf(RuntimeEnvironment.getApplication()).getNextStartedActivity());
+        }
+    }
+
+    /** 仅控制截图返回的时刻；实际默认窗口按钮→Service→beforeStop链和JPEG路径保持。 */
+    private static final class OverlayStopFixture implements AutoCloseable {
+        final ServiceController<MeetingService> host = Robolectric.buildService(MeetingService.class).create();
+        final MeetingService service = host.get();
+        final List<String> events = new ArrayList<>();
+        final WorkQueue work = new WorkQueue(), callbacks = new WorkQueue();
+        final FakeSource source = new FakeSource(true, events) {
+            @Override public void close() {
+                assertNull("发出关闭请求前不能先打开MainActivity",
+                        Shadows.shadowOf(RuntimeEnvironment.getApplication()).getNextStartedActivity());
+                super.close();
+            }
+        };
+
+        OverlayStopFixture(boolean withCapture) throws Exception {
+            ShadowSettings.setCanDrawOverlays(true);
+            set(service, "active", true);
+            set(service, "canStop", true);
+            set(service, "session", new RecordingSession(events) {
+                @Override public void submitPresentation(long offsetMs, byte[] jpeg) {
+                    // 此用例验证回页顺序；点击控件会推进测试时钟，偏移规则由前面的原测试验证。
+                    events.add("submit");
+                }
+                @Override public void requestStop() {
+                    if (!withCapture) { assertReturnedToMeeting(); events.add("return"); }
+                    events.add("stop");
+                    service.stopPresentationBefore(() -> {
+                        if (withCapture) { assertReturnedToMeeting(); events.add("return"); }
+                        events.add("continue");
+                    });
+                }
+            });
+            service.toggleOverlay();
+            Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
+            // 窗口挂载会执行UI消息并推进测试时钟；在点击Stop前建立受控会议起点。
+            if (withCapture) set(service, "presentation", new PresentationCapture(source,
+                    SystemClock.elapsedRealtime() - 1200, work, callbacks));
+        }
+
+        void clickStop() throws Exception {
+            Object window = get(get(service, "overlay"), "window");
+            var displayed = (com.czur.aimeeting.ui.DefaultMeetingOverlay) get(window, "overlay");
+            View stop = displayed.controller().contentView().findViewWithTag("overlay.stop");
+            assertNotNull(stop);
+            assertTrue(stop.isEnabled());
+            assertTrue(stop.performClick());
+        }
+
+        private void assertReturnedToMeeting() {
+            Intent returned = Shadows.shadowOf(RuntimeEnvironment.getApplication()).getNextStartedActivity();
+            assertNotNull("需要通过原回页入口返回会议页", returned);
+            assertEquals(MainActivity.class.getName(), returned.getComponent().getClassName());
+        }
+
+        @Override public void close() { host.destroy(); }
+    }
+
     private static MeetingDisplaySnapshot emptyDisplay() {
         return new MeetingDisplaySnapshot(false, "zh-CN", "en-US", false, List.of(), null);
     }
@@ -159,7 +263,7 @@ public class PresentationCaptureTest {
         @Override public void execute(Runnable command) { queued.add(command); }
         void drain() { while (!queued.isEmpty()) queued.remove().run(); }
     }
-    private static final class FakeSource implements ScreenCaptureSource {
+    private static class FakeSource implements ScreenCaptureSource {
         final boolean exclusion;
         final List<String> events;
         final Queue<Callback> pending = new ArrayDeque<>();
@@ -178,7 +282,7 @@ public class PresentationCaptureTest {
         }
         @Override public void close() { events.add("close"); }
     }
-    private static final class RecordingSession implements MeetingSession {
+    private static class RecordingSession implements MeetingSession {
         final List<String> events;
         RecordingSession(List<String> events) { this.events = events; }
         @Override public void submitPresentation(long offsetMs, byte[] jpeg) { events.add("submit:" + offsetMs); }
