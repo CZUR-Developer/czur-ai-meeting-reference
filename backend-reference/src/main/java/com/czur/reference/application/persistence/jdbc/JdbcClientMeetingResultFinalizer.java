@@ -2,8 +2,12 @@ package com.czur.reference.application.persistence.jdbc;
 
 import com.czur.aimeeting.contract.realtime.v1.TranscriptUpsert;
 import com.czur.aimeeting.contract.realtime.v1.TranslationUpsert;
+import com.czur.reference.application.command.MeetingAccessGuard;
+import com.czur.reference.application.command.MeetingCommandContext;
+import com.czur.reference.application.port.ClientMeetingInputPort.Reason;
 import com.czur.reference.application.port.ClientMeetingResultFinalizer;
 import com.czur.reference.application.port.FinalizationReceiptGenerator;
+import com.czur.reference.application.port.IdempotencyScopeCodec;
 import com.czur.reference.application.port.entitlement.CommitUsageRequest;
 import com.czur.reference.application.port.entitlement.EntitlementProvider;
 import com.czur.reference.application.port.entitlement.UsageActual;
@@ -19,6 +23,7 @@ import com.czur.reference.application.port.artifact.ArtifactStore.WriteIntentSpe
 import com.czur.reference.application.port.artifact.ArtifactStoreException;
 import com.czur.reference.domain.meeting.MeetingAggregate;
 import com.czur.reference.domain.meeting.MeetingEvent;
+import com.czur.reference.domain.meeting.MeetingIdPolicy;
 import com.czur.reference.domain.meeting.MeetingState;
 import com.czur.reference.protocol.json.MeetingManifestJson;
 import com.czur.reference.protocol.realtime.RealtimeTranscriptEventMapper;
@@ -95,6 +100,140 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
         // 无 Store 的旧装配仍可服务旧音频会议；客户端会议必须由完整进程装配提供 Store。
         this.artifactStore = artifactStore;
         this.entitlementProvider = entitlementProvider;
+    }
+
+    /**
+     * 读取本场已保存的最终修订，供部署方在正常 Stop 前发布同场资源。
+     *
+     * <p>调用方先用自身认证入口取得可信 context，并传入唯一 Assembly 已持有的
+     * DataSource；无需为读取构造 Finalizer、receipt 或 Clock。一次只读
+     * REPEATABLE_READ 事务先按会议原始范围校验归属，再核对客户端启动标记、
+     * 已冻结采音用量和首次 Create。最终文字直接复用本类原有 project，
+     * 不创建另一套修订／顺序规则，也不等待 Stop 后才生成的 Artifact。</p>
+     *
+     * <p>正常发布在 STARTING/RUNNING 读取；STOPPING/READY 同场也可读取以便核对。
+     * 返回的 Ready 只说明这些持久事实已读到，不表示结算或资源发布成功；它不调用
+     * Provider、不写 Artifact/Manifest/READY，也不提交数据库事务。调用方应在
+     * 模型尾事件及采音用量均保存后调用，已返回的不可变快照不会随后续事件改变。
+     * 无最终文字返回真实空列表；尚未冻结用量返回 INVALID_STATE，不能冒充实测 0。</p>
+     *
+     * @param dataSource 运行时唯一会议事实源，不在此入口创建连接池
+     * @param context 上游已认证及检查所需权限的服务端上下文
+     * @param meetingId 本场客户端输入会议 ID
+     * @return 不可变标准事件与首次建会参数，或复用现有输入拒绝原因
+     */
+    public static SnapshotResult readFinalSnapshot(DataSource dataSource,
+            MeetingCommandContext context, String meetingId) {
+        Objects.requireNonNull(dataSource, "dataSource");
+        Objects.requireNonNull(context, "context");
+        MeetingIdPolicy.requireValid(meetingId);
+        try (Connection connection = dataSource.getConnection()) {
+            connection.setReadOnly(true);
+            connection.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+            connection.setAutoCommit(false);
+            SnapshotResult result = readFinalSnapshot(connection, context, meetingId);
+            // 只读事务也明确结束；结束失败不返回看似已经核验的事实。
+            connection.rollback();
+            if (result instanceof Ready ready) {
+                LOGGER.log(Level.FINE,
+                        "客户端最终快照已读取 segments={0} translations={1} durationMs={2}",
+                        new Object[]{ready.transcripts().size(), ready.translations().size(),
+                                ready.frozenAudioDurationMs()});
+            } else {
+                LOGGER.log(Level.FINE, "客户端最终快照拒绝 reason={0}",
+                        ((Rejected) result).reason());
+            }
+            return result;
+        } catch (SQLException | RuntimeException failure) {
+            LOGGER.log(Level.WARNING, "客户端最终快照读取暂未完成 reason={0}",
+                    failure.getClass().getSimpleName());
+            return new Rejected(Reason.STORAGE_UNAVAILABLE);
+        }
+    }
+
+    private static SnapshotResult readFinalSnapshot(Connection connection,
+            MeetingCommandContext context, String meetingId) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT m.deployment_scope, m.subject_scope, m.state, m.client_session_id,
+                       m.profile_id, m.profile_revision, m.created_at,
+                       i.started_at, i.audio_duration_ms,
+                       i.usage_submitted_at, i.usage_expected_version
+                  FROM meeting m LEFT JOIN meeting_client_input i USING (meeting_id)
+                 WHERE m.meeting_id=?
+                """)) {
+            statement.setString(1, meetingId);
+            try (ResultSet rows = statement.executeQuery()) {
+                if (!rows.next()) return new Rejected(Reason.NOT_FOUND);
+                // 先用原始归属字段执行公共 Guard，再解析仅所有者可见的状态／事实。
+                if (MeetingAccessGuard.evaluate(context, rows.getString("deployment_scope"),
+                        rows.getString("subject_scope")) != MeetingAccessGuard.Decision.ALLOWED) {
+                    return new Rejected(Reason.ACCESS_DENIED);
+                }
+                if (rows.getTimestamp("started_at") == null) {
+                    return new Rejected(Reason.INPUT_SOURCE_CONFLICT);
+                }
+                MeetingState state = MeetingState.valueOf(rows.getString("state"));
+                if (state != MeetingState.STARTING && state != MeetingState.RUNNING
+                        && state != MeetingState.STOPPING && state != MeetingState.READY) {
+                    return new Rejected(Reason.INVALID_STATE);
+                }
+                Long duration = rows.getObject("audio_duration_ms", Long.class);
+                if (duration == null) return new Rejected(Reason.INVALID_STATE);
+                Long usageVersion = rows.getObject("usage_expected_version", Long.class);
+                if (duration < 0 || rows.getTimestamp("usage_submitted_at") == null
+                        || usageVersion == null || usageVersion < 0) {
+                    return new Rejected(Reason.STORAGE_UNAVAILABLE);
+                }
+                // 复用既有 Create 解码／摘要／scope-key／响应一致性门，不重写正文 SQL。
+                var first = new JdbcCreateMeetingFactStore(connection)
+                        .findByMeetingIdReadOnly(meetingId).orElse(null);
+                if (first == null) return new Rejected(Reason.STORAGE_UNAVAILABLE);
+                var request = first.request().requestSnapshot();
+                var response = first.response();
+                Timestamp createdAt = rows.getTimestamp("created_at");
+                if (!first.scope().equals(IdempotencyScopeCodec.meetingCreateV2(
+                        context.deploymentScope(), context.identity().subject().subjectScope()))
+                        || !meetingId.equals(response.meetingId())
+                        || !request.clientSessionId().equals(rows.getString("client_session_id"))
+                        || !request.profile().id().equals(rows.getString("profile_id"))
+                        || request.profile().revision() != rows.getInt("profile_revision")
+                        || !response.acceptedProfile().equals(request.profile())
+                        || !response.acceptedAudioProfile().equals(request.audioProfile())
+                        || createdAt == null || !first.createdAt().equals(createdAt.toInstant())) {
+                    return new Rejected(Reason.STORAGE_UNAVAILABLE);
+                }
+                Projection projection = project(connection, meetingId);
+                return new Ready(projection.transcripts(), projection.translations(),
+                        projection.language(), duration, request.artifactPolicy().retainAudio(),
+                        request.languages().source(), request.title());
+            }
+        }
+    }
+
+    /** 仅供进程内插件消费的只读结果；不新增公共 HTTP 或持久化协议。 */
+    public sealed interface SnapshotResult permits Ready, Rejected { }
+
+    /**
+     * 已读取的不可变最终标准事件和首次 Create 参数。
+     *
+     * <p>transcripts/ translations 保留原投影的最终修订及顺序，Protobuf 消息自身
+     * 不可变，列表在构造时复制。language 是最终原文的聚合语种（无最终原文为 und，
+     * 混合为 mul）；sourceLanguage 是首次 Create 的源语。frozenAudioDurationMs
+     * 始终为已提交的实测采音值，0 有明确含义；retainAudioRequested/title 也仅来自
+     * 首次 Create，title 可为空，不从总结、全局配置或字幕正文补值。</p>
+     */
+    public record Ready(List<TranscriptUpsert> transcripts, List<TranslationUpsert> translations,
+            String language, long frozenAudioDurationMs, boolean retainAudioRequested,
+            String sourceLanguage, String title) implements SnapshotResult {
+        public Ready {
+            transcripts = List.copyOf(transcripts);
+            translations = List.copyOf(translations);
+        }
+    }
+
+    /** 读取未完成或当前事实不适用；原因沿用客户端输入端口，不携带身份／正文。 */
+    public record Rejected(Reason reason) implements SnapshotResult {
+        public Rejected { Objects.requireNonNull(reason, "reason"); }
     }
 
     @Override

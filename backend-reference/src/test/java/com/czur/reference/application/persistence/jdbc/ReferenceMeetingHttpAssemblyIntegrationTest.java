@@ -16,6 +16,7 @@ import com.czur.reference.application.http.HttpRequest;
 import com.czur.reference.application.http.MeetingJdkHttpServer;
 import com.czur.reference.application.http.ReferenceDevSessionLoginEndpoint;
 import com.czur.reference.application.command.MeetingPermissions;
+import com.czur.reference.application.command.MeetingCommandContext;
 import com.czur.reference.application.command.AuthenticatedMeetingStopApplicationService;
 import com.czur.reference.application.command.AuthenticatedMeetingStopResult;
 import com.czur.reference.application.command.StopMeetingIntent;
@@ -23,6 +24,7 @@ import com.czur.reference.application.port.OwnedMeetingCreationUnitOfWork;
 import com.czur.reference.application.port.IdempotencyScopeCodec;
 import com.czur.reference.application.port.MeetingStartExecutionUnitOfWork;
 import com.czur.reference.application.port.CreateMeetingFactStore;
+import com.czur.reference.application.port.ClientMeetingInputPort;
 import com.czur.reference.application.port.FinalizationAdmissionUnitOfWork;
 import com.czur.reference.application.port.FinalizationInputFact;
 import com.czur.reference.application.port.EventLog;
@@ -283,6 +285,23 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
             assertEquals(201, status(exchange(port, "POST", "/v1/meetings/" + meetingId
                     + "/usage:submit", "{\"audioDurationMs\":0}",
                     networkHeaders(TOKEN, null, true))));
+            var context = assertInstanceOf(AuthenticatedMeetingHttpContextResolver.Ready.class,
+                    assembly.contextResolver().forClientWrite(request("POST",
+                            "/v1/meetings/" + meetingId + ":startClient"))).context();
+            var beforeStop = assertInstanceOf(JdbcClientMeetingResultFinalizer.Ready.class,
+                    JdbcClientMeetingResultFinalizer.readFinalSnapshot(
+                            assembly.databaseRuntime().dataSource(), context, meetingId));
+            assertEquals(List.of(), beforeStop.transcripts());
+            assertEquals(List.of(), beforeStop.translations());
+            assertEquals("und", beforeStop.language());
+            assertEquals(0, beforeStop.frozenAudioDurationMs());
+            assertFalse(beforeStop.retainAudioRequested());
+            assertEquals("zh-CN", beforeStop.sourceLanguage());
+            assertEquals(null, beforeStop.title());
+            assertEquals("STARTING", meetingState(meetingId));
+            assertEquals(0, countCommittedUsage());
+            assertEquals(0, count("artifact"));
+            assertEquals(0, count("meeting_client_result"));
             clock.advanceTo(NOW.plusSeconds(45));
             assertEquals(200, status(exchange(port, "POST", "/v1/meetings/" + meetingId
                     + ":stop", "{}", networkHeaders(TOKEN,
@@ -292,6 +311,70 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
             assertEquals(1, countCommittedUsage());
             assertEquals(0, clientManifest(meetingId).durationMs());
             assertEquals(List.of(), clientManifest(meetingId).artifacts());
+            assertEquals(beforeStop, JdbcClientMeetingResultFinalizer.readFinalSnapshot(
+                    assembly.databaseRuntime().dataSource(), context, meetingId));
+        }
+    }
+
+    @Test
+    void finalSnapshotRequiresClientSourceAndFrozenUsageAndRejectsOtherOwner(
+            @TempDir Path artifactRoot) throws Exception {
+        migrate(1);
+        try (var assembly = ReferenceMeetingHttpAssembly.start(enabledConfig(), CLOCK,
+                new PersistentFileSystemMockArtifactStore(artifactRoot, 1024 * 1024));
+             var network = assembly.newJdkHttpServer(new InetSocketAddress("127.0.0.1", 0))) {
+            network.start();
+            int port = network.address().getPort();
+            String key = "snapshot-gate-create-key-123456789";
+            String created = exchange(port, "POST", "/v1/meetings",
+                    createRequest(key, "snapshot-gate").body(), networkHeaders(TOKEN, key, true));
+            assertEquals(201, status(created));
+            String meetingId = ERROR_JSON.readTree(responseBody(created)).path("meetingId").asText();
+            var context = assertInstanceOf(AuthenticatedMeetingHttpContextResolver.Ready.class,
+                    assembly.contextResolver().forClientWrite(request("POST",
+                            "/v1/meetings/" + meetingId + ":startClient"))).context();
+            DataSource source = assembly.databaseRuntime().dataSource();
+            assertEquals(new JdbcClientMeetingResultFinalizer.Rejected(
+                    ClientMeetingInputPort.Reason.NOT_FOUND),
+                    JdbcClientMeetingResultFinalizer.readFinalSnapshot(source, context, "mtg_missing"));
+            assertEquals(new JdbcClientMeetingResultFinalizer.Rejected(
+                    ClientMeetingInputPort.Reason.INPUT_SOURCE_CONFLICT),
+                    JdbcClientMeetingResultFinalizer.readFinalSnapshot(source, context, meetingId));
+            assertEquals(200, status(exchange(port, "POST", "/v1/meetings/" + meetingId
+                    + ":startClient", "", networkHeaders(TOKEN, null, false))));
+            // 未冻结用量不是实测 0；只有真实 submitUsage 后才能取得 Ready。
+            assertEquals(new JdbcClientMeetingResultFinalizer.Rejected(
+                    ClientMeetingInputPort.Reason.INVALID_STATE),
+                    JdbcClientMeetingResultFinalizer.readFinalSnapshot(source, context, meetingId));
+            VerifiedIdentity owner = context.identity();
+            var other = new MeetingCommandContext(context.deploymentScope(),
+                    new VerifiedIdentity(new Subject("another-snapshot-owner"), owner.roles(),
+                            owner.permissions(), owner.issuedAt(), owner.expiresAt(), null));
+            assertEquals(new JdbcClientMeetingResultFinalizer.Rejected(
+                    ClientMeetingInputPort.Reason.ACCESS_DENIED),
+                    JdbcClientMeetingResultFinalizer.readFinalSnapshot(source, other, meetingId));
+            assertEquals(201, status(exchange(port, "POST", "/v1/meetings/" + meetingId
+                    + "/events:append", """
+                    {"clientEventId":"snapshot-partial","clientSequence":1,
+                     "transcriptUpsert":{"segmentId":"unfinished","revision":1,
+                     "operation":"UPSERT_OPERATION_UPSERT","startMs":0,"endMs":500,
+                     "language":"zh-CN","text":"尚未完成","final":false}}
+                    """, networkHeaders(TOKEN, null, true))));
+            assertEquals(201, status(exchange(port, "POST", "/v1/meetings/" + meetingId
+                    + "/usage:submit", "{\"audioDurationMs\":500}",
+                    networkHeaders(TOKEN, null, true))));
+            var snapshot = assertInstanceOf(JdbcClientMeetingResultFinalizer.Ready.class,
+                    JdbcClientMeetingResultFinalizer.readFinalSnapshot(source, context, meetingId));
+            assertEquals(List.of(), snapshot.transcripts());
+            assertEquals(List.of(), snapshot.translations());
+            assertEquals("und", snapshot.language());
+            assertEquals(500, snapshot.frozenAudioDurationMs());
+            assertEquals("STARTING", meetingState(meetingId));
+            assertEquals(1, count("meeting_client_event"));
+            assertEquals(1, count("usage_operation"));
+            assertEquals(0, countCommittedUsage());
+            assertEquals(0, count("artifact"));
+            assertEquals(0, count("meeting_client_result"));
         }
     }
 
@@ -1077,7 +1160,9 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
             HttpRequest base = createRequest("translation-create-key-123456789", "translation-client");
             String body = base.body().replace("\"targets\":[]", "\"targets\":[\"en-US\"]")
                     .replace("[\"transcript.realtime\"]",
-                            "[\"transcript.realtime\",\"translation.realtime\"]");
+                            "[\"transcript.realtime\",\"translation.realtime\"]")
+                    .replace("\"retainAudio\":false", "\"retainAudio\":true")
+                    .replace("\"timezone\":", "\"title\":\"本场快照标题\",\"timezone\":");
             String created = exchange(port, "POST", "/v1/meetings", body,
                     networkHeaders(TOKEN, "translation-create-key-123456789", true));
             assertEquals(201, status(created));
@@ -1118,6 +1203,103 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
             JsonNode events = ERROR_JSON.readTree(responseBody(page)).path("items");
             assertEquals(2, events.size());
             assertEquals("Hello", events.get(1).path("translationUpsert").path("text").asText());
+
+            // 沿真实 append HTTP 保存不同片段和后续修订；快照与 Stop 共用原投影。
+            List<String> tail = List.of("""
+                    {"clientEventId":"snapshot-source-2","clientSequence":3,
+                     "transcriptUpsert":{"segmentId":"source-2","revision":1,
+                     "operation":"UPSERT_OPERATION_UPSERT","startMs":1000,"endMs":2000,
+                     "language":"zh-CN","text":"再见","final":true}}
+                    """, """
+                    {"clientEventId":"snapshot-source-1-r2","clientSequence":4,
+                     "transcriptUpsert":{"segmentId":"source-1","revision":2,
+                     "operation":"UPSERT_OPERATION_REPLACE","startMs":0,"endMs":1000,
+                     "language":"zh-CN","text":"你好，最终修订","final":true}}
+                    """, """
+                    {"clientEventId":"snapshot-translation-1-r2","clientSequence":5,
+                     "translationUpsert":{"translationId":"translation-1",
+                     "sourceSegmentId":"source-1","revision":2,
+                     "operation":"UPSERT_OPERATION_REPLACE","sourceLanguage":"zh-CN",
+                     "targetLanguage":"en-US","text":"Hello, final revision","final":true,
+                     "supersedesTranslationIds":[]}}
+                    """, """
+                    {"clientEventId":"snapshot-unfinished","clientSequence":6,
+                     "transcriptUpsert":{"segmentId":"unfinished","revision":1,
+                     "operation":"UPSERT_OPERATION_UPSERT","startMs":2000,"endMs":2100,
+                     "language":"zh-CN","text":"尚未完成","final":false}}
+                    """, """
+                    {"clientEventId":"snapshot-translation-2","clientSequence":7,
+                     "translationUpsert":{"translationId":"translation-2",
+                     "sourceSegmentId":"source-2","revision":1,
+                     "operation":"UPSERT_OPERATION_UPSERT","sourceLanguage":"zh-CN",
+                     "targetLanguage":"en-US","text":"Goodbye","final":true,
+                     "supersedesTranslationIds":[]}}
+                    """);
+            for (String event : tail) {
+                assertEquals(201, status(exchange(port, "POST", path, event,
+                        networkHeaders(TOKEN, null, true))));
+            }
+            assertEquals(201, status(exchange(port, "POST", "/v1/meetings/" + meetingId
+                    + "/usage:submit", "{\"audioDurationMs\":2000}",
+                    networkHeaders(TOKEN, null, true))));
+            var context = assertInstanceOf(AuthenticatedMeetingHttpContextResolver.Ready.class,
+                    assembly.contextResolver().forClientWrite(request("POST", path))).context();
+            var snapshot = assertInstanceOf(JdbcClientMeetingResultFinalizer.Ready.class,
+                    JdbcClientMeetingResultFinalizer.readFinalSnapshot(
+                            assembly.databaseRuntime().dataSource(), context, meetingId));
+            assertEquals(List.of("source-1", "source-2"), snapshot.transcripts().stream()
+                    .map(item -> item.getSegmentId()).toList());
+            assertEquals(List.of("你好，最终修订", "再见"), snapshot.transcripts().stream()
+                    .map(item -> item.getText()).toList());
+            assertEquals(List.of(2, 1), snapshot.transcripts().stream()
+                    .map(item -> item.getRevision()).toList());
+            assertEquals(List.of("Hello, final revision", "Goodbye"),
+                    snapshot.translations().stream().map(item -> item.getText()).toList());
+            assertEquals("zh-CN", snapshot.language());
+            assertEquals("zh-CN", snapshot.sourceLanguage());
+            assertEquals("本场快照标题", snapshot.title());
+            assertTrue(snapshot.retainAudioRequested());
+            assertEquals(2000, snapshot.frozenAudioDurationMs());
+            assertThrows(UnsupportedOperationException.class, () -> snapshot.transcripts().clear());
+            assertThrows(UnsupportedOperationException.class, () -> snapshot.translations().clear());
+            assertEquals("STARTING", meetingState(meetingId));
+            assertEquals(7, count("meeting_client_event"));
+            assertEquals(1, count("usage_operation"));
+            assertEquals(0, countCommittedUsage());
+            assertEquals(0, count("artifact"));
+            assertEquals(0, count("meeting_client_result"));
+
+            assertEquals(200, status(exchange(port, "POST", "/v1/meetings/" + meetingId
+                    + ":stop", "", networkHeaders(TOKEN,
+                    "snapshot-translation-stop-key-123456789", false))));
+            assertEquals(snapshot, JdbcClientMeetingResultFinalizer.readFinalSnapshot(
+                    assembly.databaseRuntime().dataSource(), context, meetingId));
+            MeetingManifest manifest = clientManifest(meetingId);
+            assertEquals(2000, manifest.durationMs());
+            assertEquals(snapshot.language(), manifest.languages().source());
+            String query = "?genTime=" + NOW.toEpochMilli();
+            JsonNode finalTranscript = ERROR_JSON.readTree(responseBody(exchange(port, "GET",
+                    "/v1/artifacts/" + manifest.artifacts().get(0).artifactId() + query, "")));
+            JsonNode finalTranslation = ERROR_JSON.readTree(responseBody(exchange(port, "GET",
+                    "/v1/artifacts/" + manifest.artifacts().get(1).artifactId() + query, "")));
+            for (int index = 0; index < snapshot.transcripts().size(); index++) {
+                var segment = snapshot.transcripts().get(index);
+                JsonNode published = finalTranscript.path("segments").get(index);
+                assertEquals(segment.getSegmentId(), published.path("segmentId").asText());
+                assertEquals(segment.getText(), published.path("text").asText());
+                assertEquals(segment.getStartMs(), published.path("startMs").asLong());
+                assertEquals(segment.getEndMs(), published.path("endMs").asLong());
+            }
+            for (int index = 0; index < snapshot.translations().size(); index++) {
+                var translationItem = snapshot.translations().get(index);
+                JsonNode published = finalTranslation.path("translations").get(index);
+                assertEquals(translationItem.getTranslationId(),
+                        published.path("translationId").asText());
+                assertEquals(translationItem.getText(), published.path("text").asText());
+            }
+            assertEquals(1, countCommittedUsage());
+            assertEquals(2, count("artifact"));
+            assertEquals("READY", meetingState(meetingId));
         }
     }
 

@@ -253,6 +253,40 @@ try (var assembly = ReferenceMeetingHttpAssembly.start(
 此处交付后端协议与正常结算；SDK同流计数／提交、真实CZUR身份和会员适配仍在
 P7-1c后续小提交完成，不能以参考测试或结果READY代签生产功能已迁移。
 
+### Stop 前读取最终标准事件快照
+
+部署方在模型尾事件及采音用量保存后，可调用普通 Java 只读入口：
+
+```java
+var snapshot = JdbcClientMeetingResultFinalizer.readFinalSnapshot(
+        assembly.databaseRuntime().dataSource(), verifiedContext, meetingId);
+if (snapshot instanceof JdbcClientMeetingResultFinalizer.Ready ready) {
+    // 部署方用本场最终标准事件生成自己的资源格式；不从尚未生成的 Artifact 读取。
+    var finalTranscripts = ready.transcripts();
+    var finalTranslations = ready.translations();
+    long capturedDurationMs = ready.frozenAudioDurationMs();
+}
+```
+
+`verifiedContext`由部署方现有认证入口取得，并在上游检查所需权限；此方法在同一
+只读`REPEATABLE_READ`连接内先复用`MeetingAccessGuard`核对会议原始归属，再读取
+客户端启动标记、已保存的冻结采音值与首次Create。Create仍由原事实Store执行
+规范正文、摘要和响应一致性校验；最终修订、partial过滤与排序直接复用原Stop
+finalizer的同一个投影。返回的Protobuf消息和列表均不可变，保留全部标准字段。
+
+`Ready`包含`transcripts`、`translations`、最终原文聚合`language`、实测
+`frozenAudioDurationMs`，以及首次Create的`retainAudioRequested`、`sourceLanguage`
+和可空`title`。真实无final返回空列表／`und`；实测0返回0；未冻结采音值返回
+`Rejected(INVALID_STATE)`。其他拒绝沿用`ClientMeetingInputPort.Reason`的
+`NOT_FOUND`、`ACCESS_DENIED`、`INPUT_SOURCE_CONFLICT`和`STORAGE_UNAVAILABLE`。
+
+正常发布在`STARTING/RUNNING`读取，同场`STOPPING/READY`仍可只读核对。此处的
+`Ready`是快照读取结果，不代表资源发布、用量结算或会议READY：方法只结束只读
+事务，不调用Provider、不生成receipt、不写Artifact、Manifest或会议状态。
+部署方直接复用Assembly的唯一DataSource，不为读取构造新的finalizer／Clock／池。
+原公共HTTP协议、参考默认装配和Stop收口行为保持；真实对象上传和旧消费者接线
+需由部署方另行实现并在对应环境验收。
+
 ### 注入部署方模型发行器
 
 需要复用已有模型服务的部署，可在同一装配增加第六个参数：
