@@ -56,6 +56,8 @@ coverage/
 # Native/tooling outputs
 cmake-build-*/
 compile_commands.json
+__pycache__/
+*.pyc
 
 # Containers and local deployment overrides
 docker-compose.override.yml

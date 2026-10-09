@@ -21,6 +21,13 @@ AITransRepos 的 P2 验收记录。上述本机 Maven 测试不能自动代替�
 公开发布前单独运行 `python3 tools/check-public-boundary.py`；它是发布内容检查，
 不能替代编译、测试或实际功能验收。
 
+## Android 设备启动校验
+
+[`android-device/`](android-device/README.md) 提供基于真实页面 resource-id 的启动工具：
+一键填写后端／Web 地址、登录、选择字幕／互译及演示选项、确认系统授权、开始会议；
+也可分步执行和复用 Debug 正常停止。只需本机 Python 3 和 ADB，密码由环境变量注入，
+不使用 Docker、不注入 token。结果内容按改动范围另用脚本或视觉验收。
+
 ## P5-2 第二格式模型样例
 
 `sample-json-ws-model.py` 是只供本机/设备接线演示的固定字幕 WebSocket
