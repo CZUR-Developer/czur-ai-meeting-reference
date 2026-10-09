@@ -20,6 +20,7 @@ import com.czur.aimeeting.model.ModelSession;
 import com.czur.aimeeting.model.ModelSessionGrant;
 import com.czur.aimeeting.model.ModelSessionListener;
 import com.czur.aimeeting.model.SegmentStartedEvent;
+import com.czur.aimeeting.model.SealedAudioArtifact;
 import com.czur.aimeeting.model.SummaryAdapter;
 import com.czur.aimeeting.model.SummaryInput;
 import com.czur.aimeeting.model.SummarySessionGrant;
@@ -184,6 +185,7 @@ public final class MeetingCoordinator implements MeetingClient {
         private final MeetingOptions options;
         private final MeetingListener listener;
         private MeetingServerClient server;
+        private MeetingClientConfig sessionConfig;
         private final MeetingDisplayState display = new MeetingDisplayState();
         private final FinalTranscriptCollector finals = new FinalTranscriptCollector();
         private volatile boolean done;
@@ -200,7 +202,8 @@ public final class MeetingCoordinator implements MeetingClient {
         private boolean stopRequested;
         private boolean stopInputSent;
         private boolean modelFinished;
-        private boolean audioFailed;
+        private volatile boolean audioFailed;
+        private volatile boolean modelFailed;
         private boolean completionQueued;
         private boolean acceptingPresentation;
         private int sequence;
@@ -214,6 +217,11 @@ public final class MeetingCoordinator implements MeetingClient {
         private boolean usageRead;
         private boolean usageSubmitted;
         private boolean summarySubmitted;
+        // 仅 io 队列访问；包括封口失败在内，同场收尾只读取一次录音事实。
+        private boolean audioArtifactRead;
+        private IOException audioArtifactFailure;
+        private MeetingArtifactPublisher.Context publicationContext;
+        private boolean publicationConfirmed;
         private Long genTime;
         private volatile MeetingResult readyResult;
 
@@ -243,6 +251,11 @@ public final class MeetingCoordinator implements MeetingClient {
 
         private void begin() {
             if (cancelled || closed) return;
+            if (options.retainAudio() && (!runtime.supportsRetainedAudio()
+                    || !config.artifactPublisher().supportsAudioPublication())) {
+                failStart("本场音频保留需要装配同源录音与产物发布");
+                return;
+            }
             publish("正在确认登录状态并创建会议…");
             io.execute(() -> {
                 String step = "身份读取";
@@ -253,7 +266,8 @@ public final class MeetingCoordinator implements MeetingClient {
                         enqueue(() -> failStart(identity.message()));
                         return;
                     }
-                    server = servers.apply(config.forSession(identity.session()));
+                    sessionConfig = config.forSession(identity.session());
+                    server = servers.apply(sessionConfig);
                     LOG.info("本场身份已确认");
                     step = "能力发现";
                     var deployment = server.discover();
@@ -352,6 +366,7 @@ public final class MeetingCoordinator implements MeetingClient {
                             @Override public void onError(String message) {
                                 enqueue(() -> {
                                     if (done) return;
+                                    modelFailed = true;
                                     modelFinished = true;
                                     audioLevelActive = false;
                                     LOG.warning("本场模型运行时终止");
@@ -359,7 +374,7 @@ public final class MeetingCoordinator implements MeetingClient {
                                     maybeComplete();
                                 });
                             }
-                        });
+                        }, options.retainAudio());
                 active = true;
                 audioLevelActive = true;
                 canStop = runtime.waitsForModelFinish();
@@ -516,6 +531,7 @@ public final class MeetingCoordinator implements MeetingClient {
         }
 
         private void complete(SummaryInput input) {
+            if (cancelled || closed) return;
             String step = "检查标准事件保存";
             try {
                 if (appendFailed) throw new IOException("标准事件或截图提交失败");
@@ -541,6 +557,19 @@ public final class MeetingCoordinator implements MeetingClient {
                     summarySubmitted = true;
                     LOG.info("标准纪要已提交");
                 }
+                if (cancelled || closed) return;
+                if (options.retainAudio() && !audioFailed && !modelFailed && !publicationConfirmed) {
+                    step = "发布本场封口音频";
+                    readAudioArtifactOnce();
+                    if (cancelled || closed) return;
+                    if (!audioFailed && !modelFailed) {
+                        LOG.info("本场封口音频发布开始");
+                        sessionConfig.artifactPublisher().publish(publicationContext);
+                        publicationConfirmed = true;
+                        LOG.info("本场封口音频发布已确认");
+                    }
+                }
+                if (cancelled || closed) return;
                 step = "后端 Stop";
                 LOG.info("后端 Stop 开始");
                 if (!server.stopMeeting(meetingId).accepted()) {
@@ -575,6 +604,26 @@ public final class MeetingCoordinator implements MeetingClient {
                 logFailure(step, failure);
                 enqueue(() -> completionFailed("结束会议失败，请检查连接后再次确认停止"));
             }
+        }
+
+        private void readAudioArtifactOnce() throws IOException {
+            if (!audioArtifactRead) {
+                audioArtifactRead = true;
+                try {
+                    SealedAudioArtifact audio = model.sealedAudioArtifact()
+                            .orElseThrow(() -> new IOException("本场录音尚未完成封口"));
+                    if (!meetingId.equals(audio.meetingId()))
+                        throw new IOException("录音产物不属于本场会议");
+                    if (frozenAudioDuration.isEmpty()
+                            || frozenAudioDuration.getAsLong() != audio.durationMs())
+                        throw new IOException("录音事实与本场冻结采音用量不一致");
+                    publicationContext = new MeetingArtifactPublisher.Context(meetingId, audio,
+                            frozenAudioDuration.getAsLong(), sessionConfig);
+                } catch (IOException | RuntimeException failure) {
+                    audioArtifactFailure = new IOException("本场录音封口事实不可用", failure);
+                }
+            }
+            if (audioArtifactFailure != null) throw audioArtifactFailure;
         }
 
         private void completionFailed(String message) {

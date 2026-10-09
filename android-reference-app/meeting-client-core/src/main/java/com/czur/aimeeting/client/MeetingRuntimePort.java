@@ -25,6 +25,14 @@ public interface MeetingRuntimePort {
     default Set<String> localCapabilities() { return Set.of(); }
     ModelSession open(ModelSessionGrant grant, ModelAdapter adapter,
             TranscriptListener transcripts, ModelSessionListener listener);
+    /** 与 ModelRuntime 同义；旧 Mock/伙伴实现默认没有同源录音装配。 */
+    default boolean supportsRetainedAudio() { return false; }
+    /** false 保留旧入口；true 须由具体运行时显式接入唯一标准 PCM 流。 */
+    default ModelSession open(ModelSessionGrant grant, ModelAdapter adapter,
+            TranscriptListener transcripts, ModelSessionListener listener, boolean retainAudio) {
+        if (retainAudio) throw new IllegalStateException("同源录音尚未装配");
+        return open(grant, adapter, transcripts, listener);
+    }
     SummaryResult summarize(SummarySessionGrant grant, SummaryAdapter adapter, SummaryInput input)
             throws IOException;
 }

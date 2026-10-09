@@ -74,6 +74,34 @@ App不计数、不额外采音。时长沿用16kHz／mono／PCM16字节数除以
 静音和模型连接前采音计入，网络重发及会后等待不计入。默认Mock仍未提供实采用量，
 其会话返回empty，保留原演示链；不能以Mock结果代签真实PCM计数或CZUR会员扣费。
 
+### 可选同源 sealed 音频与正常收尾发布
+
+公共接口现提供 `ModelRuntime`／`MeetingRuntimePort.supportsRetainedAudio()` 和兼容的
+`open(..., boolean retainAudio)`，以及 `ModelSession.sealedAudioArtifact()`。旧四参入口和
+既有实现保留，默认不支持录音、getter 返回 empty；参考默认 `retainAudio=false`，
+不产生录音或发布副作用。显式选择 true 时，Coordinator 在 Create 前检查同源录音及发布器
+均已装配，不会静默忽略选择。当前公共片只是接口与收尾编排，SDK 录音实现及 CZUR 真实
+发布器仍待后续装配，不能据此声称已录制、上传或可被旧消费者读取。
+
+`SealedAudioArtifact` 只描述本场停止并严格封口后的本地文件：真实 meetingId、明确的
+Opus/OGG 或 PCM16 格式／MIME、文件字节长、实交 PCM 字节数及其派生时长。
+标准流固定16kHz／mono／PCM16，编码 padding 不计用量；已确认零帧、empty 和封口失败
+分别是不同事实。运行时须在音源停流、尾帧排完、编码EOS／容器停止和文件同步成功后提供
+不可变快照；取消和已知媒体 I/O 失败不能伪造 sealed 成功。App 不接裸 PCM、不另开音源。
+
+部署方通过不可变 `MeetingClientConfig.withArtifactPublisher(...)` 装配窄发布器。
+唯一 IO 队列按“最终标准事件保存→冻结用量→原选定总结→本场发布确认→后端 Stop”执行；
+音频／模型错误与取消不走正常音频发布。发布器 Context 只读本场 sealed、冻结时长及
+`config.forSession` 已冻结的 serverUrl／accessToken／clientIdentity；即使全局身份已退出或
+更换也不重新登录、交换Token或读取 UserHandler。Context 和产物的默认字符串不输出凭据
+或本地路径，部署方不得将这些字段写入日志或公共结果。
+
+发布正常返回须表示上传及必要同场资源登记已确认；失败进入原 `STOP_PENDING`。
+用户再次确认复用同一 sealed 快照和访问上下文，不重开录音、不重新封口、不建第二场；
+发布已确认而后端 Stop 未受理时不再次发布。响应丢失后的外部同场幂等由具体发布器负责。
+Coordinator 不删除文件或引入自动恢复／重试平台；删除须遵守真实上传及资源登记的确认。
+旧 JSONL 可由后端已保存标准事件导出，本片不复制旧 writer 或启用总结／翻译业务。
+
 工程采用 Android Studio 结构：`app/` 是参考 APK，`model-runtime-contract/`
 是模型 Adapter、会话材料、生命周期和标准字幕事件的唯一公共源码。
 `meeting-client-core/` 保存共享 Adapter 工厂、默认解析和显示规则，详见其

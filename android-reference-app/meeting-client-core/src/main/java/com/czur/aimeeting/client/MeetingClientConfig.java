@@ -21,11 +21,12 @@ public final class MeetingClientConfig {
     private final ClientIdentity clientIdentity;
     private final MeetingProfile profile;
     private final Executor callbackExecutor;
+    private final MeetingArtifactPublisher artifactPublisher;
 
     public MeetingClientConfig(String serverUrl, String accessToken, ClientIdentity clientIdentity,
             MeetingProfile profile, Executor callbackExecutor) {
         this(serverUrl, accessToken, new ReferenceIdentityProvider(accessToken), clientIdentity,
-                profile, callbackExecutor);
+                profile, callbackExecutor, MeetingArtifactPublisher.none());
     }
 
     /**
@@ -34,17 +35,20 @@ public final class MeetingClientConfig {
      */
     public MeetingClientConfig(String serverUrl, IdentityProvider identityProvider,
             ClientIdentity clientIdentity, MeetingProfile profile, Executor callbackExecutor) {
-        this(serverUrl, "", identityProvider, clientIdentity, profile, callbackExecutor);
+        this(serverUrl, "", identityProvider, clientIdentity, profile, callbackExecutor,
+                MeetingArtifactPublisher.none());
     }
 
     private MeetingClientConfig(String serverUrl, String accessToken, IdentityProvider identityProvider,
-            ClientIdentity clientIdentity, MeetingProfile profile, Executor callbackExecutor) {
+            ClientIdentity clientIdentity, MeetingProfile profile, Executor callbackExecutor,
+            MeetingArtifactPublisher artifactPublisher) {
         this.serverUrl = Objects.requireNonNull(serverUrl, "serverUrl");
         this.accessToken = Objects.requireNonNull(accessToken, "accessToken");
         this.identityProvider = Objects.requireNonNull(identityProvider, "identityProvider");
         this.clientIdentity = Objects.requireNonNull(clientIdentity, "clientIdentity");
         this.profile = Objects.requireNonNull(profile, "profile");
         this.callbackExecutor = Objects.requireNonNull(callbackExecutor, "callbackExecutor");
+        this.artifactPublisher = Objects.requireNonNull(artifactPublisher, "artifactPublisher");
     }
 
     /** 旧参考 App 的薄转发适配；伙伴应显式配置自己的身份和档位。 */
@@ -59,10 +63,20 @@ public final class MeetingClientConfig {
     public ClientIdentity clientIdentity() { return clientIdentity; }
     public MeetingProfile profile() { return profile; }
     public Executor callbackExecutor() { return callbackExecutor; }
+    public MeetingArtifactPublisher artifactPublisher() { return artifactPublisher; }
+
+    /**
+     * 创建新的不可变部署配置；不改变原配置，不启用 retainAudio，也不产生上传。
+     * 发布器必须只使用收到的本场 Context，不能在收尾时重新向全局身份来源取凭据。
+     */
+    public MeetingClientConfig withArtifactPublisher(MeetingArtifactPublisher publisher) {
+        return new MeetingClientConfig(serverUrl, accessToken, identityProvider,
+                clientIdentity, profile, callbackExecutor, publisher);
+    }
 
     /** 仅协调器使用：冻结本场凭据，避免账号刷新改变进行中请求所用的身份。 */
     MeetingClientConfig forSession(IdentitySession session) {
         return new MeetingClientConfig(serverUrl, session.accessToken(), identityProvider,
-                clientIdentity, profile, callbackExecutor);
+                clientIdentity, profile, callbackExecutor, artifactPublisher);
     }
 }

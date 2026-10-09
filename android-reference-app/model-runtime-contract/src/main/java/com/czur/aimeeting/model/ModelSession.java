@@ -1,5 +1,7 @@
 package com.czur.aimeeting.model;
 
+import java.io.IOException;
+import java.util.Optional;
 import java.util.OptionalLong;
 
 /** 一次模型会话；start 后产生事件，stopInput 后仍接收模型最终结果。 */
@@ -23,6 +25,17 @@ public interface ModelSession extends AutoCloseable {
      * 默认 empty 让既有模型／Mock 实现保持兼容，不虚构实采用量。
      */
     default OptionalLong frozenAudioDurationMs() { return OptionalLong.empty(); }
+
+    /**
+     * 读取同源录音已经完成封口的不可变事实。正常 stopInput 返回、完整尾帧排完并且
+     * 编码/文件同步成功后才可提供，冻结后同场重复读取不重开录音或重新 seal。
+     * empty 表示未装配或尚未封口，不等于已确认零帧；封口失败须抛 IOException，
+     * 不能返回失败文件并伪造成功。取消路径不产生正常可发布事实。
+     * 默认 empty 保留既有实现兼容；已明确选择保留音频的协调器不会将 empty 当作成功。
+     */
+    default Optional<SealedAudioArtifact> sealedAudioArtifact() throws IOException {
+        return Optional.empty();
+    }
 
     /** 取消并释放资源。调用方不再需要本次会话的后续事件。 */
     @Override

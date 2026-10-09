@@ -11,11 +11,13 @@ import com.czur.aimeeting.client.identity.IdentitySession;
 import com.czur.aimeeting.client.identity.ReferenceIdentityProvider;
 import com.czur.aimeeting.client.server.*;
 import com.czur.aimeeting.model.*;
+import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.BlockingQueue;
@@ -32,6 +34,288 @@ import org.junit.Test;
 public final class MeetingCoordinatorTest {
     private static final Set<String> ALL = Set.of(MeetingCapabilityState.TRANSCRIPT,
             MeetingCapabilityState.TRANSLATION, MeetingCapabilityState.SUMMARY, MeetingCapabilityState.SPEAKER);
+
+    @Test public void legacyConfigAndRuntimeDefaultsHaveNoRecordingOrPublication() throws Exception {
+        var config = MeetingClientConfig.reference("https://service.example.test", "fixture-token");
+        assertFalse(config.artifactPublisher().supportsAudioPublication());
+        Publisher publisher = new Publisher();
+        var configured = config.withArtifactPublisher(publisher);
+        assertSame(publisher, configured.artifactPublisher());
+        assertFalse("配置复制不能改变旧配置", config.artifactPublisher().supportsAudioPublication());
+        assertSame(publisher, configured.forSession(new IdentitySession("scene-token", "用户")).artifactPublisher());
+
+        ModelRuntime legacy = (grant, adapter, transcripts, listener) -> null;
+        assertFalse(legacy.supportsRetainedAudio());
+        assertNull(legacy.open(null, null, null, null, false));
+        assertThrows(IllegalStateException.class, () -> legacy.open(null, null, null, null, true));
+        MeetingRuntimePort port = new MeetingRuntimePort() {
+            @Override public ModelSession open(ModelSessionGrant g, ModelAdapter a,
+                    TranscriptListener t, ModelSessionListener l) { return null; }
+            @Override public SummaryResult summarize(SummarySessionGrant g, SummaryAdapter a,
+                    SummaryInput i) { return null; }
+        };
+        assertFalse(port.supportsRetainedAudio());
+        assertNull(port.open(null, null, null, null, false));
+        assertThrows(IllegalStateException.class, () -> port.open(null, null, null, null, true));
+        ModelSession session = new ModelSession() {
+            @Override public void start() { }
+            @Override public void stopInput() { }
+            @Override public void close() { }
+        };
+        assertTrue(session.sealedAudioArtifact().isEmpty());
+    }
+
+    @Test public void defaultMeetingNeverReadsAudioArtifactOrCallsConfiguredPublisher() throws Exception {
+        Publisher publisher = new Publisher();
+        try (Fixture f = new Fixture(true, ALL, new ReferenceIdentityProvider("fixture-token"), publisher)) {
+            f.runtime.duration = OptionalLong.of(1000);
+            f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.WEB, false);
+            f.session.requestStop();
+            assertNotNull(f.probe.result());
+            assertFalse(f.runtime.retainAudio);
+            assertFalse(f.server.requested.retainAudio());
+            assertEquals(0, f.runtime.artifactReads);
+            assertTrue(publisher.contexts.isEmpty());
+            assertEquals(List.of("discover", "create", "grant", "start", "usage", "stop", "manifest"), f.server.steps);
+        }
+    }
+
+    @Test public void retainAudioWithoutRuntimeIsRejectedBeforeCreate() throws Exception {
+        try (Fixture f = new Fixture(true, ALL, new ReferenceIdentityProvider("fixture-token"), new Publisher())) {
+            f.session = f.client.start(retainedOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT), f.probe);
+            assertTrue(f.probe.awaitPhase(MeetingSessionState.Phase.FAILED).message().contains("同源录音"));
+            assertTrue(f.server.steps.isEmpty());
+            assertEquals(0, f.runtime.openCalls);
+        }
+    }
+
+    @Test public void retainAudioWithoutPublisherIsRejectedBeforeCreate() throws Exception {
+        try (Fixture f = new Fixture(true, ALL)) {
+            f.runtime.retainedAudioSupported = true;
+            f.session = f.client.start(retainedOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT), f.probe);
+            assertTrue(f.probe.awaitPhase(MeetingSessionState.Phase.FAILED).message().contains("产物发布"));
+            assertTrue(f.server.steps.isEmpty());
+            assertEquals(0, f.runtime.openCalls);
+        }
+    }
+
+    @Test public void retainedTailUsageAndSelectedSummaryAreSavedBeforePublicationThenStop() throws Exception {
+        Publisher publisher = new Publisher();
+        try (Fixture f = new Fixture(true, ALL, new ReferenceIdentityProvider("fixture-token"), publisher)) {
+            SealedAudioArtifact audio = audio("mtg_test", 32000);
+            f.runtime.prepareAudio(audio);
+            f.runtime.emitTail = true;
+            f.start(retainedOptions(MeetingOptions.Mode.MEETING_MINUTES));
+            f.session.requestStop();
+            assertNotNull(f.probe.result());
+            assertTrue(f.runtime.retainAudio);
+            assertTrue(f.server.requested.retainAudio());
+            assertSame(audio, publisher.contexts.get(0).audio());
+            assertEquals("mtg_test", publisher.contexts.get(0).meetingId());
+            assertEquals(1000, publisher.contexts.get(0).frozenAudioDurationMs());
+            assertEquals("最后字幕", f.runtime.summaryInput.transcript());
+            assertEquals(List.of("discover", "create", "grant", "start", "event1", "usage",
+                    "summaryGrant", "summary", "publish", "stop", "manifest"), f.server.steps);
+            assertEquals(1, f.runtime.artifactReads);
+            assertEquals(1, f.runtime.durationReads);
+            assertEquals(1, f.runtime.stopCalls);
+        }
+    }
+
+    @Test public void finalEventSaveFailurePreventsAudioPublicationAndBackendStop() throws Exception {
+        Publisher publisher = new Publisher();
+        try (Fixture f = new Fixture(true, ALL, new ReferenceIdentityProvider("fixture-token"), publisher)) {
+            f.runtime.prepareAudio(audio("mtg_test", 32000));
+            f.runtime.emitTail = true;
+            f.server.failAppend = true;
+            f.start(retainedOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT));
+            f.session.requestStop();
+            f.probe.awaitPhase(MeetingSessionState.Phase.STOP_PENDING);
+            assertEquals(List.of("discover", "create", "grant", "start", "event1"), f.server.steps);
+            assertTrue(publisher.contexts.isEmpty());
+            assertEquals(0, f.runtime.artifactReads);
+            assertEquals(0, f.runtime.durationReads);
+            assertEquals(1, f.runtime.stopCalls);
+        }
+    }
+
+    @Test public void failedPublicationRetriesSameSealedAndFrozenAccessWithoutReadingIdentityAgain() throws Exception {
+        ReferenceIdentityProvider identity = new ReferenceIdentityProvider("opening-fixture-token");
+        AtomicInteger identityReads = new AtomicInteger();
+        Publisher publisher = new Publisher();
+        publisher.failOnce = true;
+        try (Fixture f = new Fixture(true, ALL,
+                () -> { identityReads.incrementAndGet(); return identity.currentIdentity(); }, publisher)) {
+            assertEquals("Provider构造配置初始Token为空", "", f.config.accessToken());
+            SealedAudioArtifact original = audio("mtg_test", 32000);
+            f.runtime.prepareAudio(original);
+            f.runtime.emitTail = true;
+            f.start(retainedOptions(MeetingOptions.Mode.MEETING_MINUTES));
+            identity.clearSession();
+            f.session.requestStop();
+            assertTrue(f.probe.awaitPhase(MeetingSessionState.Phase.STOP_PENDING).canStop());
+            assertFalse(f.server.steps.contains("stop"));
+            assertTrue(f.probe.results.isEmpty());
+            identity.updateSession(new IdentitySession("other-account-token", "另一用户"));
+            f.runtime.artifact = Optional.of(audio("other-scene", 64000));
+            f.runtime.duration = OptionalLong.of(2000);
+            f.session.requestStop();
+            assertNotNull(f.probe.result());
+            assertEquals(2, publisher.contexts.size());
+            var context = publisher.contexts.get(0);
+            assertSame(context, publisher.contexts.get(1));
+            assertSame(original, context.audio());
+            assertEquals("opening-fixture-token", context.accessToken());
+            assertEquals(f.config.serverUrl(), context.serverUrl());
+            assertSame(f.config.clientIdentity(), context.clientIdentity());
+            assertFalse(context.toString().contains("opening-fixture-token"));
+            assertFalse(context.toString().contains(f.config.serverUrl()));
+            assertFalse(context.toString().contains(original.file().getPath()));
+            assertEquals(1, identityReads.get());
+            assertEquals(1, f.runtime.openCalls);
+            assertEquals(1, f.runtime.stopCalls);
+            assertEquals(1, f.runtime.artifactReads);
+            assertEquals(1, f.runtime.durationReads);
+            assertEquals(1, f.probe.beforeStopCalls.get());
+            assertEquals(List.of(1000L), f.server.usages);
+            assertEquals(List.of("discover", "create", "grant", "start", "event1", "usage",
+                    "summaryGrant", "summary", "publish", "publish", "stop", "manifest"), f.server.steps);
+        }
+    }
+
+    @Test public void publicationAckIsNotRepeatedWhenBackendStopNeedsSameSceneRetry() throws Exception {
+        Publisher publisher = new Publisher();
+        try (Fixture f = new Fixture(true, ALL, new ReferenceIdentityProvider("fixture-token"), publisher)) {
+            f.runtime.prepareAudio(audio("mtg_test", 0));
+            f.server.pendingStop = true;
+            f.start(retainedOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT));
+            f.session.requestStop();
+            f.probe.awaitPhase(MeetingSessionState.Phase.STOP_PENDING);
+            assertEquals(1, publisher.contexts.size());
+            assertEquals(0, publisher.contexts.get(0).audio().capturedPcmBytes());
+            assertEquals(0, publisher.contexts.get(0).frozenAudioDurationMs());
+            f.session.requestStop();
+            assertNotNull(f.probe.result());
+            assertEquals(List.of("discover", "create", "grant", "start", "usage", "publish", "stop", "stop", "manifest"), f.server.steps);
+            assertEquals(1, f.runtime.artifactReads);
+            assertEquals(1, f.runtime.stopCalls);
+            assertEquals(1, publisher.contexts.size());
+        }
+    }
+
+    @Test public void wrongMeetingDurationOrMissingUsageNeverPublishesOrStops() throws Exception {
+        assertAudioRejected(Optional.of(audio("other-scene", 32000)), OptionalLong.of(1000), null);
+        assertAudioRejected(Optional.of(audio("mtg_test", 64000)), OptionalLong.of(1000), null);
+        assertAudioRejected(Optional.of(audio("mtg_test", 32000)), OptionalLong.empty(), null);
+    }
+
+    @Test public void missingSealedAndSealFailureCannotBecomeZeroFrameSuccessOnRetry() throws Exception {
+        assertAudioRejected(Optional.empty(), OptionalLong.of(0), null);
+        assertAudioRejected(Optional.empty(), OptionalLong.of(0), new IOException("fixture-seal-failed"));
+    }
+
+    private static void assertAudioRejected(Optional<SealedAudioArtifact> artifact,
+            OptionalLong duration, IOException failure) throws Exception {
+        Publisher publisher = new Publisher();
+        try (Fixture f = new Fixture(true, ALL, new ReferenceIdentityProvider("fixture-token"), publisher)) {
+            f.runtime.retainedAudioSupported = true;
+            f.runtime.artifact = artifact;
+            f.runtime.duration = duration;
+            f.runtime.artifactFailure = failure;
+            f.start(retainedOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT));
+            f.session.requestStop();
+            f.probe.awaitPhase(MeetingSessionState.Phase.STOP_PENDING);
+            // 即使不符合约定的运行时后来换值，协调器仍复用第一次收口的失败事实，不重新 seal。
+            f.runtime.artifact = Optional.of(audio("mtg_test", 0));
+            f.runtime.artifactFailure = null;
+            f.runtime.duration = OptionalLong.of(0);
+            f.session.requestStop();
+            f.probe.awaitPhase(MeetingSessionState.Phase.STOP_PENDING);
+            assertTrue(publisher.contexts.isEmpty());
+            assertFalse(f.server.steps.contains("stop"));
+            assertEquals(1, f.runtime.artifactReads);
+            assertEquals(1, f.runtime.durationReads);
+            assertEquals(1, f.runtime.stopCalls);
+            assertEquals(1, f.runtime.openCalls);
+        }
+    }
+
+    @Test public void audioErrorStopsWithoutClaimingNormalAudioPublication() throws Exception {
+        Publisher publisher = new Publisher();
+        try (Fixture f = new Fixture(true, ALL, new ReferenceIdentityProvider("fixture-token"), publisher)) {
+            f.runtime.prepareAudio(audio("mtg_test", 32000));
+            f.runtime.emitFinished = false;
+            f.start(retainedOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT));
+            f.runtime.listener.onAudioError(AudioInputErrorCode.PERMISSION_DENIED, "fixture-audio-ended");
+            f.session.requestStop();
+            f.probe.awaitPhase(MeetingSessionState.Phase.ENDED);
+            assertEquals(0, f.runtime.artifactReads);
+            assertTrue(publisher.contexts.isEmpty());
+            assertEquals(1, Collections.frequency(f.server.steps, "stop"));
+            assertTrue(f.probe.results.isEmpty());
+        }
+    }
+
+    @Test public void modelErrorCannotTriggerNormalAudioPublication() throws Exception {
+        Publisher publisher = new Publisher();
+        try (Fixture f = new Fixture(true, ALL, new ReferenceIdentityProvider("fixture-token"), publisher)) {
+            f.runtime.prepareAudio(audio("mtg_test", 32000));
+            f.runtime.emitFinished = false;
+            f.start(retainedOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT));
+            f.runtime.listener.onError("fixture-model-ended");
+            f.session.requestStop();
+            assertNotNull(f.probe.result()); // 保留原模型错误之后的 Stop/Manifest 行为。
+            assertEquals(0, f.runtime.artifactReads);
+            assertTrue(publisher.contexts.isEmpty());
+        }
+    }
+
+    @Test public void cancellationDuringQueuedUsagePreventsNewAudioPublicationAndNormalStop() throws Exception {
+        Publisher publisher = new Publisher();
+        try (Fixture f = new Fixture(true, ALL, new ReferenceIdentityProvider("fixture-token"), publisher)) {
+            f.runtime.prepareAudio(audio("mtg_test", 32000));
+            f.server.blockUsage = true;
+            f.start(retainedOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT));
+            f.session.requestStop();
+            assertTrue(f.server.usageEntered.await(2, TimeUnit.SECONDS));
+            // 客户端 close 同步关公开门，再由原 state/io 队列释放模型；不用 sleep 猜取消时点。
+            f.client.close();
+            f.server.releaseUsage.countDown();
+            assertTrue(f.runtime.closed.await(2, TimeUnit.SECONDS));
+            assertTrue(publisher.contexts.isEmpty());
+            assertEquals(0, f.runtime.artifactReads);
+            assertFalse(f.server.steps.contains("stop"));
+            assertTrue(f.probe.results.isEmpty());
+        }
+    }
+
+    @Test public void sealedAudioUsesCapturedPcmDurationAndRedactsLocalPosition() {
+        var opus = new SealedAudioArtifact("mtg_test", new File("fixture-audio.opus"),
+                SealedAudioArtifact.Format.OPUS_OGG, 17, 32640);
+        assertEquals("audio/ogg", opus.contentType());
+        assertEquals(17, opus.encodedBytes());
+        assertEquals(1020, opus.durationMs());
+        assertEquals(16000, opus.sampleRateHz());
+        assertEquals(1, opus.channelCount());
+        assertEquals(16, opus.bitsPerSample());
+        assertFalse(opus.toString().contains("fixture-audio.opus"));
+        assertEquals(0, audio("mtg_test", 0).durationMs());
+        assertThrows(IllegalArgumentException.class, () -> audio("", 0));
+        assertThrows(IllegalArgumentException.class, () -> audio("mtg_test", -2));
+        assertThrows(IllegalArgumentException.class, () -> audio("mtg_test", 1));
+        assertThrows(IllegalArgumentException.class, () -> new SealedAudioArtifact("mtg_test",
+                new File("fixture.pcm"), SealedAudioArtifact.Format.PCM16, 1, 0));
+    }
+
+    private static SealedAudioArtifact audio(String meetingId, long pcmBytes) {
+        return new SealedAudioArtifact(meetingId, new File("fixture-audio.pcm"),
+                SealedAudioArtifact.Format.PCM16, pcmBytes, pcmBytes);
+    }
+
+    private static MeetingOptions retainedOptions(MeetingOptions.Mode mode) {
+        return options(mode, MeetingOptions.ResultDelivery.WEB, false)
+                .withCreateParameters("同源录音测试", "Asia/Shanghai", true);
+    }
 
     @Test public void sameStreamLevelUsesCallbackExecutorAndQueuedLevelStopsWithNormalStop() throws Exception {
         BlockingQueue<Runnable> callbacks = new LinkedBlockingQueue<>();
@@ -450,6 +734,7 @@ public final class MeetingCoordinatorTest {
         final Probe probe = new Probe();
         final AtomicInteger clockCalls = new AtomicInteger();
         final MeetingCoordinator client;
+        final MeetingClientConfig config;
         volatile String sessionToken;
         MeetingSession session;
         Fixture(boolean real, Set<String> granted) {
@@ -460,19 +745,42 @@ public final class MeetingCoordinatorTest {
         }
         Fixture(boolean real, Set<String> granted, IdentityProvider identity,
                 java.util.concurrent.Executor callbackExecutor) {
+            this(real, granted, identity, callbackExecutor, MeetingArtifactPublisher.none());
+        }
+        Fixture(boolean real, Set<String> granted, IdentityProvider identity, Publisher publisher) {
+            this(real, granted, identity, Runnable::run, publisher);
+        }
+        Fixture(boolean real, Set<String> granted, IdentityProvider identity,
+                java.util.concurrent.Executor callbackExecutor, MeetingArtifactPublisher publisher) {
             server = new Server(granted);
             runtime = new Runtime(real);
-            var config = new MeetingClientConfig("http://127.0.0.1", identity,
-                    ClientIdentity.reference(), MeetingProfile.reference(), callbackExecutor);
+            if (publisher instanceof Publisher) ((Publisher) publisher).server = server;
+            config = new MeetingClientConfig("http://127.0.0.1", identity,
+                    ClientIdentity.reference(), MeetingProfile.reference(), callbackExecutor)
+                    .withArtifactPublisher(publisher);
             client = new MeetingCoordinator(config,
                     new ModelAdapterRegistry(), runtime, resolved -> { sessionToken = resolved.accessToken(); return server; },
                     () -> System.nanoTime() / 1_000_000L, () -> { clockCalls.incrementAndGet(); return 555; });
         }
         void start(MeetingOptions.Mode mode, MeetingOptions.ResultDelivery delivery, boolean capture) throws Exception {
-            session = client.start(options(mode, delivery, capture), probe);
+            start(options(mode, delivery, capture));
+        }
+        void start(MeetingOptions options) throws Exception {
+            session = client.start(options, probe);
             assertTrue(runtime.started.await(2, TimeUnit.SECONDS));
         }
-        @Override public void close() { server.releaseAppend.countDown(); client.close(); }
+        @Override public void close() { server.releaseAppend.countDown(); server.releaseUsage.countDown(); client.close(); }
+    }
+
+    private static final class Publisher implements MeetingArtifactPublisher {
+        final List<Context> contexts = Collections.synchronizedList(new ArrayList<>());
+        Server server;
+        boolean failOnce;
+        @Override public void publish(Context context) throws IOException {
+            contexts.add(context);
+            server.steps.add("publish");
+            if (failOnce) { failOnce = false; throw new IOException("fixture-publication-unconfirmed"); }
+        }
     }
 
     private static final class Probe implements MeetingListener {
@@ -517,6 +825,7 @@ public final class MeetingCoordinatorTest {
     private static final class Runtime implements MeetingRuntimePort {
         final boolean real;
         final CountDownLatch started = new CountDownLatch(1);
+        final CountDownLatch closed = new CountDownLatch(1);
         TranscriptListener transcripts;
         ModelSessionListener listener;
         ModelSessionGrant grant;
@@ -527,10 +836,25 @@ public final class MeetingCoordinatorTest {
         boolean emitFinished = true;
         volatile OptionalLong duration = OptionalLong.empty();
         volatile int durationReads;
+        volatile int artifactReads;
+        volatile int openCalls;
+        boolean retainedAudioSupported;
+        boolean retainAudio;
+        volatile Optional<SealedAudioArtifact> artifact = Optional.empty();
+        volatile IOException artifactFailure;
         Runtime(boolean real) { this.real = real; }
         @Override public boolean usesServerModelMaterials() { return real; }
         @Override public Set<String> localCapabilities() { return ALL; }
+        @Override public boolean supportsRetainedAudio() { return retainedAudioSupported; }
+        @Override public ModelSession open(ModelSessionGrant grant, ModelAdapter adapter,
+                TranscriptListener transcripts, ModelSessionListener listener, boolean retainAudio) {
+            if (retainAudio && !retainedAudioSupported)
+                return MeetingRuntimePort.super.open(grant, adapter, transcripts, listener, true);
+            this.retainAudio = retainAudio;
+            return open(grant, adapter, transcripts, listener);
+        }
         @Override public ModelSession open(ModelSessionGrant grant, ModelAdapter adapter, TranscriptListener transcripts, ModelSessionListener listener) {
+            ++openCalls;
             this.grant = grant; this.adapter = adapter; this.transcripts = transcripts; this.listener = listener;
             return new ModelSession() {
                 @Override public void start() { started.countDown(); }
@@ -544,13 +868,24 @@ public final class MeetingCoordinatorTest {
                         if (emitFinished) listener.onFinished();
                     }
                 }
-                @Override public void close() { }
+                @Override public void close() { closed.countDown(); }
                 @Override public OptionalLong frozenAudioDurationMs() {
                     ++durationReads;
                     assertTrue("协调器必须在停止输入后读取用量", stopCalls > 0);
                     return duration;
                 }
+                @Override public Optional<SealedAudioArtifact> sealedAudioArtifact() throws IOException {
+                    ++artifactReads;
+                    assertTrue("协调器必须在停止输入后读取封口音频", stopCalls > 0);
+                    if (artifactFailure != null) throw artifactFailure;
+                    return artifact;
+                }
             };
+        }
+        void prepareAudio(SealedAudioArtifact audio) {
+            retainedAudioSupported = true;
+            artifact = Optional.of(audio);
+            duration = OptionalLong.of(audio.durationMs());
         }
         void emit(String id, int revision, String language, String text, boolean end) {
             transcripts.onTranscript(new TranscriptEvent(id, revision, 0, 100, language, text, end, "speaker-1"));
@@ -569,7 +904,11 @@ public final class MeetingCoordinatorTest {
         final List<Long> usages = Collections.synchronizedList(new ArrayList<>());
         final CountDownLatch appendEntered = new CountDownLatch(1);
         final CountDownLatch releaseAppend = new CountDownLatch(1);
+        final CountDownLatch usageEntered = new CountDownLatch(1);
+        final CountDownLatch releaseUsage = new CountDownLatch(1);
         volatile boolean blockAppend;
+        volatile boolean blockUsage;
+        boolean failAppend;
         boolean pendingStop;
         boolean failEmail;
         boolean failContent;
@@ -598,6 +937,7 @@ public final class MeetingCoordinatorTest {
         @Override public void startClient(String id) { steps.add("start"); }
         @Override public void appendTranscript(String id, int number, TranscriptEvent event) throws IOException {
             steps.add("event" + number); transcripts.add(event); appendEntered.countDown();
+            if (failAppend) throw new IOException("fixture-event-save-failed");
             if (blockAppend) try { if (!releaseAppend.await(4, TimeUnit.SECONDS)) throw new IOException("测试未释放 HTTP"); }
             catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); throw new IOException(interrupted); }
         }
@@ -607,6 +947,9 @@ public final class MeetingCoordinatorTest {
         @Override public void submitUsage(String id, long duration) throws IOException {
             assertEquals("mtg_test", id);
             steps.add("usage"); usages.add(duration);
+            usageEntered.countDown();
+            if (blockUsage) try { if (!releaseUsage.await(4, TimeUnit.SECONDS)) throw new IOException("测试未释放用量提交"); }
+            catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); throw new IOException(interrupted); }
             if (failUsageOnce) { failUsageOnce = false; throw new IOException("受控用量响应未确认"); }
         }
         @Override public StopMeetingResponse stopMeeting(String id) {
