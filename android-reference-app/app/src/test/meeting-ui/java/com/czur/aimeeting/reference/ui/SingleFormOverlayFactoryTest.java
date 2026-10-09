@@ -30,11 +30,18 @@ public class SingleFormOverlayFactoryTest {
         var window = (SingleFormOverlayFactory.SingleWindow) MeetingAppAssembly.overlayFactory().create(
                 RuntimeEnvironment.getApplication(), () -> { }, () -> { }, stops::incrementAndGet);
         assertTrue(window.show(OverlayViewFactoryTest.single("draft", false)));
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
+        assertNotNull(window.windowToken());
+        assertSame(window.controller.contentView().getWindowToken(), window.windowToken());
         assertEquals(Set.of(SingleFormOverlayFactory.FORM_ID), window.controller.registeredFormIds());
         window.controller.hide();
+        assertNull(window.windowToken());
         window.render(OverlayViewFactoryTest.single("finished while hidden", true), MeetingSetup.Mode.LIVE_TRANSCRIPT,
                 false, "00:20", true, 38);
         window.show(OverlayViewFactoryTest.single("unused", false));
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
+        assertNotNull(window.windowToken());
+        assertSame(window.controller.contentView().getWindowToken(), window.windowToken());
         OverlayViewFactoryTest.measure(window.controller);
         assertEquals("finished while hidden", OverlayViewFactoryTest.cell(window.controller, "overlay.subtitle").getParts().get(0).text().toString());
         OverlayViewFactoryTest.visible(window.controller, "overlay.stop").performClick();

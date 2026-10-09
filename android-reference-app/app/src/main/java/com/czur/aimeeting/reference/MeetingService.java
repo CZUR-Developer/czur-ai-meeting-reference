@@ -37,7 +37,6 @@ import com.czur.aimeeting.reference.meeting.MeetingAppAssembly;
 import com.czur.aimeeting.reference.meeting.MeetingSetup;
 import com.czur.aimeeting.reference.meeting.MeetingTimeRule;
 import com.czur.aimeeting.reference.meeting.MeetingReminderPresentation;
-import java.io.IOException;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
@@ -149,7 +148,8 @@ public final class MeetingService extends Service {
     private final Runnable presentationTick = new Runnable() {
         @Override public void run() {
             if (!active || stopRequested || presentation == null) return;
-            platformWork.execute(MeetingService.this::captureAndSubmit);
+            // 主线程现取窗口token并发起异步SDK请求，采集／JPEG均不在这里等待。
+            captureAndSubmit(null);
             main.postDelayed(this, PRESENTATION_INTERVAL_MS);
         }
     };
@@ -160,6 +160,9 @@ public final class MeetingService extends Service {
     private MeetingTimeRule timing;
     private MeetingTimeRule.Snapshot stoppedClock;
     private volatile PresentationCapture presentation;
+    /** 正常Stop的末帧异步完成闭包；用户撤销授权时也结束本次等待，不影响模型收口。 */
+    private Runnable presentationStopContinuation;
+    private String presentationCapability = "";
     private MeetingSetup setup;
     private String meetingId;
     private String status = "请先登录，再开始会议";
@@ -219,6 +222,12 @@ public final class MeetingService extends Service {
         }
         MeetingSetup requested = prepared.setup();
         if (requested.presentationCapture()) {
+            if (!ScreenCaptureSourceFactory.isSupported()) {
+                status = "Mock构建不提供屏幕截图，请使用SDK构建，会议未创建";
+                publish();
+                stopSelf();
+                return START_NOT_STICKY;
+            }
             projectionData = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
                     ? intent.getParcelableExtra(EXTRA_PROJECTION_DATA, Intent.class)
                     : intent.getParcelableExtra(EXTRA_PROJECTION_DATA);
@@ -318,6 +327,8 @@ public final class MeetingService extends Service {
         active = false;
         canStop = false;
         stopRequested = false;
+        presentationStopContinuation = null;
+        presentationCapability = "";
         readyResult = null;
         actionOutcome = null;
         actionRunning = false;
@@ -408,15 +419,7 @@ public final class MeetingService extends Service {
                 }
 
                 @Override public void beforeStop(Runnable continuation) {
-                    main.removeCallbacks(presentationTick);
-                    // 和周期截图共用一条平台队列：先做已排任务及最后有效帧，再续接 SDK 收口。
-                    platformWork.execute(() -> {
-                        try { captureAndSubmit(); }
-                        finally {
-                            try { closePresentation(); }
-                            finally { continuation.run(); }
-                        }
-                    });
+                    stopPresentationBefore(continuation);
                 }
 
                 @Override public void onResult(MeetingResult result) {
@@ -443,38 +446,80 @@ public final class MeetingService extends Service {
 
     private void startPresentation(long startedAtMs) {
         try {
-            presentation = new PresentationCapture(this, projectionResultCode,
-                    projectionData, startedAtMs, this::onPresentationStopped);
+            ScreenCaptureSource source = ScreenCaptureSourceFactory.create(this, projectionResultCode,
+                    projectionData, command -> main.post(command), this::onPresentationStopped);
+            presentation = new PresentationCapture(source, startedAtMs, platformWork,
+                    command -> main.post(command));
+            presentationCapability = source.supportsWindowExclusion() ? ""
+                    : "当前系统仅支持整屏截图，演示图片会包含悬浮窗";
             main.postDelayed(presentationTick, PRESENTATION_INTERVAL_MS);
-            Log.i(TAG, "演示文稿屏幕采集已开始 meetingId=" + meetingId);
+            Log.i(TAG, "SDK演示采集已开始 mode=" + source.mode()
+                    + " excludeWindows=" + source.supportsWindowExclusion() + " meetingId=" + meetingId);
         } catch (RuntimeException failure) {
             Log.e(TAG, "演示文稿屏幕采集启动失败 errorType=" + failure.getClass().getSimpleName());
             status = "屏幕采集启动失败；字幕会议继续，可停止后重试";
         } finally { projectionData = null; }
     }
 
-    private void captureAndSubmit() {
+    /** 主线程发起截图；两级异步回调保持周期帧→末帧→关闭→SDK收口的正常顺序。 */
+    private void captureAndSubmit(Runnable completed) {
         PresentationCapture current = presentation;
         MeetingSession currentSession = session;
-        if (current == null || currentSession == null) return;
+        if (current == null || currentSession == null) {
+            if (completed != null) completed.run();
+            return;
+        }
         try {
-            PresentationCapture.Frame frame = current.capture(SystemClock.elapsedRealtime());
-            if (frame == null) return;
-            currentSession.submitPresentation(frame.offsetMs(), frame.jpeg());
-            Log.i(TAG, "演示截图已提交组合会话 offsetMs=" + frame.offsetMs());
-        } catch (IOException | RuntimeException failure) {
-            Log.e(TAG, "演示截图采集失败 errorType=" + failure.getClass().getSimpleName());
-            main.post(() -> {
-                main.removeCallbacks(presentationTick);
-                status = "演示截图采集失败；字幕会议继续";
-                publish();
+            // 旧系统事前按实际能力选择整屏；不是排除失败后再重截一张包含窗口的图片。
+            IBinder[] excluded = current.supportsWindowExclusion()
+                    ? overlay.captureWindowTokens() : new IBinder[0];
+            current.capture(SystemClock.elapsedRealtime(), excluded, new PresentationCapture.Callback() {
+                @Override public void onSuccess(PresentationCapture.Frame frame) {
+                    try {
+                        if (destroyed || presentation != current || session != currentSession) return;
+                        currentSession.submitPresentation(frame.offsetMs(), frame.jpeg());
+                        Log.i(TAG, "演示截图已提交组合会话 offsetMs=" + frame.offsetMs());
+                    } finally { if (completed != null) completed.run(); }
+                }
+                @Override public void onError(String message) {
+                    try { presentationFailed(message); }
+                    finally { if (completed != null) completed.run(); }
+                }
             });
+        } catch (RuntimeException failure) {
+            try { presentationFailed("SDK截图请求无法执行"); }
+            finally { if (completed != null) completed.run(); }
         }
     }
 
-    private void onPresentationStopped() {
-        presentation = null;
+    private void presentationFailed(String message) {
+        if (destroyed) return;
+        Log.w(TAG, "演示截图未完成：" + message);
         main.removeCallbacks(presentationTick);
+        if (!stopRequested) status = "演示截图采集失败；字幕会议继续";
+        publish();
+    }
+
+    /** 既有beforeStop入口的异步平台衔接；主线程调用，正常末帧完成后延续SDK收口。 */
+    void stopPresentationBefore(Runnable continuation) {
+        main.removeCallbacks(presentationTick);
+        // 不同步等待SDK主线程回调：末帧经同一JPEG队列处理／提交后关闭授权再续接。
+        presentationStopContinuation = continuation;
+        captureAndSubmit(this::finishPresentationStop);
+    }
+
+    private void finishPresentationStop() {
+        Runnable continuation = presentationStopContinuation;
+        presentationStopContinuation = null;
+        try { closePresentation(); }
+        finally { if (continuation != null) continuation.run(); }
+    }
+
+    private void onPresentationStopped() {
+        closePresentation();
+        presentationCapability = "";
+        main.removeCallbacks(presentationTick);
+        if (presentationStopContinuation != null) finishPresentationStop();
         if (active && !stopRequested) {
             status = "系统已结束屏幕共享，字幕会议继续";
             publish();
@@ -597,7 +642,9 @@ public final class MeetingService extends Service {
                 ? reminderPresentation.at(clock) : MeetingReminderPresentation.Notice.NONE;
         String audioText = audioInputMode == null ? "" : "\n音频来源：" + audioInputMode;
         if (audioErrorText != null) audioText += "\n" + audioErrorText;
-        State state = new State(display, status, capabilityText + audioText, busy, active, canStop,
+        String visibleStatus = status + (active && !presentationCapability.isEmpty()
+                ? "\n" + presentationCapability : "");
+        State state = new State(display, visibleStatus, capabilityText + audioText, busy, active, canStop,
                 overlay.isShowing(), transcriptVersion, readyResult, actionOutcome, actionRunning, timeText, reminder,
                 setup == null ? MeetingSetup.Mode.LIVE_TRANSCRIPT : setup.mode(),
                 setup != null && setup.summaryEnabled(), audioLevel);
@@ -608,6 +655,7 @@ public final class MeetingService extends Service {
 
     @Override public void onDestroy() {
         destroyed = true;
+        presentationStopContinuation = null;
         observer = null;
         MeetingAppAssembly.unobserveResultUi(resultUiAvailable);
         audioLevel = null;

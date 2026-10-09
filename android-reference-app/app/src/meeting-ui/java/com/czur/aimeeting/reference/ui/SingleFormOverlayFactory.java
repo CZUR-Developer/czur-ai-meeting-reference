@@ -1,6 +1,7 @@
 package com.czur.aimeeting.reference.ui;
 
 import android.content.Context;
+import android.os.IBinder;
 import android.view.Gravity;
 import android.view.View;
 import com.czur.aimeeting.client.display.MeetingDisplaySnapshot;
@@ -56,6 +57,10 @@ public final class SingleFormOverlayFactory implements MeetingOverlayFactory {
             return controller.show(FORM_ID) == OverlayController.DisplayCondition.READY;
         }
         @Override public boolean isShowing() { return controller.isShowing(); }
+        @Override public IBinder windowToken() {
+            View view = controller.contentView();
+            return isShowing() && view != null ? view.getWindowToken() : null;
+        }
         @Override public void render(MeetingDisplaySnapshot display, MeetingSetup.Mode mode, boolean summaryEnabled,
                 String timeText, boolean canStop, int audioLevel) {
             this.display = display;

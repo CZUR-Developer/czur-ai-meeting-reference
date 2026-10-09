@@ -36,6 +36,9 @@ public class OverlayViewFactoryTest {
                 RuntimeEnvironment.getApplication(), opens::incrementAndGet, () -> fail("单语无交换"), stops::incrementAndGet);
         var initial = single("old revised", false);
         assertTrue(window.show(initial));
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
+        assertNotNull(window.windowToken());
+        assertSame(window.overlay.controller().contentView().getWindowToken(), window.windowToken());
         window.render(initial, MeetingSetup.Mode.LIVE_TRANSCRIPT, false, "00:10", true, 42);
         var controller = window.overlay.controller();
         assertEquals(1800, controller.windowSpec().widthPx);
@@ -48,16 +51,19 @@ public class OverlayViewFactoryTest {
         assertTrue(cell(controller, "overlay.subtitle").getParts().get(1).isFinal());
         visible(controller, "overlay.stop");
         window.overlay.collapse();
+        assertSame(controller.contentView().getWindowToken(), window.windowToken());
         assertEquals(126, controller.windowSpec().widthPx);
         assertEquals(60, controller.windowSpec().heightPx);
         measure(controller);
         visible(controller, "overlay.restore");
         window.overlay.hide();
+        assertNull(window.windowToken());
         window.render(single("old final while hidden", true), MeetingSetup.Mode.LIVE_TRANSCRIPT,
                 false, "00:20", true, 73);
         assertFalse(window.isShowing());
         window.overlay.show(false);
         window.overlay.restore();
+        assertSame(controller.contentView().getWindowToken(), window.windowToken());
         measure(controller);
         assertEquals("old final while hidden", cell(controller, "overlay.subtitle").getParts().get(0).text().toString());
         assertTrue(cell(controller, "overlay.subtitle").getParts().get(0).isFinal());
@@ -68,7 +74,12 @@ public class OverlayViewFactoryTest {
         assertEquals(1, stops.get());
         window.render(initial, MeetingSetup.Mode.LIVE_TRANSCRIPT, false, "00:20", false, 0);
         assertFalse(visible(controller, "overlay.stop").isEnabled());
+        // 原视觉回归以固定尺寸手动layout；attach traversal在这些断言后完成，避免改变其测量时序。
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
+        assertNotNull(window.windowToken());
+        assertSame(controller.contentView().getWindowToken(), window.windowToken());
         window.dismiss();
+        assertNull(window.windowToken());
         assertEquals(OverlayController.State.RELEASED, controller.state());
     }
 

@@ -1,6 +1,7 @@
 package com.czur.aimeeting.reference.ui;
 
 import android.content.Context;
+import android.os.IBinder;
 import com.czur.aimeeting.client.display.MeetingDisplaySnapshot;
 import com.czur.aimeeting.reference.meeting.MeetingSetup;
 
@@ -20,6 +21,11 @@ public interface MeetingOverlayFactory {
         boolean show(MeetingDisplaySnapshot initial);
         /** 当前是否实际挂载，仅供宿主显示按钮状态。 */
         boolean isShowing();
+        /**
+         * 当前已挂载View的公开getWindowToken；主线程现取，隐藏／释放时为null。
+         * 宿主每次截图重新查询，不缓存跨挂载句柄，不访问隐藏SurfaceControl。
+         */
+        IBinder windowToken();
         /** 完整替换同场显示输入；快照已经配对、路由并冻结，窗口不处理原始模型事件。 */
         void render(MeetingDisplaySnapshot display, MeetingSetup.Mode mode, boolean summaryEnabled,
                 String timeText, boolean canStop, int audioLevel);

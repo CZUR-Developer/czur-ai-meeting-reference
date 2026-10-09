@@ -89,6 +89,29 @@ P7-1a新增可注入的`IdentityProvider`及`MeetingClient.refreshIdentity()`。
 默认 `mock` 模式不需要私有 AAR，可干净构建并演示同一片段的初稿、修订稿、最终稿；
 未完成文字以 80% 透明度显示，最终文字以 100% 显示。
 
+### 独立SDK截图与参考演示帧
+
+参考App的屏幕采集引擎已移到闭源SDK的`ScreenCaptureClient`。App在主线程申请系统
+屏幕投影授权、启动具有`mediaProjection`类型的前台Service，再经`sdk`源集的
+`ScreenCaptureSourceFactory`创建客户端；`main`只保留薄接口和演示图片处理。
+App保持10秒周期、相对本场`elapsedRealtime`起点的偏移、1280长边／JPEG体积约束与上传。
+`beforeStop`异步取得末帧，工作线程缩放／编码，提交后关闭截图客户端再调用continuation，
+不在主线程或串行回调队列中同步等待。Bitmap成功交付归App，JPEG编码的全部出口回收它。
+
+新固件的`SYSTEM_CAPTURE`路径每次在主线程现取当前已挂载浮窗token，包含字幕／互译／
+Mini和提醒遮罩、卡片。窗口工厂只使用公开`View.getWindowToken()`；隐藏／重新挂载后
+不缓存旧句柄，不临时隐藏窗口或反射访问SurfaceControl。伙伴自己的窗口工厂须实现
+`MeetingOverlayFactory.Window.windowToken()`，返回当前View的窗口token。
+
+旧CZUR固件／普通Android继续由SDK通过MediaProjection提供整屏截图。App事前按实际
+`supportsWindowExclusion()`选择空排除列表，并在会中说明演示图片会包含悬浮窗；不是
+排除失败后默默再截整屏。干净Mock没有截图SDK，演示开关明确禁用且说明不支持，
+不保留另一份采集引擎；字幕、UI和结果的Mock流程保持。
+SDK还可独立输出指定目录PNG File，参考上传采用Bitmap入口以沿用自己的JPEG策略。
+Bitmap／File独立接口、Main／IO与Kotlin挂起接入见SDK随包的`SCREEN-CAPTURE.md`。
+本轮源码／定向测试和APK构建不代签新固件有／无排除、窗口下方内容或真实末帧Web图片，
+实际效果待系统编译／烧写后另验。
+
 `sdk` 模式把 `starry` 独立 SDK Module 产出的版本化 AAR 从仓外注入。SDK 在有兼容
 共享音频接口的新 Starry 系统读取 Broker；旧 CZUR 系统无服务／接口不兼容，以及
 普通 Android 设备使用标准麦克风，并通过 WebSocket

@@ -166,7 +166,7 @@ public final class MainActivity extends Activity {
             boolean translation = checkedId == translationModeView.getId();
             targetLanguageView.setEnabled(translation && deploymentLanguages.size() >= 2);
             if (translation) presentationCaptureView.setChecked(false);
-            presentationCaptureView.setEnabled(!translation);
+            presentationCaptureView.setEnabled(!translation && ScreenCaptureSourceFactory.isSupported());
             page.showSetupMode(translation);
         });
         summaryEnabledView.setOnCheckedChangeListener((button, checked) ->
@@ -382,6 +382,12 @@ public final class MainActivity extends Activity {
             transcriptModeView.setChecked(true);
         }
         targetLanguageView.setEnabled(translation && translationModeView.isChecked());
+        boolean screenCapture = ScreenCaptureSourceFactory.isSupported();
+        presentationCaptureView.setText(screenCapture ? "演示文稿" : "演示文稿（Mock不支持截图）");
+        presentationCaptureView.setContentDescription(screenCapture
+                ? "演示文稿，开始时申请系统屏幕采集授权" : "Mock构建不提供截图，请使用SDK构建");
+        presentationCaptureView.setEnabled(screenCapture && !translationModeView.isChecked());
+        if (!screenCapture) presentationCaptureView.setChecked(false);
         page.showSetupMode(translationModeView.isChecked());
     }
 
@@ -599,7 +605,8 @@ public final class MainActivity extends Activity {
         String actionId = resultActionIds.get(resultGroup.getCheckedRadioButtonId());
         return new MeetingSetup(mode, deploymentLanguages.get(sourceLanguageView.getSelectedItemPosition()),
                 deploymentLanguages.get(targetLanguageView.getSelectedItemPosition()),
-                mode == MeetingSetup.Mode.LIVE_TRANSCRIPT && presentationCaptureView.isChecked(),
+                mode == MeetingSetup.Mode.LIVE_TRANSCRIPT && ScreenCaptureSourceFactory.isSupported()
+                        && presentationCaptureView.isChecked(),
                 ResultOptions.action(actionId), "", List.of(),
                 summaryEnabledView.isChecked());
     }

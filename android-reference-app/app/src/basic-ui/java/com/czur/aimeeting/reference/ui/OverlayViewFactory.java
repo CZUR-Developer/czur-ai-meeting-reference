@@ -2,6 +2,7 @@ package com.czur.aimeeting.reference.ui;
 
 import android.content.Context;
 import android.graphics.PixelFormat;
+import android.os.IBinder;
 import android.provider.Settings;
 import android.view.Gravity;
 import android.view.WindowManager;
@@ -54,6 +55,9 @@ public final class OverlayViewFactory implements MeetingOverlayFactory {
             return true;
         }
         @Override public boolean isShowing() { return showing; }
+        @Override public IBinder windowToken() {
+            return showing && views != null ? views.view().getWindowToken() : null;
+        }
         @Override public void render(MeetingDisplaySnapshot display, MeetingSetup.Mode mode, boolean summaryEnabled,
                 String timeText, boolean canStop, int audioLevel) {
             if (views != null) views.render(display, timeText, canStop, audioLevel, false);

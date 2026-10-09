@@ -2,6 +2,7 @@ package com.czur.aimeeting.reference.ui;
 
 import android.content.Context;
 import android.graphics.Color;
+import android.os.IBinder;
 import android.util.DisplayMetrics;
 import android.view.Gravity;
 import com.czur.aimeeting.client.display.MeetingDisplaySnapshot;
@@ -61,6 +62,10 @@ public final class OverlayViewFactory implements MeetingOverlayFactory {
             return overlay.show(initial.bilingual()) == OverlayController.DisplayCondition.READY;
         }
         @Override public boolean isShowing() { return overlay.controller().isShowing(); }
+        @Override public IBinder windowToken() {
+            android.view.View view = overlay.controller().contentView();
+            return isShowing() && view != null ? view.getWindowToken() : null;
+        }
         @Override public void render(MeetingDisplaySnapshot display, MeetingSetup.Mode mode, boolean summaryEnabled,
                 String timeText, boolean canStop, int audioLevel) {
             this.display = display;

@@ -1,6 +1,7 @@
 package com.czur.aimeeting.reference;
 
 import android.content.Context;
+import android.os.IBinder;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
@@ -10,6 +11,7 @@ import com.czur.aimeeting.reference.meeting.MeetingAppAssembly;
 import com.czur.aimeeting.reference.meeting.MeetingReminderPresentation;
 import com.czur.aimeeting.reference.meeting.MeetingSetup;
 import com.czur.aimeeting.reference.ui.MeetingOverlayFactory;
+import java.util.ArrayList;
 
 /**
  * 参考 App 的薄悬浮窗宿主。窗口内容由集中装配的工厂提供，仍读取 Service 的同一快照，
@@ -31,6 +33,20 @@ final class MeetingOverlay {
     }
 
     boolean isShowing() { return window != null && window.isShowing(); }
+
+    /**
+     * 每次截图在主线程现取全部自己的浮窗句柄，包括提醒遮罩和卡片；不缓存旧窗口。
+     * 已挂载窗口暂未取得token时保留null交SDK明确报INVALID_WINDOW，不漏排后伪成功。
+     */
+    IBinder[] captureWindowTokens() {
+        ArrayList<IBinder> tokens = new ArrayList<>();
+        if (isShowing()) tokens.add(window.windowToken());
+        if (reminderScrim != null && reminderScrim.getParent() != null)
+            tokens.add(reminderScrim.getWindowToken());
+        if (reminderPopup != null && reminderPopup.view().getParent() != null)
+            tokens.add(reminderPopup.view().getWindowToken());
+        return tokens.toArray(new IBinder[0]);
+    }
 
     void show(MeetingDisplaySnapshot state, Runnable onOpenApp, Runnable onSwapColumns,
             Runnable onConfirmReminder, Runnable onStop) {
