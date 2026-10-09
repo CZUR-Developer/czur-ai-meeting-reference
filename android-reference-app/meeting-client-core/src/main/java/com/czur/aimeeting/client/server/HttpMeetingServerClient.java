@@ -68,8 +68,8 @@ public final class HttpMeetingServerClient implements MeetingServerClient {
                             .put("appVersion", identity.appVersion())
                             .put("contractVersion", identity.contractVersion())
                             .put("deviceId", identity.deviceId()))
-                    .put("title", "参考会议")
-                    .put("timezone", "Asia/Shanghai")
+                    .put("title", setup.title())
+                    .put("timezone", setup.timezone())
                     .put("languages", new JSONObject().put("source", setup.sourceLanguage())
                             .put("targets", new JSONArray(setup.targetLanguages())))
                     .put("audioProfile", new JSONObject()
@@ -79,7 +79,7 @@ public final class HttpMeetingServerClient implements MeetingServerClient {
                             .put("frameDurationMs", 100))
                     .put("requestedCapabilities", new JSONArray(setup.requestedCapabilities()))
                     .put("artifactPolicy", new JSONObject()
-                            .put("retainAudio", false)
+                            .put("retainAudio", setup.retainAudio())
                             .put("presentationCapture", setup.presentationCapture()));
             String response = post("/v1/meetings", body.toString(),
                     UUID.randomUUID().toString(), 201).body;

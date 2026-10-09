@@ -14,6 +14,7 @@ import com.czur.aimeeting.client.MeetingOptions;
 import com.czur.aimeeting.client.MeetingProfile;
 import com.czur.aimeeting.client.MeetingResult;
 import com.czur.aimeeting.client.PresentationFrame;
+import com.czur.aimeeting.client.result.ResultOptions;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -60,11 +61,45 @@ public final class HttpMeetingServerClientTest {
             assertEquals("device-7", body.getJSONObject("client").getString("deviceId"));
             assertEquals("partner-meeting", body.getJSONObject("profile").getString("id"));
             assertEquals(3, body.getJSONObject("profile").getInt("revision"));
+            assertEquals("参考会议", body.getString("title"));
+            assertEquals("Asia/Shanghai", body.getString("timezone"));
+            assertFalse(body.getJSONObject("artifactPolicy").getBoolean("retainAudio"));
             assertFalse(body.has("endpoint"));
             assertFalse(body.has("resultDelivery"));
             assertEquals("mtg_config", created.meetingId());
             assertEquals(600000, created.maxMeetingDurationMs());
             assertFalse(config.toString().contains("test-token"));
+        }
+    }
+
+    @Test public void createUsesFrozenParametersAndOmitsAnAbsentTitle() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            MeetingOptions selected = new MeetingOptions(MeetingOptions.Mode.LIVE_TRANSLATION,
+                    "en-US", "zh-CN", true, ResultOptions.action("partner.web"),
+                    "https://result.example.test/index.html", List.of("fixture@example.test"), true);
+            fixture.reply(201, "{\"meetingId\":\"mtg_parameters\",\"limits\":{\"maxMeetingDurationMs\":600000}}");
+            fixture.client().createMeeting(selected.withCreateParameters("客户会议", "Europe/Paris", true));
+            Request request = fixture.request();
+            JSONObject body = new JSONObject(request.body());
+            assertEquals("/v1/meetings", request.path());
+            assertEquals("Bearer test-token", request.authorization());
+            assertEquals("客户会议", body.getString("title"));
+            assertEquals("Europe/Paris", body.getString("timezone"));
+            assertTrue(body.getJSONObject("artifactPolicy").getBoolean("retainAudio"));
+            assertTrue(body.getJSONObject("artifactPolicy").getBoolean("presentationCapture"));
+            assertEquals("en-US", body.getJSONObject("languages").getString("source"));
+            assertEquals(List.of("zh-CN"), body.getJSONObject("languages").getJSONArray("targets").toList());
+            assertEquals(selected.requestedCapabilities(), body.getJSONArray("requestedCapabilities").toList());
+            assertEquals(Set.of("clientSessionId", "profile", "client", "title", "timezone",
+                    "languages", "audioProfile", "requestedCapabilities", "artifactPolicy"), body.keySet());
+
+            // null标题是现有协议的正常可省略字段，不替调用者重新填入参考标题。
+            fixture.reply(201, "{\"meetingId\":\"mtg_untitled\",\"limits\":{\"maxMeetingDurationMs\":600000}}");
+            fixture.client().createMeeting(selected.withCreateParameters(null, "Europe/Paris", false));
+            JSONObject untitled = new JSONObject(fixture.request().body());
+            assertFalse(untitled.has("title"));
+            assertEquals("Europe/Paris", untitled.getString("timezone"));
+            assertFalse(untitled.getJSONObject("artifactPolicy").getBoolean("retainAudio"));
         }
     }
 

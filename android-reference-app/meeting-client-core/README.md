@@ -88,6 +88,23 @@ speaker 可选，未授予时移除字段、不拒绝开场；总结工厂独立
 总结仍在末尾最终字幕完成、标准事件提交后生成，并在后端Stop前保存；设置拆分不改变
 P6的采音、模型、DOA或尾部收口时序。
 
+### 本场建会参数
+
+`MeetingOptions.withCreateParameters(title, timezone, retainAudio)` 返回新的不可变快照，
+只覆盖既有 Create 协议中的标题、时区和音频保留请求；mode、独立总结、结果动作、
+邮箱、演示截图及语言设置完整保留。`title=null` 时省略请求字段，时区需显式提供。
+原七／八／九参 PUBLIC 构造器全部保留，默认仍是 `参考会议`、`Asia/Shanghai`、
+`retainAudio=false`，参考 App 不因本接口改变默认行为。
+
+```java
+MeetingOptions named = selected.withCreateParameters("客户会议", "Europe/Paris", false);
+// 将 named 交给现有 MeetingClient.start，模型材料和会议编排仍由 SDK 处理。
+```
+
+`retainAudio` 仅透传已有服务端产物策略，不等于 SDK 已录制或上传音频。
+当前完整入口尚无同源录音产物出口，产品装配继续关闭；后续接通同一输入流的产物后
+才显式启用。不增加私有 metadata map，不从品牌、保存方式或结果动作猜测此开关。
+
 ### 可注册结果动作
 
 公共`client.result`已提供`ResultActionPlugin`、构建期`ResultActionRegistry`、独立

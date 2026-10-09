@@ -7,11 +7,25 @@ import com.czur.aimeeting.client.result.ResultOptions;
 /**
  * 本场会前快照。mode决定会中字幕／互译呈现，summaryEnabled独立决定会后是否生成纪要。
  * 模型能力请求与结果交付相互独立，不接受模型地址或短期材料。
- * 旧MEETING_MINUTES模式及七参数构造器保留，语义为字幕＋总结；新App使用两种呈现模式加开关。
+ * title/timezone/retainAudio是既有Create协议字段，不是私有平台参数或已产生的录音事实。
+ * 旧MEETING_MINUTES模式及全部七／八／九参构造器保留，原参考建会默认值不变。
  */
 public record MeetingOptions(Mode mode, String sourceLanguage, String targetLanguage,
         boolean presentationCapture, ResultDelivery resultDelivery, String resultWebUrl,
-        List<String> resultEmails, boolean summaryEnabled, ResultOptions resultOptions) {
+        List<String> resultEmails, boolean summaryEnabled, ResultOptions resultOptions,
+        String title, String timezone, boolean retainAudio) {
+    /**
+     * 保留原record自动生成的九参PUBLIC签名，现有源码和已编译调用者仍可使用。
+     * 建会保持原参考标题／时区，不启用录音；结果动作及独立总结选择不重新解释。
+     */
+    public MeetingOptions(Mode mode, String sourceLanguage, String targetLanguage,
+            boolean presentationCapture, ResultDelivery resultDelivery, String resultWebUrl,
+            List<String> resultEmails, boolean summaryEnabled, ResultOptions resultOptions) {
+        this(mode, sourceLanguage, targetLanguage, presentationCapture, resultDelivery,
+                resultWebUrl, resultEmails, summaryEnabled, resultOptions,
+                "参考会议", "Asia/Shanghai", false);
+    }
+
     /** 保留原八参PUBLIC签名，旧枚举仅转换动作选择；执行由宿主显式装配。 */
     public MeetingOptions(Mode mode, String sourceLanguage, String targetLanguage,
             boolean presentationCapture, ResultDelivery resultDelivery, String resultWebUrl,
@@ -40,9 +54,22 @@ public record MeetingOptions(Mode mode, String sourceLanguage, String targetLang
 
     public MeetingOptions {
         java.util.Objects.requireNonNull(resultOptions, "resultOptions");
+        java.util.Objects.requireNonNull(timezone, "timezone");
+        if (timezone.isBlank()) throw new IllegalArgumentException("建会时区不能为空");
         resultEmails = List.copyOf(resultEmails);
         // 旧枚举始终表示纪要，避免新构造器把相同旧模式解释为“关闭总结”。
         summaryEnabled = summaryEnabled || mode == Mode.MEETING_MINUTES;
+    }
+
+    /**
+     * 仅复制本场建会参数，不修改原快照或 mode／总结／结果动作／截图／邮箱。
+     * title可为null，HTTP按现有协议省略；timezone由App显式提供，不回退到参考时区。
+     * retainAudio仅请求服务端产物策略，本方法不启动录音，不保证已保存或上传音频。
+     */
+    public MeetingOptions withCreateParameters(String title, String timezone, boolean retainAudio) {
+        return new MeetingOptions(mode, sourceLanguage, targetLanguage, presentationCapture,
+                resultDelivery, resultWebUrl, resultEmails, summaryEnabled, resultOptions,
+                title, timezone, retainAudio);
     }
 
     public enum Mode {
