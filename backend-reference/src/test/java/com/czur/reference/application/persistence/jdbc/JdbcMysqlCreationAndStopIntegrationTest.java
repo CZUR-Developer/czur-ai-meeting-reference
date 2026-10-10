@@ -6,8 +6,10 @@ import com.czur.reference.application.entitlement.referencedev.ReferenceDevEntit
 import com.czur.reference.application.port.*;
 import com.czur.reference.application.port.entitlement.*;
 import com.czur.reference.application.port.identity.Subject;
+import com.czur.reference.application.port.identity.VerifiedIdentity;
 import com.czur.reference.application.port.model.AudioProfile;
 import com.czur.reference.domain.meeting.MeetingAggregate;
+import com.czur.reference.domain.meeting.MeetingEvent;
 import com.czur.reference.domain.meeting.MeetingState;
 import com.czur.reference.protocol.json.CreateMeetingRequestFactJson;
 import com.czur.reference.protocol.json.CreateMeetingResponseFactJson;
@@ -25,6 +27,7 @@ import java.time.*;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -173,6 +176,78 @@ class JdbcMysqlCreationAndStopIntegrationTest {
         assertEquals(UsageReservation.State.COMMITTED, first.reservation().state());
         assertEquals(2, first.reservation().version());
         try (var c = connection()) { assertEquals(2, count(c, "ai_trans_usage_operation")); }
+    }
+
+    @Test
+    void stopSameKeyAndDifferentKeysKeepOneStableStoppingFact() throws Exception {
+        var reserve = reserve("stop", "mtg_stop");
+        success(unitOfWork().create(request(reserve, null, "token")));
+        prepareRunningFixture("mtg_stop");
+        Instant stopClock = Instant.parse("2030-01-01T00:00:40.123456789Z");
+        Instant stopAt = stopClock.truncatedTo(ChronoUnit.MICROS);
+        var context = new MeetingCommandContext(DEPLOYMENT, new VerifiedIdentity(
+                new Subject(SUBJECT), Set.of("ROLE_USER"), Set.of(MeetingPermissions.STOP),
+                RESERVED_AT, stopAt.plusSeconds(600), "test-reference"));
+        var stop = new JdbcOwnedMeetingStopUnitOfWork(database, Clock.fixed(stopClock, ZoneOffset.UTC));
+        var request = new OwnedMeetingStopUnitOfWork.StopRequest(context, "mtg_stop", "stop-key-123456789", "stop-digest");
+        var results = concurrent(6, () -> stop.stop(request));
+        assertEquals(1, results.stream().map(r -> assertInstanceOf(OwnedMeetingStopUnitOfWork.Success.class, r))
+                .filter(r -> r.code() == OwnedMeetingStopUnitOfWork.SuccessCode.ACCEPTED).count());
+        String stable = IdempotencyResultJson.encode(assertInstanceOf(
+                OwnedMeetingStopUnitOfWork.Success.class, results.getFirst()).result());
+        for (var result : results) {
+            var success = assertInstanceOf(OwnedMeetingStopUnitOfWork.Success.class, result);
+            assertEquals(stable, IdempotencyResultJson.encode(success.result()));
+            assertEquals(MeetingState.STOPPING, success.result().meeting().state());
+            assertEquals(stopAt, success.result().meeting().updatedAt());
+        }
+        var replay = assertInstanceOf(OwnedMeetingStopUnitOfWork.Success.class,
+                new JdbcOwnedMeetingStopUnitOfWork(database, Clock.fixed(stopAt.plusSeconds(10), ZoneOffset.UTC)).stop(request));
+        assertEquals(OwnedMeetingStopUnitOfWork.SuccessCode.REPLAYED, replay.code());
+        assertEquals(stable, IdempotencyResultJson.encode(replay.result()));
+        // 新键仅登记当时STOPPING快照，不能生成新的状态更新、pending或Stop outbox。
+        var next = new AtomicInteger();
+        var differentKeys = concurrent(4, () -> stop.stop(new OwnedMeetingStopUnitOfWork.StopRequest(
+                context, "mtg_stop", "stop-new-key-" + next.incrementAndGet(), "other-digest")));
+        for (var result : differentKeys) {
+            assertEquals(OwnedMeetingStopUnitOfWork.SuccessCode.ACCEPTED,
+                    assertInstanceOf(OwnedMeetingStopUnitOfWork.Success.class, result).code());
+        }
+        try (var c = connection(); var s = c.createStatement()) {
+            assertEquals(5, count(c, "ai_trans_idempotency_record"));
+            assertEquals(2, count(c, "ai_trans_outbox_event")); // 一次Create + 一次Stop
+            assertEquals(1, count(c, "ai_trans_meeting_create_fact"));
+            try (var rows = s.executeQuery("SELECT state, input_state, finalization_receipt_id, aggregate_version, updated_at FROM ai_trans_meeting")) {
+                assertTrue(rows.next());
+                assertEquals("STOPPING", JdbcValues.text(rows, "state"));
+                assertEquals("INPUT_COMPLETE_PENDING", JdbcValues.text(rows, "input_state"));
+                assertNull(rows.getString("finalization_receipt_id"));
+                assertEquals(4, rows.getLong("aggregate_version")); // 夹具3次 + 首次Stop1次
+                assertEquals(stopAt, JdbcValues.instant(rows, "updated_at"));
+            }
+            try (var rows = s.executeQuery("SELECT created_at FROM ai_trans_idempotency_record")) {
+                while (rows.next()) { assertEquals(stopAt, JdbcValues.instant(rows, "created_at")); }
+            }
+            try (var rows = s.executeQuery("SELECT occurred_at FROM ai_trans_outbox_event WHERE event_type='MeetingStopRequested'")) {
+                assertTrue(rows.next()); assertEquals(stopAt, JdbcValues.instant(rows, "occurred_at")); assertFalse(rows.next());
+            }
+        }
+    }
+
+    /** A只准备既有RUNNING状态；真实Start执行事实/模型材料验收属于B，不冒充该证明。 */
+    private void prepareRunningFixture(String meetingId) throws Exception {
+        try (var c = connection()) {
+            c.setAutoCommit(false);
+            Instant at = CREATED_AT;
+            for (var event : List.of(MeetingEvent.AUTHORIZE, MeetingEvent.START, MeetingEvent.START)) {
+                at = at.plusSeconds(1);
+                var before = JdbcMeetingRepository.findVersionedForUpdate(c, MYSQL, meetingId).orElseThrow();
+                var aggregate = MeetingAggregate.fromSnapshot(before.snapshot());
+                aggregate.apply(event, at);
+                JdbcMeetingRepository.updateOwnedExisting(c, MYSQL, before, aggregate.snapshot());
+            }
+            c.commit();
+        }
     }
 
     private JdbcCompleteMeetingCreationUnitOfWork unitOfWork() {

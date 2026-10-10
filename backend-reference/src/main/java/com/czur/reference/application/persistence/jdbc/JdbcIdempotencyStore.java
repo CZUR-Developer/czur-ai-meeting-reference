@@ -59,9 +59,19 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
             """;
 
     private final DataSource dataSource;
+    private final JdbcDatabaseEngine engine;
 
     public JdbcIdempotencyStore(DataSource dataSource) {
+        this(dataSource, JdbcDatabaseEngine.POSTGRESQL);
+    }
+
+    public JdbcIdempotencyStore(JdbcDatabaseContext database) {
+        this(database.dataSource(), database.engine());
+    }
+
+    private JdbcIdempotencyStore(DataSource dataSource, JdbcDatabaseEngine engine) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
+        this.engine = Objects.requireNonNull(engine, "engine");
     }
 
     @Override
@@ -69,9 +79,9 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
         requireText("scope", scope);
         requireText("key", key);
         try (Connection connection = dataSource.getConnection();
-             PreparedStatement statement = connection.prepareStatement(FIND_SQL)) {
-            statement.setString(1, scope);
-            statement.setString(2, key);
+             PreparedStatement statement = connection.prepareStatement(findSql(engine, false))) {
+            JdbcValues.setText(statement, 1, engine, scope);
+            JdbcValues.setText(statement, 2, engine, key);
             try (ResultSet resultSet = statement.executeQuery()) {
                 return resultSet.next() ? Optional.of(readRecord(resultSet)) : Optional.empty();
             }
@@ -82,6 +92,10 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
 
     @Override
     public void save(IdempotencyRecord record) {
+        if (engine == JdbcDatabaseEngine.MYSQL) {
+            reserve(record); // 保留只插入首次事实的语义，绝不覆盖赢家。
+            return;
+        }
         Objects.requireNonNull(record, "record");
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement(INSERT_SQL)) {
@@ -100,6 +114,11 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
             boolean previousAutoCommit = connection.getAutoCommit();
             connection.setAutoCommit(false);
             try {
+                if (engine == JdbcDatabaseEngine.MYSQL) {
+                    Reservation result = reserve(connection, engine, candidate, Instant.now());
+                    connection.commit();
+                    return result;
+                }
                 int inserted;
                 try (PreparedStatement statement = connection.prepareStatement(INSERT_SQL)) {
                     bindCandidate(statement, candidate);
@@ -151,15 +170,38 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
             Connection connection,
             IdempotencyRecord candidate,
             Instant createdAt) throws SQLException {
+        return reserve(connection, JdbcDatabaseEngine.POSTGRESQL, candidate, createdAt);
+    }
+
+    static Reservation reserve(Connection connection, JdbcDatabaseEngine engine,
+            IdempotencyRecord candidate, Instant createdAt) throws SQLException {
         Objects.requireNonNull(connection, "connection");
         Objects.requireNonNull(candidate, "candidate");
         Objects.requireNonNull(createdAt, "createdAt");
         int inserted;
-        try (PreparedStatement statement = connection.prepareStatement(INSERT_SQL)) {
-            bindCandidate(statement, candidate, createdAt);
+        String sql = engine == JdbcDatabaseEngine.POSTGRESQL ? INSERT_SQL : "INSERT INTO "
+                + JdbcDatabaseTable.IDEMPOTENCY_RECORD.physicalName(engine)
+                + " (subject_scope, idempotency_key, request_hash, response_status, response_body, created_at)"
+                + " VALUES (?, ?, ?, ?, CAST(? AS JSON), ?)";
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            if (engine == JdbcDatabaseEngine.POSTGRESQL) {
+                bindCandidate(statement, candidate, createdAt);
+            } else {
+                JdbcValues.setText(statement, 1, engine, candidate.scope());
+                JdbcValues.setText(statement, 2, engine, candidate.key());
+                statement.setString(3, candidate.requestDigest());
+                statement.setInt(4, 200);
+                statement.setString(5, IdempotencyResultJson.encode(candidate.result()));
+                JdbcValues.setInstant(statement, 6, createdAt);
+            }
             inserted = statement.executeUpdate();
+        } catch (SQLException failure) {
+            if (engine != JdbcDatabaseEngine.MYSQL || !JdbcSqlErrors.isDuplicate(engine, failure)) {
+                throw failure;
+            }
+            inserted = 0; // 此表唯一轴仅为编码范围/键；其它完整性错误向外传播。
         }
-        IdempotencyRecord current = find(connection, candidate.scope(), candidate.key())
+        IdempotencyRecord current = findCurrent(connection, engine, candidate.scope(), candidate.key())
                 .orElseThrow(() -> new IllegalStateException("幂等记录插入后不可见"));
         if (inserted == 1) {
             LOGGER.log(Level.FINE, "JDBC 事务内幂等预占成功");
@@ -176,11 +218,27 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
     /** 在调用方事务连接上读取幂等记录。 */
     static Optional<IdempotencyRecord> find(Connection connection, String scope, String key)
             throws SQLException {
+        return find(connection, JdbcDatabaseEngine.POSTGRESQL, scope, key);
+    }
+
+    static Optional<IdempotencyRecord> find(Connection connection, JdbcDatabaseEngine engine,
+            String scope, String key) throws SQLException {
+        return findUsing(connection, engine, scope, key, false);
+    }
+
+    /** 写事务已经取得业务行锁后，读取等待期间提交的唯一赢家。 */
+    static Optional<IdempotencyRecord> findCurrent(Connection connection, JdbcDatabaseEngine engine,
+            String scope, String key) throws SQLException {
+        return findUsing(connection, engine, scope, key, engine == JdbcDatabaseEngine.MYSQL);
+    }
+
+    private static Optional<IdempotencyRecord> findUsing(Connection connection, JdbcDatabaseEngine engine,
+            String scope, String key, boolean currentRead) throws SQLException {
         requireText("scope", scope);
         requireText("key", key);
-        try (PreparedStatement statement = connection.prepareStatement(FIND_SQL)) {
-            statement.setString(1, scope);
-            statement.setString(2, key);
+        try (PreparedStatement statement = connection.prepareStatement(findSql(engine, currentRead))) {
+            JdbcValues.setText(statement, 1, engine, scope);
+            JdbcValues.setText(statement, 2, engine, key);
             try (ResultSet resultSet = statement.executeQuery()) {
                 return resultSet.next() ? Optional.of(readRecord(resultSet)) : Optional.empty();
             }
@@ -303,6 +361,9 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
 
     @Override
     public void release(IdempotencyRecord candidate) {
+        if (engine != JdbcDatabaseEngine.POSTGRESQL) {
+            throw new UnsupportedOperationException("MySQL client model does not expose legacy release");
+        }
         Objects.requireNonNull(candidate, "candidate");
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement(DELETE_SQL)) {
@@ -314,6 +375,14 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
         } catch (SQLException failure) {
             throw fail("释放幂等记录失败", failure);
         }
+    }
+
+    private static String findSql(JdbcDatabaseEngine engine, boolean currentRead) {
+        return engine == JdbcDatabaseEngine.POSTGRESQL ? FIND_SQL
+                : "SELECT subject_scope, idempotency_key, request_hash, response_status, response_body, created_at FROM "
+                + JdbcDatabaseTable.IDEMPOTENCY_RECORD.physicalName(engine)
+                + " WHERE subject_scope = ? AND idempotency_key = ?"
+                + (currentRead ? " LOCK IN SHARE MODE" : "");
     }
 
     private static void bindCandidate(PreparedStatement statement, IdempotencyRecord candidate)
@@ -346,8 +415,8 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
             throw new SQLException("幂等持久事实损坏", "22000");
         }
         return new IdempotencyRecord(
-                resultSet.getString("subject_scope"),
-                resultSet.getString("idempotency_key"),
+                JdbcValues.text(resultSet, "subject_scope"),
+                JdbcValues.text(resultSet, "idempotency_key"),
                 resultSet.getString("request_hash"),
                 result);
     }

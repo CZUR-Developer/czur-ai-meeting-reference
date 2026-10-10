@@ -115,14 +115,20 @@ public final class JdbcMeetingFinalizationStore implements MeetingFinalizationSt
      */
     static Result requestInputCompletion(Connection connection, String meetingId)
             throws SQLException {
+        return requestInputCompletion(connection, JdbcDatabaseEngine.POSTGRESQL, meetingId);
+    }
+
+    /** 仅 Stop pending 闭包适配双引擎；不开放 MySQL 音频 Worker 的 acceptInput。 */
+    static Result requestInputCompletion(Connection connection, JdbcDatabaseEngine engine, String meetingId)
+            throws SQLException {
         requireTransactionalConnection(connection);
         MeetingFinalizationStore.requireMeetingId(meetingId);
         // 公共入口也必须获得与 Stop/Worker 相同的会议行锁。只依赖 UPDATE 的受影响
         // 行数会让并发第二个调用误报冲突，而不是稳定重放第一个 pending 事实。
-        if (JdbcMeetingRepository.findVersionedForUpdate(connection, meetingId).isEmpty()) {
+        if (JdbcMeetingRepository.findVersionedForUpdate(connection, engine, meetingId).isEmpty()) {
             return new NotFound();
         }
-        Optional<Row> rowOptional = readRow(connection, meetingId);
+        Optional<Row> rowOptional = readRow(connection, engine, meetingId);
         Row row = rowOptional.orElseThrow(
                 () -> new IllegalStateException("锁定后的会议事实不可见"));
         if (row.fact().inputState() == InputState.INPUT_ACCEPTED) {
@@ -141,8 +147,12 @@ public final class JdbcMeetingFinalizationStore implements MeetingFinalizationSt
         if (row.state() != MeetingState.STOPPING) {
             return new Conflict(ConflictReason.INVALID_MEETING_STATE);
         }
-        try (PreparedStatement statement = connection.prepareStatement(MARK_PENDING_SQL)) {
-            statement.setString(1, meetingId);
+        String sql = engine == JdbcDatabaseEngine.POSTGRESQL ? MARK_PENDING_SQL : "UPDATE "
+                + JdbcDatabaseTable.MEETING.physicalName(engine)
+                + " SET input_state = 'INPUT_COMPLETE_PENDING' WHERE meeting_id = ?"
+                + " AND input_state = 'INPUT_OPEN' AND finalization_receipt_id IS NULL";
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            JdbcValues.setText(statement, 1, engine, meetingId);
             if (statement.executeUpdate() != 1) {
                 return new Conflict(ConflictReason.FACT_INCONSISTENT);
             }
@@ -316,8 +326,16 @@ public final class JdbcMeetingFinalizationStore implements MeetingFinalizationSt
 
     private static Optional<Row> readRow(Connection connection, String meetingId)
             throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(FIND_SQL)) {
-            statement.setString(1, meetingId);
+        return readRow(connection, JdbcDatabaseEngine.POSTGRESQL, meetingId);
+    }
+
+    private static Optional<Row> readRow(Connection connection, JdbcDatabaseEngine engine, String meetingId)
+            throws SQLException {
+        String sql = engine == JdbcDatabaseEngine.POSTGRESQL ? FIND_SQL
+                : "SELECT state, input_state, finalization_receipt_id FROM "
+                + JdbcDatabaseTable.MEETING.physicalName(engine) + " WHERE meeting_id = ? LOCK IN SHARE MODE";
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            JdbcValues.setText(statement, 1, engine, meetingId);
             try (ResultSet rows = statement.executeQuery()) {
                 if (!rows.next()) {
                     return Optional.empty();

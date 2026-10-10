@@ -55,10 +55,20 @@ public final class JdbcOwnedMeetingStopUnitOfWork
 
     private final DataSource dataSource;
     private final Clock clock;
+    private final JdbcDatabaseEngine engine;
 
     public JdbcOwnedMeetingStopUnitOfWork(DataSource dataSource, Clock clock) {
+        this(dataSource, JdbcDatabaseEngine.POSTGRESQL, clock);
+    }
+
+    public JdbcOwnedMeetingStopUnitOfWork(JdbcDatabaseContext database, Clock clock) {
+        this(database.dataSource(), database.engine(), clock);
+    }
+
+    private JdbcOwnedMeetingStopUnitOfWork(DataSource dataSource, JdbcDatabaseEngine engine, Clock clock) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
         this.clock = Objects.requireNonNull(clock, "clock");
+        this.engine = Objects.requireNonNull(engine, "engine");
     }
 
     /**
@@ -87,7 +97,7 @@ public final class JdbcOwnedMeetingStopUnitOfWork
             phase = Phase.MEETING_LOCK;
             Optional<JdbcMeetingRepository.VersionedMeeting> lockedOptional =
                     JdbcMeetingRepository.findVersionedForUpdate(
-                            connection, request.meetingId());
+                            connection, engine, request.meetingId());
             if (lockedOptional.isEmpty()) {
                 return failAndRollback(
                         connection, transactionResolution, ErrorCode.MEETING_NOT_FOUND);
@@ -109,8 +119,8 @@ public final class JdbcOwnedMeetingStopUnitOfWork
                     request.context().identity().subject().subjectScope());
             phase = Phase.IDEMPOTENCY_READ;
             Optional<IdempotencyStore.IdempotencyRecord> previous =
-                    JdbcIdempotencyStore.find(
-                            connection, stopScope, request.idempotencyKey());
+                    JdbcIdempotencyStore.findCurrent(
+                            connection, engine, stopScope, request.idempotencyKey());
             if (previous.isPresent()) {
                 Result replay = classifyIdempotency(previous.get(), request, current);
                 transactionResolution.rollback(connection);
@@ -159,7 +169,7 @@ public final class JdbcOwnedMeetingStopUnitOfWork
             phase = Phase.IDEMPOTENCY_RESERVE;
             IdempotencyStore.Reservation idempotency =
                     JdbcIdempotencyStore.reserve(
-                            connection, candidate, acceptedAt);
+                            connection, engine, candidate, acceptedAt);
             if (idempotency.status()
                     != IdempotencyStore.ReservationStatus.ACQUIRED) {
                 Result replay = classifyIdempotency(
@@ -171,7 +181,7 @@ public final class JdbcOwnedMeetingStopUnitOfWork
             if (advancesState) {
                 phase = Phase.MEETING_UPDATE;
                 JdbcMeetingRepository.updateOwnedExisting(
-                        connection, locked, accepted.meeting());
+                        connection, engine, locked, accepted.meeting());
 
             }
 
@@ -181,7 +191,7 @@ public final class JdbcOwnedMeetingStopUnitOfWork
             phase = Phase.INPUT_COMPLETION_PENDING;
             MeetingFinalizationStore.Result completion =
                     JdbcMeetingFinalizationStore.requestInputCompletion(
-                            connection, request.meetingId());
+                            connection, engine, request.meetingId());
             if (!(completion instanceof MeetingFinalizationStore.Applied)
                     && !(completion instanceof MeetingFinalizationStore.Replayed)) {
                 return failAndRollback(
@@ -191,7 +201,7 @@ public final class JdbcOwnedMeetingStopUnitOfWork
             if (advancesState) {
                 phase = Phase.OUTBOX_APPEND;
                 OutboxStore.AppendResult append = JdbcOutboxStore.append(
-                        connection,
+                        connection, engine,
                         MeetingCommandEventFactory.meetingStopRequested(
                                 accepted.meeting(), acceptedAt));
                 if (append.status() != OutboxStore.AppendStatus.APPENDED) {
@@ -236,7 +246,8 @@ public final class JdbcOwnedMeetingStopUnitOfWork
             if (transactionStarted) {
                 transactionResolution.rollback(connection);
             }
-            ErrorCode code = isTemporaryStorageFailure(sqlFailure)
+            ErrorCode code = (JdbcSqlErrors.isTransientTransaction(engine, sqlFailure)
+                    || isTemporaryStorageFailure(sqlFailure))
                     ? ErrorCode.STORAGE_UNAVAILABLE : ErrorCode.INTERNAL;
             return loggedFailure(code, phase, sqlFailure.getSQLState());
         } finally {
