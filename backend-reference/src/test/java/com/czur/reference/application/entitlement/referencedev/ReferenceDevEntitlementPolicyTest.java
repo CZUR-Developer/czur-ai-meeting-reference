@@ -203,7 +203,8 @@ class ReferenceDevEntitlementPolicyTest {
 
     @Test
     void logsContainOnlyStableReasonsAndNeverContainBusinessIdentifiers() {
-        Logger logger = Logger.getLogger(ReferenceDevEntitlementPolicy.class.getName());
+        Logger logger = Logger.getLogger(
+                com.czur.reference.application.entitlement.FixedEntitlementPolicy.class.getName());
         Level oldLevel = logger.getLevel();
         boolean oldParents = logger.getUseParentHandlers();
         List<String> messages = new ArrayList<>();

@@ -46,7 +46,7 @@ public final class MeetingHttpRuntime implements AutoCloseable {
 
     private final MeetingHttpAdapter adapter;
     private final HttpErrorMapper errors;
-    private final ReferenceDevSessionLoginEndpoint referenceLogin;
+    private final SessionLoginEndpoint referenceLogin;
     private final ReferenceDeploymentCapabilitiesEndpoint capabilities;
     private final AtomicBoolean closed = new AtomicBoolean(false);
 
@@ -218,7 +218,7 @@ public final class MeetingHttpRuntime implements AutoCloseable {
             MeetingEventLogPort eventLogPort,
             ClientMeetingInputPort clientInputPort,
             ModelSessionIssuer modelSessions,
-            ReferenceDevSessionLoginEndpoint referenceLogin) {
+            SessionLoginEndpoint referenceLogin) {
         this(queryPort, deletionPort, decoder, errors, stopService, createService,
                 createDecoder, createEnabled, manifestPort, renewService, artifactPort,
                 eventLogPort, clientInputPort, modelSessions, null, referenceLogin);
@@ -236,7 +236,7 @@ public final class MeetingHttpRuntime implements AutoCloseable {
             MeetingArtifactContentPort artifactPort, MeetingEventLogPort eventLogPort,
             ClientMeetingInputPort clientInputPort, ModelSessionIssuer modelSessions,
             ModelSessionLanguageLookup modelSessionLanguages,
-            ReferenceDevSessionLoginEndpoint referenceLogin) {
+            SessionLoginEndpoint referenceLogin) {
         this(queryPort, deletionPort, decoder, errors, stopService, createService,
                 createDecoder, createEnabled, manifestPort, renewService, artifactPort,
                 eventLogPort, clientInputPort, modelSessions, modelSessionLanguages,
@@ -255,7 +255,7 @@ public final class MeetingHttpRuntime implements AutoCloseable {
             ClientMeetingInputPort clientInputPort, ModelSessionIssuer modelSessions,
             ModelSessionLanguageLookup modelSessionLanguages,
             BailianSummarySessionIssuer summarySessions,
-            ReferenceDevSessionLoginEndpoint referenceLogin) {
+            SessionLoginEndpoint referenceLogin) {
         this(queryPort, deletionPort, decoder, errors, stopService, createService,
                 createDecoder, createEnabled, manifestPort, renewService, artifactPort,
                 eventLogPort, clientInputPort, modelSessions, modelSessionLanguages,
@@ -274,7 +274,7 @@ public final class MeetingHttpRuntime implements AutoCloseable {
             ClientMeetingInputPort clientInputPort, ModelSessionIssuer modelSessions,
             ModelSessionLanguageLookup modelSessionLanguages,
             BailianSummarySessionIssuer summarySessions,
-            ReferenceDevSessionLoginEndpoint referenceLogin,
+            SessionLoginEndpoint referenceLogin,
             ReferenceDeploymentCapabilitiesEndpoint capabilities) {
         this(new MeetingHttpAdapter(queryPort, deletionPort, decoder, errors, stopService,
                 createService, createDecoder, createEnabled, manifestPort, renewService,
@@ -303,7 +303,7 @@ public final class MeetingHttpRuntime implements AutoCloseable {
     }
 
     private MeetingHttpRuntime(MeetingHttpAdapter adapter, HttpErrorMapper errors,
-            ReferenceDevSessionLoginEndpoint referenceLogin,
+            SessionLoginEndpoint referenceLogin,
             ReferenceDeploymentCapabilitiesEndpoint capabilities) {
         this.adapter = Objects.requireNonNull(adapter, "adapter");
         this.errors = Objects.requireNonNull(errors, "errors");
@@ -331,7 +331,7 @@ public final class MeetingHttpRuntime implements AutoCloseable {
             return errors.runtimeUnavailable();
         }
         if (referenceLogin != null
-                && ReferenceDevSessionLoginEndpoint.PATH.equals(request.path())) {
+                && referenceLogin.path().equals(request.path())) {
             return referenceLogin.handle(request);
         }
         if (capabilities != null

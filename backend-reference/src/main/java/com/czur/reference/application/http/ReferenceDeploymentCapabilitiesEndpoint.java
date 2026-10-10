@@ -1,6 +1,6 @@
 package com.czur.reference.application.http;
 
-import com.czur.reference.application.bootstrap.ReferenceMeetingDeploymentConfig;
+import com.czur.reference.application.bootstrap.MeetingDeploymentConfig;
 import com.czur.reference.domain.capability.CapabilityIds;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -16,7 +16,7 @@ public final class ReferenceDeploymentCapabilitiesEndpoint {
     private final HttpResponse response;
     private final HttpErrorMapper errors;
 
-    public ReferenceDeploymentCapabilitiesEndpoint(ReferenceMeetingDeploymentConfig config,
+    public ReferenceDeploymentCapabilitiesEndpoint(MeetingDeploymentConfig config,
             HttpErrorMapper errors) {
         this.errors = errors;
         TreeSet<String> available = new TreeSet<>();

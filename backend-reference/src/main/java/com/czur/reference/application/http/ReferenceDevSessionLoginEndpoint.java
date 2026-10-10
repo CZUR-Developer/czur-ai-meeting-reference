@@ -19,7 +19,7 @@ import java.util.logging.Logger;
  * 查询和模型会话仍走现有身份 Provider；合作伙伴可替换整个参考身份实现，
  * 无需依赖这里的账号配置。没有自助注册、后台管理、刷新或撤销功能。</p>
  */
-public final class ReferenceDevSessionLoginEndpoint {
+public final class ReferenceDevSessionLoginEndpoint implements SessionLoginEndpoint {
     /** 与参考 Android App 约定的唯一登录路径。 */
     public static final String PATH = "/v1/reference/session:login";
     private static final Logger LOGGER = Logger.getLogger(
@@ -37,6 +37,8 @@ public final class ReferenceDevSessionLoginEndpoint {
         this.errors = Objects.requireNonNull(errors, "errors");
         this.clock = Objects.requireNonNull(clock, "clock");
     }
+
+    @Override public String path() { return PATH; }
 
     /**
      * 处理 POST 登录；只记录固定状态，不记录账号、密码或返回的 Token。

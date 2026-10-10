@@ -464,7 +464,7 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
         AtomicReference<EntitlementProvider> shared = new AtomicReference<>();
         UnaryOperator<EntitlementProvider> factory = delegate -> {
             factoryCalls.incrementAndGet();
-            assertInstanceOf(JdbcReferenceDevEntitlementProvider.class, delegate);
+            assertInstanceOf(JdbcEntitlementProvider.class, delegate);
             EntitlementProvider decorated = new EntitlementProvider() {
                 @Override public EntitlementProviderResult<MeetingGrant> authorizeStart(
                         AuthorizeStartRequest request) {
@@ -659,7 +659,7 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
              var network = assembly.newJdkHttpServer(new InetSocketAddress("127.0.0.1", 0))) {
             network.start();
             int port = network.address().getPort();
-            assertInstanceOf(JdbcReferenceDevEntitlementProvider.class,
+            assertInstanceOf(JdbcEntitlementProvider.class,
                     assembly.entitlementProvider());
             String key = "external-create-key-123456789";
             String body = createRequest(key, "external-session").body();
