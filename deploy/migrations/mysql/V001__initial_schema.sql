@@ -78,6 +78,14 @@ CREATE TABLE ai_trans_finalization_execution_fact (
     PRIMARY KEY (meeting_id)
 ) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
+-- MySQL 没有 PG advisory transaction lock；完整 Create 只锁既有 scope/key 行。
+-- 仅持久化原编码范围/键，不保存请求、摘要、响应或业务状态，不接入旧业务服务。
+CREATE TABLE ai_trans_idempotency_lock (
+    scope VARBINARY(2048) NOT NULL,
+    idempotency_key VARBINARY(256) NOT NULL,
+    PRIMARY KEY (scope, idempotency_key)
+) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+
 CREATE TABLE ai_trans_idempotency_record (
     subject_scope VARBINARY(2048) NOT NULL,
     idempotency_key VARBINARY(256) NOT NULL,

@@ -80,8 +80,8 @@ class MySqlInitialBaselineSchemaAuthorIntegrationTest {
             }
             try (var rows = statement.executeQuery("SELECT COUNT(*), SUM(engine='InnoDB') FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name LIKE 'ai\\_trans\\_%'")) {
                 assertTrue(rows.next());
-                assertEquals(25, rows.getInt(1));
-                assertEquals(25, rows.getInt(2));
+                assertEquals(26, rows.getInt(1));
+                assertEquals(26, rows.getInt(2));
             }
         }
         ProcessResult repeated = runInitialization(null);

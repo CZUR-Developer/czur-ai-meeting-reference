@@ -9,7 +9,9 @@
 
 `deploy/migrate.sh` 在首次启动时将 V001 建表与 `schema_migrations` 登记放入同一事务；再次启动时检查登记并跳过。Compose 自带数据库与外部 PostgreSQL 使用相同脚本，应用进程不自动建表。
 
-MySQL 初始化仅向已经存在的目标数据库新增 25 张 `ai_trans_*` 表（含登记表），不创建数据库或账号，不修改旧业务表，也不加入旧服务的迁移版本链。使用本机 `mysql` 客户端；`MYSQL_CLIENT` 可以指定已安装客户端路径。与应用使用相同的 `DATABASE_URL`、`DATABASE_USER`、`DATABASE_PASSWORD`，URL 支持 `jdbc:mysql://主机[:端口]/库名` 或 `mysql://主机[:端口]/库名`，当前入口支持主机名／IPv4；JDBC 查询参数由应用消费，初始化客户端自身固定 UTF-8 和 UTC。连接地址和 Secret 不输出到脚本日志。
+MySQL 初始化仅向已经存在的目标数据库新增 26 张 `ai_trans_*` 表（含登记表和同键事务辅助锁表），不创建数据库或账号，不修改旧业务表，也不加入旧服务的迁移版本链。使用本机 `mysql` 客户端；`MYSQL_CLIENT` 可以指定已安装客户端路径。与应用使用相同的 `DATABASE_URL`、`DATABASE_USER`、`DATABASE_PASSWORD`，URL 支持 `jdbc:mysql://主机[:端口]/库名` 或 `mysql://主机[:端口]/库名`，当前入口支持主机名／IPv4；JDBC 查询参数由应用消费，初始化客户端自身固定 UTF-8 和 UTC。连接地址和 Secret 不输出到脚本日志。
+
+`ai_trans_idempotency_lock` 仅为 MySQL 的完整 Create 事务持久序列化原编码 `scope`/`idempotency_key`：二元主键使用完整 UTF-8 字节（2048/256 字节），先 no-op 插入，再在调用方事务内 `FOR UPDATE`。它不保存请求/响应或业务状态，不做后台清理、恢复平台或在线迁移；首次未发布版本仍并入同一 MySQL V001。PostgreSQL 保留原 advisory transaction lock 和原 V001，不要求这张辅助表。
 
 ```bash
 export DATABASE_URL='jdbc:mysql://127.0.0.1:3306/meeting_example'

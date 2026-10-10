@@ -45,15 +45,22 @@ public final class JdbcCompleteMeetingCreationUnitOfWork
         implements CompleteMeetingCreationUnitOfWork {
     private static final Logger LOGGER = Logger.getLogger(
             JdbcCompleteMeetingCreationUnitOfWork.class.getName());
-    private static final String LOCK_SCOPE_KEY_SQL =
-            "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))";
-
     private final DataSource dataSource;
     private final Clock clock;
+    private final JdbcDatabaseEngine engine;
 
     public JdbcCompleteMeetingCreationUnitOfWork(DataSource dataSource, Clock clock) {
+        this(dataSource, JdbcDatabaseEngine.POSTGRESQL, clock);
+    }
+
+    public JdbcCompleteMeetingCreationUnitOfWork(JdbcDatabaseContext database, Clock clock) {
+        this(database.dataSource(), database.engine(), clock);
+    }
+
+    private JdbcCompleteMeetingCreationUnitOfWork(DataSource dataSource, JdbcDatabaseEngine engine, Clock clock) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
         this.clock = Objects.requireNonNull(clock, "clock");
+        this.engine = Objects.requireNonNull(engine, "engine");
     }
 
     /** 仅提交已经组装完成的确定性事实；不调用任何外部 Provider。 */
@@ -77,8 +84,8 @@ public final class JdbcCompleteMeetingCreationUnitOfWork
             transactionStarted = true;
 
             phase = Phase.KEY_LOCK;
-            lockScopeKey(connection, scope, key);
-            JdbcCreateMeetingFactStore facts = new JdbcCreateMeetingFactStore(connection);
+            JdbcIdempotencyLock.acquire(connection, engine, scope, key);
+            JdbcCreateMeetingFactStore facts = new JdbcCreateMeetingFactStore(connection, engine);
             phase = Phase.FACT_PROBE;
             Result previous = replayIfPresent(facts, scope, key, request);
             if (previous != null) {
@@ -90,7 +97,7 @@ public final class JdbcCompleteMeetingCreationUnitOfWork
             UsageReservation supplied = request.reserveResult().reservation();
             Optional<JdbcUsageReservationStore.LockedReservation> lockedOptional =
                     JdbcUsageReservationStore.lockReservationForOwnedCreation(
-                            connection, request.deploymentScope(), request.subjectScope(),
+                            connection, engine, request.deploymentScope(), request.subjectScope(),
                             supplied.reservationId());
             if (lockedOptional.isEmpty()) {
                 rollbackConfirmed = rollbackQuietly(connection);
@@ -108,7 +115,7 @@ public final class JdbcCompleteMeetingCreationUnitOfWork
 
             phase = Phase.RESERVE_RESULT_READ;
             JdbcUsageReservationStore.LockedReservation locked = lockedOptional.get();
-            Failure validation = validateStableReserve(connection, request, locked.reservation());
+            Failure validation = validateStableReserve(connection, engine, request, locked.reservation());
             if (validation != null) {
                 rollbackConfirmed = rollbackQuietly(connection);
                 return validation;
@@ -141,13 +148,21 @@ public final class JdbcCompleteMeetingCreationUnitOfWork
                     request.reserveResult().grantExpiresAt(), current.reservationId(),
                     profile.profileId(), profile.profileRevision(), at).snapshot();
 
+            // MySQL 的双向外键即时检查：先插入引用已存在预占的 Meeting，再条件绑定。
+            // PG 保留原延迟外键路径的 bind -> Meeting 顺序，不复制业务状态机。
+            if (engine == JdbcDatabaseEngine.MYSQL) {
+                phase = Phase.MEETING_INSERT;
+                JdbcMeetingRepository.insertOwned(connection, engine, meeting);
+            }
             phase = Phase.RESERVATION_BIND;
-            if (!JdbcUsageReservationStore.bindForOwnedMeeting(connection, current, at)) {
+            if (!JdbcUsageReservationStore.bindForOwnedMeeting(connection, engine, current, at)) {
                 rollbackConfirmed = rollbackQuietly(connection);
                 return failure(ErrorCode.INTERNAL, false);
             }
-            phase = Phase.MEETING_INSERT;
-            JdbcMeetingRepository.insertOwned(connection, meeting);
+            if (engine == JdbcDatabaseEngine.POSTGRESQL) {
+                phase = Phase.MEETING_INSERT;
+                JdbcMeetingRepository.insertOwned(connection, engine, meeting);
+            }
             phase = Phase.FACT_INSERT;
             CreateMeetingFactStore.PersistResult persisted = facts.persist(
                     new CreateMeetingFactStore.Record(scope, key,
@@ -164,7 +179,7 @@ public final class JdbcCompleteMeetingCreationUnitOfWork
             }
             phase = Phase.OUTBOX_APPEND;
             OutboxStore.AppendResult append = JdbcOutboxStore.append(
-                    connection, MeetingCommandEventFactory.meetingCreated(meeting, at));
+                    connection, engine, MeetingCommandEventFactory.meetingCreated(meeting, at));
             if (append.status() != OutboxStore.AppendStatus.APPENDED) {
                 rollbackConfirmed = rollbackQuietly(connection);
                 return failure(ErrorCode.INTERNAL, false);
@@ -196,11 +211,12 @@ public final class JdbcCompleteMeetingCreationUnitOfWork
             if (transactionStarted) {
                 rollbackConfirmed = rollbackQuietly(connection);
             }
-            if (phase == Phase.MEETING_INSERT && "23505".equals(failure.getSQLState())) {
+            if (phase == Phase.MEETING_INSERT && JdbcSqlErrors.isDuplicate(engine, failure)) {
                 return loggedFailure(ErrorCode.MEETING_CONFLICT, false, phase,
                         failure.getSQLState());
             }
-            ErrorCode code = isTemporaryStorageFailure(failure)
+            ErrorCode code = (JdbcSqlErrors.isTransientTransaction(engine, failure)
+                    || isTemporaryStorageFailure(failure))
                     ? ErrorCode.STORAGE_UNAVAILABLE : ErrorCode.INTERNAL;
             return loggedFailure(code, code == ErrorCode.STORAGE_UNAVAILABLE,
                     phase, failure.getSQLState());
@@ -239,11 +255,11 @@ public final class JdbcCompleteMeetingCreationUnitOfWork
     }
 
     private static Failure validateStableReserve(
-            Connection connection, CreateRequest request, UsageReservation current)
+            Connection connection, JdbcDatabaseEngine engine, CreateRequest request, UsageReservation current)
             throws SQLException {
         UsageOperationResult supplied = request.reserveResult();
         Optional<JdbcUsageReservationStore.UsageOperationRow> rowOptional =
-                JdbcUsageReservationStore.findOperation(connection,
+                JdbcUsageReservationStore.findOperationCurrent(connection, engine,
                         supplied.deploymentScope(), supplied.subjectScope(),
                         supplied.operationScope(), supplied.idempotencyKey());
         if (rowOptional.isEmpty()) {
@@ -289,16 +305,6 @@ public final class JdbcCompleteMeetingCreationUnitOfWork
             return failure(ErrorCode.INTERNAL, false);
         }
         return null;
-    }
-
-    private static void lockScopeKey(Connection connection, String scope, String key)
-            throws SQLException {
-        // 长度前缀消除字符串拼接歧义。hash 碰撞只会多串行化，不影响 V013 唯一性。
-        String lockName = scope.length() + ":" + scope + key.length() + ":" + key;
-        try (PreparedStatement statement = connection.prepareStatement(LOCK_SCOPE_KEY_SQL)) {
-            statement.setString(1, lockName);
-            statement.execute();
-        }
     }
 
     private static boolean sameDigest(String left, String right) {

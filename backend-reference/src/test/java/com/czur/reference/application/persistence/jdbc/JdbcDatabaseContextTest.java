@@ -42,12 +42,15 @@ class JdbcDatabaseContextTest {
     @Test
     void mapsOnlyCurrentBaselineTablesToFixedMysqlPrefix() {
         Set<String> postgres = Arrays.stream(JdbcDatabaseTable.values())
+                .filter(table -> table.requiredFor(JdbcDatabaseEngine.POSTGRESQL))
                 .map(table -> table.physicalName(JdbcDatabaseEngine.POSTGRESQL)).collect(Collectors.toSet());
         Set<String> mysql = Arrays.stream(JdbcDatabaseTable.values())
                 .map(table -> table.physicalName(JdbcDatabaseEngine.MYSQL)).collect(Collectors.toSet());
 
         assertEquals(25, postgres.size());
-        assertEquals(25, mysql.size());
+        assertEquals(26, mysql.size());
+        assertFalse(JdbcDatabaseTable.IDEMPOTENCY_LOCK.requiredFor(JdbcDatabaseEngine.POSTGRESQL));
+        assertEquals("ai_trans_idempotency_lock", JdbcDatabaseTable.IDEMPOTENCY_LOCK.physicalName(JdbcDatabaseEngine.MYSQL));
         assertTrue(mysql.stream().allMatch(name -> name.startsWith("ai_trans_")));
         assertEquals("schema_migrations", JdbcDatabaseTable.SCHEMA_MIGRATIONS.physicalName(JdbcDatabaseEngine.POSTGRESQL));
         assertEquals("ai_trans_schema_migrations", JdbcDatabaseTable.SCHEMA_MIGRATIONS.physicalName(JdbcDatabaseEngine.MYSQL));

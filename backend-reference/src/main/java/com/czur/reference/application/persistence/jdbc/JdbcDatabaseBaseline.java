@@ -63,6 +63,7 @@ final class JdbcDatabaseBaseline {
     private static boolean hasRequiredTables(Connection connection, JdbcDatabaseEngine engine)
             throws SQLException {
         List<String> tables = Arrays.stream(JdbcDatabaseTable.values())
+                .filter(table -> table.requiredFor(engine))
                 .map(table -> table.physicalName(engine)).toList();
         Set<String> missing = new HashSet<>(tables);
         String placeholders = String.join(",", java.util.Collections.nCopies(tables.size(), "?"));

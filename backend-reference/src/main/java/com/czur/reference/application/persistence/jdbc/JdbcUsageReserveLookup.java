@@ -28,9 +28,19 @@ public final class JdbcUsageReserveLookup implements UsageReserveLookup {
             JdbcUsageReserveLookup.class.getName());
 
     private final DataSource dataSource;
+    private final JdbcDatabaseEngine engine;
 
     public JdbcUsageReserveLookup(DataSource dataSource) {
+        this(dataSource, JdbcDatabaseEngine.POSTGRESQL);
+    }
+
+    public JdbcUsageReserveLookup(JdbcDatabaseContext database) {
+        this(database.dataSource(), database.engine());
+    }
+
+    private JdbcUsageReserveLookup(DataSource dataSource, JdbcDatabaseEngine engine) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
+        this.engine = Objects.requireNonNull(engine, "engine");
     }
 
     @Override
@@ -41,7 +51,7 @@ public final class JdbcUsageReserveLookup implements UsageReserveLookup {
             connection = dataSource.getConnection();
             Optional<JdbcUsageReservationStore.UsageOperationRow> stored =
                     JdbcUsageReservationStore.findOperation(
-                            connection,
+                            connection, engine,
                             request.deploymentScope(),
                             request.subjectScope(),
                             UsageOperationScopes.RESERVE,
@@ -91,8 +101,8 @@ public final class JdbcUsageReserveLookup implements UsageReserveLookup {
         }
     }
 
-    private static Result fromSqlFailure(SQLException failure) {
-        JdbcReadLookupSupport.FailureKind kind = JdbcReadLookupSupport.classify(failure);
+    private Result fromSqlFailure(SQLException failure) {
+        JdbcReadLookupSupport.FailureKind kind = JdbcReadLookupSupport.classify(engine, failure);
         if (kind == JdbcReadLookupSupport.FailureKind.INCONSISTENT) {
             return logged(new Inconsistent(InconsistencyReason.STORED_RESULT_INVALID), failure);
         }

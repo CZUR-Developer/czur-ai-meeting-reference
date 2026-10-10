@@ -29,10 +29,17 @@ final class JdbcReadLookupSupport {
      * 重试。其余 SQL 错误仍是不可用，但不能无依据承诺重试有效。</p>
      */
     static FailureKind classify(SQLException failure) {
+        return classify(JdbcDatabaseEngine.POSTGRESQL, failure);
+    }
+
+    static FailureKind classify(JdbcDatabaseEngine engine, SQLException failure) {
         Objects.requireNonNull(failure, "failure");
         String sqlState = failure.getSQLState();
         if (sqlState != null && sqlState.startsWith("22")) {
             return FailureKind.INCONSISTENT;
+        }
+        if (JdbcSqlErrors.isTransientTransaction(engine, failure)) {
+            return FailureKind.RETRYABLE_UNAVAILABLE;
         }
         if (failure instanceof SQLTransientException
                 || failure instanceof SQLRecoverableException) {

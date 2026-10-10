@@ -125,9 +125,19 @@ public final class JdbcOutboxStore implements OutboxStore {
             """;
 
     private final DataSource dataSource;
+    private final JdbcDatabaseEngine engine;
 
     public JdbcOutboxStore(DataSource dataSource) {
+        this(dataSource, JdbcDatabaseEngine.POSTGRESQL);
+    }
+
+    public JdbcOutboxStore(JdbcDatabaseContext database) {
+        this(database.dataSource(), database.engine());
+    }
+
+    private JdbcOutboxStore(DataSource dataSource, JdbcDatabaseEngine engine) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
+        this.engine = Objects.requireNonNull(engine, "engine");
     }
 
     @Override
@@ -137,6 +147,11 @@ public final class JdbcOutboxStore implements OutboxStore {
             boolean previousAutoCommit = connection.getAutoCommit();
             connection.setAutoCommit(false);
             try {
+                if (engine == JdbcDatabaseEngine.MYSQL) {
+                    AppendResult result = append(connection, engine, event);
+                    connection.commit();
+                    return result;
+                }
                 int inserted;
                 try (PreparedStatement statement = connection.prepareStatement(APPEND_SQL)) {
                     bindAppend(statement, event);
@@ -174,21 +189,46 @@ public final class JdbcOutboxStore implements OutboxStore {
      * 连接。调用方可因此把事件追加与会议快照、幂等记录放入同一事务。
      */
     static AppendResult append(Connection connection, OutboxEvent event) throws SQLException {
+        return append(connection, JdbcDatabaseEngine.POSTGRESQL, event);
+    }
+
+    static AppendResult append(Connection connection, JdbcDatabaseEngine engine, OutboxEvent event)
+            throws SQLException {
         validateAppend(event);
         Objects.requireNonNull(connection, "connection");
         int inserted;
-        try (PreparedStatement statement = connection.prepareStatement(APPEND_SQL)) {
-            bindAppend(statement, event);
+        String sql = engine == JdbcDatabaseEngine.POSTGRESQL ? APPEND_SQL : "INSERT INTO "
+                + JdbcDatabaseTable.OUTBOX_EVENT.physicalName(engine)
+                + " (event_id, aggregate_type, aggregate_id, event_type, payload,"
+                + " occurred_at, available_at, status, attempt_count)"
+                + " VALUES (?, ?, ?, ?, CAST(? AS JSON), ?, ?, 'PENDING', 0)";
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            if (engine == JdbcDatabaseEngine.POSTGRESQL) {
+                bindAppend(statement, event);
+            } else {
+                JdbcValues.setText(statement, 1, engine, event.eventId());
+                JdbcValues.setText(statement, 2, engine, event.aggregateType());
+                JdbcValues.setText(statement, 3, engine, event.aggregateId());
+                JdbcValues.setText(statement, 4, engine, event.eventType());
+                statement.setString(5, event.payload());
+                JdbcValues.setInstant(statement, 6, event.occurredAt());
+                JdbcValues.setInstant(statement, 7, event.availableAt());
+            }
             inserted = statement.executeUpdate();
+        } catch (SQLException failure) {
+            if (engine != JdbcDatabaseEngine.MYSQL || !JdbcSqlErrors.isDuplicate(engine, failure)) {
+                throw failure;
+            }
+            inserted = 0; // 此表只有 event_id 唯一轴，重读必须是 current read。
         }
-        OutboxEvent current = find(connection, event.eventId())
+        OutboxEvent current = findStored(connection, engine, event.eventId(), true).map(StoredEvent::event)
                 .orElseThrow(() -> new IllegalStateException("Outbox 插入后不可见"));
         if (inserted == 1) {
             LOGGER.log(Level.INFO, "JDBC 事务内 Outbox 事件已追加 eventId={0} eventType={1}",
                     new Object[]{event.eventId(), event.eventType()});
             return new AppendResult(AppendStatus.APPENDED, current);
         }
-        if (sameMessage(connection, event)) {
+        if (sameMessage(connection, engine, event)) {
             LOGGER.log(Level.FINE, "JDBC 事务内 Outbox 事件幂等重放 eventId={0}", event.eventId());
             return new AppendResult(AppendStatus.REPLAYED, current);
         }
@@ -200,7 +240,7 @@ public final class JdbcOutboxStore implements OutboxStore {
     public Optional<OutboxEvent> find(String eventId) {
         requireText("eventId", eventId);
         try (Connection connection = dataSource.getConnection()) {
-            return find(connection, eventId);
+            return find(connection, engine, eventId);
         } catch (SQLException failure) {
             throw fail("查询 Outbox 事件失败 eventId=" + eventId, failure);
         }
@@ -208,6 +248,7 @@ public final class JdbcOutboxStore implements OutboxStore {
 
     @Override
     public List<ClaimedEvent> claim(ClaimRequest request) {
+        requirePostgresWorker();
         Objects.requireNonNull(request, "request");
         if (request.registeredEventTypes().isEmpty()) {
             return List.of();
@@ -288,6 +329,7 @@ public final class JdbcOutboxStore implements OutboxStore {
 
     @Override
     public RenewResult renew(LeaseToken lease, Instant renewedAt, Duration leaseDuration) {
+        requirePostgresWorker();
         Objects.requireNonNull(lease, "lease");
         Objects.requireNonNull(renewedAt, "renewedAt");
         Objects.requireNonNull(leaseDuration, "leaseDuration");
@@ -361,6 +403,7 @@ public final class JdbcOutboxStore implements OutboxStore {
 
     @Override
     public PublishResult markPublished(LeaseToken lease, Instant publishedAt) {
+        requirePostgresWorker();
         Objects.requireNonNull(lease, "lease");
         Objects.requireNonNull(publishedAt, "publishedAt");
         Instant effectivePublishedAt = postgresTimestamp(publishedAt);
@@ -393,6 +436,7 @@ public final class JdbcOutboxStore implements OutboxStore {
     @Override
     public FailureResult markFailed(LeaseToken lease, Instant failedAt,
                                     Instant nextAvailableAt, String error, int maxAttempts) {
+        requirePostgresWorker();
         Objects.requireNonNull(lease, "lease");
         Objects.requireNonNull(failedAt, "failedAt");
         Objects.requireNonNull(nextAvailableAt, "nextAvailableAt");
@@ -515,10 +559,27 @@ public final class JdbcOutboxStore implements OutboxStore {
         return findStored(connection, eventId).map(StoredEvent::event);
     }
 
+    static Optional<OutboxEvent> find(Connection connection, JdbcDatabaseEngine engine, String eventId)
+            throws SQLException {
+        return findStored(connection, engine, eventId, false).map(StoredEvent::event);
+    }
+
     private static Optional<StoredEvent> findStored(Connection connection, String eventId)
             throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(FIND_SQL)) {
-            statement.setString(1, eventId);
+        return findStored(connection, JdbcDatabaseEngine.POSTGRESQL, eventId, false);
+    }
+
+    private static Optional<StoredEvent> findStored(Connection connection, JdbcDatabaseEngine engine,
+            String eventId, boolean currentRead) throws SQLException {
+        String sql = engine == JdbcDatabaseEngine.POSTGRESQL ? FIND_SQL : """
+                SELECT event_id, aggregate_type, aggregate_id, event_type, payload,
+                       occurred_at, available_at, status, attempt_count,
+                       lease_owner, lease_until, lease_token, lease_version, published_at, last_error
+                  FROM %s WHERE event_id = ?
+                """.formatted(JdbcDatabaseTable.OUTBOX_EVENT.physicalName(engine))
+                + (currentRead ? " LOCK IN SHARE MODE" : "");
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            JdbcValues.setText(statement, 1, engine, eventId);
             try (ResultSet rows = statement.executeQuery()) {
                 return rows.next() ? Optional.of(readStoredEvent(rows)) : Optional.empty();
             }
@@ -532,33 +593,53 @@ public final class JdbcOutboxStore implements OutboxStore {
      * 字符串相等判断，否则同一事件在首次写入后重放会被误判为冲突。</p>
      */
     private static boolean sameMessage(Connection connection, OutboxEvent event) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(SAME_MESSAGE_SQL)) {
-            statement.setString(1, event.aggregateType());
-            statement.setString(2, event.aggregateId());
-            statement.setString(3, event.eventType());
+        return sameMessage(connection, JdbcDatabaseEngine.POSTGRESQL, event);
+    }
+
+    private static boolean sameMessage(Connection connection, JdbcDatabaseEngine engine, OutboxEvent event)
+            throws SQLException {
+        String sql = engine == JdbcDatabaseEngine.POSTGRESQL ? SAME_MESSAGE_SQL : "SELECT aggregate_type = ?"
+                + " AND aggregate_id = ? AND event_type = ? AND payload = CAST(? AS JSON)"
+                + " AND occurred_at = ? AS same_message FROM "
+                + JdbcDatabaseTable.OUTBOX_EVENT.physicalName(engine) + " WHERE event_id = ? LOCK IN SHARE MODE";
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            JdbcValues.setText(statement, 1, engine, event.aggregateType());
+            JdbcValues.setText(statement, 2, engine, event.aggregateId());
+            JdbcValues.setText(statement, 3, engine, event.eventType());
             statement.setString(4, event.payload());
-            statement.setTimestamp(5, Timestamp.from(event.occurredAt()));
-            statement.setString(6, event.eventId());
+            if (engine == JdbcDatabaseEngine.POSTGRESQL) {
+                // 泛用PG Outbox允许纳秒输入，必须与原bindAppend的pgjdbc舍入一致。
+                statement.setTimestamp(5, Timestamp.from(event.occurredAt()));
+            } else {
+                JdbcValues.setInstant(statement, 5, event.occurredAt());
+            }
+            JdbcValues.setText(statement, 6, engine, event.eventId());
             try (ResultSet rows = statement.executeQuery()) {
                 return rows.next() && rows.getBoolean("same_message");
             }
         }
     }
 
+    private void requirePostgresWorker() {
+        if (engine != JdbcDatabaseEngine.POSTGRESQL) {
+            throw new UnsupportedOperationException("MySQL client model does not expose Outbox worker");
+        }
+    }
+
     private static OutboxEvent readEvent(ResultSet rows) throws SQLException {
         return new OutboxEvent(
-                rows.getString("event_id"),
-                rows.getString("aggregate_type"),
-                rows.getString("aggregate_id"),
-                rows.getString("event_type"),
+                JdbcValues.text(rows, "event_id"),
+                JdbcValues.text(rows, "aggregate_type"),
+                JdbcValues.text(rows, "aggregate_id"),
+                JdbcValues.text(rows, "event_type"),
                 rows.getString("payload"),
-                rows.getTimestamp("occurred_at").toInstant(),
-                rows.getTimestamp("available_at").toInstant(),
-                EventStatus.valueOf(rows.getString("status")),
+                JdbcValues.instant(rows, "occurred_at"),
+                JdbcValues.instant(rows, "available_at"),
+                EventStatus.valueOf(JdbcValues.text(rows, "status")),
                 rows.getInt("attempt_count"),
                 rows.getString("lease_owner"),
-                toInstant(rows.getTimestamp("lease_until")),
-                toInstant(rows.getTimestamp("published_at")),
+                JdbcValues.instant(rows, "lease_until"),
+                JdbcValues.instant(rows, "published_at"),
                 rows.getString("last_error"));
     }
 

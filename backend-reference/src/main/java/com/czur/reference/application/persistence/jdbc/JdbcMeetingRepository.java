@@ -266,19 +266,29 @@ public final class JdbcMeetingRepository implements MeetingRepository {
             """;
 
     private final DataSource dataSource;
+    private final JdbcDatabaseEngine engine;
 
     public JdbcMeetingRepository(DataSource dataSource) {
+        this(dataSource, JdbcDatabaseEngine.POSTGRESQL);
+    }
+
+    public JdbcMeetingRepository(JdbcDatabaseContext database) {
+        this(database.dataSource(), database.engine());
+    }
+
+    private JdbcMeetingRepository(DataSource dataSource, JdbcDatabaseEngine engine) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
+        this.engine = Objects.requireNonNull(engine, "engine");
     }
 
     @Override
     public Optional<MeetingAggregate.MeetingSnapshot> find(String meetingId) {
         requireText("meetingId", meetingId);
         try (Connection connection = dataSource.getConnection();
-             PreparedStatement statement = connection.prepareStatement(FIND_SQL)) {
-            statement.setString(1, meetingId);
+             PreparedStatement statement = connection.prepareStatement(findSql(engine, false))) {
+            JdbcValues.setText(statement, 1, engine, meetingId);
             try (ResultSet resultSet = statement.executeQuery()) {
-                return resultSet.next() ? Optional.of(readSnapshot(resultSet)) : Optional.empty();
+                return resultSet.next() ? Optional.of(readSnapshot(resultSet, engine)) : Optional.empty();
             }
         } catch (SQLException failure) {
             throw failure("查询会议快照失败 meetingId=" + meetingId, failure);
@@ -292,11 +302,13 @@ public final class JdbcMeetingRepository implements MeetingRepository {
         requireText("deploymentScope", deploymentScope);
         requireText("clientSessionId", clientSessionId);
         try (Connection connection = dataSource.getConnection();
-             PreparedStatement statement = connection.prepareStatement(FIND_BY_SCOPE_SQL)) {
-            statement.setString(1, deploymentScope);
-            statement.setString(2, clientSessionId);
+             PreparedStatement statement = connection.prepareStatement(engine == JdbcDatabaseEngine.POSTGRESQL
+                     ? FIND_BY_SCOPE_SQL : mysqlColumns(false) + " WHERE m.deployment_scope = ?"
+                     + " AND m.client_session_id = ? ORDER BY m.created_at, m.meeting_id LIMIT 1")) {
+            JdbcValues.setText(statement, 1, engine, deploymentScope);
+            JdbcValues.setText(statement, 2, engine, clientSessionId);
             try (ResultSet resultSet = statement.executeQuery()) {
-                return resultSet.next() ? Optional.of(readSnapshot(resultSet)) : Optional.empty();
+                return resultSet.next() ? Optional.of(readSnapshot(resultSet, engine)) : Optional.empty();
             }
         } catch (SQLException failure) {
             throw failure("按范围查询会议失败 deploymentScope=" + deploymentScope, failure);
@@ -305,6 +317,9 @@ public final class JdbcMeetingRepository implements MeetingRepository {
 
     @Override
     public void save(MeetingAggregate.MeetingSnapshot meeting) {
+        if (engine == JdbcDatabaseEngine.MYSQL) {
+            throw new UnsupportedOperationException("MySQL client model does not support legacy save");
+        }
         Objects.requireNonNull(meeting, "meeting");
         requireLegacySave(meeting);
         try (Connection connection = dataSource.getConnection();
@@ -348,17 +363,23 @@ public final class JdbcMeetingRepository implements MeetingRepository {
      */
     static Optional<VersionedMeeting> findVersionedForUpdate(
             Connection connection, String meetingId) throws SQLException {
+        return findVersionedForUpdate(connection, JdbcDatabaseEngine.POSTGRESQL, meetingId);
+    }
+
+    static Optional<VersionedMeeting> findVersionedForUpdate(
+            Connection connection, JdbcDatabaseEngine engine, String meetingId) throws SQLException {
         Objects.requireNonNull(connection, "connection");
         requireText("meetingId", meetingId);
         try (PreparedStatement statement = connection.prepareStatement(
-                FIND_VERSIONED_FOR_UPDATE_SQL)) {
-            statement.setString(1, meetingId);
+                engine == JdbcDatabaseEngine.POSTGRESQL ? FIND_VERSIONED_FOR_UPDATE_SQL
+                        : findSql(engine, true) + " FOR UPDATE")) {
+            JdbcValues.setText(statement, 1, engine, meetingId);
             try (ResultSet resultSet = statement.executeQuery()) {
                 if (!resultSet.next()) {
                     return Optional.empty();
                 }
                 return Optional.of(new VersionedMeeting(
-                        readSnapshot(resultSet), resultSet.getLong("aggregate_version")));
+                        readSnapshot(resultSet, engine), resultSet.getLong("aggregate_version")));
             }
         }
     }
@@ -409,22 +430,35 @@ public final class JdbcMeetingRepository implements MeetingRepository {
     static void insertOwned(
             Connection connection,
             MeetingAggregate.MeetingSnapshot meeting) throws SQLException {
+        insertOwned(connection, JdbcDatabaseEngine.POSTGRESQL, meeting);
+    }
+
+    static void insertOwned(Connection connection, JdbcDatabaseEngine engine,
+                            MeetingAggregate.MeetingSnapshot meeting) throws SQLException {
         Objects.requireNonNull(connection, "connection");
         Objects.requireNonNull(meeting, "meeting");
         requireOwnedInitialSnapshot(meeting);
-        try (PreparedStatement statement = connection.prepareStatement(INSERT_OWNED_SQL)) {
-            statement.setString(1, meeting.meetingId());
-            statement.setString(2, meeting.deploymentScope());
-            statement.setString(3, meeting.clientSessionId());
-            statement.setString(4, meeting.subjectScope());
-            statement.setString(5, meeting.grantId());
-            statement.setTimestamp(6, Timestamp.from(meeting.grantExpiresAt()));
-            statement.setString(7, meeting.usageReservationId());
-            statement.setString(8, meeting.profileId());
+        String sql = engine == JdbcDatabaseEngine.POSTGRESQL ? INSERT_OWNED_SQL : """
+                INSERT INTO %s (
+                    meeting_id, deployment_scope, client_session_id, subject_scope,
+                    grant_id, grant_expires_at, usage_reservation_id,
+                    profile_id, profile_revision, state, aggregate_version,
+                    created_at, updated_at, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, CAST('{}' AS JSON))
+                """.formatted(JdbcDatabaseTable.MEETING.physicalName(engine));
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            JdbcValues.setText(statement, 1, engine, meeting.meetingId());
+            JdbcValues.setText(statement, 2, engine, meeting.deploymentScope());
+            JdbcValues.setText(statement, 3, engine, meeting.clientSessionId());
+            JdbcValues.setText(statement, 4, engine, meeting.subjectScope());
+            JdbcValues.setText(statement, 5, engine, meeting.grantId());
+            JdbcValues.setInstant(statement, 6, meeting.grantExpiresAt());
+            JdbcValues.setText(statement, 7, engine, meeting.usageReservationId());
+            JdbcValues.setText(statement, 8, engine, meeting.profileId());
             statement.setInt(9, meeting.profileRevision());
             statement.setString(10, meeting.state().name());
-            statement.setTimestamp(11, Timestamp.from(meeting.createdAt()));
-            statement.setTimestamp(12, Timestamp.from(meeting.updatedAt()));
+            JdbcValues.setInstant(statement, 11, meeting.createdAt());
+            JdbcValues.setInstant(statement, 12, meeting.updatedAt());
             requireInserted(statement.executeUpdate());
         }
     }
@@ -441,27 +475,40 @@ public final class JdbcMeetingRepository implements MeetingRepository {
             Connection connection,
             VersionedMeeting before,
             MeetingAggregate.MeetingSnapshot after) throws SQLException {
+        updateOwnedExisting(connection, JdbcDatabaseEngine.POSTGRESQL, before, after);
+    }
+
+    static void updateOwnedExisting(Connection connection, JdbcDatabaseEngine engine,
+                                   VersionedMeeting before,
+                                   MeetingAggregate.MeetingSnapshot after) throws SQLException {
         Objects.requireNonNull(connection, "connection");
         Objects.requireNonNull(before, "before");
         Objects.requireNonNull(after, "after");
         requireOwnedExistingTransition(before.snapshot(), after);
         MeetingAggregate.MeetingSnapshot snapshot = before.snapshot();
         try (PreparedStatement statement = connection.prepareStatement(
-                UPDATE_OWNED_EXISTING_SQL)) {
+                engine == JdbcDatabaseEngine.POSTGRESQL ? UPDATE_OWNED_EXISTING_SQL : """
+                UPDATE %s
+                   SET state = ?, updated_at = ?, aggregate_version = aggregate_version + 1
+                 WHERE meeting_id = ? AND deployment_scope = ? AND client_session_id = ?
+                   AND subject_scope = ? AND grant_id = ? AND grant_expires_at = ?
+                   AND usage_reservation_id = ? AND profile_id = ? AND profile_revision = ?
+                   AND created_at = ? AND state = ? AND updated_at = ? AND aggregate_version = ?
+                """.formatted(JdbcDatabaseTable.MEETING.physicalName(engine)))) {
             statement.setString(1, after.state().name());
-            statement.setTimestamp(2, Timestamp.from(after.updatedAt()));
-            statement.setString(3, snapshot.meetingId());
-            statement.setString(4, snapshot.deploymentScope());
-            statement.setString(5, snapshot.clientSessionId());
-            statement.setString(6, snapshot.subjectScope());
-            statement.setString(7, snapshot.grantId());
-            statement.setTimestamp(8, Timestamp.from(snapshot.grantExpiresAt()));
-            statement.setString(9, snapshot.usageReservationId());
-            statement.setString(10, snapshot.profileId());
+            JdbcValues.setInstant(statement, 2, after.updatedAt());
+            JdbcValues.setText(statement, 3, engine, snapshot.meetingId());
+            JdbcValues.setText(statement, 4, engine, snapshot.deploymentScope());
+            JdbcValues.setText(statement, 5, engine, snapshot.clientSessionId());
+            JdbcValues.setText(statement, 6, engine, snapshot.subjectScope());
+            JdbcValues.setText(statement, 7, engine, snapshot.grantId());
+            JdbcValues.setInstant(statement, 8, snapshot.grantExpiresAt());
+            JdbcValues.setText(statement, 9, engine, snapshot.usageReservationId());
+            JdbcValues.setText(statement, 10, engine, snapshot.profileId());
             statement.setInt(11, snapshot.profileRevision());
-            statement.setTimestamp(12, Timestamp.from(snapshot.createdAt()));
+            JdbcValues.setInstant(statement, 12, snapshot.createdAt());
             statement.setString(13, snapshot.state().name());
-            statement.setTimestamp(14, Timestamp.from(snapshot.updatedAt()));
+            JdbcValues.setInstant(statement, 14, snapshot.updatedAt());
             statement.setLong(15, before.aggregateVersion());
             requireUpdatedOwned(statement.executeUpdate());
         }
@@ -1004,7 +1051,41 @@ public final class JdbcMeetingRepository implements MeetingRepository {
     private static final class DeletionSnapshotException extends Exception {
     }
 
+    /** MySQL 当前 V001 直接选择固定归属列，PG 历史列兼容查询保持不变。 */
+    private static String mysqlColumns(boolean versioned) {
+        // STORED 为 MySQL 5.7 生成列关键字，不复用 PG 的未引用 stored 别名。
+        return "SELECT m.meeting_id, m.deployment_scope, m.client_session_id,"
+                + " m.subject_scope, m.profile_id, m.profile_revision, m.state,"
+                + (versioned ? " m.aggregate_version," : "")
+                + " m.created_at, m.updated_at, TRUE AS ownership_columns_present,"
+                + " m.grant_id, m.grant_expires_at, m.usage_reservation_id FROM "
+                + JdbcDatabaseTable.MEETING.physicalName(JdbcDatabaseEngine.MYSQL) + " AS m";
+    }
+
+    private static String findSql(JdbcDatabaseEngine engine, boolean versioned) {
+        return engine == JdbcDatabaseEngine.POSTGRESQL ? FIND_SQL
+                : mysqlColumns(versioned) + " WHERE m.meeting_id = ?";
+    }
+
     private static MeetingAggregate.MeetingSnapshot readSnapshot(ResultSet resultSet) throws SQLException {
+        return readSnapshot(resultSet, JdbcDatabaseEngine.POSTGRESQL);
+    }
+
+    private static MeetingAggregate.MeetingSnapshot readSnapshot(
+            ResultSet resultSet, JdbcDatabaseEngine engine) throws SQLException {
+        if (engine == JdbcDatabaseEngine.MYSQL) {
+            return new MeetingAggregate.MeetingSnapshot(
+                    JdbcValues.text(resultSet, "meeting_id"),
+                    JdbcValues.text(resultSet, "deployment_scope"),
+                    JdbcValues.text(resultSet, "client_session_id"),
+                    JdbcValues.text(resultSet, "subject_scope"),
+                    JdbcValues.text(resultSet, "grant_id"),
+                    JdbcValues.instant(resultSet, "grant_expires_at"),
+                    JdbcValues.text(resultSet, "usage_reservation_id"),
+                    JdbcValues.text(resultSet, "profile_id"), resultSet.getInt("profile_revision"),
+                    MeetingState.valueOf(JdbcValues.text(resultSet, "state")),
+                    JdbcValues.instant(resultSet, "created_at"), JdbcValues.instant(resultSet, "updated_at"));
+        }
         String meetingId = resultSet.getString("meeting_id");
         String deploymentScope = resultSet.getString("deployment_scope");
         String clientSessionId = resultSet.getString("client_session_id");

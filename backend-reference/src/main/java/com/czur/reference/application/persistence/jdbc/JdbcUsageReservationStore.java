@@ -154,18 +154,46 @@ final class JdbcUsageReservationStore {
             String subjectScope,
             String operationScope,
             String idempotencyKey) throws SQLException {
+        return findOperation(connection, JdbcDatabaseEngine.POSTGRESQL,
+                deploymentScope, subjectScope, operationScope, idempotencyKey);
+    }
+
+    static Optional<UsageOperationRow> findOperation(Connection connection, JdbcDatabaseEngine engine,
+            String deploymentScope, String subjectScope, String operationScope, String idempotencyKey)
+            throws SQLException {
+        return findOperationUsing(connection, engine, deploymentScope, subjectScope,
+                operationScope, idempotencyKey, false);
+    }
+
+    /** 写事务已获得 Reservation/同键序列化锁后使用，避免 RR 等待后读取旧 snapshot。 */
+    static Optional<UsageOperationRow> findOperationCurrent(Connection connection, JdbcDatabaseEngine engine,
+            String deploymentScope, String subjectScope, String operationScope, String idempotencyKey)
+            throws SQLException {
+        return findOperationUsing(connection, engine, deploymentScope, subjectScope,
+                operationScope, idempotencyKey, engine == JdbcDatabaseEngine.MYSQL);
+    }
+
+    private static Optional<UsageOperationRow> findOperationUsing(Connection connection, JdbcDatabaseEngine engine,
+            String deploymentScope, String subjectScope, String operationScope, String idempotencyKey,
+            boolean currentRead) throws SQLException {
         Objects.requireNonNull(connection, "connection");
-        try (PreparedStatement statement = connection.prepareStatement(FIND_OPERATION_SQL)) {
-            statement.setString(1, deploymentScope);
-            statement.setString(2, subjectScope);
-            statement.setString(3, operationScope);
-            statement.setString(4, idempotencyKey);
+        String sql = engine == JdbcDatabaseEngine.POSTGRESQL ? FIND_OPERATION_SQL
+                : "SELECT request_digest, reservation_id, result_body FROM "
+                + JdbcDatabaseTable.USAGE_OPERATION.physicalName(engine)
+                + " WHERE deployment_scope = ? AND subject_scope = ?"
+                + " AND operation_scope = ? AND idempotency_key = ?"
+                + (currentRead ? " LOCK IN SHARE MODE" : "");
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            JdbcValues.setText(statement, 1, engine, deploymentScope);
+            JdbcValues.setText(statement, 2, engine, subjectScope);
+            JdbcValues.setText(statement, 3, engine, operationScope);
+            JdbcValues.setText(statement, 4, engine, idempotencyKey);
             try (ResultSet rows = statement.executeQuery()) {
                 if (!rows.next()) {
                     return Optional.empty();
                 }
                 String digest = rows.getString("request_digest");
-                String reservationId = rows.getString("reservation_id");
+                String reservationId = JdbcValues.text(rows, "reservation_id");
                 String resultBody = rows.getString("result_body");
                 if (digest == null || digest.isBlank()
                         || reservationId == null || reservationId.isBlank()
@@ -189,12 +217,24 @@ final class JdbcUsageReservationStore {
             String deploymentScope,
             String subjectScope,
             String reservationId) throws SQLException {
+        return findReserveOperationByReservation(connection, JdbcDatabaseEngine.POSTGRESQL,
+                deploymentScope, subjectScope, reservationId);
+    }
+
+    static Optional<ReserveOperationRow> findReserveOperationByReservation(
+            Connection connection, JdbcDatabaseEngine engine, String deploymentScope,
+            String subjectScope, String reservationId) throws SQLException {
         Objects.requireNonNull(connection, "connection");
         try (PreparedStatement statement = connection.prepareStatement(
-                FIND_RESERVE_OPERATION_BY_RESERVATION_SQL)) {
-            statement.setString(1, deploymentScope);
-            statement.setString(2, subjectScope);
-            statement.setString(3, reservationId);
+                engine == JdbcDatabaseEngine.POSTGRESQL ? FIND_RESERVE_OPERATION_BY_RESERVATION_SQL
+                        : "SELECT operation_scope, idempotency_key, request_digest, reservation_id, result_body FROM "
+                        + JdbcDatabaseTable.USAGE_OPERATION.physicalName(engine)
+                        + " WHERE deployment_scope = ? AND subject_scope = ? AND reservation_id = ?"
+                        + " AND operation_scope = 'usage.reserve.v1' ORDER BY idempotency_key LIMIT 2"
+                        + " LOCK IN SHARE MODE")) {
+            JdbcValues.setText(statement, 1, engine, deploymentScope);
+            JdbcValues.setText(statement, 2, engine, subjectScope);
+            JdbcValues.setText(statement, 3, engine, reservationId);
             try (ResultSet rows = statement.executeQuery()) {
                 if (!rows.next()) {
                     return Optional.empty();
@@ -223,6 +263,11 @@ final class JdbcUsageReservationStore {
      */
     static void insertReservation(Connection connection, UsageReservation reservation)
             throws SQLException {
+        insertReservation(connection, JdbcDatabaseEngine.POSTGRESQL, reservation);
+    }
+
+    static void insertReservation(Connection connection, JdbcDatabaseEngine engine, UsageReservation reservation)
+            throws SQLException {
         Objects.requireNonNull(connection, "connection");
         Objects.requireNonNull(reservation, "reservation");
         if (reservation.state() != UsageReservation.State.RESERVED
@@ -230,20 +275,29 @@ final class JdbcUsageReservationStore {
                 || reservation.version() != 0) {
             throw new IllegalArgumentException("only initial unbound reservation can be inserted");
         }
-        try (PreparedStatement statement = connection.prepareStatement(INSERT_RESERVATION_SQL)) {
-            statement.setString(1, reservation.reservationId());
-            statement.setTimestamp(2, Timestamp.from(
-                    reservation.createdAt().truncatedTo(ChronoUnit.MICROS)));
-            statement.setTimestamp(3, Timestamp.from(
-                    reservation.createdAt().truncatedTo(ChronoUnit.MICROS)));
-            statement.setString(4, reservation.deploymentScope());
-            statement.setString(5, reservation.subjectScope());
-            statement.setString(6, reservation.grantId());
-            statement.setString(7, reservation.expectedMeetingId());
+        String sql = engine == JdbcDatabaseEngine.POSTGRESQL ? INSERT_RESERVATION_SQL : """
+                INSERT INTO %s (
+                    reservation_id, meeting_id, usage_type, status, quantity, provider_ref,
+                    created_at, updated_at, record_format, deployment_scope, subject_scope,
+                    grant_id, expected_meeting_id, bound_meeting_id, bound_at, usage_unit,
+                    reserved_amount, actual_amount, expires_at, version, committed_at,
+                    cancelled_at, cancellation_reason_code, lease_owner, lease_token,
+                    lease_until, lease_version)
+                VALUES (?, NULL, NULL, 'RESERVED', NULL, NULL,
+                        ?, ?, 'V3', ?, ?, ?, ?, NULL, NULL, ?, ?, NULL, ?, 0,
+                        NULL, NULL, NULL, NULL, NULL, NULL, 0)
+                """.formatted(JdbcDatabaseTable.USAGE_RESERVATION.physicalName(engine));
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            JdbcValues.setText(statement, 1, engine, reservation.reservationId());
+            JdbcValues.setInstant(statement, 2, reservation.createdAt());
+            JdbcValues.setInstant(statement, 3, reservation.createdAt());
+            JdbcValues.setText(statement, 4, engine, reservation.deploymentScope());
+            JdbcValues.setText(statement, 5, engine, reservation.subjectScope());
+            JdbcValues.setText(statement, 6, engine, reservation.grantId());
+            JdbcValues.setText(statement, 7, engine, reservation.expectedMeetingId());
             statement.setString(8, reservation.reservedUsage().unit().name());
             statement.setBigDecimal(9, BigDecimal.valueOf(reservation.reservedUsage().amount()));
-            statement.setTimestamp(10, Timestamp.from(
-                    reservation.expiresAt().truncatedTo(ChronoUnit.MICROS)));
+            JdbcValues.setInstant(statement, 10, reservation.expiresAt());
             if (statement.executeUpdate() != 1) {
                 throw new SQLException("usage reservation insert count is not one");
             }
@@ -257,19 +311,35 @@ final class JdbcUsageReservationStore {
     static boolean insertOperation(
             Connection connection, UsageOperationResult result, Instant createdAt)
             throws SQLException {
+        return insertOperation(connection, JdbcDatabaseEngine.POSTGRESQL, result, createdAt);
+    }
+
+    static boolean insertOperation(Connection connection, JdbcDatabaseEngine engine,
+            UsageOperationResult result, Instant createdAt) throws SQLException {
         Objects.requireNonNull(connection, "connection");
         Objects.requireNonNull(result, "result");
         Objects.requireNonNull(createdAt, "createdAt");
-        try (PreparedStatement statement = connection.prepareStatement(INSERT_OPERATION_SQL)) {
-            statement.setString(1, result.deploymentScope());
-            statement.setString(2, result.subjectScope());
-            statement.setString(3, result.operationScope());
-            statement.setString(4, result.idempotencyKey());
+        String sql = engine == JdbcDatabaseEngine.POSTGRESQL ? INSERT_OPERATION_SQL : "INSERT INTO "
+                + JdbcDatabaseTable.USAGE_OPERATION.physicalName(engine)
+                + " (deployment_scope, subject_scope, operation_scope, idempotency_key,"
+                + " request_digest, reservation_id, result_body, created_at)"
+                + " VALUES (?, ?, ?, ?, ?, ?, CAST(? AS JSON), ?)";
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            JdbcValues.setText(statement, 1, engine, result.deploymentScope());
+            JdbcValues.setText(statement, 2, engine, result.subjectScope());
+            JdbcValues.setText(statement, 3, engine, result.operationScope());
+            JdbcValues.setText(statement, 4, engine, result.idempotencyKey());
             statement.setString(5, result.requestDigest());
-            statement.setString(6, result.reservation().reservationId());
+            JdbcValues.setText(statement, 6, engine, result.reservation().reservationId());
             statement.setString(7, UsageOperationResultJson.encode(result));
-            statement.setTimestamp(8, Timestamp.from(createdAt));
+            JdbcValues.setInstant(statement, 8, createdAt);
             return statement.executeUpdate() == 1;
+        } catch (SQLException failure) {
+            // 此表唯一轴仅为 operation 四元组；外键/截断错误不能当成重放。
+            if (engine == JdbcDatabaseEngine.MYSQL && JdbcSqlErrors.isDuplicate(engine, failure)) {
+                return false;
+            }
+            throw failure;
         }
     }
 
@@ -279,8 +349,14 @@ final class JdbcUsageReservationStore {
             String deploymentScope,
             String subjectScope,
             String reservationId) throws SQLException {
+        return lockReservation(connection, JdbcDatabaseEngine.POSTGRESQL,
+                deploymentScope, subjectScope, reservationId);
+    }
+
+    static Optional<UsageReservation> lockReservation(Connection connection, JdbcDatabaseEngine engine,
+            String deploymentScope, String subjectScope, String reservationId) throws SQLException {
         return lockReservationForOwnedCreation(
-                connection, deploymentScope, subjectScope, reservationId)
+                connection, engine, deploymentScope, subjectScope, reservationId)
                 .map(LockedReservation::reservation);
     }
 
@@ -321,11 +397,28 @@ final class JdbcUsageReservationStore {
             String deploymentScope,
             String subjectScope,
             String reservationId) throws SQLException {
+        return lockReservationForOwnedCreation(connection, JdbcDatabaseEngine.POSTGRESQL,
+                deploymentScope, subjectScope, reservationId);
+    }
+
+    static Optional<LockedReservation> lockReservationForOwnedCreation(
+            Connection connection, JdbcDatabaseEngine engine, String deploymentScope,
+            String subjectScope, String reservationId) throws SQLException {
         Objects.requireNonNull(connection, "connection");
-        try (PreparedStatement statement = connection.prepareStatement(LOCK_RESERVATION_SQL)) {
-            statement.setString(1, deploymentScope);
-            statement.setString(2, subjectScope);
-            statement.setString(3, reservationId);
+        String sql = engine == JdbcDatabaseEngine.POSTGRESQL ? LOCK_RESERVATION_SQL : """
+                SELECT reservation_id, deployment_scope, subject_scope, grant_id,
+                       expected_meeting_id, bound_meeting_id, bound_at, usage_unit,
+                       reserved_amount, actual_amount, created_at, expires_at, status,
+                       version, committed_at, cancelled_at, cancellation_reason_code,
+                       lease_owner, lease_token, lease_until, lease_version
+                  FROM %s
+                 WHERE deployment_scope = ? AND subject_scope = ? AND reservation_id = ?
+                   AND record_format = 'V3' FOR UPDATE
+                """.formatted(JdbcDatabaseTable.USAGE_RESERVATION.physicalName(engine));
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            JdbcValues.setText(statement, 1, engine, deploymentScope);
+            JdbcValues.setText(statement, 2, engine, subjectScope);
+            JdbcValues.setText(statement, 3, engine, reservationId);
             try (ResultSet rows = statement.executeQuery()) {
                 return rows.next() ? Optional.of(readLockedReservation(rows)) : Optional.empty();
             }
@@ -337,20 +430,31 @@ final class JdbcUsageReservationStore {
             Connection connection,
             UsageReservation previous,
             UsageReservation committed) throws SQLException {
+        return commit(connection, JdbcDatabaseEngine.POSTGRESQL, previous, committed);
+    }
+
+    static boolean commit(Connection connection, JdbcDatabaseEngine engine,
+            UsageReservation previous, UsageReservation committed) throws SQLException {
         Objects.requireNonNull(connection, "connection");
         Objects.requireNonNull(previous, "previous");
         Objects.requireNonNull(committed, "committed");
         if (committed.state() != UsageReservation.State.COMMITTED) {
             throw new IllegalArgumentException("committed snapshot is required");
         }
-        try (PreparedStatement statement = connection.prepareStatement(COMMIT_SQL)) {
+        String sql = engine == JdbcDatabaseEngine.POSTGRESQL ? COMMIT_SQL : "UPDATE "
+                + JdbcDatabaseTable.USAGE_RESERVATION.physicalName(engine)
+                + " SET status = 'COMMITTED', actual_amount = ?, committed_at = ?, version = ?, updated_at = ?,"
+                + " lease_owner = NULL, lease_token = NULL, lease_until = NULL"
+                + " WHERE deployment_scope = ? AND subject_scope = ? AND reservation_id = ?"
+                + " AND record_format = 'V3' AND status = 'RESERVED' AND bound_meeting_id IS NOT NULL AND version = ?";
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setBigDecimal(1, BigDecimal.valueOf(committed.actualUsage().amount()));
-            statement.setTimestamp(2, Timestamp.from(committed.committedAt()));
+            JdbcValues.setInstant(statement, 2, committed.committedAt());
             statement.setLong(3, committed.version());
-            statement.setTimestamp(4, Timestamp.from(committed.committedAt()));
-            statement.setString(5, previous.deploymentScope());
-            statement.setString(6, previous.subjectScope());
-            statement.setString(7, previous.reservationId());
+            JdbcValues.setInstant(statement, 4, committed.committedAt());
+            JdbcValues.setText(statement, 5, engine, previous.deploymentScope());
+            JdbcValues.setText(statement, 6, engine, previous.subjectScope());
+            JdbcValues.setText(statement, 7, engine, previous.reservationId());
             statement.setLong(8, previous.version());
             return statement.executeUpdate() == 1;
         }
@@ -361,21 +465,33 @@ final class JdbcUsageReservationStore {
             Connection connection,
             UsageReservation previous,
             UsageReservation cancelled) throws SQLException {
+        return cancel(connection, JdbcDatabaseEngine.POSTGRESQL, previous, cancelled);
+    }
+
+    static boolean cancel(Connection connection, JdbcDatabaseEngine engine,
+            UsageReservation previous, UsageReservation cancelled) throws SQLException {
         Objects.requireNonNull(connection, "connection");
         Objects.requireNonNull(previous, "previous");
         Objects.requireNonNull(cancelled, "cancelled");
         if (cancelled.state() != UsageReservation.State.CANCELLED) {
             throw new IllegalArgumentException("cancelled snapshot is required");
         }
-        try (PreparedStatement statement = connection.prepareStatement(CANCEL_SQL)) {
-            statement.setTimestamp(1, Timestamp.from(cancelled.cancelledAt()));
+        String sql = engine == JdbcDatabaseEngine.POSTGRESQL ? CANCEL_SQL : "UPDATE "
+                + JdbcDatabaseTable.USAGE_RESERVATION.physicalName(engine)
+                + " SET status = 'CANCELLED', cancelled_at = ?, cancellation_reason_code = ?, version = ?, updated_at = ?,"
+                + " lease_owner = NULL, lease_token = NULL, lease_until = NULL"
+                + " WHERE deployment_scope = ? AND subject_scope = ? AND reservation_id = ?"
+                + " AND record_format = 'V3' AND status = 'RESERVED' AND bound_meeting_id IS NULL"
+                + " AND expected_meeting_id = ? AND version = ?";
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            JdbcValues.setInstant(statement, 1, cancelled.cancelledAt());
             statement.setString(2, cancelled.cancellationReasonCode());
             statement.setLong(3, cancelled.version());
-            statement.setTimestamp(4, Timestamp.from(cancelled.cancelledAt()));
-            statement.setString(5, previous.deploymentScope());
-            statement.setString(6, previous.subjectScope());
-            statement.setString(7, previous.reservationId());
-            statement.setString(8, previous.expectedMeetingId());
+            JdbcValues.setInstant(statement, 4, cancelled.cancelledAt());
+            JdbcValues.setText(statement, 5, engine, previous.deploymentScope());
+            JdbcValues.setText(statement, 6, engine, previous.subjectScope());
+            JdbcValues.setText(statement, 7, engine, previous.reservationId());
+            JdbcValues.setText(statement, 8, engine, previous.expectedMeetingId());
             statement.setLong(9, previous.version());
             return statement.executeUpdate() == 1;
         }
@@ -449,6 +565,11 @@ final class JdbcUsageReservationStore {
             Connection connection,
             UsageReservation reservation,
             Instant bindAt) throws SQLException {
+        return bindForOwnedMeeting(connection, JdbcDatabaseEngine.POSTGRESQL, reservation, bindAt);
+    }
+
+    static boolean bindForOwnedMeeting(Connection connection, JdbcDatabaseEngine engine,
+            UsageReservation reservation, Instant bindAt) throws SQLException {
         Objects.requireNonNull(connection, "connection");
         Objects.requireNonNull(reservation, "reservation");
         Objects.requireNonNull(bindAt, "bindAt");
@@ -458,19 +579,26 @@ final class JdbcUsageReservationStore {
                     "initial unbound RESERVED snapshot is required");
         }
         try (PreparedStatement statement = connection.prepareStatement(
-                BIND_FOR_OWNED_MEETING_SQL)) {
-            statement.setString(1, reservation.expectedMeetingId());
-            statement.setTimestamp(2, Timestamp.from(bindAt));
+                engine == JdbcDatabaseEngine.POSTGRESQL ? BIND_FOR_OWNED_MEETING_SQL : "UPDATE "
+                        + JdbcDatabaseTable.USAGE_RESERVATION.physicalName(engine)
+                        + " SET bound_meeting_id = ?, bound_at = ?, version = ?, updated_at = ?,"
+                        + " lease_owner = NULL, lease_token = NULL, lease_until = NULL"
+                        + " WHERE deployment_scope = ? AND subject_scope = ? AND reservation_id = ?"
+                        + " AND record_format = 'V3' AND status = 'RESERVED' AND bound_meeting_id IS NULL AND bound_at IS NULL"
+                        + " AND expected_meeting_id = ? AND grant_id = ? AND version = ? AND expires_at > ?"
+                        + " AND (lease_until IS NULL OR lease_until <= ?)")) {
+            JdbcValues.setText(statement, 1, engine, reservation.expectedMeetingId());
+            JdbcValues.setInstant(statement, 2, bindAt);
             statement.setLong(3, reservation.version() + 1);
-            statement.setTimestamp(4, Timestamp.from(bindAt));
-            statement.setString(5, reservation.deploymentScope());
-            statement.setString(6, reservation.subjectScope());
-            statement.setString(7, reservation.reservationId());
-            statement.setString(8, reservation.expectedMeetingId());
-            statement.setString(9, reservation.grantId());
+            JdbcValues.setInstant(statement, 4, bindAt);
+            JdbcValues.setText(statement, 5, engine, reservation.deploymentScope());
+            JdbcValues.setText(statement, 6, engine, reservation.subjectScope());
+            JdbcValues.setText(statement, 7, engine, reservation.reservationId());
+            JdbcValues.setText(statement, 8, engine, reservation.expectedMeetingId());
+            JdbcValues.setText(statement, 9, engine, reservation.grantId());
             statement.setLong(10, reservation.version());
-            statement.setTimestamp(11, Timestamp.from(bindAt));
-            statement.setTimestamp(12, Timestamp.from(bindAt));
+            JdbcValues.setInstant(statement, 11, bindAt);
+            JdbcValues.setInstant(statement, 12, bindAt);
             return statement.executeUpdate() == 1;
         }
     }
@@ -536,7 +664,7 @@ final class JdbcUsageReservationStore {
     }
 
     private static String requireText(ResultSet rows, String column) throws SQLException {
-        String value = rows.getString(column);
+        String value = JdbcValues.text(rows, column);
         if (value == null || value.isBlank()) {
             throw new CorruptUsageDataException("text field is blank: " + column);
         }
@@ -544,16 +672,15 @@ final class JdbcUsageReservationStore {
     }
 
     private static Instant requireInstant(ResultSet rows, String column) throws SQLException {
-        Timestamp value = rows.getTimestamp(column);
+        Instant value = JdbcValues.instant(rows, column);
         if (value == null) {
             throw new CorruptUsageDataException("time field is null: " + column);
         }
-        return value.toInstant();
+        return value;
     }
 
     private static Instant nullableInstant(ResultSet rows, String column) throws SQLException {
-        Timestamp value = rows.getTimestamp(column);
-        return value == null ? null : value.toInstant();
+        return JdbcValues.instant(rows, column);
     }
 
     /** usage_operation 中尚未解码的摘要与稳定结果正文。 */

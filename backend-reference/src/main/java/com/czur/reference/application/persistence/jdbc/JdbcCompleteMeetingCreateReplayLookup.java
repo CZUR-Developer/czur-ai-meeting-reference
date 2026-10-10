@@ -26,10 +26,20 @@ public final class JdbcCompleteMeetingCreateReplayLookup
             JdbcCompleteMeetingCreateReplayLookup.class.getName());
 
     private final DataSource dataSource;
+    private final JdbcDatabaseEngine engine;
 
     /** @param dataSource 已完成 V013 readiness 校验的 PostgreSQL 数据源 */
     public JdbcCompleteMeetingCreateReplayLookup(DataSource dataSource) {
+        this(dataSource, JdbcDatabaseEngine.POSTGRESQL);
+    }
+
+    public JdbcCompleteMeetingCreateReplayLookup(JdbcDatabaseContext database) {
+        this(database.dataSource(), database.engine());
+    }
+
+    private JdbcCompleteMeetingCreateReplayLookup(DataSource dataSource, JdbcDatabaseEngine engine) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
+        this.engine = Objects.requireNonNull(engine, "engine");
     }
 
     @Override
@@ -38,9 +48,11 @@ public final class JdbcCompleteMeetingCreateReplayLookup
         String scope = IdempotencyScopeCodec.meetingCreateV2(
                 request.deploymentScope(), request.subjectScope());
         try (Connection connection = dataSource.getConnection()) {
+            connection.setReadOnly(true);
+            connection.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
             connection.setAutoCommit(false);
             try {
-                JdbcCreateMeetingFactStore facts = new JdbcCreateMeetingFactStore(connection);
+                JdbcCreateMeetingFactStore facts = new JdbcCreateMeetingFactStore(connection, engine);
                 Optional<String> digest = facts.probeRequestDigest(scope, request.idempotencyKey());
                 Result result;
                 if (digest.isEmpty()) {

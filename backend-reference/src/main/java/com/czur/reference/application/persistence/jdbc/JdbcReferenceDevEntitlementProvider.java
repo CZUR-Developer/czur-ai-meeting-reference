@@ -56,6 +56,7 @@ public final class JdbcReferenceDevEntitlementProvider
     private final DataSource dataSource;
     private final EntitlementPolicy policy;
     private final Clock clock;
+    private final JdbcDatabaseEngine engine;
 
     /** 保留旧构造器的类型签名；默认策略和账本行为保持一致。 */
     public JdbcReferenceDevEntitlementProvider(
@@ -76,9 +77,20 @@ public final class JdbcReferenceDevEntitlementProvider
             DataSource dataSource,
             EntitlementPolicy policy,
             Clock clock) {
+        this(dataSource, JdbcDatabaseEngine.POSTGRESQL, policy, clock);
+    }
+
+    public JdbcReferenceDevEntitlementProvider(JdbcDatabaseContext database,
+            EntitlementPolicy policy, Clock clock) {
+        this(database.dataSource(), database.engine(), policy, clock);
+    }
+
+    private JdbcReferenceDevEntitlementProvider(DataSource dataSource, JdbcDatabaseEngine engine,
+            EntitlementPolicy policy, Clock clock) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
         this.policy = Objects.requireNonNull(policy, "policy");
         this.clock = Objects.requireNonNull(clock, "clock");
+        this.engine = Objects.requireNonNull(engine, "engine");
         LOGGER.log(Level.INFO, "JDBC 会议权益 Provider 已创建");
     }
 
@@ -117,9 +129,9 @@ public final class JdbcReferenceDevEntitlementProvider
                 }
                 UsageOperationResult candidate = identity.reserveResult(
                         prepared.valueOrThrow(), request.grant());
-                JdbcUsageReservationStore.insertReservation(connection, candidate.reservation());
+                JdbcUsageReservationStore.insertReservation(connection, engine, candidate.reservation());
                 if (!JdbcUsageReservationStore.insertOperation(
-                        connection, candidate, clock.instant())) {
+                        connection, engine, candidate, clock.instant())) {
                     return rollbackAndReadWinner(connection, identity);
                 }
                 connection.commit();
@@ -164,7 +176,7 @@ public final class JdbcReferenceDevEntitlementProvider
                 }
 
                 Optional<UsageReservation> locked = JdbcUsageReservationStore.lockReservation(
-                        connection, request.deploymentScope(), request.subjectScope(),
+                        connection, engine, request.deploymentScope(), request.subjectScope(),
                         request.reservationId());
                 if (locked.isEmpty()) {
                     connection.rollback();
@@ -172,7 +184,7 @@ public final class JdbcReferenceDevEntitlementProvider
                             "COMMIT_RESERVATION_NOT_FOUND");
                 }
                 // 锁等待期间其它事务可能已经提交相同 operation；必须再次读取。
-                existing = findOperation(connection, identity);
+                existing = findOperationCurrent(connection, identity);
                 if (existing.isPresent()) {
                     EntitlementProviderResult<UsageOperationResult> replay =
                             replayOrConflict(existing.get(), identity);
@@ -192,14 +204,14 @@ public final class JdbcReferenceDevEntitlementProvider
                     return failure(EntitlementProviderError.Code.INVALID_REQUEST, false,
                             "COMMIT_USAGE_INVALID");
                 }
-                if (!JdbcUsageReservationStore.commit(connection, locked.get(), committed)) {
+                if (!JdbcUsageReservationStore.commit(connection, engine, locked.get(), committed)) {
                     connection.rollback();
                     return failure(EntitlementProviderError.Code.VERSION_CONFLICT, false,
                             "COMMIT_CAS_REJECTED");
                 }
                 UsageOperationResult candidate = identity.terminalResult(committed);
                 if (!JdbcUsageReservationStore.insertOperation(
-                        connection, candidate, clock.instant())) {
+                        connection, engine, candidate, clock.instant())) {
                     return rollbackAndReadWinner(connection, identity);
                 }
                 connection.commit();
@@ -244,14 +256,14 @@ public final class JdbcReferenceDevEntitlementProvider
                 }
 
                 Optional<UsageReservation> locked = JdbcUsageReservationStore.lockReservation(
-                        connection, request.deploymentScope(), request.subjectScope(),
+                        connection, engine, request.deploymentScope(), request.subjectScope(),
                         request.reservationId());
                 if (locked.isEmpty()) {
                     connection.rollback();
                     return failure(EntitlementProviderError.Code.RESERVATION_NOT_FOUND, false,
                             "CANCEL_RESERVATION_NOT_FOUND");
                 }
-                existing = findOperation(connection, identity);
+                existing = findOperationCurrent(connection, identity);
                 if (existing.isPresent()) {
                     EntitlementProviderResult<UsageOperationResult> replay =
                             replayOrConflict(existing.get(), identity);
@@ -277,14 +289,14 @@ public final class JdbcReferenceDevEntitlementProvider
                     return failure(EntitlementProviderError.Code.INVALID_REQUEST, false,
                             "CANCEL_REQUEST_INVALID");
                 }
-                if (!JdbcUsageReservationStore.cancel(connection, locked.get(), cancelled)) {
+                if (!JdbcUsageReservationStore.cancel(connection, engine, locked.get(), cancelled)) {
                     connection.rollback();
                     return failure(EntitlementProviderError.Code.VERSION_CONFLICT, false,
                             "CANCEL_CAS_REJECTED");
                 }
                 UsageOperationResult candidate = identity.terminalResult(cancelled);
                 if (!JdbcUsageReservationStore.insertOperation(
-                        connection, candidate, clock.instant())) {
+                        connection, engine, candidate, clock.instant())) {
                     return rollbackAndReadWinner(connection, identity);
                 }
                 connection.commit();
@@ -318,6 +330,9 @@ public final class JdbcReferenceDevEntitlementProvider
     @Override
     public EntitlementProviderResult<UsageOperationResult> cancelReservationWithLease(
             LeaseAwareCancelReservationRequest request) {
+        if (engine != JdbcDatabaseEngine.POSTGRESQL) {
+            throw new UnsupportedOperationException("MySQL client model does not expose lease cleanup");
+        }
         if (request == null) {
             return failure(EntitlementProviderError.Code.INVALID_REQUEST, false,
                     "CANCEL_LEASE_REQUEST_MISSING");
@@ -444,17 +459,24 @@ public final class JdbcReferenceDevEntitlementProvider
         return operationTime.truncatedTo(ChronoUnit.MICROS);
     }
 
-    private static Optional<JdbcUsageReservationStore.UsageOperationRow> findOperation(
+    private Optional<JdbcUsageReservationStore.UsageOperationRow> findOperation(
             Connection connection, OperationIdentity identity) throws SQLException {
         return JdbcUsageReservationStore.findOperation(
-                connection,
+                connection, engine,
                 identity.deploymentScope(),
                 identity.subjectScope(),
                 identity.operationScope(),
                 identity.idempotencyKey());
     }
 
-    private static EntitlementProviderResult<UsageOperationResult> rollbackAndReadWinner(
+    private Optional<JdbcUsageReservationStore.UsageOperationRow> findOperationCurrent(
+            Connection connection, OperationIdentity identity) throws SQLException {
+        return JdbcUsageReservationStore.findOperationCurrent(connection, engine,
+                identity.deploymentScope(), identity.subjectScope(),
+                identity.operationScope(), identity.idempotencyKey());
+    }
+
+    private EntitlementProviderResult<UsageOperationResult> rollbackAndReadWinner(
             Connection connection, OperationIdentity identity) throws SQLException {
         connection.rollback();
         Optional<JdbcUsageReservationStore.UsageOperationRow> winner =
