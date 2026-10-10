@@ -29,7 +29,6 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.temporal.ChronoUnit;
 import java.util.HexFormat;
@@ -38,7 +37,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * 客户端字幕和译文的 PostgreSQL 输入边界，复用 meeting_event 作为唯一标准事件源。
+ * 客户端字幕和译文的公共 JDBC 输入边界，复用 meeting_event 作为唯一标准事件源。
  *
  * <p>存在 meeting_client_input 行表示本场由 App 提交事件；缺行表示旧后端音频链路。
  * 首次 start 先持久登记输入来源，再复用现有 Start 协调器冻结执行事实，避免把
@@ -50,6 +49,7 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final int MAX_SUMMARY_JSON_BYTES = 256 * 1024;
     private final DataSource dataSource;
+    private final JdbcDatabaseEngine engine;
     private final RealtimeMeetingStartCoordinator startCoordinator;
     private final Clock clock;
     private final ArtifactStore artifactStore;
@@ -71,8 +71,9 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
                 }
                 Long previous;
                 try (PreparedStatement statement = connection.prepareStatement(
-                        "SELECT audio_duration_ms FROM meeting_client_input WHERE meeting_id=?")) {
-                    statement.setString(1, meetingId);
+                        "SELECT audio_duration_ms FROM " + table(JdbcDatabaseTable.MEETING_CLIENT_INPUT)
+                                + " WHERE meeting_id=?" + currentRead())) {
+                    JdbcValues.setText(statement, 1, engine, meetingId);
                     try (ResultSet rows = statement.executeQuery()) {
                         rows.next();
                         previous = rows.getObject(1, Long.class);
@@ -91,14 +92,15 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
                 }
                 long reservationVersion;
                 try (PreparedStatement statement = connection.prepareStatement("""
-                        SELECT r.version FROM meeting m JOIN usage_reservation r
+                        SELECT r.version FROM %s m JOIN %s r
                           ON r.reservation_id=m.usage_reservation_id
                          AND r.deployment_scope=m.deployment_scope
                          AND r.subject_scope=m.subject_scope
                         WHERE m.meeting_id=? AND r.bound_meeting_id=m.meeting_id
                           AND r.record_format='V3' AND r.status='RESERVED'
-                        """)) {
-                    statement.setString(1, meetingId);
+                        """.formatted(table(JdbcDatabaseTable.MEETING),
+                                table(JdbcDatabaseTable.USAGE_RESERVATION)) + currentRead())) {
+                    JdbcValues.setText(statement, 1, engine, meetingId);
                     try (ResultSet rows = statement.executeQuery()) {
                         if (!rows.next()) {
                             return rollback(connection, new Rejected(Reason.INVALID_STATE));
@@ -107,15 +109,16 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
                     }
                 }
                 try (PreparedStatement statement = connection.prepareStatement("""
-                        UPDATE meeting_client_input SET audio_duration_ms=?,
+                        UPDATE %s SET audio_duration_ms=?,
                             usage_submitted_at=?, usage_expected_version=? WHERE meeting_id=?
-                        """)) {
+                        """.formatted(table(JdbcDatabaseTable.MEETING_CLIENT_INPUT)))) {
                     statement.setLong(1, audioDurationMs);
-                    statement.setTimestamp(2, Timestamp.from(
-                            clock.instant().truncatedTo(ChronoUnit.MICROS)));
+                    JdbcValues.setInstant(statement, 2, clock.instant());
                     statement.setLong(3, reservationVersion);
-                    statement.setString(4, meetingId);
-                    statement.executeUpdate();
+                    JdbcValues.setText(statement, 4, engine, meetingId);
+                    if (statement.executeUpdate() != 1) {
+                        throw new SQLException("client usage freeze did not update one row");
+                    }
                 }
                 connection.commit();
                 LOGGER.log(Level.INFO, "客户端采音用量已冻结 durationMs={0}", audioDurationMs);
@@ -160,8 +163,9 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
                 }
                 String previous = null;
                 try (PreparedStatement statement = connection.prepareStatement(
-                        "SELECT summary_json FROM meeting_client_summary WHERE meeting_id=?")) {
-                    statement.setString(1, meetingId);
+                        "SELECT summary_json FROM " + table(JdbcDatabaseTable.MEETING_CLIENT_SUMMARY)
+                                + " WHERE meeting_id=?" + currentRead())) {
+                    JdbcValues.setText(statement, 1, engine, meetingId);
                     try (ResultSet rows = statement.executeQuery()) {
                         if (rows.next()) previous = rows.getString(1);
                     }
@@ -176,13 +180,12 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
                     return rollback(connection, new Rejected(Reason.INVALID_STATE));
                 }
                 try (PreparedStatement statement = connection.prepareStatement("""
-                        INSERT INTO meeting_client_summary
+                        INSERT INTO %s
                             (meeting_id, summary_json, submitted_at) VALUES (?, ?, ?)
-                        """)) {
-                    statement.setString(1, meetingId);
+                        """.formatted(table(JdbcDatabaseTable.MEETING_CLIENT_SUMMARY)))) {
+                    JdbcValues.setText(statement, 1, engine, meetingId);
                     statement.setString(2, content);
-                    statement.setTimestamp(3, Timestamp.from(
-                            clock.instant().truncatedTo(ChronoUnit.MICROS)));
+                    JdbcValues.setInstant(statement, 3, clock.instant());
                     statement.executeUpdate();
                 }
                 connection.commit();
@@ -207,7 +210,27 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
     public JdbcClientMeetingInputPort(DataSource dataSource,
             RealtimeMeetingStartCoordinator startCoordinator, Clock clock,
             ArtifactStore artifactStore) {
+        this(dataSource, JdbcDatabaseEngine.POSTGRESQL, startCoordinator, clock, artifactStore);
+    }
+
+    /** 使用公共唯一池和原 Start 协调器；未装配存储时仅截图不可用。 */
+    public JdbcClientMeetingInputPort(JdbcDatabaseContext database,
+            RealtimeMeetingStartCoordinator startCoordinator, Clock clock,
+            ArtifactStore artifactStore) {
+        this(database.dataSource(), database.engine(), startCoordinator, clock, artifactStore);
+    }
+
+    /** 不需要截图存储的客户端输入兼容入口。 */
+    public JdbcClientMeetingInputPort(JdbcDatabaseContext database,
+            RealtimeMeetingStartCoordinator startCoordinator, Clock clock) {
+        this(database, startCoordinator, clock, null);
+    }
+
+    private JdbcClientMeetingInputPort(DataSource dataSource, JdbcDatabaseEngine engine,
+            RealtimeMeetingStartCoordinator startCoordinator, Clock clock,
+            ArtifactStore artifactStore) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
+        this.engine = Objects.requireNonNull(engine, "engine");
         this.startCoordinator = Objects.requireNonNull(startCoordinator, "startCoordinator");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.artifactStore = artifactStore;
@@ -239,7 +262,7 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
                 if (!presentationRequested(connection, meetingId)) {
                     return rollback(connection, new Rejected(Reason.PRESENTATION_NOT_REQUESTED));
                 }
-                var metadata = new JdbcArtifactReadyMetadataStore(connection);
+                var metadata = new JdbcArtifactReadyMetadataStore(connection, engine);
                 var previous = metadata.findByArtifactId(artifactId);
                 if (previous.isPresent()) {
                     connection.rollback();
@@ -282,22 +305,25 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
         }
     }
 
-    private static boolean presentationRequested(Connection connection, String meetingId) {
-        var first = new JdbcCreateMeetingFactStore(connection)
+    private boolean presentationRequested(Connection connection, String meetingId) {
+        var first = new JdbcCreateMeetingFactStore(connection, engine)
                 .findByMeetingId(meetingId).orElse(null);
         return first != null && first.request().requestSnapshot()
                 .artifactPolicy().presentationCapture();
     }
 
-    private static int lastPresentationSequence(Connection connection, String meetingId)
+    private int lastPresentationSequence(Connection connection, String meetingId)
             throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT COALESCE(MAX(revision), 0) FROM artifact "
-                + "WHERE meeting_id=? AND artifact_type='presentation.capture'")) {
-            statement.setString(1, meetingId);
+                engine == JdbcDatabaseEngine.MYSQL
+                        ? "SELECT revision FROM " + table(JdbcDatabaseTable.ARTIFACT)
+                                + " WHERE meeting_id=? AND artifact_type='presentation.capture'"
+                                + " ORDER BY revision DESC LIMIT 1 FOR UPDATE"
+                        : "SELECT COALESCE(MAX(revision), 0) FROM artifact "
+                                + "WHERE meeting_id=? AND artifact_type='presentation.capture'")) {
+            JdbcValues.setText(statement, 1, engine, meetingId);
             try (ResultSet rows = statement.executeQuery()) {
-                rows.next();
-                return rows.getInt(1);
+                return rows.next() ? rows.getInt(1) : 0;
             }
         }
     }
@@ -366,7 +392,7 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
                         request.clientEventId());
                 if (previous != null) {
                     EventLog winner = JdbcMeetingEventLogStore.findByEventId(
-                            connection, previous.eventId()).orElse(null);
+                            connection, engine, previous.eventId()).orElse(null);
                     if (winner == null || previous.clientSequence() != request.clientSequence()
                             || !sameEvent(winner, request)) {
                         return rollback(connection, new Rejected(Reason.EVENT_CONFLICT));
@@ -378,24 +404,24 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
                     return rollback(connection, new Rejected(Reason.EVENT_CONFLICT));
                 }
                 long sequence = Math.addExact(
-                        JdbcMeetingEventLogStore.currentSequence(connection, meetingId), 1);
+                        JdbcMeetingEventLogStore.currentSequence(connection, engine, meetingId), 1);
                 String eventId = eventId(meetingId, request.clientEventId());
                 EventLog event = createEvent(meetingId, eventId, sequence,
                         clock.instant().truncatedTo(ChronoUnit.MICROS), request);
                 EventLogStore.AppendResult appended = JdbcMeetingEventLogStore.append(
-                        connection, event);
+                        connection, engine, event);
                 if (appended.status() != EventLogStore.AppendStatus.APPENDED) {
                     return rollback(connection, new Rejected(Reason.EVENT_CONFLICT));
                 }
                 try (PreparedStatement statement = connection.prepareStatement("""
-                        INSERT INTO meeting_client_event
+                        INSERT INTO %s
                             (meeting_id, client_event_id, client_sequence, event_id)
                         VALUES (?, ?, ?, ?)
-                        """)) {
-                    statement.setString(1, meetingId);
-                    statement.setString(2, request.clientEventId());
+                        """.formatted(table(JdbcDatabaseTable.MEETING_CLIENT_EVENT)))) {
+                    JdbcValues.setText(statement, 1, engine, meetingId);
+                    JdbcValues.setText(statement, 2, engine, request.clientEventId());
                     statement.setLong(3, request.clientSequence());
-                    statement.setString(4, eventId);
+                    JdbcValues.setText(statement, 4, engine, eventId);
                     statement.executeUpdate();
                 }
                 connection.commit();
@@ -413,18 +439,18 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
     }
 
     /** 能力以本场首次持久化 Create 决策为准；全局配置变动不改变既有会议。 */
-    private static boolean translationEnabled(Connection connection, String meetingId) {
+    private boolean translationEnabled(Connection connection, String meetingId) {
         return capabilityEnabled(connection, meetingId, CapabilityIds.TRANSLATION_REALTIME);
     }
 
-    private static boolean speakerEnabled(Connection connection, String meetingId) {
+    private boolean speakerEnabled(Connection connection, String meetingId) {
         return capabilityEnabled(connection, meetingId,
                 CapabilityIds.SPEAKER_DIARIZATION_SESSION);
     }
 
-    private static boolean capabilityEnabled(Connection connection, String meetingId,
+    private boolean capabilityEnabled(Connection connection, String meetingId,
             String capability) {
-        var first = new JdbcCreateMeetingFactStore(connection)
+        var first = new JdbcCreateMeetingFactStore(connection, engine)
                 .findByMeetingId(meetingId).orElse(null);
         if (first == null || !first.request().requestSnapshot().requestedCapabilities()
                 .contains(capability)) return false;
@@ -472,12 +498,11 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
                 }
                 if (!alreadyClient) {
                     try (PreparedStatement statement = connection.prepareStatement("""
-                            INSERT INTO meeting_client_input (meeting_id, started_at)
+                            INSERT INTO %s (meeting_id, started_at)
                             VALUES (?, ?)
-                            """)) {
-                        statement.setString(1, meetingId);
-                        statement.setTimestamp(2, Timestamp.from(
-                                clock.instant().truncatedTo(ChronoUnit.MICROS)));
+                            """.formatted(table(JdbcDatabaseTable.MEETING_CLIENT_INPUT)))) {
+                        JdbcValues.setText(statement, 1, engine, meetingId);
+                        JdbcValues.setInstant(statement, 2, clock.instant());
                         statement.executeUpdate();
                     }
                 }
@@ -494,17 +519,18 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
         }
     }
 
-    private static MeetingRow lockMeeting(Connection connection, String meetingId)
+    private MeetingRow lockMeeting(Connection connection, String meetingId)
             throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
-                SELECT deployment_scope, subject_scope, state FROM meeting
+                SELECT deployment_scope, subject_scope, state FROM %s
                 WHERE meeting_id = ? FOR UPDATE
-                """)) {
-            statement.setString(1, meetingId);
+                """.formatted(table(JdbcDatabaseTable.MEETING)))) {
+            JdbcValues.setText(statement, 1, engine, meetingId);
             try (ResultSet rows = statement.executeQuery()) {
                 if (!rows.next()) return null;
-                return new MeetingRow(rows.getString(1), rows.getString(2),
-                        MeetingState.valueOf(rows.getString(3)));
+                return new MeetingRow(JdbcValues.text(rows, "deployment_scope"),
+                        JdbcValues.text(rows, "subject_scope"),
+                        MeetingState.valueOf(JdbcValues.text(rows, "state")));
             }
         }
     }
@@ -516,37 +542,41 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
                 ? null : new Rejected(Reason.ACCESS_DENIED);
     }
 
-    private static boolean clientSourceExists(Connection connection, String meetingId)
+    private boolean clientSourceExists(Connection connection, String meetingId)
             throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT 1 FROM meeting_client_input WHERE meeting_id=?")) {
-            statement.setString(1, meetingId);
+                "SELECT 1 FROM " + table(JdbcDatabaseTable.MEETING_CLIENT_INPUT)
+                        + " WHERE meeting_id=?" + currentRead())) {
+            JdbcValues.setText(statement, 1, engine, meetingId);
             try (ResultSet rows = statement.executeQuery()) { return rows.next(); }
         }
     }
 
-    private static ClientEventRow findClientEvent(Connection connection, String meetingId,
+    private ClientEventRow findClientEvent(Connection connection, String meetingId,
             String clientEventId) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
-                SELECT client_sequence, event_id FROM meeting_client_event
+                SELECT client_sequence, event_id FROM %s
                 WHERE meeting_id=? AND client_event_id=?
-                """)) {
-            statement.setString(1, meetingId);
-            statement.setString(2, clientEventId);
+                """.formatted(table(JdbcDatabaseTable.MEETING_CLIENT_EVENT)) + currentRead())) {
+            JdbcValues.setText(statement, 1, engine, meetingId);
+            JdbcValues.setText(statement, 2, engine, clientEventId);
             try (ResultSet rows = statement.executeQuery()) {
-                return rows.next() ? new ClientEventRow(rows.getLong(1), rows.getString(2)) : null;
+                return rows.next() ? new ClientEventRow(rows.getLong(1),
+                        JdbcValues.text(rows, "event_id")) : null;
             }
         }
     }
 
-    private static long lastClientSequence(Connection connection, String meetingId)
+    private long lastClientSequence(Connection connection, String meetingId)
             throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT COALESCE(MAX(client_sequence), 0) FROM meeting_client_event WHERE meeting_id=?")) {
-            statement.setString(1, meetingId);
+                engine == JdbcDatabaseEngine.MYSQL
+                        ? "SELECT client_sequence FROM " + table(JdbcDatabaseTable.MEETING_CLIENT_EVENT)
+                                + " WHERE meeting_id=? ORDER BY client_sequence DESC LIMIT 1 FOR UPDATE"
+                        : "SELECT COALESCE(MAX(client_sequence), 0) FROM meeting_client_event WHERE meeting_id=?")) {
+            JdbcValues.setText(statement, 1, engine, meetingId);
             try (ResultSet rows = statement.executeQuery()) {
-                rows.next();
-                return rows.getLong(1);
+                return rows.next() ? rows.getLong(1) : 0;
             }
         }
     }
@@ -561,6 +591,15 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
         } catch (NoSuchAlgorithmException failure) {
             throw new IllegalStateException("SHA-256 unavailable", failure);
         }
+    }
+
+    private String table(JdbcDatabaseTable table) {
+        return table.physicalName(engine);
+    }
+
+    /** 本类所有决定性读取都在 Meeting 行锁之后；MySQL 明确使用当前读。 */
+    private String currentRead() {
+        return engine == JdbcDatabaseEngine.MYSQL ? " FOR UPDATE" : "";
     }
 
     private static Rejected rollback(Connection connection, Rejected rejected)

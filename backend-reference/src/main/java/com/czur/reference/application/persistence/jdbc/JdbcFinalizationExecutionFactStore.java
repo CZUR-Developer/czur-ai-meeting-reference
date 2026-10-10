@@ -40,23 +40,30 @@ final class JdbcFinalizationExecutionFactStore
                 'search_path', format('%I, pg_temp', current_schema()), TRUE)
             """;
     private static final String FIND_SQL = """
-            SELECT meeting_id, canonical_json, execution_fact_json::text AS jsonb_text,
+            SELECT meeting_id, canonical_json, %s AS jsonb_text,
                    content_sha256
-              FROM finalization_execution_fact
+              FROM %s
              WHERE meeting_id = ?
             """;
     private static final String INSERT_SQL = """
-            INSERT INTO finalization_execution_fact (
+            INSERT INTO %s (
                 meeting_id, canonical_json, execution_fact_json, content_sha256)
-            VALUES (?, ?, ?::jsonb, ?)
-            ON CONFLICT (meeting_id) DO NOTHING
+            VALUES (?, ?, %s, ?)
+            %s
             """;
 
     private final Connection connection;
+    private final JdbcDatabaseEngine engine;
 
     /** 绑定调用方当前连接；构造过程不获取或释放连接。 */
     JdbcFinalizationExecutionFactStore(Connection connection) {
+        this(connection, JdbcDatabaseEngine.POSTGRESQL);
+    }
+
+    /** 显式选择引擎；连接及事务仍完全由外层工作单元持有。 */
+    JdbcFinalizationExecutionFactStore(Connection connection, JdbcDatabaseEngine engine) {
         this.connection = Objects.requireNonNull(connection, "connection");
+        this.engine = Objects.requireNonNull(engine, "engine");
     }
 
     @Override
@@ -65,8 +72,8 @@ final class JdbcFinalizationExecutionFactStore
         requireExplicitTransaction();
         try {
             pinSearchPath();
-            try (PreparedStatement statement = connection.prepareStatement(FIND_SQL)) {
-                statement.setString(1, meetingId);
+            try (PreparedStatement statement = connection.prepareStatement(findSql(false))) {
+                JdbcValues.setText(statement, 1, engine, meetingId);
                 try (ResultSet rows = statement.executeQuery()) {
                     if (!rows.next()) {
                         logResult("FIND", "EMPTY");
@@ -100,12 +107,20 @@ final class JdbcFinalizationExecutionFactStore
         try {
             pinSearchPath();
             int inserted;
-            try (PreparedStatement statement = connection.prepareStatement(INSERT_SQL)) {
-                statement.setString(1, candidate.meetingId());
+            try (PreparedStatement statement = connection.prepareStatement(INSERT_SQL.formatted(
+                    JdbcDatabaseTable.FINALIZATION_EXECUTION_FACT.physicalName(engine),
+                    JdbcValues.jsonParameter(engine), engine == JdbcDatabaseEngine.MYSQL
+                            ? "" : "ON CONFLICT (meeting_id) DO NOTHING"))) {
+                JdbcValues.setText(statement, 1, engine, candidate.meetingId());
                 statement.setString(2, canonical);
                 statement.setString(3, canonical);
                 statement.setBytes(4, digest);
-                inserted = statement.executeUpdate();
+                try {
+                    inserted = statement.executeUpdate();
+                } catch (SQLException duplicate) {
+                    if (!JdbcSqlErrors.isDuplicate(engine, duplicate)) throw duplicate;
+                    inserted = 0;
+                }
             }
             StoredFact winner = selectRequired(candidate.meetingId());
             if (inserted == 1) {
@@ -135,8 +150,8 @@ final class JdbcFinalizationExecutionFactStore
     }
 
     private StoredFact selectRequired(String meetingId) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(FIND_SQL)) {
-            statement.setString(1, meetingId);
+        try (PreparedStatement statement = connection.prepareStatement(findSql(true))) {
+            JdbcValues.setText(statement, 1, engine, meetingId);
             try (ResultSet rows = statement.executeQuery()) {
                 if (!rows.next()) {
                     throw corruptData();
@@ -179,6 +194,7 @@ final class JdbcFinalizationExecutionFactStore
     }
 
     private void pinSearchPath() throws SQLException {
+        if (engine == JdbcDatabaseEngine.MYSQL) return;
         try (PreparedStatement statement = connection.prepareStatement(
                 "SELECT current_schema()")) {
             try (ResultSet rows = statement.executeQuery()) {
@@ -213,7 +229,8 @@ final class JdbcFinalizationExecutionFactStore
     }
 
     private static String requiredText(ResultSet rows, String column) throws SQLException {
-        String value = rows.getString(column);
+        String value = "meeting_id".equals(column)
+                ? JdbcValues.text(rows, column) : rows.getString(column);
         if (value == null || value.isBlank()) {
             throw corruptData();
         }
@@ -227,6 +244,13 @@ final class JdbcFinalizationExecutionFactStore
         } catch (NoSuchAlgorithmException impossible) {
             throw new IllegalStateException("SHA-256 is unavailable");
         }
+    }
+
+    /** 普通 find 可用于只读快照；插入裁决才使用 MySQL 当前读，避免 RR 旧快照。 */
+    private String findSql(boolean currentRead) {
+        return FIND_SQL.formatted(JdbcValues.jsonText(engine, "execution_fact_json"),
+                JdbcDatabaseTable.FINALIZATION_EXECUTION_FACT.physicalName(engine))
+                + (currentRead && engine == JdbcDatabaseEngine.MYSQL ? " FOR UPDATE" : "");
     }
 
     private static void requireStored(boolean condition) {

@@ -11,7 +11,6 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Timestamp;
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
 import java.nio.charset.CharacterCodingException;
@@ -50,14 +49,14 @@ final class JdbcArtifactReadyMetadataStore implements ArtifactReadyMetadataStore
             SELECT artifact_id, meeting_id, artifact_type, media_type, language,
                    revision, intent_id, storage_binding, content_size, content_checksum,
                    recorded_at
-              FROM artifact
+              FROM %s
              WHERE artifact_id = ?
             """;
     private static final String FIND_BY_MEETING_ID_SQL = """
             SELECT artifact_id, meeting_id, artifact_type, media_type, language,
                    revision, intent_id, storage_binding, content_size, content_checksum,
                    recorded_at
-              FROM artifact
+              FROM %s
              WHERE meeting_id = ?
              ORDER BY artifact_id
             """;
@@ -65,25 +64,32 @@ final class JdbcArtifactReadyMetadataStore implements ArtifactReadyMetadataStore
             SELECT artifact_id, meeting_id, artifact_type, media_type, language,
                    revision, intent_id, storage_binding, content_size, content_checksum,
                    recorded_at
-              FROM artifact
+              FROM %s
              WHERE artifact_id = ?
                 OR (meeting_id = ? AND artifact_type = ? AND revision = ?)
                 OR intent_id = ?
                 OR storage_binding = ?
             """;
     private static final String INSERT_SQL = """
-            INSERT INTO artifact (
+            INSERT INTO %s (
                 artifact_id, meeting_id, artifact_type, media_type, language,
                 revision, intent_id, storage_binding, content_size, content_checksum)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT DO NOTHING
+            %s
             """;
 
     private final Connection connection;
+    private final JdbcDatabaseEngine engine;
 
     /** 绑定调用方当前连接；构造过程不获取或释放连接。 */
     JdbcArtifactReadyMetadataStore(Connection connection) {
+        this(connection, JdbcDatabaseEngine.POSTGRESQL);
+    }
+
+    /** 截图和后续结果收口共用同一元数据原语，不接管连接或事务。 */
+    JdbcArtifactReadyMetadataStore(Connection connection, JdbcDatabaseEngine engine) {
         this.connection = Objects.requireNonNull(connection, "connection");
+        this.engine = Objects.requireNonNull(engine, "engine");
     }
 
     @Override
@@ -94,8 +100,8 @@ final class JdbcArtifactReadyMetadataStore implements ArtifactReadyMetadataStore
         try {
             pinSearchPath();
             try (PreparedStatement statement = connection.prepareStatement(
-                    FIND_BY_ARTIFACT_ID_SQL)) {
-                statement.setString(1, artifactId);
+                    FIND_BY_ARTIFACT_ID_SQL.formatted(table()))) {
+                JdbcValues.setText(statement, 1, engine, artifactId);
                 try (ResultSet rows = statement.executeQuery()) {
                     if (!rows.next()) {
                         logResult("FIND", "EMPTY");
@@ -127,8 +133,8 @@ final class JdbcArtifactReadyMetadataStore implements ArtifactReadyMetadataStore
         try {
             pinSearchPath();
             try (PreparedStatement statement = connection.prepareStatement(
-                    FIND_BY_MEETING_ID_SQL)) {
-                statement.setString(1, meetingId);
+                    FIND_BY_MEETING_ID_SQL.formatted(table()))) {
+                JdbcValues.setText(statement, 1, engine, meetingId);
                 try (ResultSet rows = statement.executeQuery()) {
                     List<ArtifactReadyMetadataStore.ReadyMetadata> result =
                             new ArrayList<>();
@@ -169,11 +175,12 @@ final class JdbcArtifactReadyMetadataStore implements ArtifactReadyMetadataStore
         try {
             pinSearchPath();
             int inserted;
-            try (PreparedStatement statement = connection.prepareStatement(INSERT_SQL)) {
+            try (PreparedStatement statement = connection.prepareStatement(INSERT_SQL.formatted(
+                    table(), engine == JdbcDatabaseEngine.MYSQL ? "" : "ON CONFLICT DO NOTHING"))) {
                 WriteIntentSpec spec = candidate.intent().spec();
-                statement.setString(1, spec.artifactId());
-                statement.setString(2, spec.meetingId());
-                statement.setString(3, spec.artifactType());
+                JdbcValues.setText(statement, 1, engine, spec.artifactId());
+                JdbcValues.setText(statement, 2, engine, spec.meetingId());
+                JdbcValues.setText(statement, 3, engine, spec.artifactType());
                 statement.setString(4, spec.mediaType());
                 if (spec.language() == null) {
                     statement.setNull(5, java.sql.Types.VARCHAR);
@@ -181,11 +188,16 @@ final class JdbcArtifactReadyMetadataStore implements ArtifactReadyMetadataStore
                     statement.setString(5, spec.language());
                 }
                 statement.setInt(6, spec.revision());
-                statement.setString(7, candidate.intent().intentId());
-                statement.setString(8, candidate.intent().binding().value());
+                JdbcValues.setText(statement, 7, engine, candidate.intent().intentId());
+                JdbcValues.setText(statement, 8, engine, candidate.intent().binding().value());
                 statement.setLong(9, candidate.content().size());
                 statement.setString(10, candidate.content().checksum());
-                inserted = statement.executeUpdate();
+                try {
+                    inserted = statement.executeUpdate();
+                } catch (SQLException duplicate) {
+                    if (!JdbcSqlErrors.isDuplicate(engine, duplicate)) throw duplicate;
+                    inserted = 0;
+                }
             }
 
             List<ArtifactReadyMetadataStore.ReadyMetadata> matches = selectMatching(candidate);
@@ -225,13 +237,16 @@ final class JdbcArtifactReadyMetadataStore implements ArtifactReadyMetadataStore
     private List<ArtifactReadyMetadataStore.ReadyMetadata> selectMatching(
             ArtifactDescriptor candidate) throws SQLException {
         WriteIntentSpec spec = candidate.intent().spec();
-        try (PreparedStatement statement = connection.prepareStatement(FIND_MATCHING_AXES_SQL)) {
-            statement.setString(1, spec.artifactId());
-            statement.setString(2, spec.meetingId());
-            statement.setString(3, spec.artifactType());
+        // 写入/重复键之后必须读取当前唯一赢家，不复用外层较早建立的 RR 快照。
+        try (PreparedStatement statement = connection.prepareStatement(
+                FIND_MATCHING_AXES_SQL.formatted(table())
+                        + (engine == JdbcDatabaseEngine.MYSQL ? " FOR UPDATE" : ""))) {
+            JdbcValues.setText(statement, 1, engine, spec.artifactId());
+            JdbcValues.setText(statement, 2, engine, spec.meetingId());
+            JdbcValues.setText(statement, 3, engine, spec.artifactType());
             statement.setInt(4, spec.revision());
-            statement.setString(5, candidate.intent().intentId());
-            statement.setString(6, candidate.intent().binding().value());
+            JdbcValues.setText(statement, 5, engine, candidate.intent().intentId());
+            JdbcValues.setText(statement, 6, engine, candidate.intent().binding().value());
             try (ResultSet rows = statement.executeQuery()) {
                 List<ArtifactReadyMetadataStore.ReadyMetadata> matches = new ArrayList<>();
                 while (rows.next()) {
@@ -261,11 +276,10 @@ final class JdbcArtifactReadyMetadataStore implements ArtifactReadyMetadataStore
                 throw corruptData();
             }
             String checksum = requiredText(rows, "content_checksum");
-            Timestamp recordedAt = rows.getTimestamp("recorded_at");
-            if (recordedAt == null) {
+            Instant recordedInstant = JdbcValues.instant(rows, "recorded_at");
+            if (recordedInstant == null) {
                 throw corruptData();
             }
-            Instant recordedInstant = recordedAt.toInstant();
             if (recordedInstant.getNano() % 1_000 != 0) {
                 throw corruptData();
             }
@@ -302,6 +316,7 @@ final class JdbcArtifactReadyMetadataStore implements ArtifactReadyMetadataStore
     }
 
     private void pinSearchPath() throws SQLException {
+        if (engine == JdbcDatabaseEngine.MYSQL) return;
         try (PreparedStatement statement = connection.prepareStatement(
                 "SELECT current_schema()")) {
             try (ResultSet rows = statement.executeQuery()) {
@@ -349,7 +364,11 @@ final class JdbcArtifactReadyMetadataStore implements ArtifactReadyMetadataStore
     }
 
     private static String requiredText(ResultSet rows, String column) throws SQLException {
-        String value = rows.getString(column);
+        String value = switch (column) {
+            case "artifact_id", "meeting_id", "artifact_type", "intent_id", "storage_binding" ->
+                    JdbcValues.text(rows, column);
+            default -> rows.getString(column);
+        };
         try {
             requireText(column, value);
         } catch (IllegalArgumentException malformed) {
@@ -360,6 +379,10 @@ final class JdbcArtifactReadyMetadataStore implements ArtifactReadyMetadataStore
 
     private static StoredFactException corruptData() {
         return new StoredFactException(FailureKind.CORRUPT_DATA);
+    }
+
+    private String table() {
+        return JdbcDatabaseTable.ARTIFACT.physicalName(engine);
     }
 
     private static StoredFactException sqlFailure(String phase, SQLException failure) {

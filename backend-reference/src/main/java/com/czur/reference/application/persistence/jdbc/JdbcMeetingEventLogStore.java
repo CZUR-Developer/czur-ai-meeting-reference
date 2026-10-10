@@ -10,6 +10,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -18,7 +19,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * 基于 PostgreSQL {@code meeting_event} 表的规范事件日志适配器。
+ * 基于公共 JDBC 固定会议表的规范事件日志适配器。
  *
  * <p>该类只实现 {@link EventLogStore} 的持久化原语，不负责主体鉴权、会议
  * 访问控制、实时推送或事件业务编排。公开方法每次使用一个独立的短事务；未来
@@ -45,21 +46,21 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
     private static final String FIND_BY_EVENT_ID_SQL = """
             SELECT meeting_id, event_sequence, event_id, event_type, canonical_payload,
                    occurred_at, spec_version, stream_id
-              FROM meeting_event
+              FROM %s
              WHERE event_id = ?
             """;
 
     /** 会议行锁是同一会议序号递增的串行化边界。 */
     private static final String LOCK_MEETING_SQL = """
             SELECT meeting_id
-              FROM meeting
+              FROM %s
              WHERE meeting_id = ?
              FOR UPDATE
             """;
 
     private static final String MAX_SEQUENCE_SQL = """
             SELECT COALESCE(MAX(event_sequence), 0)
-              FROM meeting_event
+              FROM %s
              WHERE meeting_id = ?
             """;
 
@@ -68,16 +69,16 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
      * 会在唯一键冲突后读取已经提交的原记录并按完整 envelope 分类。
      */
     private static final String INSERT_SQL = """
-            INSERT INTO meeting_event (
+            INSERT INTO %s (
                 meeting_id, event_sequence, event_id, event_type, payload,
                 canonical_payload, occurred_at, spec_version, stream_id)
-            VALUES (?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?)
-            ON CONFLICT (event_id) DO NOTHING
+            VALUES (?, ?, ?, ?, %s, ?, ?, ?, ?)
+            %s
             """;
 
     private static final String HISTORICAL_ENVELOPE_SQL = """
             SELECT 1
-             FROM meeting_event
+             FROM %s
              WHERE meeting_id = ?
                AND (spec_version IS NULL OR stream_id IS NULL OR canonical_payload IS NULL)
              LIMIT 1
@@ -86,7 +87,7 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
     private static final String PAGE_SQL = """
             SELECT meeting_id, event_sequence, event_id, event_type, canonical_payload,
                    occurred_at, spec_version, stream_id
-              FROM meeting_event
+              FROM %s
              WHERE meeting_id = ?
                AND event_sequence > ?
              ORDER BY event_sequence ASC
@@ -107,6 +108,7 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
             """;
 
     private final DataSource dataSource;
+    private final JdbcDatabaseEngine engine;
 
     /**
      * 使用已经由运行时装配和生命周期管理的数据库连接池创建事件日志适配器。
@@ -114,7 +116,17 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
      * @param dataSource 会议事实源的数据源；不能为 {@code null}
      */
     public JdbcMeetingEventLogStore(DataSource dataSource) {
+        this(dataSource, JdbcDatabaseEngine.POSTGRESQL);
+    }
+
+    /** 显式消费唯一连接上下文；标准事件和去重语义仍由原端口定义。 */
+    public JdbcMeetingEventLogStore(JdbcDatabaseContext database) {
+        this(database.dataSource(), database.engine());
+    }
+
+    private JdbcMeetingEventLogStore(DataSource dataSource, JdbcDatabaseEngine engine) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
+        this.engine = Objects.requireNonNull(engine, "engine");
     }
 
     /**
@@ -137,7 +149,7 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
             previousAutoCommit = connection.getAutoCommit();
             connection.setAutoCommit(false);
             transactionStarted = true;
-            AppendResult result = append(connection, event);
+            AppendResult result = append(connection, engine, event);
             connection.commit();
             transactionStarted = false;
             logAppend(event, result);
@@ -165,6 +177,12 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
      * 中。调用方必须确保连接仍在事务内，并负责处理本方法抛出的异常。</p>
      */
     static AppendResult append(Connection connection, EventLog event) throws SQLException {
+        return append(connection, JdbcDatabaseEngine.POSTGRESQL, event);
+    }
+
+    /** MySQL 写路径先锁 Meeting 再当前读，PG 原先重放顺序保持。 */
+    static AppendResult append(Connection connection, JdbcDatabaseEngine engine, EventLog event)
+            throws SQLException {
         Objects.requireNonNull(connection, "connection");
         Objects.requireNonNull(event, "event");
         if (connection.getAutoCommit()) {
@@ -174,21 +192,25 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
 
         // 先处理已存在 eventId 的重放，避免因为调用方重试时序号已经推进而
         // 错误地把本来可以安全重放的请求判成序号错误。
-        Optional<EventLog> existing = findByEventId(connection, event.eventId());
+        if (engine == JdbcDatabaseEngine.MYSQL && !lockMeeting(connection, engine, event.meetingId())) {
+            throw new IllegalStateException("追加事件的会议不存在");
+        }
+        Optional<EventLog> existing = findByEventId(connection, engine, event.eventId());
         if (existing.isPresent()) {
-            return classifyExisting(connection, event, existing.get());
+            return classifyExisting(connection, engine, event, existing.get());
         }
 
-        if (!lockMeeting(connection, event.meetingId())) {
+        if (engine == JdbcDatabaseEngine.POSTGRESQL
+                && !lockMeeting(connection, engine, event.meetingId())) {
             throw new IllegalStateException("追加事件的会议不存在");
         }
         // 初次查询与会议行锁之间可能有另一个事务刚提交了相同 eventId。重新
         // 查询是并发重放的必要步骤；否则该请求会把已经成功的重放误判为序号错误。
-        existing = findByEventId(connection, event.eventId());
+        existing = findByEventId(connection, engine, event.eventId());
         if (existing.isPresent()) {
-            return classifyExisting(connection, event, existing.get());
+            return classifyExisting(connection, engine, event, existing.get());
         }
-        long expectedSequence = currentSequence(connection, event.meetingId()) + 1L;
+        long expectedSequence = currentSequence(connection, engine, event.meetingId()) + 1L;
         if (event.eventSequence() != expectedSequence) {
             throw new IllegalArgumentException(
                     "eventSequence must be the next meeting sequence: expected="
@@ -196,19 +218,27 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
         }
 
         int inserted;
-        try (PreparedStatement statement = connection.prepareStatement(INSERT_SQL)) {
-            bindAppend(statement, event);
-            inserted = statement.executeUpdate();
+        try (PreparedStatement statement = connection.prepareStatement(INSERT_SQL.formatted(
+                JdbcDatabaseTable.MEETING_EVENT.physicalName(engine), JdbcValues.jsonParameter(engine),
+                engine == JdbcDatabaseEngine.MYSQL ? "" : "ON CONFLICT (event_id) DO NOTHING"))) {
+            bindAppend(statement, engine, event);
+            try {
+                inserted = statement.executeUpdate();
+            } catch (SQLException duplicate) {
+                if (!JdbcSqlErrors.isDuplicate(engine, duplicate)
+                        || findByEventId(connection, engine, event.eventId()).isEmpty()) throw duplicate;
+                inserted = 0;
+            }
         }
 
         // INSERT ... ON CONFLICT 可能是另一个事务刚刚提交了相同 eventId；无论
         // 是否插入成功，都重新读取数据库原记录，确保返回值来自事实源。
-        EventLog current = findByEventId(connection, event.eventId())
+        EventLog current = findByEventId(connection, engine, event.eventId())
                 .orElseThrow(() -> new IllegalStateException("事件插入后不可见"));
         if (inserted == 1) {
             return new AppendResult(AppendStatus.APPENDED, current);
         }
-        return classifyExisting(connection, event, current);
+        return classifyExisting(connection, engine, event, current);
     }
 
     /**
@@ -232,14 +262,18 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
         try {
             connection = dataSource.getConnection();
             previousAutoCommit = connection.getAutoCommit();
+            if (engine == JdbcDatabaseEngine.MYSQL) {
+                connection.setReadOnly(true);
+                connection.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+            }
             connection.setAutoCommit(false);
             transactionStarted = true;
-            if (hasHistoricalEnvelopeGap(connection, meetingId)) {
+            if (hasHistoricalEnvelopeGap(connection, engine, meetingId)) {
                 throw new IllegalStateException(
                         "会议事件包含无法证明协议版本、逻辑流或 canonical 正文的历史记录");
             }
             List<EventLog> rows = readPageRows(
-                    connection, meetingId, afterSequence, queryLimit);
+                    connection, engine, meetingId, afterSequence, queryLimit);
             boolean hasMore = rows.size() > limit;
             if (hasMore) {
                 rows = new ArrayList<>(rows.subList(0, limit));
@@ -272,8 +306,15 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
 
     static Optional<EventLog> findByEventId(Connection connection, String eventId)
             throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(FIND_BY_EVENT_ID_SQL)) {
-            statement.setString(1, eventId);
+        return findByEventId(connection, JdbcDatabaseEngine.POSTGRESQL, eventId);
+    }
+
+    static Optional<EventLog> findByEventId(Connection connection, JdbcDatabaseEngine engine,
+            String eventId) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(FIND_BY_EVENT_ID_SQL.formatted(
+                JdbcDatabaseTable.MEETING_EVENT.physicalName(engine))
+                + (engine == JdbcDatabaseEngine.MYSQL ? " FOR UPDATE" : ""))) {
+            JdbcValues.setText(statement, 1, engine, eventId);
             try (ResultSet rows = statement.executeQuery()) {
                 return rows.next() ? Optional.of(readEvent(rows)) : Optional.empty();
             }
@@ -281,8 +322,14 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
     }
 
     static boolean lockMeeting(Connection connection, String meetingId) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(LOCK_MEETING_SQL)) {
-            statement.setString(1, meetingId);
+        return lockMeeting(connection, JdbcDatabaseEngine.POSTGRESQL, meetingId);
+    }
+
+    static boolean lockMeeting(Connection connection, JdbcDatabaseEngine engine, String meetingId)
+            throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(LOCK_MEETING_SQL.formatted(
+                JdbcDatabaseTable.MEETING.physicalName(engine)))) {
+            JdbcValues.setText(statement, 1, engine, meetingId);
             try (ResultSet rows = statement.executeQuery()) {
                 return rows.next();
             }
@@ -290,10 +337,20 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
     }
 
     static long currentSequence(Connection connection, String meetingId) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(MAX_SEQUENCE_SQL)) {
-            statement.setString(1, meetingId);
+        return currentSequence(connection, JdbcDatabaseEngine.POSTGRESQL, meetingId);
+    }
+
+    static long currentSequence(Connection connection, JdbcDatabaseEngine engine, String meetingId)
+            throws SQLException {
+        String table = JdbcDatabaseTable.MEETING_EVENT.physicalName(engine);
+        try (PreparedStatement statement = connection.prepareStatement(engine == JdbcDatabaseEngine.MYSQL
+                ? "SELECT event_sequence FROM " + table
+                        + " WHERE meeting_id=? ORDER BY event_sequence DESC LIMIT 1 FOR UPDATE"
+                : MAX_SEQUENCE_SQL.formatted(table))) {
+            JdbcValues.setText(statement, 1, engine, meetingId);
             try (ResultSet rows = statement.executeQuery()) {
                 if (!rows.next()) {
+                    if (engine == JdbcDatabaseEngine.MYSQL) return 0;
                     throw new SQLException("无法读取会议当前事件序号");
                 }
                 return rows.getLong(1);
@@ -301,10 +358,12 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
         }
     }
 
-    private static boolean hasHistoricalEnvelopeGap(Connection connection, String meetingId)
+    private static boolean hasHistoricalEnvelopeGap(Connection connection, JdbcDatabaseEngine engine,
+            String meetingId)
             throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(HISTORICAL_ENVELOPE_SQL)) {
-            statement.setString(1, meetingId);
+        try (PreparedStatement statement = connection.prepareStatement(HISTORICAL_ENVELOPE_SQL.formatted(
+                JdbcDatabaseTable.MEETING_EVENT.physicalName(engine)))) {
+            JdbcValues.setText(statement, 1, engine, meetingId);
             try (ResultSet rows = statement.executeQuery()) {
                 return rows.next();
             }
@@ -313,12 +372,14 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
 
     private static List<EventLog> readPageRows(
             Connection connection,
+            JdbcDatabaseEngine engine,
             String meetingId,
             long afterSequence,
             int queryLimit) throws SQLException {
         List<EventLog> events = new ArrayList<>();
-        try (PreparedStatement statement = connection.prepareStatement(PAGE_SQL)) {
-            statement.setString(1, meetingId);
+        try (PreparedStatement statement = connection.prepareStatement(PAGE_SQL.formatted(
+                JdbcDatabaseTable.MEETING_EVENT.physicalName(engine)))) {
+            JdbcValues.setText(statement, 1, engine, meetingId);
             statement.setLong(2, afterSequence);
             statement.setInt(3, queryLimit);
             try (ResultSet rows = statement.executeQuery()) {
@@ -339,7 +400,7 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
      */
     static EventLog readEvent(ResultSet rows) throws SQLException {
         String specVersion = rows.getString("spec_version");
-        String streamId = rows.getString("stream_id");
+        String streamId = JdbcValues.text(rows, "stream_id");
         // V001 历史行和任何半迁移行都不能转换成 EventLog；不要用默认值猜测。
         if (specVersion == null || specVersion.isBlank()
                 || streamId == null || streamId.isBlank()) {
@@ -349,7 +410,7 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
         if (canonicalPayload == null || canonicalPayload.isBlank()) {
             throw new InvalidStoredEvent();
         }
-        Timestamp occurredAt = rows.getTimestamp("occurred_at");
+        Instant occurredAt = JdbcValues.instant(rows, "occurred_at");
         if (occurredAt == null) {
             throw new InvalidStoredEvent();
         }
@@ -360,7 +421,7 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
                     streamId,
                     requiredColumn(rows, "event_id"),
                     rows.getLong("event_sequence"),
-                    occurredAt.toInstant(),
+                    occurredAt,
                     requiredColumn(rows, "event_type"),
                     canonicalPayload);
         } catch (IllegalArgumentException | NullPointerException failure) {
@@ -370,7 +431,10 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
     }
 
     private static String requiredColumn(ResultSet rows, String column) throws SQLException {
-        String value = rows.getString(column);
+        String value = switch (column) {
+            case "meeting_id", "event_id" -> JdbcValues.text(rows, column);
+            default -> rows.getString(column);
+        };
         if (value == null || value.isBlank()) {
             throw new InvalidStoredEvent();
         }
@@ -385,8 +449,11 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
     }
 
     private static AppendResult classifyExisting(
-            Connection connection, EventLog candidate, EventLog existing) throws SQLException {
-        if (sameEnvelope(connection, candidate)) {
+            Connection connection, JdbcDatabaseEngine engine, EventLog candidate, EventLog existing)
+            throws SQLException {
+        // MySQL LONGTEXT 的 PAD SPACE 等值不等于原文精确一致；直接比较完整不可变值。
+        if (engine == JdbcDatabaseEngine.MYSQL ? existing.equals(candidate)
+                : sameEnvelope(connection, candidate)) {
             return new AppendResult(AppendStatus.REPLAYED, existing);
         }
         return new AppendResult(AppendStatus.CONFLICT, existing);
@@ -408,16 +475,17 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
         }
     }
 
-    private static void bindAppend(PreparedStatement statement, EventLog event) throws SQLException {
-        statement.setString(1, event.meetingId());
+    private static void bindAppend(PreparedStatement statement, JdbcDatabaseEngine engine,
+            EventLog event) throws SQLException {
+        JdbcValues.setText(statement, 1, engine, event.meetingId());
         statement.setLong(2, event.eventSequence());
-        statement.setString(3, event.eventId());
+        JdbcValues.setText(statement, 3, engine, event.eventId());
         statement.setString(4, event.eventType());
         statement.setString(5, event.canonicalPayloadJson());
         statement.setString(6, event.canonicalPayloadJson());
-        statement.setTimestamp(7, Timestamp.from(event.emittedAt()));
+        JdbcValues.setInstant(statement, 7, event.emittedAt());
         statement.setString(8, event.specVersion());
-        statement.setString(9, event.streamId());
+        JdbcValues.setText(statement, 9, engine, event.streamId());
     }
 
     private static void logAppend(EventLog event, AppendResult result) {

@@ -36,7 +36,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * PostgreSQL 单连接实现的会议开始 execution fact 工作单元。
+ * 公共 JDBC 单连接实现的会议开始 execution fact 工作单元。
  *
  * <p>首次路径严格按以下顺序执行：锁定 Meeting、验证归属和 Profile、锁定主
  * Reservation、反查并严格解码首次 reserve 的 AuthorizedProfileSnapshot、运行
@@ -85,12 +85,25 @@ public final class JdbcMeetingStartExecutionUnitOfWork
             MeetingState.FAILED);
 
     private final DataSource dataSource;
+    private final JdbcDatabaseEngine engine;
     private final CapabilityPlanner capabilityPlanner;
 
     public JdbcMeetingStartExecutionUnitOfWork(
             DataSource dataSource,
             CapabilityPlanner capabilityPlanner) {
+        this(dataSource, JdbcDatabaseEngine.POSTGRESQL, capabilityPlanner);
+    }
+
+    /** 复用唯一连接上下文；引擎仅选择 SQL，不改变原 Start 状态机。 */
+    public JdbcMeetingStartExecutionUnitOfWork(
+            JdbcDatabaseContext database, CapabilityPlanner capabilityPlanner) {
+        this(database.dataSource(), database.engine(), capabilityPlanner);
+    }
+
+    private JdbcMeetingStartExecutionUnitOfWork(DataSource dataSource,
+            JdbcDatabaseEngine engine, CapabilityPlanner capabilityPlanner) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
+        this.engine = Objects.requireNonNull(engine, "engine");
         this.capabilityPlanner = Objects.requireNonNull(
                 capabilityPlanner, "capabilityPlanner");
     }
@@ -129,12 +142,12 @@ public final class JdbcMeetingStartExecutionUnitOfWork
             // Meeting 锁读前固定部署 schema；若等到 execution fact Store 才固定，
             // 同名 TEMP meeting 已经可以伪造 owner/Profile 并污染重放结果。
             phase = Phase.SCHEMA_PIN;
-            pinDeploymentSchema(connection);
+            pinDeploymentSchema(connection, engine);
 
             phase = Phase.MEETING_LOCK;
             Optional<JdbcMeetingRepository.VersionedMeeting> lockedOptional =
                     JdbcMeetingRepository.findVersionedForUpdate(
-                            connection, request.meetingId());
+                            connection, engine, request.meetingId());
             if (lockedOptional.isEmpty()) {
                 return failAndRollback(
                         connection, resolution, ErrorCode.MEETING_NOT_FOUND, phase);
@@ -154,7 +167,7 @@ public final class JdbcMeetingStartExecutionUnitOfWork
 
             phase = Phase.EXECUTION_FACT_READ;
             JdbcFinalizationExecutionFactStore factStore =
-                    new JdbcFinalizationExecutionFactStore(connection);
+                    new JdbcFinalizationExecutionFactStore(connection, engine);
             Optional<FinalizationExecutionFact> existing =
                     factStore.find(request.meetingId());
 
@@ -190,7 +203,7 @@ public final class JdbcMeetingStartExecutionUnitOfWork
             // INVALID_MEETING_STATE，STARTING 却缺 fact 应稳定返回 FACT_INCONSISTENT。
             phase = Phase.AUTHORIZATION_READ;
             AuthorizationFacts authorization = readAuthorization(
-                    connection, current);
+                    connection, engine, current);
             ErrorCode authorizationFailure = validateAuthorization(
                     request, current, authorization);
             if (authorizationFailure != null) {
@@ -212,7 +225,7 @@ public final class JdbcMeetingStartExecutionUnitOfWork
             if (mode == StartMode.COMPLETE_CREATE_V2) {
                 phase = Phase.CREATE_FACT_READ;
                 Optional<CreateMeetingFactStore.Record> createFact =
-                        new JdbcCreateMeetingFactStore(connection)
+                        new JdbcCreateMeetingFactStore(connection, engine)
                                 .findByMeetingId(request.meetingId());
                 if (createFact.isEmpty()
                         || !sameCompleteCreateFacts(
@@ -287,7 +300,7 @@ public final class JdbcMeetingStartExecutionUnitOfWork
                         connection, resolution, ErrorCode.INTERNAL, phase);
             }
             JdbcMeetingRepository.updateOwnedExisting(
-                    connection, locked, aggregate.snapshot());
+                    connection, engine, locked, aggregate.snapshot());
 
             phase = Phase.COMMIT;
             commitStarted = true;
@@ -358,6 +371,7 @@ public final class JdbcMeetingStartExecutionUnitOfWork
                     JdbcReadLookupSupport.classify(failure);
             ErrorCode code = kind
                     == JdbcReadLookupSupport.FailureKind.RETRYABLE_UNAVAILABLE
+                    || JdbcSqlErrors.isTransientTransaction(engine, failure)
                     ? ErrorCode.STORAGE_UNAVAILABLE : ErrorCode.INTERNAL;
             return loggedFailure(
                     code, phase, JdbcReadLookupSupport.safeSqlState(failure));
@@ -381,13 +395,14 @@ public final class JdbcMeetingStartExecutionUnitOfWork
      */
     private static AuthorizationFacts readAuthorization(
             Connection connection,
+            JdbcDatabaseEngine engine,
             MeetingAggregate.MeetingSnapshot meeting) throws SQLException {
         if (meeting.usageReservationId() == null) {
             return AuthorizationFacts.missing();
         }
         Optional<JdbcUsageReservationStore.LockedReservation> reservation =
                 JdbcUsageReservationStore.lockReservationForOwnedCreation(
-                        connection,
+                        connection, engine,
                         meeting.deploymentScope(),
                         meeting.subjectScope(),
                         meeting.usageReservationId());
@@ -396,7 +411,7 @@ public final class JdbcMeetingStartExecutionUnitOfWork
         }
         Optional<JdbcUsageReservationStore.ReserveOperationRow> operation =
                 JdbcUsageReservationStore.findReserveOperationByReservation(
-                        connection,
+                        connection, engine,
                         meeting.deploymentScope(),
                         meeting.subjectScope(),
                         meeting.usageReservationId());
@@ -531,7 +546,9 @@ public final class JdbcMeetingStartExecutionUnitOfWork
      * {@code set_config(..., true)} 把部署 schema 放在临时 schema 前面。设置随
      * commit/rollback 自动回收，不会污染连接池中的后续借用者。</p>
      */
-    private static void pinDeploymentSchema(Connection connection) throws SQLException {
+    private static void pinDeploymentSchema(Connection connection, JdbcDatabaseEngine engine)
+            throws SQLException {
+        if (engine == JdbcDatabaseEngine.MYSQL) return;
         try (PreparedStatement statement = connection.prepareStatement(
                 "SELECT current_schema()")) {
             try (ResultSet rows = statement.executeQuery()) {

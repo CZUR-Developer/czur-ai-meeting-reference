@@ -124,6 +124,26 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
      */
     public static SnapshotResult readFinalSnapshot(DataSource dataSource,
             MeetingCommandContext context, String meetingId) {
+        return readFinalSnapshot(dataSource, JdbcDatabaseEngine.POSTGRESQL, context, meetingId);
+    }
+
+    /**
+     * 使用显式公共连接上下文读取最终快照；不构造 Finalizer，不结算或写入结果。
+     * 原 DataSource 入口仍按 PG 解释，部署方切换引擎时必须使用本重载。
+     *
+     * @param database 已启动的唯一会议连接上下文，连接由本次只读调用释放
+     * @param context 已由上游核验归属及权限的上下文
+     * @param meetingId 本场客户端会议标识
+     * @return 原最终修订投影与冻结实际用量；不保证后续发布或 READY 已完成
+     */
+    public static SnapshotResult readFinalSnapshot(JdbcDatabaseContext database,
+            MeetingCommandContext context, String meetingId) {
+        Objects.requireNonNull(database, "database");
+        return readFinalSnapshot(database.dataSource(), database.engine(), context, meetingId);
+    }
+
+    private static SnapshotResult readFinalSnapshot(DataSource dataSource,
+            JdbcDatabaseEngine engine, MeetingCommandContext context, String meetingId) {
         Objects.requireNonNull(dataSource, "dataSource");
         Objects.requireNonNull(context, "context");
         MeetingIdPolicy.requireValid(meetingId);
@@ -131,7 +151,7 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
             connection.setReadOnly(true);
             connection.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
             connection.setAutoCommit(false);
-            SnapshotResult result = readFinalSnapshot(connection, context, meetingId);
+            SnapshotResult result = readFinalSnapshot(connection, engine, context, meetingId);
             // 只读事务也明确结束；结束失败不返回看似已经核验的事实。
             connection.rollback();
             if (result instanceof Ready ready) {
@@ -152,27 +172,29 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
     }
 
     private static SnapshotResult readFinalSnapshot(Connection connection,
-            MeetingCommandContext context, String meetingId) throws SQLException {
+            JdbcDatabaseEngine engine, MeetingCommandContext context, String meetingId)
+            throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
                 SELECT m.deployment_scope, m.subject_scope, m.state, m.client_session_id,
                        m.profile_id, m.profile_revision, m.created_at,
                        i.started_at, i.audio_duration_ms,
                        i.usage_submitted_at, i.usage_expected_version
-                  FROM meeting m LEFT JOIN meeting_client_input i USING (meeting_id)
+                  FROM %s m LEFT JOIN %s i USING (meeting_id)
                  WHERE m.meeting_id=?
-                """)) {
-            statement.setString(1, meetingId);
+                """.formatted(JdbcDatabaseTable.MEETING.physicalName(engine),
+                        JdbcDatabaseTable.MEETING_CLIENT_INPUT.physicalName(engine)))) {
+            JdbcValues.setText(statement, 1, engine, meetingId);
             try (ResultSet rows = statement.executeQuery()) {
                 if (!rows.next()) return new Rejected(Reason.NOT_FOUND);
                 // 先用原始归属字段执行公共 Guard，再解析仅所有者可见的状态／事实。
-                if (MeetingAccessGuard.evaluate(context, rows.getString("deployment_scope"),
-                        rows.getString("subject_scope")) != MeetingAccessGuard.Decision.ALLOWED) {
+                if (MeetingAccessGuard.evaluate(context, JdbcValues.text(rows, "deployment_scope"),
+                        JdbcValues.text(rows, "subject_scope")) != MeetingAccessGuard.Decision.ALLOWED) {
                     return new Rejected(Reason.ACCESS_DENIED);
                 }
-                if (rows.getTimestamp("started_at") == null) {
+                if (JdbcValues.instant(rows, "started_at") == null) {
                     return new Rejected(Reason.INPUT_SOURCE_CONFLICT);
                 }
-                MeetingState state = MeetingState.valueOf(rows.getString("state"));
+                MeetingState state = MeetingState.valueOf(JdbcValues.text(rows, "state"));
                 if (state != MeetingState.STARTING && state != MeetingState.RUNNING
                         && state != MeetingState.STOPPING && state != MeetingState.READY) {
                     return new Rejected(Reason.INVALID_STATE);
@@ -180,29 +202,29 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
                 Long duration = rows.getObject("audio_duration_ms", Long.class);
                 if (duration == null) return new Rejected(Reason.INVALID_STATE);
                 Long usageVersion = rows.getObject("usage_expected_version", Long.class);
-                if (duration < 0 || rows.getTimestamp("usage_submitted_at") == null
+                if (duration < 0 || JdbcValues.instant(rows, "usage_submitted_at") == null
                         || usageVersion == null || usageVersion < 0) {
                     return new Rejected(Reason.STORAGE_UNAVAILABLE);
                 }
                 // 复用既有 Create 解码／摘要／scope-key／响应一致性门，不重写正文 SQL。
-                var first = new JdbcCreateMeetingFactStore(connection)
+                var first = new JdbcCreateMeetingFactStore(connection, engine)
                         .findByMeetingIdReadOnly(meetingId).orElse(null);
                 if (first == null) return new Rejected(Reason.STORAGE_UNAVAILABLE);
                 var request = first.request().requestSnapshot();
                 var response = first.response();
-                Timestamp createdAt = rows.getTimestamp("created_at");
+                Instant createdAt = JdbcValues.instant(rows, "created_at");
                 if (!first.scope().equals(IdempotencyScopeCodec.meetingCreateV2(
                         context.deploymentScope(), context.identity().subject().subjectScope()))
                         || !meetingId.equals(response.meetingId())
-                        || !request.clientSessionId().equals(rows.getString("client_session_id"))
+                        || !request.clientSessionId().equals(JdbcValues.text(rows, "client_session_id"))
                         || !request.profile().id().equals(rows.getString("profile_id"))
                         || request.profile().revision() != rows.getInt("profile_revision")
                         || !response.acceptedProfile().equals(request.profile())
                         || !response.acceptedAudioProfile().equals(request.audioProfile())
-                        || createdAt == null || !first.createdAt().equals(createdAt.toInstant())) {
+                        || createdAt == null || !first.createdAt().equals(createdAt)) {
                     return new Rejected(Reason.STORAGE_UNAVAILABLE);
                 }
-                Projection projection = project(connection, meetingId);
+                Projection projection = project(connection, engine, meetingId);
                 return new Ready(projection.transcripts(), projection.translations(),
                         projection.language(), duration, request.artifactPolicy().retainAudio(),
                         request.languages().source(), request.title());
@@ -524,17 +546,24 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
 
     private static Projection project(Connection connection, String meetingId)
             throws SQLException {
+        return project(connection, JdbcDatabaseEngine.POSTGRESQL, meetingId);
+    }
+
+    /** 两引擎共享既有最终修订规则；只读快照不使用锁定读取。 */
+    private static Projection project(Connection connection, JdbcDatabaseEngine engine, String meetingId)
+            throws SQLException {
         Map<String, TranscriptUpsert> latest = new HashMap<>();
         Map<String, TranslationRevision> latestTranslations = new HashMap<>();
         try (PreparedStatement statement = connection.prepareStatement("""
                 SELECT e.meeting_id, e.event_sequence, e.event_id, e.event_type,
                        c.client_sequence,
                        e.canonical_payload, e.occurred_at, e.spec_version, e.stream_id
-                  FROM meeting_client_event AS c
-                  JOIN meeting_event AS e ON e.event_id=c.event_id
+                  FROM %s AS c
+                  JOIN %s AS e ON e.event_id=c.event_id
                  WHERE c.meeting_id=? ORDER BY c.client_sequence
-                """)) {
-            statement.setString(1, meetingId);
+                """.formatted(JdbcDatabaseTable.MEETING_CLIENT_EVENT.physicalName(engine),
+                        JdbcDatabaseTable.MEETING_EVENT.physicalName(engine)))) {
+            JdbcValues.setText(statement, 1, engine, meetingId);
             try (ResultSet rows = statement.executeQuery()) {
                 while (rows.next()) {
                     var event = JdbcMeetingEventLogStore.readEvent(rows);
@@ -588,8 +617,9 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
         String translationLanguage = targets.size() == 1 ? targets.iterator().next() : "mul";
         ObjectNode summary = null;
         try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT summary_json FROM meeting_client_summary WHERE meeting_id=?")) {
-            statement.setString(1, meetingId);
+                "SELECT summary_json FROM " + JdbcDatabaseTable.MEETING_CLIENT_SUMMARY.physicalName(engine)
+                        + " WHERE meeting_id=?")) {
+            JdbcValues.setText(statement, 1, engine, meetingId);
             try (ResultSet rows = statement.executeQuery()) {
                 if (rows.next()) {
                     try {

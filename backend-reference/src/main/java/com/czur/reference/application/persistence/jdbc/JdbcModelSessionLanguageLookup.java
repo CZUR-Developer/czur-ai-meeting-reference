@@ -15,7 +15,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Timestamp;
+import java.time.Instant;
 import java.util.Objects;
 
 /**
@@ -25,9 +25,20 @@ import java.util.Objects;
  */
 public final class JdbcModelSessionLanguageLookup implements ModelSessionLanguageLookup {
     private final DataSource dataSource;
+    private final JdbcDatabaseEngine engine;
 
     public JdbcModelSessionLanguageLookup(DataSource dataSource) {
+        this(dataSource, JdbcDatabaseEngine.POSTGRESQL);
+    }
+
+    /** 读取本场冻结语言和能力，复用 Context 同一池及只读一致快照。 */
+    public JdbcModelSessionLanguageLookup(JdbcDatabaseContext database) {
+        this(database.dataSource(), database.engine());
+    }
+
+    private JdbcModelSessionLanguageLookup(DataSource dataSource, JdbcDatabaseEngine engine) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
+        this.engine = Objects.requireNonNull(engine, "engine");
     }
 
     @Override
@@ -52,30 +63,31 @@ public final class JdbcModelSessionLanguageLookup implements ModelSessionLanguag
             pinSchema(connection);
             try (PreparedStatement statement = connection.prepareStatement("""
                     SELECT deployment_scope, subject_scope, client_session_id, created_at
-                      FROM meeting WHERE meeting_id=?
-                    """)) {
-                statement.setString(1, meetingId);
+                      FROM %s WHERE meeting_id=?
+                    """.formatted(JdbcDatabaseTable.MEETING.physicalName(engine)))) {
+                JdbcValues.setText(statement, 1, engine, meetingId);
                 try (ResultSet rows = statement.executeQuery()) {
                     if (!rows.next() || MeetingAccessGuard.evaluate(context,
-                            rows.getString("deployment_scope"), rows.getString("subject_scope"))
+                            JdbcValues.text(rows, "deployment_scope"), JdbcValues.text(rows, "subject_scope"))
                             != MeetingAccessGuard.Decision.ALLOWED) throw unavailable();
-                    String sessionId = rows.getString("client_session_id");
-                    Timestamp createdAt = rows.getTimestamp("created_at");
+                    String sessionId = JdbcValues.text(rows, "client_session_id");
+                    Instant createdAt = JdbcValues.instant(rows, "created_at");
                     if (rows.next()) throw unavailable();
-                    CreateMeetingFactStore.Record first = new JdbcCreateMeetingFactStore(connection)
+                    CreateMeetingFactStore.Record first = new JdbcCreateMeetingFactStore(connection, engine)
                             .findByMeetingIdReadOnly(meetingId).orElseThrow(
                                     JdbcModelSessionLanguageLookup::unavailable);
                     var request = first.request().requestSnapshot();
                     if (!first.scope().equals(IdempotencyScopeCodec.meetingCreateV2(
                             context.deploymentScope(), context.identity().subject().subjectScope()))
                             || !sessionId.equals(request.clientSessionId())
-                            || createdAt == null || !first.createdAt().equals(createdAt.toInstant())) {
+                            || createdAt == null || !first.createdAt().equals(createdAt)) {
                         throw unavailable();
                     }
                     boolean clientStarted;
                     try (PreparedStatement marker = connection.prepareStatement(
-                            "SELECT 1 FROM meeting_client_input WHERE meeting_id=?")) {
-                        marker.setString(1, meetingId);
+                            "SELECT 1 FROM " + JdbcDatabaseTable.MEETING_CLIENT_INPUT.physicalName(engine)
+                                    + " WHERE meeting_id=?")) {
+                        JdbcValues.setText(marker, 1, engine, meetingId);
                         try (ResultSet clientRows = marker.executeQuery()) {
                             clientStarted = clientRows.next();
                         }
@@ -101,7 +113,8 @@ public final class JdbcModelSessionLanguageLookup implements ModelSessionLanguag
         }
     }
 
-    private static void pinSchema(Connection connection) throws SQLException {
+    private void pinSchema(Connection connection) throws SQLException {
+        if (engine == JdbcDatabaseEngine.MYSQL) return;
         try (PreparedStatement statement = connection.prepareStatement("""
                 SELECT set_config('search_path', format('%I, pg_temp', current_schema()), TRUE)
                 """)) {

@@ -12,7 +12,6 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.Objects;
 import java.util.logging.Level;
@@ -32,13 +31,24 @@ public final class JdbcRealtimeStartFactsLookup implements RealtimeStartFactsLoo
     private static final String MEETING_SQL = """
             SELECT deployment_scope, subject_scope, client_session_id,
                    profile_id, profile_revision, created_at
-              FROM meeting WHERE meeting_id = ?
+              FROM %s WHERE meeting_id = ?
             """;
 
     private final DataSource dataSource;
+    private final JdbcDatabaseEngine engine;
 
     public JdbcRealtimeStartFactsLookup(DataSource dataSource) {
+        this(dataSource, JdbcDatabaseEngine.POSTGRESQL);
+    }
+
+    /** 从唯一上下文读取同场事实；保留只读 RR 快照，不参与 Start 写事务。 */
+    public JdbcRealtimeStartFactsLookup(JdbcDatabaseContext database) {
+        this(database.dataSource(), database.engine());
+    }
+
+    private JdbcRealtimeStartFactsLookup(DataSource dataSource, JdbcDatabaseEngine engine) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
+        this.engine = Objects.requireNonNull(engine, "engine");
     }
 
     /** 只读查找；无论成功或失败均不修补事实或改变会议状态。 */
@@ -64,13 +74,13 @@ public final class JdbcRealtimeStartFactsLookup implements RealtimeStartFactsLoo
                 return reject(Reason.ACCESS_DENIED);
             }
             FinalizationExecutionFact execution =
-                    new JdbcFinalizationExecutionFactStore(connection)
+                    new JdbcFinalizationExecutionFactStore(connection, engine)
                             .find(meetingId).orElse(null);
             Result result;
             if (execution != null) {
                 result = new Started(meeting.subjectScope(), execution);
             } else {
-                CreateMeetingFactStore.Record first = new JdbcCreateMeetingFactStore(connection)
+                CreateMeetingFactStore.Record first = new JdbcCreateMeetingFactStore(connection, engine)
                         .findByMeetingIdReadOnly(meetingId).orElse(null);
                 if (first == null || !sameFirstFacts(meetingId, meeting, first)) {
                     return reject(Reason.CREATE_FACT_INCONSISTENT);
@@ -105,18 +115,19 @@ public final class JdbcRealtimeStartFactsLookup implements RealtimeStartFactsLoo
         }
     }
 
-    private static MeetingRow readMeeting(Connection connection, String meetingId)
+    private MeetingRow readMeeting(Connection connection, String meetingId)
             throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(MEETING_SQL)) {
-            statement.setString(1, meetingId);
+        try (PreparedStatement statement = connection.prepareStatement(MEETING_SQL.formatted(
+                JdbcDatabaseTable.MEETING.physicalName(engine)))) {
+            JdbcValues.setText(statement, 1, engine, meetingId);
             try (ResultSet rows = statement.executeQuery()) {
                 if (!rows.next()) return null;
-                Timestamp created = rows.getTimestamp("created_at");
-                MeetingRow row = new MeetingRow(rows.getString("deployment_scope"),
-                        rows.getString("subject_scope"),
-                        rows.getString("client_session_id"),
+                Instant created = JdbcValues.instant(rows, "created_at");
+                MeetingRow row = new MeetingRow(JdbcValues.text(rows, "deployment_scope"),
+                        JdbcValues.text(rows, "subject_scope"),
+                        JdbcValues.text(rows, "client_session_id"),
                         rows.getString("profile_id"), rows.getInt("profile_revision"),
-                        created == null ? null : created.toInstant());
+                        created);
                 if (rows.next()) throw new InvalidFact();
                 return row;
             }
@@ -138,7 +149,8 @@ public final class JdbcRealtimeStartFactsLookup implements RealtimeStartFactsLoo
                 && first.createdAt().equals(meeting.createdAt());
     }
 
-    private static void pinSchema(Connection connection) throws SQLException {
+    private void pinSchema(Connection connection) throws SQLException {
+        if (engine == JdbcDatabaseEngine.MYSQL) return;
         try (PreparedStatement statement = connection.prepareStatement("SELECT current_schema()");
              ResultSet rows = statement.executeQuery()) {
             if (!rows.next() || rows.getString(1) == null
