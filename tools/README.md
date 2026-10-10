@@ -23,7 +23,8 @@ AITransRepos 的 P2 验收记录。上述本机 Maven 测试不能自动代替�
 
 MySQL 5.7 的小型数据库能力实验见
 [`mysql57-compatibility/`](mysql57-compatibility/README.md)。仅连接显式指定的本机隔离库，
-不执行正式 V001；此入口仅为探针，当前后端尚不支持生产 MySQL。
+不执行正式 V001；此入口仅为能力探针。共享核心的正常客户端会议链支持 MySQL 5.7，
+参考默认进程的旧 WSS／Mock 链仍使用 PostgreSQL。
 
 ## Android 设备启动校验
 

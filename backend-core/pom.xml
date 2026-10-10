@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.czur.ai.meeting</groupId>
+  <artifactId>backend-core</artifactId>
+  <version>0.1.0-SNAPSHOT</version>
+  <name>CZUR AI Meeting reusable backend core</name>
+  <properties>
+    <maven.compiler.release>21</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <!-- Protobuf Java 运行时与构建期 protoc 必须锁定同一版本。 -->
+    <protobuf.version>3.25.3</protobuf.version>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>com.sun.mail</groupId>
+      <artifactId>jakarta.mail</artifactId>
+      <version>2.0.1</version>
+    </dependency>
+    <!--
+      公开 Manifest JSON 边界使用显式 tree codec，拒绝未知/重复/缺失字段及
+      数值强制转换。Jackson 类型只停留在 protocol.json 基础设施包，不进入
+      领域对象或 application port。
+    -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <version>2.15.4</version>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.datatype</groupId>
+      <artifactId>jackson-datatype-jsr310</artifactId>
+      <version>2.15.4</version>
+    </dependency>
+    <!-- 生成类只供 protocol/realtime 字节边界使用，领域和 Driver 不依赖它。 -->
+    <dependency>
+      <groupId>com.google.protobuf</groupId>
+      <artifactId>protobuf-java</artifactId>
+      <version>${protobuf.version}</version>
+    </dependency>
+    <!-- 固定公开 JSON Fixture，并供持久实时事件使用严格 Protobuf JSON Mapping。 -->
+    <dependency>
+      <groupId>com.google.protobuf</groupId>
+      <artifactId>protobuf-java-util</artifactId>
+      <version>${protobuf.version}</version>
+    </dependency>
+    <!--
+      运行时唯一共享连接池。HikariCP 只位于数据库装配边界，不渗透到领域
+      和 application port；连接池生命周期只由公共数据库装配边界统一管理。
+    -->
+    <dependency>
+      <groupId>com.zaxxer</groupId>
+      <artifactId>HikariCP</artifactId>
+      <version>5.1.0</version>
+    </dependency>
+    <!-- Hikari 与 WebSocket 组件统一使用 SLF4J 2 API，避免混装 1.7 provider。 -->
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+      <version>2.0.13</version>
+    </dependency>
+    <!-- T16 正式 WSS 传输入口复用已通过 TLS 小试的固定版本组件。 -->
+    <dependency>
+      <groupId>org.java-websocket</groupId>
+      <artifactId>Java-WebSocket</artifactId>
+      <version>1.6.0</version>
+    </dependency>
+    <!--
+      JDBC 适配器只依赖 javax.sql.DataSource 和 java.sql；驱动放在运行时边界，
+      使核心领域仍可在没有数据库的环境中编译和执行单元测试。部署参考后端时
+      必须把该驱动与应用一起打包，或由容器运行时提供同版本驱动。
+    -->
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+      <version>42.6.2</version>
+      <scope>runtime</scope>
+    </dependency>
+    <!-- 共享客户端会议链支持MySQL 5.7；驱动只在运行时使用。 -->
+    <dependency>
+      <groupId>com.mysql</groupId>
+      <artifactId>mysql-connector-j</artifactId>
+      <version>8.3.0</version>
+      <scope>runtime</scope>
+    </dependency>
+    <!-- P5-3 可替换对象存储仅在 S3 ArtifactStore 适配器内使用。 -->
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>s3</artifactId>
+      <version>2.32.0</version>
+    </dependency>
+  </dependencies>
+  <build>
+    <extensions>
+      <extension>
+        <groupId>kr.motd.maven</groupId>
+        <artifactId>os-maven-plugin</artifactId>
+        <version>1.7.1</version>
+      </extension>
+    </extensions>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.13.0</version>
+      </plugin>
+      <plugin>
+        <groupId>org.xolstice.maven.plugins</groupId>
+        <artifactId>protobuf-maven-plugin</artifactId>
+        <version>0.6.1</version>
+        <configuration>
+          <!-- 仓库根 contracts/realtime.proto 是唯一源；不复制进 Java 模块。 -->
+          <protoSourceRoot>${project.basedir}/../contracts</protoSourceRoot>
+          <protocArtifact>com.google.protobuf:protoc:${protobuf.version}:exe:${os.detected.classifier}</protocArtifact>
+        </configuration>
+        <executions>
+          <execution>
+            <goals>
+              <goal>compile</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.2</version>
+        <!-- 两模块定向测试在参考模块运行，核心无同名测试时仍可先构建。 -->
+        <configuration><failIfNoSpecifiedTests>false</failIfNoSpecifiedTests></configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

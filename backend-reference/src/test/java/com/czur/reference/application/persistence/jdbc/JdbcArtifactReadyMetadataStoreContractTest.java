@@ -48,10 +48,10 @@ class JdbcArtifactReadyMetadataStoreContractTest {
 
     private static String readSource() throws Exception {
         Path[] candidates = {
-                Path.of("src", "main", "java", "com", "czur", "reference",
+                Path.of("..", "backend-core", "src", "main", "java", "com", "czur", "reference",
                         "application", "persistence", "jdbc",
                         "JdbcArtifactReadyMetadataStore.java"),
-                Path.of("backend-reference", "src", "main", "java", "com", "czur",
+                Path.of("backend-core", "src", "main", "java", "com", "czur",
                         "reference", "application", "persistence", "jdbc",
                         "JdbcArtifactReadyMetadataStore.java")
         };

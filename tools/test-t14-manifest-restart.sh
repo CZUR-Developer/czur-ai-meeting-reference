@@ -314,7 +314,7 @@ START_A="$(postmaster_start_time)"
 log INFO "阶段 A postmasterStart=${START_A}"
 log INFO "启动阶段 A Maven/JVM：publishBeforeFirstRestart"
 mvn -B --no-transfer-progress \
-  -f "${REPO_ROOT}/backend-reference/pom.xml" \
+  -f "${REPO_ROOT}/pom.xml" -pl backend-reference -am \
   '-Dtest=T14ManifestRestartIntegrationTest#publishBeforeFirstRestart' test
 
 [[ -f "${STATE_FILE}" ]] || fail "阶段 A 未生成重启状态文件"
@@ -344,7 +344,7 @@ log INFO "阶段 B postmasterStart=${START_B}"
 
 log INFO "启动阶段 B Maven/JVM：replayPublishAndDeleteAfterFirstRestart"
 mvn -B --no-transfer-progress \
-  -f "${REPO_ROOT}/backend-reference/pom.xml" \
+  -f "${REPO_ROOT}/pom.xml" -pl backend-reference -am \
   '-Dtest=T14ManifestRestartIntegrationTest#replayPublishAndDeleteAfterFirstRestart' test
 
 [[ "$(stat -c '%a' "${STATE_DIR}")" == "700" ]] || fail "阶段 B 后状态目录权限不是 700"
@@ -358,7 +358,7 @@ log INFO "阶段 C postmasterStart=${START_C}"
 
 log INFO "启动阶段 C Maven/JVM：verifyAfterSecondRestart"
 mvn -B --no-transfer-progress \
-  -f "${REPO_ROOT}/backend-reference/pom.xml" \
+  -f "${REPO_ROOT}/pom.xml" -pl backend-reference -am \
   '-Dtest=T14ManifestRestartIntegrationTest#verifyAfterSecondRestart' test
 
 log INFO "业务断言已通过，开始精确清理本次资源"

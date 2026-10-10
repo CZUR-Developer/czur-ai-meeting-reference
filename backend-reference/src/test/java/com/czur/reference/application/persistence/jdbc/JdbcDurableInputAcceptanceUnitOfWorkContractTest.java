@@ -52,9 +52,9 @@ class JdbcDurableInputAcceptanceUnitOfWorkContractTest {
 
     private static String readSource(String name) throws Exception {
         Path[] candidates = {
-                Path.of("src", "main", "java", "com", "czur", "reference",
+                Path.of("..", "backend-core", "src", "main", "java", "com", "czur", "reference",
                         "application", "persistence", "jdbc", name),
-                Path.of("backend-reference", "src", "main", "java", "com", "czur",
+                Path.of("backend-core", "src", "main", "java", "com", "czur",
                         "reference", "application", "persistence", "jdbc", name)
         };
         for (Path candidate : candidates) {

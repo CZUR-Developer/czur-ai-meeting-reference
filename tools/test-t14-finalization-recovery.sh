@@ -249,7 +249,7 @@ unset T14_FINALIZATION_RECOVERY_CONTROL_FILE
 
 log INFO "启动 P2-T14-08-12 单测试门禁（连接信息已隐藏）"
 mvn -B --no-transfer-progress \
-  -f "${REPO_ROOT}/backend-reference/pom.xml" \
+  -f "${REPO_ROOT}/pom.xml" -pl backend-reference -am \
   -Dtest=T14FinalizationRecoveryIntegrationTest test
 
 trap - EXIT

@@ -221,14 +221,14 @@ export T15_HEALTH_GATE_CONTAINER_ID="${CONTAINER_ID}"
 export T15_HEALTH_GATE_RUN_ID="${RUN_ID}"
 
 STAGE='compile'
-mvn -B --no-transfer-progress -f "${REPO_ROOT}/backend-reference/pom.xml" \
+mvn -B --no-transfer-progress -f "${REPO_ROOT}/pom.xml" -pl backend-reference -am \
   test-compile >"${STATE_DIR}/compile.log" 2>&1 || {
     fail 'test-compile 失败'
   }
 info 'test-compile 通过'
 
 STAGE='test'
-mvn -B --no-transfer-progress -f "${REPO_ROOT}/backend-reference/pom.xml" \
+mvn -B --no-transfer-progress -f "${REPO_ROOT}/pom.xml" -pl backend-reference -am \
   "-Dtest=${TEST_TARGET}" \
   test >"${STATE_DIR}/test.log" 2>&1 || {
     fail '定向测试失败'

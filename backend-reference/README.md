@@ -1,5 +1,11 @@
 # Backend reference implementation
 
+当前 Maven 后端由两个 Module 组成。共享领域、协议、会议流程和 JDBC 源码位于
+[`../backend-core/`](../backend-core/README.md)；本模块保留参考进程、演示登录、Mock
+和默认装配。下面的 `domain/`、`application/port/`、公共 `jdbc/` 等为核心中的包路径。
+现有测试保留在本模块 `src/test/java/`，通过普通核心依赖同时验证公共与参考行为。
+IntelliJ IDEA 打开仓库根 `pom.xml`，即可导入两个 Module。
+
 这是公开仓中的 Java 21 参考后端，用于展示会议领域状态、能力计划、可替换的
 Model Driver 端口和 PostgreSQL 事实源边界。领域、命令和应用端口保持与 HTTP
 框架、数据库实现、厂商 SDK 和生产服务解耦；Provider 特有的响应转换只能位于
@@ -417,16 +423,16 @@ P2-T11 已验证连接池在 PostgreSQL 停止和重启后的恢复，但该切�
 在仓库根目录执行：
 
 ```bash
-mvn -B -f backend-reference/pom.xml clean test
+mvn -B -f pom.xml clean test
 ```
 
 Maven 会从仓库根的 `contracts/realtime.proto` 用固定版本的 protoc 自动生成
-`target/generated-sources/` 下的 Java 类；不使用开发机预装的 `protoc`，也不提交
-生成文件。干净检出后可先运行 `mvn -B -f backend-reference/pom.xml test-compile`；
+`backend-core/target/generated-sources/` 下的 Java 类；不使用开发机预装的 `protoc`，也不提交
+生成文件。干净检出后可先运行 `mvn -B -f pom.xml test-compile`；
 生成类只允许留在实时协议/传输边界，不进入会议领域或 Model Driver 端口。
 
-该命令只构建本模块，不启动数据库、不调用外部服务，也不会触发父仓库的 Maven
-reactor。Fixture、公开边界和依赖检查由仓库根目录的工具脚本执行。
+该命令从源码顺序构建两个 Module，不需要预先安装公共核心；不启动数据库或外部服务。
+Fixture、公开边界和依赖检查由仓库根目录的工具脚本执行。
 
 真实 PostgreSQL 事务和运行时门禁需显式传入一次性测试库连接；集成用例在随机
 schema 中自行装载 V001，不要指向已有环境。正式部署则先执行 `deploy/migrate.sh`：
@@ -435,5 +441,5 @@ schema 中自行装载 V001，不要指向已有环境。正式部署则先执�
 REFERENCE_TEST_DATABASE_URL='jdbc:postgresql://127.0.0.1:5432/meeting' \
 REFERENCE_TEST_DATABASE_USER='meeting' \
 REFERENCE_TEST_DATABASE_PASSWORD='<从测试 Secret 注入>' \
-mvn -B -f backend-reference/pom.xml clean test
+mvn -B -f pom.xml clean test
 ```

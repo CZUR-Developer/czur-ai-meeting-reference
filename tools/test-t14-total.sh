@@ -203,7 +203,7 @@ export REFERENCE_TEST_DATABASE_USER="${DB_USER}"
 export REFERENCE_TEST_DATABASE_PASSWORD="${DB_PASSWORD}"
 export T14_TOTAL_STATE_FILE="${STATE_FILE}"
 log INFO "阶段 A：独立 Maven/JVM fresh-chain readiness（含最终收口与删除 lease）"
-mvn -B --no-transfer-progress -f "${REPO_ROOT}/backend-reference/pom.xml" \
+mvn -B --no-transfer-progress -f "${REPO_ROOT}/pom.xml" -pl backend-reference -am \
   '-Dtest=T14TotalGateIntegrationTest#prepareBeforeRestart' test
 [[ -f "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || fail "阶段 A 未生成状态文件"
 [[ "$(stat -c '%a' "${STATE_DIR}")" == "700" ]] || fail "状态目录权限不是 700"
@@ -227,7 +227,7 @@ AFTER_START="$(postmaster_start)"
 
 export REFERENCE_TEST_DATABASE_URL="${JDBC_URL}"
 log INFO "阶段 B：独立 Maven/JVM restart verification（含最终收口与 ArtifactDeletionWorker）"
-mvn -B --no-transfer-progress -f "${REPO_ROOT}/backend-reference/pom.xml" \
+mvn -B --no-transfer-progress -f "${REPO_ROOT}/pom.xml" -pl backend-reference -am \
   '-Dtest=T14TotalGateIntegrationTest#verifyAfterRestart' test
 grep -qx 'phase=VERIFIED' "${STATE_FILE}" || fail "阶段 B 状态不正确"
 

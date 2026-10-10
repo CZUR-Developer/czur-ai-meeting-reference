@@ -6,7 +6,9 @@
 
 | 目录 | 内容 |
 | --- | --- |
-| `backend-reference/` | 可由 IntelliJ IDEA 导入的 Maven 参考后端（Java 21） |
+| `pom.xml` | IntelliJ IDEA 的 Maven 聚合入口（Java 21） |
+| `backend-core/` | 独立普通 JAR：共享会议、协议、能力、持久化与扩展端口 |
+| `backend-reference/` | 依赖核心的参考应用：启动、演示登录、Mock 和默认装配 |
 | `android-reference-app/` | 可由 Android Studio 打开的参考应用工程 |
 | `web-reference/` | 参考 Web 静态页面源码 |
 | `contracts/` | OpenAPI、JSON Schema、实时事件协议与 Fixture |
@@ -21,7 +23,7 @@
 
 ## 本机开发验证
 
-使用 IntelliJ IDEA 打开 `backend-reference/pom.xml`，使用 Android Studio 打开
+使用 IntelliJ IDEA 打开根目录 `pom.xml`，使用 Android Studio 打开
 `android-reference-app/`。Android
 应用的系统音频实现和签名组件由设备厂商通过 SDK 提供，不在此仓库中实现。
 
@@ -38,7 +40,12 @@ cd android-reference-app && ./gradlew :app:assembleDebug
 不启动 Docker。公开发布前再单独执行 `python3 tools/check-public-boundary.py`。
 
 MySQL 5.7 的独立能力探针见 [`tools/mysql57-compatibility/`](tools/mysql57-compatibility/README.md)；
-此入口仅做本机隔离库实验，当前 PostgreSQL 后端尚不支持生产 MySQL。
+此入口仅做本机隔离能力探针。共享核心的正常 SDK 直连会议链支持 PostgreSQL 和
+MySQL 5.7；参考进程默认 PostgreSQL，旧 WSS／Mock 链仍限 PostgreSQL。
+
+公共后端核心的边界和消费方式见 [`backend-core/README.md`](backend-core/README.md)。
+两模块从根目录执行 `mvn -B clean test`；单独构建参考应用使用
+`mvn -B -pl backend-reference -am package`，无需预先安装核心。
 
 ## 交付部署
 

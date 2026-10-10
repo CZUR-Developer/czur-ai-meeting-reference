@@ -348,9 +348,9 @@ class JdbcDatabaseRuntimeReadinessContractTest {
 
     private static String readRuntimeSource() throws IOException {
         Path[] candidates = {
-                Path.of("src", "main", "java", "com", "czur", "reference",
+                Path.of("..", "backend-core", "src", "main", "java", "com", "czur", "reference",
                         "application", "persistence", "jdbc", "JdbcDatabaseRuntime.java"),
-                Path.of("backend-reference", "src", "main", "java", "com", "czur",
+                Path.of("backend-core", "src", "main", "java", "com", "czur",
                         "reference", "application", "persistence", "jdbc",
                         "JdbcDatabaseRuntime.java")
         };

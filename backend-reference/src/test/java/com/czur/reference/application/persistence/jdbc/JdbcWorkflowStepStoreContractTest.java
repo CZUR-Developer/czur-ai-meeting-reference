@@ -72,9 +72,9 @@ class JdbcWorkflowStepStoreContractTest {
 
     private static String readSource() {
         for (Path candidate : new Path[]{
-                Path.of("src", "main", "java", "com", "czur", "reference",
+                Path.of("..", "backend-core", "src", "main", "java", "com", "czur", "reference",
                         "application", "persistence", "jdbc", "JdbcWorkflowStepStore.java"),
-                Path.of("backend-reference", "src", "main", "java", "com", "czur",
+                Path.of("backend-core", "src", "main", "java", "com", "czur",
                         "reference", "application", "persistence", "jdbc",
                         "JdbcWorkflowStepStore.java")}) {
             if (Files.isRegularFile(candidate)) {

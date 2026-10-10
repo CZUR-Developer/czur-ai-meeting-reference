@@ -1,5 +1,11 @@
 # 只向镜像构建传送 Java 生产源码、Maven 描述和唯一实时协议源。
 *
+!pom.xml
+!backend-core/
+!backend-core/pom.xml
+!backend-core/src/
+!backend-core/src/main/
+!backend-core/src/main/**
 !backend-reference/
 !backend-reference/pom.xml
 !backend-reference/src/

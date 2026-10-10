@@ -1,5 +1,10 @@
 # P3-T03/P3-T04/P3-T05 公开切片来源与审计记录
 
+本页保留早期切片的来源、路径和 SHA 历史证据，以下旧目录与阶段范围描述对应当时提交。
+2026-10-10 起，共享生产源码机械迁到 `backend-core/src/main/java/`，包名和内容保持；
+演示登录、Mock 和启动类仍在 `backend-reference/src/main/java/`，测试路径未迁。
+当前两模块边界与构建入口见 [`../backend-core/README.md`](../backend-core/README.md)。
+
 本文件记录 P3-T03 选择性迁移的固定来源、路径映射和逐文件校验结果，以及
 P3-T04 的测试工具/无网络第二 Driver、P3-T05 的会议应用切片和 P2-T05 的 JDBC
 适配器增量。公开仓只保留可替换的参考实现；它不是完整后端，也不包含 HTTP API、

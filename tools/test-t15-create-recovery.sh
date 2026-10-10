@@ -110,7 +110,7 @@ export T15_CREATE_RESTART_STATE_FILE="${STATE_DIR}/create-state.bin"
 
 run_maven() {
   local selector="$1" output="$2" tests failures errors skipped
-  mvn -B --no-transfer-progress -f "${REPO_ROOT}/backend-reference/pom.xml" \
+  mvn -B --no-transfer-progress -f "${REPO_ROOT}/pom.xml" -pl backend-reference -am \
     -DskipTests=false -Dmaven.test.skip=false \
     "-Dtest=T15CreateRecoveryIntegrationTest#${selector}" test >"${output}" 2>&1 || {
       tail -n 100 "${output}" >&2; fail "Maven 阶段失败 selector=${selector}"

@@ -1,5 +1,9 @@
 # 参考后端 Docker 部署
 
+产品 Dockerfile 从根 Maven 聚合入口同时构建 `backend-core` 与 `backend-reference`，
+再将参考进程 JAR、核心 JAR 和运行时依赖打入交付镜像。无需预装核心或检出其他仓库。
+开发验证仍使用本机 `bash tools/verify-local.sh`，不执行 Docker 构建。
+
 本目录部署参考后端：一个应用进程同时提供 HTTP、旧 WSS 音频链路和周期收口 Worker。PostgreSQL 是必需的；可使用 Compose 演示数据库或部署方已有的 PostgreSQL。两种模式都运行 `migrate.sh` 与唯一的 `migrations/V001__initial_schema.sql`，应用不会自动建表。P5 新增听悟临时会话签发；后端不转发模型音频，也不包含后台管理或 Web 容器。
 
 ## 准备配置

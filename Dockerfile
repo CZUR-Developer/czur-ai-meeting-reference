@@ -1,12 +1,17 @@
 FROM maven:3.9.9-eclipse-temurin-21 AS build
 
 WORKDIR /build
+COPY pom.xml pom.xml
+COPY backend-core/pom.xml backend-core/pom.xml
 COPY backend-reference/pom.xml backend-reference/pom.xml
 COPY contracts/realtime.proto contracts/realtime.proto
+COPY backend-core/src/main/ backend-core/src/main/
 COPY backend-reference/src/main/ backend-reference/src/main/
 
-# 仓库根的 proto 是唯一协议源；运行时依赖与应用 JAR 分开放置，避免修改 Maven 工程。
-RUN mvn -B -f backend-reference/pom.xml -Dmaven.test.skip=true package \
+# 产品镜像先从同一源码构建并安装两个Module，依赖收集无需预装公共核心。
+# proto只在backend-core生成；普通JAR和运行时三方依赖分开放置。
+RUN mvn -B -f pom.xml -Dmaven.test.skip=true install \
+    && mvn -B -f backend-reference/pom.xml -Dmaven.test.skip=true \
     org.apache.maven.plugins:maven-dependency-plugin:3.6.1:copy-dependencies \
     -DincludeScope=runtime \
     -DoutputDirectory=/build/backend-reference/target/runtime-libs

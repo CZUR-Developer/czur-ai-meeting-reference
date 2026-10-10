@@ -231,7 +231,7 @@ unset T14_WORKER_CROSS_JVM_CONTROL_FILE
 
 log INFO "启动 P2-T14-09-10 五窗口及删除事务真实双 JVM 门禁（连接信息已隐藏）"
 mvn -B --no-transfer-progress \
-  -f "${REPO_ROOT}/backend-reference/pom.xml" \
+  -f "${REPO_ROOT}/pom.xml" -pl backend-reference -am \
   -Dtest=MockFinalizationWorkerCrossJvmIntegrationTest,JdbcArtifactDeletionWorkerCrossJvmIntegrationTest test
 
 trap - EXIT

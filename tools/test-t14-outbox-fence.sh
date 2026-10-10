@@ -301,7 +301,7 @@ run_phase() {
   export REFERENCE_TEST_DATABASE_URL="${JDBC_URL}"
   log INFO "启动阶段 ${ordinal} 独立 Maven/JVM：${method}"
   mvn -B --no-transfer-progress \
-    -f "${REPO_ROOT}/backend-reference/pom.xml" \
+    -f "${REPO_ROOT}/pom.xml" -pl backend-reference -am \
     "-Dtest=T14OutboxFenceIntegrationTest#${method}" test
 }
 

@@ -106,7 +106,7 @@ info "专属 PG16 已就绪 container=${CONTAINER} endpoint=${REFERENCE_TEST_DAT
 
 run_test() {
   local name="$1" log="${LOG_DIR}/${1}.log" counts
-  mvn -B --no-transfer-progress -f "${REPO_ROOT}/backend-reference/pom.xml" \
+  mvn -B --no-transfer-progress -f "${REPO_ROOT}/pom.xml" -pl backend-reference -am \
     "-Dtest=JdbcAudioInputRecoveryIntegrationTest#${name}" test >"${log}" 2>&1 || {
       tail -n 100 "${log}" >&2; fail "测试失败: ${name}"
     }

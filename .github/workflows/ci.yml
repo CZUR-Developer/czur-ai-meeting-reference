@@ -23,7 +23,7 @@ jobs:
               json.loads(p.read_text(encoding='utf-8'))
           PY
       - name: 校验目录结构
-        run: test -f backend-reference/pom.xml && test -f android-reference-app/app/build.gradle.kts
+        run: test -f pom.xml && test -f backend-core/pom.xml && test -f backend-reference/pom.xml && test -f android-reference-app/app/build.gradle.kts
       - name: 公开边界扫描
         run: python3 tools/check-public-boundary.py
       - name: Web 静态构建
@@ -40,4 +40,4 @@ jobs:
           distribution: temurin
           java-version: '21'
           cache: maven
-      - run: mvn -B -f backend-reference/pom.xml test
+      - run: mvn -B -f pom.xml test

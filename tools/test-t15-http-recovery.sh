@@ -233,7 +233,7 @@ migration_count="$(docker exec --env "PGPASSWORD=${DB_PASSWORD}" "${CONTAINER_ID
 [[ "${migration_count}" == 1 ]] || fail '迁移登记数量不是唯一 V001'
 
 STAGE='phase-a'
-mvn -B --no-transfer-progress -f "${REPO_ROOT}/backend-reference/pom.xml" \
+mvn -B --no-transfer-progress -f "${REPO_ROOT}/pom.xml" -pl backend-reference -am \
   '-Dtest=T15HttpRecoveryIntegrationTest#phaseAPublishesPersistentArtifactOverRealHttp' \
   test >"${STATE_DIR}/phase-a.log" 2>&1 || fail '阶段 A Maven/JVM 失败'
 capture_surefire_counts "${STATE_DIR}/phase-a.log"
@@ -281,7 +281,7 @@ export REFERENCE_TEST_DATABASE_URL="jdbc:postgresql://${binding}/${DB_NAME}"
 
 STAGE='phase-b'
 export T15_HTTP_RECOVERY_STAGE='B'
-mvn -B --no-transfer-progress -f "${REPO_ROOT}/backend-reference/pom.xml" \
+mvn -B --no-transfer-progress -f "${REPO_ROOT}/pom.xml" -pl backend-reference -am \
   '-Dtest=T15HttpRecoveryIntegrationTest#phaseBReopensArtifactAndReplaysAfterDatabaseRestart' \
   test >"${STATE_DIR}/phase-b.log" 2>&1 || fail '阶段 B Maven/JVM 失败'
 capture_surefire_counts "${STATE_DIR}/phase-b.log"

@@ -315,7 +315,7 @@ BEFORE_START="$(postmaster_start_time)"
 log INFO "重启前 postmasterStart=${BEFORE_START}"
 log INFO "启动第一阶段 Maven/JVM：prepareBeforeRestart"
 mvn -B --no-transfer-progress \
-  -f "${REPO_ROOT}/backend-reference/pom.xml" \
+  -f "${REPO_ROOT}/pom.xml" -pl backend-reference -am \
   '-Dtest=T13PostgresRestartIntegrationTest#prepareBeforeRestart' test
 
 [[ -f "${STATE_FILE}" ]] || fail "第一阶段未生成重启状态文件"
@@ -337,7 +337,7 @@ log INFO "重启后 postmasterStart=${AFTER_START}"
 
 log INFO "启动第二阶段 Maven/JVM：verifyAfterRestart"
 mvn -B --no-transfer-progress \
-  -f "${REPO_ROOT}/backend-reference/pom.xml" \
+  -f "${REPO_ROOT}/pom.xml" -pl backend-reference -am \
   '-Dtest=T13PostgresRestartIntegrationTest#verifyAfterRestart' test
 
 log INFO "业务断言已通过，开始精确清理本次资源"
