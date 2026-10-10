@@ -86,6 +86,52 @@ class DatabaseRuntimeConfigTest {
     }
 
     @Test
+    void selectsMysqlFromExplicitUrlAndPreservesSocketSeconds() {
+        Map<String, String> environment = validEnvironment();
+        String mysqlUrl = "jdbc:mysql://localhost:3306/meeting?useSSL=false";
+        environment.put(DatabaseRuntimeConfig.DATABASE_URL, mysqlUrl);
+        environment.put(DatabaseRuntimeConfig.DATABASE_SOCKET_TIMEOUT_SECONDS, "3");
+        DatabaseRuntimeConfig config = DatabaseRuntimeConfig.fromEnvironment(environment);
+
+        assertEquals(JdbcDatabaseEngine.MYSQL, config.engine());
+        assertEquals(mysqlUrl, config.url());
+        assertEquals(Duration.ofSeconds(3), config.socketTimeout());
+        assertFalse(config.toString().contains(mysqlUrl));
+        assertFalse(config.toString().contains(DB_VALUE));
+        assertEquals(JdbcDatabaseEngine.POSTGRESQL,
+                DatabaseRuntimeConfig.fromEnvironment(validEnvironment()).engine());
+    }
+
+    @Test
+    void mysqlRequiresNamedDatabaseAndSameSingleHostAuthorityRules() {
+        for (String url : List.of("jdbc:mysql://localhost", "jdbc:mysql://localhost/",
+                "jdbc:mysql://localhost/?useSSL=false", "jdbc:mysql://localhost/meeting/other",
+                "jdbc:mysql://localhost:3306,other:3306/meeting",
+                "jdbc:mysql://localhost:65536/meeting")) {
+            Map<String, String> environment = validEnvironment();
+            environment.put(DatabaseRuntimeConfig.DATABASE_URL, url);
+            assertSafeFailure(environment, DatabaseRuntimeConfig.DATABASE_URL);
+        }
+        Map<String, String> ipv6 = validEnvironment();
+        ipv6.put(DatabaseRuntimeConfig.DATABASE_URL, "jdbc:mysql://[::1]:3306/meeting");
+        assertEquals(JdbcDatabaseEngine.MYSQL, DatabaseRuntimeConfig.fromEnvironment(ipv6).engine());
+    }
+
+    @Test
+    void mysqlUrlCannotOverrideRuntimeSocketCharsetOrUtcParameters() {
+        for (String suffix : List.of("?socketTimeout=0", "?socket%54imeout=0",
+                "?characterEncoding=latin1", "?connectionCollation=latin1_bin",
+                "?connectionTimeZone=LOCAL", "?serverTimezone=Asia/Shanghai",
+                "?forceConnectionTimeZoneToSession=false", "?preserveInstants=false",
+                "?sessionVariables=time_zone%3D%27%2B08%3A00%27")) {
+            Map<String, String> environment = validEnvironment();
+            environment.put(DatabaseRuntimeConfig.DATABASE_URL,
+                    "jdbc:mysql://localhost:3306/meeting" + suffix);
+            assertSafeFailure(environment, DatabaseRuntimeConfig.DATABASE_URL);
+        }
+    }
+
+    @Test
     void rejectsMissingAndInvalidValuesBeforePoolCreation() {
         Map<String, String> missingUrl = validEnvironment();
         missingUrl.remove(DatabaseRuntimeConfig.DATABASE_URL);

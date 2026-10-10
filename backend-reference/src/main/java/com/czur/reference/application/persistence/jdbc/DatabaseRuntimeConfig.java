@@ -4,16 +4,20 @@ import java.time.Duration;
 import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 /**
- * PostgreSQL 运行时的不可变配置。
+ * 公共 PostgreSQL／MySQL 连接运行时的不可变配置。
  *
  * <p>配置只在装配阶段从环境映射读取一次。数据库地址、账号和密码不会通过
  * {@link #toString()} 输出；校验失败也只报告字段和约束，不把完整 URL 或密码
- * 带入异常消息。Compose PostgreSQL 与外部 PostgreSQL 使用同一组字段，业务代码
- * 不按 hostname、profile 或数据库来源选择实现。</p>
+ * 带入异常消息。两种引擎使用同一组字段，由显式 JDBC URL 选择；业务代码
+ * 不按 hostname、profile 或数据库来源选择实现。支持连接不表示对应会议 Store
+ * 已经可用，M1 的 MySQL 入口仅为 {@link JdbcDatabaseContext}。</p>
  */
 public final class DatabaseRuntimeConfig {
     public static final String DATABASE_URL = "DATABASE_URL";
@@ -33,8 +37,13 @@ public final class DatabaseRuntimeConfig {
     private static final int DEFAULT_MIN_IDLE = 1;
     private static final long HIKARI_MIN_TIMEOUT_MS = 250;
     private static final int MAX_ALLOWED_POOL_SIZE = 100;
+    private static final Set<String> MYSQL_MANAGED_PARAMETERS = Set.of(
+            "socketTimeout", "characterEncoding", "connectionCollation",
+            "connectionTimeZone", "serverTimezone", "forceConnectionTimeZoneToSession",
+            "preserveInstants", "sessionVariables");
 
     private final String url;
+    private final JdbcDatabaseEngine engine;
     private final String username;
     private final String credential;
     private final Duration connectionTimeout;
@@ -53,6 +62,7 @@ public final class DatabaseRuntimeConfig {
             int maximumPoolSize,
             int minimumIdle) {
         this.url = validateUrl(url);
+        this.engine = JdbcDatabaseEngine.fromUrl(this.url);
         this.username = requireText(DATABASE_USER, username);
         this.credential = requireText(DATABASE_PASSWORD, credential);
         this.connectionTimeout = requirePositive(DATABASE_CONNECTION_TIMEOUT_MS, connectionTimeout);
@@ -61,7 +71,7 @@ public final class DatabaseRuntimeConfig {
         if (this.socketTimeout.getNano() != 0
                 || this.socketTimeout.getSeconds() > MAX_SOCKET_TIMEOUT_SECONDS) {
             throw invalid(DATABASE_SOCKET_TIMEOUT_SECONDS,
-                    "必须是可由 pgjdbc 表示的正整数秒");
+                    "必须是可由 JDBC 驱动表示的正整数秒");
         }
         if (this.validationTimeout.compareTo(this.connectionTimeout) > 0) {
             throw invalid(DATABASE_VALIDATION_TIMEOUT_MS,
@@ -122,7 +132,10 @@ public final class DatabaseRuntimeConfig {
                 maximumPoolSize, minimumIdle);
     }
 
-    /** 显式覆盖 pgjdbc 单次 socket 读超时；原有 {@code of} 调用保持五秒默认值。 */
+    /**
+     * 显式覆盖单次 socket 读超时，输入仍为整数秒；连接池按引擎转换驱动单位。
+     * 原有 {@code of} 调用保持五秒默认值。
+     */
     public static DatabaseRuntimeConfig of(
             String url,
             String username,
@@ -137,9 +150,14 @@ public final class DatabaseRuntimeConfig {
                 socketTimeout, maximumPoolSize, minimumIdle);
     }
 
-    /** 返回仅供 JDBC 连接池使用的 PostgreSQL 地址；调用方不得写入日志。 */
+    /** 返回仅供 JDBC 连接池使用的地址；调用方不得写入日志。 */
     public String url() {
         return url;
+    }
+
+    /** 返回由显式 JDBC URL 推导的引擎，不表示会议 Store 的适配状态。 */
+    public JdbcDatabaseEngine engine() {
+        return engine;
     }
 
     /** 返回数据库账号；调用方不得写入日志。 */
@@ -162,7 +180,7 @@ public final class DatabaseRuntimeConfig {
         return validationTimeout;
     }
 
-    /** 同一连接池中健康探针与业务查询共用的 pgjdbc 单次 socket 读超时。 */
+    /** 同一连接池共用的单次 socket 读超时；PG 驱动用秒，MySQL 驱动用毫秒。 */
     public Duration socketTimeout() {
         return socketTimeout;
     }
@@ -194,10 +212,11 @@ public final class DatabaseRuntimeConfig {
 
     private static String validateUrl(String value) {
         String url = requireText(DATABASE_URL, value);
-        if (!url.startsWith("jdbc:postgresql://") || containsWhitespaceOrControl(url)) {
-            throw invalid(DATABASE_URL, "必须是不含空白字符的 jdbc:postgresql:// 地址");
+        JdbcDatabaseEngine engine = JdbcDatabaseEngine.fromUrl(url);
+        if (containsWhitespaceOrControl(url)) {
+            throw invalid(DATABASE_URL, "JDBC 地址不得含空白字符");
         }
-        String authority = url.substring("jdbc:postgresql://".length());
+        String authority = url.substring(engine.urlPrefix().length());
         int end = authority.indexOf('/');
         if (end < 0) {
             end = authority.indexOf('?');
@@ -211,18 +230,25 @@ public final class DatabaseRuntimeConfig {
                 || hostAndPort.indexOf(',') >= 0) {
             throw invalid(DATABASE_URL, "必须包含有效主机");
         }
-        if (hasSocketTimeoutQueryKey(url)) {
-            throw invalid(DATABASE_URL, "不得在连接地址中覆盖 socketTimeout");
+        if (hasManagedQueryKey(url, engine)) {
+            throw invalid(DATABASE_URL, "不得在连接地址中覆盖运行时管理的驱动参数");
         }
         String lower = url.toLowerCase(java.util.Locale.ROOT);
         if (lower.matches(".*[?&](user|password)=[^&]*.*")) {
             throw invalid(DATABASE_URL, "不得在连接地址中嵌入账号或密码");
         }
+        if (engine == JdbcDatabaseEngine.MYSQL) {
+            int slash = authority.indexOf('/');
+            String database = slash < 0 ? "" : authority.substring(slash + 1).split("\\?", 2)[0];
+            if (database.isEmpty() || database.indexOf('/') >= 0) {
+                throw invalid(DATABASE_URL, "MySQL 地址必须指定一个数据库");
+            }
+        }
         validatePort(hostAndPort);
         return url;
     }
 
-    private static boolean hasSocketTimeoutQueryKey(String url) {
+    private static boolean hasManagedQueryKey(String url, JdbcDatabaseEngine engine) {
         int question = url.indexOf('?');
         if (question < 0) {
             return false;
@@ -232,7 +258,15 @@ public final class DatabaseRuntimeConfig {
             String key = separator < 0 ? parameter : parameter.substring(0, separator);
             // pgjdbc 42.6.2 的 URL key 原样且大小写敏感，首个 '=' 前的
             // 精确 socketTimeout 会覆盖连接属性；无 '=' 也会产生同名 key。
-            if ("socketTimeout".equals(key)) {
+            if (engine == JdbcDatabaseEngine.MYSQL) {
+                try {
+                    key = URLDecoder.decode(key, StandardCharsets.UTF_8);
+                } catch (IllegalArgumentException failure) {
+                    throw invalid(DATABASE_URL, "MySQL 地址参数编码非法");
+                }
+            }
+            if ((engine == JdbcDatabaseEngine.POSTGRESQL && "socketTimeout".equals(key))
+                    || (engine == JdbcDatabaseEngine.MYSQL && MYSQL_MANAGED_PARAMETERS.contains(key))) {
                 return true;
             }
         }
@@ -382,8 +416,6 @@ public final class DatabaseRuntimeConfig {
 
     private static String redactUrl(String value) {
         // 不保留 host、端口、数据库名或 query 参数；query 可能携带驱动 Secret。
-        return value.startsWith("jdbc:postgresql://")
-                ? "jdbc:postgresql://<redacted>"
-                : "<redacted>";
+        return JdbcDatabaseEngine.fromUrl(value).urlPrefix() + "<redacted>";
     }
 }

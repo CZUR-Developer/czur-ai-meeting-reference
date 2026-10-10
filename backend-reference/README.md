@@ -142,7 +142,7 @@ Outbox 的领取、发布和失败重试继续由提交后的 Worker 使用独�
 
 ### PostgreSQL 运行时
 
-`JdbcDatabaseRuntime` 是唯一的生产候选 JDBC 装配入口。它从
+`JdbcDatabaseRuntime` 是完整 PostgreSQL 会议的生产候选 JDBC 装配入口。它从
 `DATABASE_URL`、`DATABASE_USER`、`DATABASE_PASSWORD` 以及连接池参数创建一个
 共享 HikariCP `DataSource`，再向应用暴露 `JdbcMeetingUnitOfWork` 和提交后使用的
 `JdbcOutboxStore`。配置非法、数据库不可用、V001 未登记，或已登记基线的
@@ -156,6 +156,39 @@ Outbox 的领取、发布和失败重试继续由提交后的 Worker 使用独�
 关闭后禁止继续取得业务组件。
 Compose 数据库和外部 PostgreSQL 使用完全相同的配置入口，不根据 hostname 或
 Profile 切换实现。
+
+### P8 M1：MySQL 5.7 初始化与连接
+
+公共连接层新增 Connector/J `8.3.0` 和 `JdbcDatabaseContext`，配置继续使用
+`DATABASE_URL`、`DATABASE_USER`、`DATABASE_PASSWORD` 及原连接池参数。
+`jdbc:mysql://<host>:3306/<database>` 明确选择 MySQL，原 PostgreSQL URL、
+两个 `DatabaseRuntimeConfig.of` 重载及默认值保持。
+`DATABASE_SOCKET_TIMEOUT_SECONDS` 仍以整数秒配置；池向 pgjdbc 传秒，向
+Connector/J 传毫秒。MySQL 连接固定使用 UTF-8／`utf8mb4_bin`、UTC 时区及
+`forceConnectionTimeZoneToSession=true`，URL 不得覆盖这些运行时参数。
+
+先对选定库执行 [MySQL 当前 V001](../deploy/migrations/mysql/V001__initial_schema.sql)
+及 [独立初始化入口](../deploy/migrate-mysql.sh)，再调用
+`JdbcDatabaseContext.start(config)`。上下文拥有唯一 HikariCP 池；
+`engine()` 和 `table(JdbcDatabaseTable)` 提供封闭固定映射：PostgreSQL 原表名
+保留，MySQL 25 张当前基线表全部为 `ai_trans_*`，包含
+`ai_trans_schema_migrations`。启动只读检查连接、`V001__initial_schema` 登记及
+必要表存在／InnoDB，不读取旧业务表，不自动建表、登记或修补结构。
+`checkBaselineReadiness()` 的 READY 只签连接与最小初始化基线，不签会议业务。
+装配者统一关闭上下文，调用者关闭借出的连接；重复 `close()` 安全。
+
+M1 尚未适配 MySQL 的会议 Store、Create／Stop／Worker 或 HTTP 装配。
+`JdbcDatabaseRuntime.start/open` 对 MySQL 在创建池之前明确返回
+`INVALID_CONFIGURATION`，因而旧 `ReferenceMeetingHttpAssembly` 不会误装配
+PostgreSQL SQL。MySQL 正常会议链留 M2，CZUR 服务装配留 M3；原 PG catalog
+契约门和完整运行时行为保留。每种引擎只交付一份当前 V001，不把两份基线连续执行。
+
+本机定向真实连接测试使用 `REFERENCE_TEST_MYSQL_DATABASE_URL`、
+`REFERENCE_TEST_MYSQL_DATABASE_USER`、`REFERENCE_TEST_MYSQL_DATABASE_PASSWORD`，
+与原 PG 测试变量分开；仅接受 loopback 的 `ai_trans_m1_*` 隔离库。
+`JdbcDatabaseContextMysqlIntegrationTest` 只读核对实际5.7 server、当前基线、
+会话 UTC／utf8mb4、中文／emoji／canonical 原文及 UTC 微秒，未提供配置时明确跳过。
+该测试不运行会议 Store，也不代表生产业务库、CZUR 真会或部署已验收。
 
 ### reference-dev 身份
 

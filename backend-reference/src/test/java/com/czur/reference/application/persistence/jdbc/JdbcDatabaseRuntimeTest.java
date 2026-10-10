@@ -10,10 +10,25 @@ import java.util.logging.LogRecord;
 import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class JdbcDatabaseRuntimeTest {
+    @Test
+    void mysqlM1CannotBeAssembledAsPostgresMeetingRuntime() {
+        DatabaseRuntimeConfig config = DatabaseRuntimeConfig.of(
+                "jdbc:mysql://127.0.0.1:1/meeting", "runtime-user", "runtime-secret",
+                Duration.ofMillis(250), Duration.ofMillis(250), 1, 0);
+
+        DatabaseStartupException failure = assertThrows(DatabaseStartupException.class,
+                () -> JdbcDatabaseRuntime.start(config));
+
+        // 即使数据库地址不可达，也必须在创建池及任何 PG Store 之前明确拒绝装配。
+        assertEquals(DatabaseReadiness.Status.INVALID_CONFIGURATION, failure.readiness().status());
+        assertNull(failure.getCause());
+    }
+
     @Test
     void startupFailureIsFailClosedAndDoesNotExposeConnectionDetails() {
         String dbValue = "runtime-secret";

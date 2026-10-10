@@ -2,7 +2,6 @@ package com.czur.reference.application.persistence.jdbc;
 
 import com.czur.reference.application.port.MeetingUnitOfWork;
 import com.czur.reference.application.port.CreateMeetingFactStore;
-import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 
 import javax.sql.DataSource;
@@ -22,6 +21,10 @@ import java.util.logging.Logger;
 
 /**
  * PostgreSQL 数据库运行时边界。
+ *
+ * <p>本入口只装配已经实现的 PG 会议 Store；MySQL M1 仅提供
+ * {@link JdbcDatabaseContext} 的初始化／连接基线。本类在创建连接池之前拒绝
+ * MySQL，避免只读基线通过后错误装配尚未适配的 PG SQL。</p>
  *
  * <p>启动时创建唯一的 HikariCP 连接池，执行只读 {@code SELECT 1} 探针并检查
  * {@code schema_migrations} 中唯一的首次交付基线 V001，再以只读 catalog 查询核对
@@ -340,6 +343,7 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
                     "artifact_deletion_item_status_ck", "7d644b2bea16a06d068d8216483deca6"));
 
     private final DatabaseRuntimeConfig config;
+    private final JdbcDatabaseContext databaseContext;
     private final HikariDataSource dataSource;
     private final JdbcMeetingUnitOfWork meetingUnitOfWork;
     private final JdbcOutboxStore outboxStore;
@@ -348,6 +352,7 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
 
     private JdbcDatabaseRuntime(DatabaseRuntimeConfig config, HikariDataSource dataSource) {
         this.config = config;
+        this.databaseContext = new JdbcDatabaseContext(config, dataSource);
         this.dataSource = dataSource;
         this.meetingUnitOfWork = new JdbcMeetingUnitOfWork(dataSource);
         this.outboxStore = new JdbcOutboxStore(dataSource);
@@ -369,11 +374,17 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
      * 用显式配置启动数据库运行时。
      *
      * @param config 已校验的数据库配置
-     * @return 可供应用装配使用的数据库运行时
-     * @throws DatabaseStartupException readiness 未通过；创建的池会先关闭
+     * @return 可供应用装配使用的 PostgreSQL 完整会议运行时
+     * @throws DatabaseStartupException 所选引擎尚未支持完整会议，或 readiness 未通过；
+     *         已创建的池会先关闭
      */
     public static JdbcDatabaseRuntime start(DatabaseRuntimeConfig config) {
         Objects.requireNonNull(config, "config");
+        if (config.engine() != JdbcDatabaseEngine.POSTGRESQL) {
+            LOGGER.log(Level.WARNING, "完整会议 JDBC 运行时尚未适配所选引擎 engine={0}", config.engine());
+            throw new DatabaseStartupException(
+                    DatabaseReadiness.invalidConfiguration("MySQL M1 仅支持连接与初始化基线"));
+        }
         HikariDataSource pool = null;
         JdbcDatabaseRuntime runtime = null;
         try {
@@ -649,7 +660,7 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
         if (!closed.compareAndSet(false, true)) {
             return;
         }
-        closeQuietly(dataSource);
+        databaseContext.close();
         LOGGER.log(Level.INFO, "数据库运行时已关闭");
     }
 
@@ -660,19 +671,7 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
     }
 
     private static HikariDataSource createPool(DatabaseRuntimeConfig config) {
-        HikariConfig hikari = new HikariConfig();
-        hikari.setJdbcUrl(config.url());
-        hikari.setUsername(config.username());
-        hikari.setPassword(config.password());
-        hikari.setConnectionTimeout(config.connectionTimeout().toMillis());
-        hikari.setValidationTimeout(config.validationTimeout().toMillis());
-        hikari.addDataSourceProperty("socketTimeout",
-                Long.toString(config.socketTimeout().toSeconds()));
-        hikari.setMaximumPoolSize(config.maximumPoolSize());
-        hikari.setMinimumIdle(config.minimumIdle());
-        hikari.setPoolName("czur-meeting-db");
-        hikari.setReadOnly(false);
-        return new HikariDataSource(hikari);
+        return JdbcDatabaseContext.createPool(config);
     }
 
     private static boolean isMissingMigrationTable(SQLException failure) {
@@ -2228,11 +2227,6 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
     }
 
     private static void closeQuietly(HikariDataSource pool) {
-        try {
-            pool.close();
-        } catch (RuntimeException failure) {
-            LOGGER.log(Level.WARNING, "关闭数据库连接池失败 exception={0}",
-                    failure.getClass().getSimpleName());
-        }
+        JdbcDatabaseContext.closePool(pool);
     }
 }
