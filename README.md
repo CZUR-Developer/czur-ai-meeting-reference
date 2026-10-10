@@ -37,6 +37,9 @@ cd android-reference-app && ./gradlew :app:assembleDebug
 配置方式见 [`backend-reference/README.md`](backend-reference/README.md)。日常开发验证
 不启动 Docker。公开发布前再单独执行 `python3 tools/check-public-boundary.py`。
 
+MySQL 5.7 的独立能力探针见 [`tools/mysql57-compatibility/`](tools/mysql57-compatibility/README.md)；
+此入口仅做本机隔离库实验，当前 PostgreSQL 后端尚不支持生产 MySQL。
+
 ## 交付部署
 
 交付用的后端 Dockerfile 和 Compose 配置不参与上述开发验证。参考后端的配置与

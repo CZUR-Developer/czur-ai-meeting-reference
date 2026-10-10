@@ -21,6 +21,10 @@ AITransRepos 的 P2 验收记录。上述本机 Maven 测试不能自动代替�
 公开发布前单独运行 `python3 tools/check-public-boundary.py`；它是发布内容检查，
 不能替代编译、测试或实际功能验收。
 
+MySQL 5.7 的小型数据库能力实验见
+[`mysql57-compatibility/`](mysql57-compatibility/README.md)。仅连接显式指定的本机隔离库，
+不执行正式 V001；此入口仅为探针，当前后端尚不支持生产 MySQL。
+
 ## Android 设备启动校验
 
 [`android-device/`](android-device/README.md) 提供基于真实页面 resource-id 的启动工具：
