@@ -49,7 +49,7 @@
     </dependency>
     <!--
       运行时唯一共享连接池。HikariCP 只位于数据库装配边界，不渗透到领域
-      和 application port；连接池由 JdbcDatabaseRuntime 负责启动与关闭。
+      和 application port；连接池生命周期只由公共数据库装配边界统一管理。
     -->
     <dependency>
       <groupId>com.zaxxer</groupId>
@@ -84,6 +84,13 @@
       <groupId>org.postgresql</groupId>
       <artifactId>postgresql</artifactId>
       <version>42.6.2</version>
+      <scope>runtime</scope>
+    </dependency>
+    <!-- MySQL 5.7 M1 只交付连接／初始化基线；完整会议 Store 在后续小步适配。 -->
+    <dependency>
+      <groupId>com.mysql</groupId>
+      <artifactId>mysql-connector-j</artifactId>
+      <version>8.3.0</version>
       <scope>runtime</scope>
     </dependency>
     <!-- P5-3 可替换对象存储仅在 S3 ArtifactStore 适配器内使用。 -->
