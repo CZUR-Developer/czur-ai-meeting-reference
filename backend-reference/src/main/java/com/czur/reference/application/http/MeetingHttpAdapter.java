@@ -332,7 +332,8 @@ public final class MeetingHttpAdapter {
             ModelSessionLanguageLookup modelSessionLanguages,
             BailianSummarySessionIssuer summarySessions) {
         this.queryPort = Objects.requireNonNull(queryPort, "queryPort");
-        this.deletionPort = Objects.requireNonNull(deletionPort, "deletionPort");
+        // 显式客户端模型装配不构造旧删除工作单元；null 仅关闭该路由，不能伪装可用。
+        this.deletionPort = deletionPort;
         this.decoder = Objects.requireNonNull(decoder, "decoder");
         this.errors = Objects.requireNonNull(errors, "errors");
         this.stopService = Objects.requireNonNull(stopService, "stopService");
@@ -699,6 +700,7 @@ public final class MeetingHttpAdapter {
                     context, detail.group(1))));
         }
         if ("DELETE".equals(method) && detail.matches()) {
+            if (deletionPort == null) return errors.notImplemented();
             String meetingId = detail.group(1);
             String idempotencyKey = requireIdempotencyKey(request);
             DeleteRequest delete = decoder.decodeDelete(request, context);

@@ -27,6 +27,7 @@ import com.czur.reference.application.model.BailianSummarySessionIssuer;
 import com.czur.reference.application.model.SampleJsonWsModelSessionIssuer;
 import com.czur.reference.application.model.TingwuModelSessionIssuer;
 import com.czur.reference.application.persistence.jdbc.JdbcDatabaseRuntime;
+import com.czur.reference.application.persistence.jdbc.JdbcDatabaseContext;
 import com.czur.reference.application.persistence.jdbc.JdbcCompleteMeetingCreateReplayLookup;
 import com.czur.reference.application.persistence.jdbc.JdbcCompleteMeetingCreationUnitOfWork;
 import com.czur.reference.application.persistence.jdbc.JdbcMeetingDeletionAdmissionUnitOfWork;
@@ -106,6 +107,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
             ReferenceMeetingHttpAssembly.class.getName());
 
     private final JdbcDatabaseRuntime database;
+    private final JdbcDatabaseContext databaseContext;
     private final String deploymentScope;
     private final MeetingHttpRuntime runtime;
     private final MeetingHttpDispatcher dispatcher;
@@ -122,7 +124,8 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
     private final AtomicBoolean closed = new AtomicBoolean();
 
     private ReferenceMeetingHttpAssembly(
-            JdbcDatabaseRuntime database, String deploymentScope, MeetingHttpRuntime runtime,
+            JdbcDatabaseRuntime database, JdbcDatabaseContext databaseContext,
+            String deploymentScope, MeetingHttpRuntime runtime,
             AuthenticatedMeetingHttpContextResolver contextResolver,
             HttpErrorMapper errors, boolean realtimeRenewEnabled,
             JdbcRealtimeCredentialVerifier realtimeVerifier,
@@ -132,6 +135,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
             JdbcMeetingEventLogPort eventLog, Clock clock,
             ResultEmailEndpoint resultEmail, EntitlementProvider entitlementProvider) {
         this.database = database;
+        this.databaseContext = Objects.requireNonNull(databaseContext, "databaseContext");
         this.deploymentScope = deploymentScope;
         this.runtime = runtime;
         this.contextResolver = contextResolver;
@@ -140,7 +144,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
         this.realtimeVerifier = realtimeVerifier;
         this.realtimeAudioIngress = realtimeAudioIngress;
         this.realtimeTranscriptSessions = realtimeTranscriptSessions;
-        this.inputReconciler = Objects.requireNonNull(inputReconciler, "inputReconciler");
+        this.inputReconciler = inputReconciler;
         this.eventLog = Objects.requireNonNull(eventLog, "eventLog");
         this.clock = clock;
         this.dispatcher = new MeetingHttpDispatcher(runtime, errors, contextResolver, resultEmail);
@@ -184,7 +188,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
             throw new IllegalArgumentException("外部身份配置须显式注入身份和权益策略");
         }
         return start(config, clock, artifactStore, null, null, null,
-                UnaryOperator.identity(), true);
+                UnaryOperator.identity(), true, false);
     }
 
     /**
@@ -277,7 +281,42 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
         Objects.requireNonNull(entitlementPolicy, "entitlementPolicy");
         Objects.requireNonNull(entitlementProviderDecorator, "entitlementProviderDecorator");
         return start(config, clock, artifactStore, identityProvider, entitlementPolicy,
-                modelSessionIssuer, entitlementProviderDecorator, false);
+                modelSessionIssuer, entitlementProviderDecorator, false, false);
+    }
+
+    /**
+     * 显式装配 SDK 直连模型的正常客户端会议入口，支持已初始化的 PG／MySQL5.7。
+     *
+     * <p>与原 start 共用唯一装配核心、创建／Stop 服务、领域状态机和持久权益 Provider。
+     * 只拥有一个 Context 池；不构造旧音频 Worker、WSS、删除或实时 Token 续签组件。
+     * 这些 HTTP 路由使用既有 501，非 HTTP 访问器明确拒绝，不能借默认 PG Store 冒充可用。
+     * Create 的旧 realtime 字段保留协议兼容；实际模型材料来自 modelSession 发行器。</p>
+     *
+     * <p>身份、资格、模型与存储必须由部署方明确提供；本入口无演示登录、模型或存储兜底。
+     * 装饰器只装配一次，Create 与客户端 Stop 共用其返回实例。调用方先停外层 HTTP，
+     * 再关闭本装配；外部身份／资格／模型／存储生命周期由调用方管理，不在此关闭。</p>
+     *
+     * @param config 已冻结的可信配置，启动不自动迁移，Create 开关及能力交集保持
+     * @param clock 身份、会议及用量共用的服务端时钟
+     * @param artifactStore 部署方持久产物 Store，不另建存储状态机
+     * @param identityProvider 真实凭据校验端口，不从请求正文推定所有者
+     * @param entitlementPolicy 首次资格／预占策略，公共持久账本仍使用唯一 Context
+     * @param modelSessionIssuer 临时直连材料发行器，不接收或转发音频
+     * @param entitlementProviderDecorator 唯一 JDBC Provider 的共享结算装饰器
+     * @return 启动基线通过的客户端装配，不自动监听网络或运行后台 Worker
+     */
+    public static ReferenceMeetingHttpAssembly startClientModel(
+            ReferenceMeetingDeploymentConfig config, Clock clock, ArtifactStore artifactStore,
+            IdentityProvider identityProvider, EntitlementPolicy entitlementPolicy,
+            ModelSessionIssuer modelSessionIssuer,
+            UnaryOperator<EntitlementProvider> entitlementProviderDecorator) {
+        Objects.requireNonNull(artifactStore, "artifactStore");
+        Objects.requireNonNull(identityProvider, "identityProvider");
+        Objects.requireNonNull(entitlementPolicy, "entitlementPolicy");
+        Objects.requireNonNull(modelSessionIssuer, "modelSessionIssuer");
+        Objects.requireNonNull(entitlementProviderDecorator, "entitlementProviderDecorator");
+        return start(config, clock, artifactStore, identityProvider, entitlementPolicy,
+                modelSessionIssuer, entitlementProviderDecorator, false, true);
     }
 
     private static ReferenceMeetingHttpAssembly start(
@@ -285,30 +324,33 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
             ArtifactStore artifactStore, IdentityProvider identityProvider,
             EntitlementPolicy entitlementPolicy, ModelSessionIssuer modelSessionIssuer,
             UnaryOperator<EntitlementProvider> entitlementProviderDecorator,
-            boolean referenceDefaults) {
+            boolean referenceDefaults, boolean clientModel) {
         Objects.requireNonNull(config, "config");
         Objects.requireNonNull(clock, "clock");
-        JdbcDatabaseRuntime database = JdbcDatabaseRuntime.start(config.database());
+        JdbcDatabaseRuntime database = clientModel ? null : JdbcDatabaseRuntime.start(config.database());
+        JdbcDatabaseContext databaseContext = clientModel ? JdbcDatabaseContext.start(config.database())
+                : database.databaseContext();
+        boolean realtimeRenewEnabled = !clientModel && config.realtimeRenewEnabled();
         MeetingHttpRuntime runtime = null;
         try {
-            if (config.realtimeRenewEnabled()) {
+            if (realtimeRenewEnabled) {
                 DatabaseReadiness readiness = database.checkRealtimeCredentialReadiness();
                 if (!readiness.ready()) {
                     throw new DatabaseStartupException(readiness);
                 }
             }
-            DataSource dataSource = database.dataSource();
+            DataSource dataSource = databaseContext.dataSource();
             SecureRandom random = new SecureRandom();
             RandomIds ids = new RandomIds(random);
             byte[] pageSecret = config.pageTokenSecretCopy();
             JdbcMeetingQueryPort query;
             try {
-                query = new JdbcMeetingQueryPort(dataSource, pageSecret);
+                query = new JdbcMeetingQueryPort(databaseContext, pageSecret);
             } finally {
                 Arrays.fill(pageSecret, (byte) 0);
             }
-            var stop = new JdbcOwnedMeetingStopUnitOfWork(dataSource, clock);
-            var deletion = new JdbcMeetingDeletionAdmissionUnitOfWork(dataSource, clock);
+            var stop = new JdbcOwnedMeetingStopUnitOfWork(databaseContext, clock);
+            var deletion = clientModel ? null : new JdbcMeetingDeletionAdmissionUnitOfWork(dataSource, clock);
             IdentityProvider identity = referenceDefaults
                     ? new ReferenceDevIdentityProvider(config.identity(), clock)
                     : identityProvider;
@@ -317,7 +359,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                     : entitlementPolicy;
             // 工厂只装配一次；Create、Stop与Worker访问器共用同一装饰实例。
             // 输入Provider仍在唯一会议库保存所有预占／用量操作和绑定事实。
-            var jdbcEntitlement = new JdbcReferenceDevEntitlementProvider(dataSource, policy, clock);
+            var jdbcEntitlement = new JdbcReferenceDevEntitlementProvider(databaseContext, policy, clock);
             EntitlementProvider entitlement = Objects.requireNonNull(
                     entitlementProviderDecorator.apply(jdbcEntitlement),
                     "entitlementProviderDecorator result");
@@ -334,7 +376,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
             // Create 开关只控制新建；关闭后仍可能有先前创建的 V013/V015 会议
             // 等待 Stop 收口，因此同一 Reconciler 独立于该开关。旧 v1 会议没有
             // 完整输入事实，触发结果不会改写已提交 Stop 或权威查询响应。
-            MeetingInputReconciler inputReconciler = new MeetingInputReconciler(
+            MeetingInputReconciler inputReconciler = clientModel ? null : new MeetingInputReconciler(
                     new JdbcMeetingInputClosureContextPort(
                             dataSource, config.deploymentScope()),
                     new JdbcAcceptedInputFactLookup(dataSource),
@@ -344,9 +386,9 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                     clock);
             var stopService = new AuthenticatedMeetingStopApplicationService(
                     config.deploymentScope(), identity, stop, query, inputReconciler,
-                    new JdbcClientMeetingResultFinalizer(dataSource, ids::newReceipt,
+                    new JdbcClientMeetingResultFinalizer(databaseContext, ids::newReceipt,
                             clock, artifactStore, entitlement));
-            var renewService = config.realtimeRenewEnabled()
+            var renewService = realtimeRenewEnabled
                     ? new AuthenticatedRealtimeTokenRenewApplicationService(
                             config.deploymentScope(), identity,
                             new JdbcRenewRealtimeTokenUnitOfWork(dataSource, clock,
@@ -356,32 +398,32 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                     config.profile().id().equals(id)
                             && config.profile().revision() == revision
                             ? Optional.of(config.profile()) : Optional.empty();
-            var realtimeVerifier = new JdbcRealtimeCredentialVerifier(
+            var realtimeVerifier = clientModel ? null : new JdbcRealtimeCredentialVerifier(
                     dataSource, config.deploymentScope(), clock);
-            var durableAudio = new JdbcDurableAudioInputPort(dataSource,
+            var durableAudio = clientModel ? null : new JdbcDurableAudioInputPort(dataSource,
                     config.deploymentScope());
             var startCoordinator = new RealtimeMeetingStartCoordinator(
-                    config.deploymentScope(), new JdbcRealtimeStartFactsLookup(dataSource),
+                    config.deploymentScope(), new JdbcRealtimeStartFactsLookup(databaseContext),
                     profiles, config.mockCapabilities(), config.capabilityLimits(), clock,
                     new JdbcMeetingStartExecutionUnitOfWork(
-                            dataSource, new CapabilityPlanner()));
-            var realtimeIngress = new RealtimeAudioIngress(startCoordinator, durableAudio);
-            var clientInput = new JdbcClientMeetingInputPort(dataSource,
+                            databaseContext, new CapabilityPlanner()));
+            var realtimeIngress = clientModel ? null : new RealtimeAudioIngress(startCoordinator, durableAudio);
+            var clientInput = new JdbcClientMeetingInputPort(databaseContext,
                     startCoordinator, clock, artifactStore);
-            var realtimeTranscripts = new RealtimeMockTranscriptRuntime(
+            var realtimeTranscripts = clientModel ? null : new RealtimeMockTranscriptRuntime(
                     new JdbcRealtimeMockSessionSpecLookup(dataSource,
                             config.deploymentScope()), durableAudio,
                     new JdbcRealtimeTranscriptEventPublisher(dataSource, clock),
                     config.mockCapabilities(), clock);
             MeetingManifestPort manifest = config.resultLinkTtl()
                     .<MeetingManifestPort>map(ttl -> new JdbcMeetingManifestQueryPort(
-                            dataSource, new ManifestResultAccessPolicy(clock, ttl)))
+                            databaseContext, new ManifestResultAccessPolicy(clock, ttl)))
                     .orElse(null);
             MeetingArtifactContentPort artifact = manifest != null
                     ? new JdbcMeetingArtifactContentQueryPort(
-                            dataSource, manifest, artifactStore) : null;
+                            databaseContext, manifest, artifactStore) : null;
             // REST 补拉和后续 WSS 恢复共用 meeting_event；不建立第二套事件事实源。
-            var events = new JdbcMeetingEventLogPort(dataSource);
+            var events = new JdbcMeetingEventLogPort(databaseContext);
             // 只替换模型会话材料签发端口。旧 Create.realtime 与 WSS Mock
             // 继续保留既有语义，Android 直连模型的选择由 adapterId 驱动。
             ModelSessionIssuer modelSessions = modelSessionIssuer != null ? modelSessionIssuer
@@ -394,7 +436,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
             var summarySessions = config.bailianSummarySession()
                     .map(summary -> new BailianSummarySessionIssuer(summary, clock)).orElse(null);
             var modelSessionLanguages = modelSessions == null && summarySessions == null ? null
-                    : new JdbcModelSessionLanguageLookup(dataSource);
+                    : new JdbcModelSessionLanguageLookup(databaseContext);
             if (config.createEnabled()) {
                 // 与查询、Stop、Delete 共用唯一连接池、身份 Provider、Clock 和错误映射。
                 // ID 仅由服务端安全随机源生成；首次公开响应由会议创建事实持久化。
@@ -402,11 +444,11 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                         config.wssOrigin(), config.wssTokenTtl(), clock, random);
                 var create = new AuthenticatedCompleteMeetingApplicationService(
                         config.deploymentScope(), identity,
-                        new JdbcCompleteMeetingCreateReplayLookup(dataSource),
-                        new JdbcUsageReserveLookup(dataSource), entitlement, ids,
+                        new JdbcCompleteMeetingCreateReplayLookup(databaseContext),
+                        new JdbcUsageReserveLookup(databaseContext), entitlement, ids,
                         new CompleteMeetingResponseAssembler(new CapabilityPlanner(),
                                 sessions, config.runtimeLimits()),
-                        new JdbcCompleteMeetingCreationUnitOfWork(dataSource, clock),
+                        new JdbcCompleteMeetingCreationUnitOfWork(databaseContext, clock),
                         config.trustedEstimate(), profiles, config.mockCapabilities(),
                         config.capabilityLimits());
                 runtime = new MeetingHttpRuntime(query, deletion, decoder, errors, stopService,
@@ -422,13 +464,13 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                         referenceLogin, capabilities);
             }
             LOGGER.log(Level.INFO,
-                    "reference meeting HTTP 装配完成 createEnabled={0} realtimeRenewEnabled={1} identityMode={2} modelIssuerMode={3}",
-                    new Object[]{config.createEnabled(), config.realtimeRenewEnabled(),
+                    "reference meeting HTTP 装配完成 createEnabled={0} realtimeRenewEnabled={1} identityMode={2} modelIssuerMode={3} clientModel={4}",
+                    new Object[]{config.createEnabled(), realtimeRenewEnabled,
                             referenceDefaults ? "REFERENCE" : "EXTERNAL",
-                            modelSessionIssuer == null ? "DEFAULT" : "EXTERNAL"});
-            return new ReferenceMeetingHttpAssembly(database, config.deploymentScope(),
+                            modelSessionIssuer == null ? "DEFAULT" : "EXTERNAL", clientModel});
+            return new ReferenceMeetingHttpAssembly(database, databaseContext, config.deploymentScope(),
                     runtime, resolver, errors,
-                    config.realtimeRenewEnabled(), realtimeVerifier, realtimeIngress,
+                    realtimeRenewEnabled, realtimeVerifier, realtimeIngress,
                     realtimeTranscripts, inputReconciler, events, clock,
                     config.resultEmail().map(email -> new ResultEmailEndpoint(query, manifest,
                             new SmtpResultEmailSender(email), errors)).orElse(null), entitlement);
@@ -441,7 +483,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
                 failure.addSuppressed(cleanupFailure);
             }
             try {
-                database.close();
+                if (database != null) database.close(); else databaseContext.close();
             } catch (RuntimeException | Error cleanupFailure) {
                 failure.addSuppressed(cleanupFailure);
             }
@@ -472,7 +514,13 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
     public HttpErrorMapper errorMapper() { return errors; }
 
     /** 返回已通过启动 readiness 的数据库运行时；调用方不得单独关闭。 */
-    public JdbcDatabaseRuntime databaseRuntime() { return database; }
+    public JdbcDatabaseRuntime databaseRuntime() {
+        requireLegacyRuntime();
+        return database;
+    }
+
+    /** 所有模式的唯一 Context，供部署方读取同场 StartFacts／最终快照；不得单独关闭。 */
+    public JdbcDatabaseContext databaseContext() { return databaseContext; }
 
     /**
      * 返回与Create和客户端Stop共用的持久权益Provider，供部署方装配既有收口Worker。
@@ -490,6 +538,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
      * 且必须在本装配根关闭之前停止调用。
      */
     public MeetingInputReconciliationScan newInputReconciliationScan(int pageSize) {
+        requireLegacyRuntime();
         if (closed.get()) {
             throw new IllegalStateException("reference meeting HTTP assembly is closed");
         }
@@ -511,7 +560,8 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
             throw new IllegalStateException("reference meeting HTTP assembly is closed");
         }
         return new MeetingJdkHttpServer(address, dispatcher,
-                () -> database.checkReadiness().ready()
+                () -> (database == null ? databaseContext.checkBaselineReadiness().ready()
+                        : database.checkReadiness().ready())
                         && (!realtimeRenewEnabled
                                 || database.checkRealtimeCredentialReadiness().ready()));
     }
@@ -523,6 +573,7 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
      */
     public MeetingRealtimeWssServer newRealtimeWssServer(
             InetSocketAddress address, SSLContext tls) {
+        requireLegacyRuntime();
         if (closed.get()) {
             throw new IllegalStateException("reference meeting HTTP assembly is closed");
         }
@@ -542,9 +593,15 @@ public final class ReferenceMeetingHttpAssembly implements AutoCloseable {
             try {
                 runtime.close();
             } finally {
-                database.close();
+                if (database != null) database.close(); else databaseContext.close();
             }
             LOGGER.log(Level.INFO, "reference meeting HTTP 装配已关闭");
+        }
+    }
+
+    private void requireLegacyRuntime() {
+        if (database == null) {
+            throw new UnsupportedOperationException("client model does not expose legacy audio runtime");
         }
     }
 

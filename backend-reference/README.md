@@ -171,17 +171,38 @@ Connector/J 传毫秒。MySQL 连接固定使用 UTF-8／`utf8mb4_bin`、UTC 时
 及 [独立初始化入口](../deploy/migrate-mysql.sh)，再调用
 `JdbcDatabaseContext.start(config)`。上下文拥有唯一 HikariCP 池；
 `engine()` 和 `table(JdbcDatabaseTable)` 提供封闭固定映射：PostgreSQL 原表名
-保留，MySQL 25 张当前基线表全部为 `ai_trans_*`，包含
+保留，MySQL 当前共 26 张基线表（25 张基础表加 1 张作用域锁表），全部为 `ai_trans_*`，包含
 `ai_trans_schema_migrations`。启动只读检查连接、`V001__initial_schema` 登记及
 必要表存在／InnoDB，不读取旧业务表，不自动建表、登记或修补结构。
 `checkBaselineReadiness()` 的 READY 只签连接与最小初始化基线，不签会议业务。
 装配者统一关闭上下文，调用者关闭借出的连接；重复 `close()` 安全。
 
-M1 尚未适配 MySQL 的会议 Store、Create／Stop／Worker 或 HTTP 装配。
-`JdbcDatabaseRuntime.start/open` 对 MySQL 在创建池之前明确返回
-`INVALID_CONFIGURATION`，因而旧 `ReferenceMeetingHttpAssembly` 不会误装配
-PostgreSQL SQL。MySQL 正常会议链留 M2，CZUR 服务装配留 M3；原 PG catalog
-契约门和完整运行时行为保留。每种引擎只交付一份当前 V001，不把两份基线连续执行。
+### P8 M2：显式客户端正常会议 HTTP 装配
+
+`ReferenceMeetingHttpAssembly.startClientModel(config, clock, artifactStore,
+identityProvider, entitlementPolicy, modelSessionIssuer, entitlementProviderDecorator)`
+从已初始化的 PG／MySQL5.7 创建唯一 `JdbcDatabaseContext` 池，显式要求部署方
+提供身份、资格、模型会话材料和持久产物 Store，不自动回退演示身份、模型或存储。
+它与旧入口共用唯一装配核心、创建／Stop 应用服务、领域状态机和持久权益账本。
+装饰器只调用一次，Create、客户端 Stop 及 `entitlementProvider()` 共用其返回实例。
+`databaseContext()` 返回同一个连接上下文，供同场 StartFacts／最终只读快照使用；
+调用方不得单独关闭。身份、策略、模型和 Store 的生命周期仍由调用方管理。
+
+正常链覆盖 Create／同键重放、modelSession、startClient、标准字幕／译文事件、
+实测用量冻结、可选纪要及展示截图、Stop／同键重放、用量 COMMIT、READY、
+归属列表／详情、事件补拉、匿名 Manifest 和产物字节。所有 MySQL 事实仍写入固定
+`ai_trans_*` 表。模型输入由客户端直连，装配不接收或转发音频；可选纪要提交沿用
+冻结能力，`summarySession` 发行仍需明确配置发行器，无发行器时发现接口不宣称纪要生成。
+Create 原 `realtime` 字段仅保留协议兼容，实际模型材料由显式发行器提供。
+
+本入口不构造旧音频 Worker、Reconciler、WSS、删除或旧实时 Token 续签。
+对应有效 HTTP DELETE／renew 路由返回既有 501；`databaseRuntime()`、
+`newInputReconciliationScan()`、`newRealtimeWssServer()` 明确拒绝访问旧组件。
+健康探针只读取同一 Context 的初始化基线，不把 READY 探针当作完整业务验收。
+原 `ReferenceMeetingHttpAssembly.start(...)` 和 `JdbcDatabaseRuntime.start/open`
+完整 PG 入口及 catalog 契约门保持；旧完整运行时仍在建池前拒绝 MySQL
+`INVALID_CONFIGURATION`，不能把未经适配的 PG 音频／Worker SQL 装到 MySQL。
+CZUR Cloud 服务装配留 M3。每种引擎只交付一份当前 V001，不把两份基线连续执行。
 
 本机定向真实连接测试使用 `REFERENCE_TEST_MYSQL_DATABASE_URL`、
 `REFERENCE_TEST_MYSQL_DATABASE_USER`、`REFERENCE_TEST_MYSQL_DATABASE_PASSWORD`，
@@ -189,6 +210,12 @@ PostgreSQL SQL。MySQL 正常会议链留 M2，CZUR 服务装配留 M3；原 PG 
 `JdbcDatabaseContextMysqlIntegrationTest` 只读核对实际5.7 server、当前基线、
 会话 UTC／utf8mb4、中文／emoji／canonical 原文及 UTC 微秒，未提供配置时明确跳过。
 该测试不运行会议 Store，也不代表生产业务库、CZUR 真会或部署已验收。
+
+M2 正常 HTTP 定向测试 `ReferenceMeetingMysqlClientHttpAssemblyIntegrationTest`
+使用相同的三个 MySQL 测试环境变量；正式初始化自己的 `ai_trans_m2_c_*` 随机库，
+经实际 loopback HTTP 验证正常链及同键重放，并核对原业务哨兵 DDL／数据未改变。
+模型、身份、资格和产物存储均为显式测试端口，不调用厂商。测试结束仅删除该例随机库，
+不访问或修改部署方业务库；这仍不代表 M3、异常／恢复矩阵或 Cloud 生产验收。
 
 ### reference-dev 身份
 

@@ -17,7 +17,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Timestamp;
+import java.time.Instant;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.logging.Level;
@@ -26,13 +26,13 @@ import java.util.logging.Logger;
 /**
  * 结果 URL 使用的 JDBC Manifest 查询端口。
  *
- * <p>一次 {@code SELECT} statement 通过 PostgreSQL {@code LATERAL} 子查询读取
- * meeting 行和该会议的最新 Manifest revision。READ COMMITTED 下这两个读取共享
+ * <p>一次 {@code SELECT} statement 读取 meeting 行和该会议的最新 Manifest revision。
+ * PG 使用 {@code LATERAL}，MySQL5.7 使用相关 {@code MAX} 连接；两个读取共享
  * 同一个 statement snapshot，避免先查会议、再查结果时把生成中的状态和另一版
  * Manifest 拼成不存在的组合。该类只读取事实，不创建独立业务事务，也不负责
  * 登录、结果链接生成或 Artifact 内容下载。</p>
  *
- * <p>Manifest JSON 在返回前仍按 canonical 文本、JSONB 镜像、SHA-256、身份、
+ * <p>Manifest JSON 在返回前仍按 canonical 文本、原生 JSON 镜像、SHA-256、身份、
  * revision 和前序链做关闭式校验。删除状态由访问策略优先撤权，即使事实表仍
  * 保留旧 revision 也不会返回旧结果。</p>
  */
@@ -82,6 +82,7 @@ public final class JdbcMeetingManifestQueryPort implements MeetingManifestPort {
             """;
 
     private final DataSource dataSource;
+    private final JdbcDatabaseEngine engine;
     private final ManifestResultAccessPolicy accessPolicy;
 
     /**
@@ -93,7 +94,19 @@ public final class JdbcMeetingManifestQueryPort implements MeetingManifestPort {
     public JdbcMeetingManifestQueryPort(
             DataSource dataSource,
             ManifestResultAccessPolicy accessPolicy) {
+        this(dataSource, JdbcDatabaseEngine.POSTGRESQL, accessPolicy);
+    }
+
+    /** 同一池及原结果访问策略；MySQL 使用相关最新 revision，仍为单 statement 快照。 */
+    public JdbcMeetingManifestQueryPort(JdbcDatabaseContext database,
+            ManifestResultAccessPolicy accessPolicy) {
+        this(database.dataSource(), database.engine(), accessPolicy);
+    }
+
+    private JdbcMeetingManifestQueryPort(DataSource dataSource, JdbcDatabaseEngine engine,
+            ManifestResultAccessPolicy accessPolicy) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
+        this.engine = Objects.requireNonNull(engine, "engine");
         this.accessPolicy = Objects.requireNonNull(accessPolicy, "accessPolicy");
     }
 
@@ -123,8 +136,8 @@ public final class JdbcMeetingManifestQueryPort implements MeetingManifestPort {
 
     /** 单条 statement 读取并先做不需要 Manifest 正文的访问决策。 */
     private Result readOne(Connection connection, Request request) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(GET_SQL)) {
-            statement.setString(1, request.meetingId());
+        try (PreparedStatement statement = connection.prepareStatement(getSql())) {
+            JdbcValues.setText(statement, 1, engine, request.meetingId());
             try (ResultSet rows = statement.executeQuery()) {
                 if (!rows.next()) {
                     return new NotFound();
@@ -180,10 +193,10 @@ public final class JdbcMeetingManifestQueryPort implements MeetingManifestPort {
                 throw new CorruptManifestSnapshot();
             }
             InputState inputState = readEnum(rows, "input_state", InputState.class);
-            String receipt = rows.getString("finalization_receipt_id");
+            String receipt = JdbcValues.text(rows, "finalization_receipt_id");
             ManifestStatus manifestState = readEnum(
                     rows, "manifest_state", ManifestStatus.class);
-            Timestamp updatedAt = rows.getTimestamp("updated_at");
+            Instant updatedAt = JdbcValues.instant(rows, "updated_at");
             if (updatedAt == null) {
                 throw new CorruptManifestSnapshot();
             }
@@ -192,7 +205,7 @@ public final class JdbcMeetingManifestQueryPort implements MeetingManifestPort {
                     meetingState,
                     new FinalizationFact(inputState, receipt),
                     manifestState,
-                    updatedAt.toInstant());
+                    updatedAt);
 
             int latestRevisionValue = rows.getInt("manifest_revision");
             Integer latestRevision = rows.wasNull() ? null : latestRevisionValue;
@@ -202,7 +215,7 @@ public final class JdbcMeetingManifestQueryPort implements MeetingManifestPort {
             String manifestJsonText = rows.getString("manifest_json_text");
             byte[] contentSha256 = rows.getBytes("content_sha256");
             Boolean chainValid = nullableChainValid(rows);
-            boolean clientInput = rows.getString("client_meeting_id") != null;
+            boolean clientInput = JdbcValues.text(rows, "client_meeting_id") != null;
             String clientManifestJson = rows.getString("client_manifest_json");
             if (!clientInput && clientManifestJson != null) {
                 throw new CorruptManifestSnapshot();
@@ -311,7 +324,7 @@ public final class JdbcMeetingManifestQueryPort implements MeetingManifestPort {
     }
 
     private static String requiredText(ResultSet rows, String column) throws SQLException {
-        String value = rows.getString(column);
+        String value = JdbcValues.text(rows, column);
         if (value == null || value.isBlank()) {
             throw new CorruptManifestSnapshot();
         }
@@ -322,6 +335,38 @@ public final class JdbcMeetingManifestQueryPort implements MeetingManifestPort {
         boolean value = rows.getBoolean("chain_valid");
         return rows.wasNull() ? null : value;
     }
+
+    /** 5.7 无 LATERAL；等价相关 MAX 连接保留原 latest／前序链及客户端优先规则。 */
+    private String getSql() {
+        if (engine == JdbcDatabaseEngine.POSTGRESQL) return GET_SQL;
+        return """
+                SELECT m.meeting_id, m.profile_id, m.profile_revision, m.state,
+                       m.input_state, m.finalization_receipt_id, m.manifest_state, m.updated_at,
+                       r.manifest_revision, r.previous_revision, r.canonical_json,
+                       r.manifest_json AS manifest_json_text, r.content_sha256,
+                       CASE WHEN r.manifest_revision IS NULL THEN NULL
+                            WHEN r.manifest_revision=1 THEN r.previous_revision IS NULL
+                            ELSE r.previous_revision IS NOT NULL AND EXISTS (
+                                SELECT 1 FROM %s p WHERE p.meeting_id=r.meeting_id
+                                    AND p.manifest_revision=r.previous_revision)
+                       END AS chain_valid,
+                       ci.meeting_id AS client_meeting_id,
+                       client_result.manifest_json AS client_manifest_json
+                  FROM %s m
+                  LEFT JOIN %s ci ON ci.meeting_id=m.meeting_id
+                  LEFT JOIN %s client_result ON client_result.meeting_id=ci.meeting_id
+                  LEFT JOIN %s r ON r.meeting_id=m.meeting_id
+                    AND r.manifest_revision=(SELECT MAX(n.manifest_revision) FROM %s n
+                                             WHERE n.meeting_id=m.meeting_id)
+                 WHERE m.meeting_id=?
+                """.formatted(table(JdbcDatabaseTable.MEETING_MANIFEST_REVISION),
+                        table(JdbcDatabaseTable.MEETING), table(JdbcDatabaseTable.MEETING_CLIENT_INPUT),
+                        table(JdbcDatabaseTable.MEETING_CLIENT_RESULT),
+                        table(JdbcDatabaseTable.MEETING_MANIFEST_REVISION),
+                        table(JdbcDatabaseTable.MEETING_MANIFEST_REVISION));
+    }
+
+    private String table(JdbcDatabaseTable table) { return table.physicalName(engine); }
 
     private static byte[] sha256(String value) {
         try {

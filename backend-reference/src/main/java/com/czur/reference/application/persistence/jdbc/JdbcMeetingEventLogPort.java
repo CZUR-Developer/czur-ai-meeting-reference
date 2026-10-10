@@ -18,11 +18,12 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * 基于 PostgreSQL 会议事实源的认证事件补拉适配器。
+ * 基于 PG／MySQL 同一会议事实源的认证事件补拉适配器。
  *
- * <p>一次调用只执行一条 SELECT。会议存在性、原始归属、会议与 Manifest 删除状态、整场事件完整性、
- * 最高已提交事件序号和 {@code afterSequence} 之后的事件页因此都来自同一个 statement
- * snapshot，不会出现先鉴权、后查询时读到两份数据库状态的竞态。结果行到达后
+ * <p>PG 一次调用只执行一条 SELECT；MySQL5.7 在一个只读 REPEATABLE READ 事务内
+ * 读取会议和事件。会议存在性、原始归属、会议与 Manifest 删除状态、整场事件完整性、
+ * 最高已提交事件序号和 {@code afterSequence} 之后的事件页都来自同一快照，
+ * 不会出现先鉴权、后查询时读到两份数据库状态的竞态。结果行到达后
  * 必须先用 {@link MeetingAccessGuard} 判断原始归属；跨部署、跨主体和历史
  * {@code LEGACY_UNOWNED} 会议立即返回 {@link AccessDenied}，不会读取事件正文或
  * 暴露该行是否包含损坏事件。已归属会议的 {@code state} 或
@@ -32,7 +33,7 @@ import java.util.logging.Logger;
  * <p>事件查询按会议全局 {@code event_sequence} 升序读取 {@code limit + 1} 条，
  * 不按 {@code stream_id} 过滤。额外一条只用于计算 {@code hasMore}；空页保留调用
  * 方的 {@code afterSequence}。所有者会议只要包含无法证明 envelope 的历史事件、
- * 任一无法构造 {@link EventLog} 的必需字段，或 canonical JSON 已损坏/与 JSONB
+ * 任一无法构造 {@link EventLog} 的必需字段，或 canonical JSON 已损坏/与原生 JSON
  * 事实不一致，就关闭式返回不可用，不返回部分页面；这不代表历史已按保留策略
  * 截断。只有游标高于最高已提交事件序号才返回
  * {@link ConflictReason#INVALID_CURSOR}。当前参考实现保留全量事件，不主动返回
@@ -153,6 +154,7 @@ public final class JdbcMeetingEventLogPort implements MeetingEventLogPort, Realt
             """;
 
     private final DataSource dataSource;
+    private final JdbcDatabaseEngine engine;
 
     /**
      * 创建认证事件补拉适配器。
@@ -160,7 +162,17 @@ public final class JdbcMeetingEventLogPort implements MeetingEventLogPort, Realt
      * @param dataSource 由参考后端数据库运行时统一管理的连接池
      */
     public JdbcMeetingEventLogPort(DataSource dataSource) {
+        this(dataSource, JdbcDatabaseEngine.POSTGRESQL);
+    }
+
+    /** 复用唯一池；5.7 无 CTE/LATERAL 时以一个只读 RR 事务保持同一认证事件快照。 */
+    public JdbcMeetingEventLogPort(JdbcDatabaseContext database) {
+        this(database.dataSource(), database.engine());
+    }
+
+    private JdbcMeetingEventLogPort(DataSource dataSource, JdbcDatabaseEngine engine) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
+        this.engine = Objects.requireNonNull(engine, "engine");
     }
 
     /**
@@ -191,6 +203,15 @@ public final class JdbcMeetingEventLogPort implements MeetingEventLogPort, Realt
         Connection connection = null;
         try {
             connection = dataSource.getConnection();
+            if (engine == JdbcDatabaseEngine.MYSQL) {
+                connection.setReadOnly(true);
+                connection.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+                connection.setAutoCommit(false);
+                Result result = readMysqlSnapshot(connection, meetingId, afterSequence, limit,
+                        deploymentScope, subjectScope);
+                connection.rollback();
+                return logged(result, afterSequence);
+            }
             return logged(readSnapshot(connection, meetingId, afterSequence, limit,
                     deploymentScope, subjectScope), afterSequence);
         } catch (JdbcMeetingEventLogStore.InvalidStoredEvent
@@ -207,6 +228,59 @@ public final class JdbcMeetingEventLogPort implements MeetingEventLogPort, Realt
         } finally {
             closeQuietly(connection);
         }
+    }
+
+    /**
+     * 5.7 读取与 PG 使用同一守卫、EventLog 解码及页值对象。
+     * 先读归属／删除状态，后在同一 RR 快照扫描整场完整性；只保留本页 limit+1 条。
+     * 不使用锁定读，不把历史坏事件隐藏在游标之前，也不另建事件事实源。
+     */
+    private Result readMysqlSnapshot(Connection connection, String meetingId, long afterSequence,
+            int limit, String deploymentScope, String subjectScope) throws SQLException {
+        try (PreparedStatement header = connection.prepareStatement(
+                "SELECT deployment_scope, subject_scope, state, manifest_state FROM "
+                        + JdbcDatabaseTable.MEETING.physicalName(engine) + " WHERE meeting_id=?")) {
+            JdbcValues.setText(header, 1, engine, meetingId);
+            try (ResultSet rows = header.executeQuery()) {
+                if (!rows.next()) return new NotFound();
+                if (MeetingAccessGuard.evaluate(deploymentScope, subjectScope,
+                        JdbcValues.text(rows, "deployment_scope"), JdbcValues.text(rows, "subject_scope"))
+                        != MeetingAccessGuard.Decision.ALLOWED) return new AccessDenied();
+                String state = JdbcValues.text(rows, "state");
+                String manifest = JdbcValues.text(rows, "manifest_state");
+                if ("DELETION_PENDING".equals(state) || "DELETED".equals(state)
+                        || "DELETION_PENDING".equals(manifest) || "DELETED".equals(manifest)) {
+                    return new AccessDenied();
+                }
+            }
+        }
+        int queryLimit = Math.addExact(limit, 1);
+        List<EventLog> events = new ArrayList<>(queryLimit);
+        long maxSequence = 0;
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT meeting_id, event_sequence, event_id, event_type, canonical_payload,
+                       occurred_at, spec_version, stream_id,
+                       CASE WHEN JSON_VALID(canonical_payload)
+                            THEN payload=CAST(canonical_payload AS JSON) ELSE FALSE END AS payload_matches
+                  FROM %s WHERE meeting_id=? ORDER BY event_sequence
+                """.formatted(JdbcDatabaseTable.MEETING_EVENT.physicalName(engine)))) {
+            JdbcValues.setText(statement, 1, engine, meetingId);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    if (!rows.getBoolean("payload_matches")) {
+                        return new Unavailable(UnavailableReason.STORAGE_FAILURE, false);
+                    }
+                    EventLog event = JdbcMeetingEventLogStore.readEvent(rows);
+                    maxSequence = event.eventSequence();
+                    if (maxSequence > afterSequence && events.size() < queryLimit) events.add(event);
+                }
+            }
+        }
+        if (afterSequence > maxSequence) return new Conflict(ConflictReason.INVALID_CURSOR);
+        boolean hasMore = events.size() > limit;
+        List<EventLog> page = hasMore ? events.subList(0, limit) : events;
+        return new Page(page.isEmpty() ? MeetingEventPage.empty(afterSequence)
+                : new MeetingEventPage(page, page.getLast().eventSequence(), hasMore));
     }
 
     /**

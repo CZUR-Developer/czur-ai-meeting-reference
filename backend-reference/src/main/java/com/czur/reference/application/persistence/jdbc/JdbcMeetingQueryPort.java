@@ -16,7 +16,6 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -26,7 +25,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * 从 PostgreSQL {@code meeting} 权威事实表读取会议详情和归属列表。
+ * 从 PG／MySQL 的同一会议权威事实表读取会议详情和归属列表。
  *
  * <p>{@link #get(GetRequest)} 使用一条 SELECT 同时读取聚合归属、会议状态、
  * meeting-level 输入状态、finalization receipt、Manifest 状态和时间，再复用
@@ -51,14 +50,14 @@ public final class JdbcMeetingQueryPort implements MeetingQueryPort {
                    grant_id, grant_expires_at, usage_reservation_id,
                    profile_id, profile_revision, state, input_state,
                    finalization_receipt_id, manifest_state, created_at, updated_at
-              FROM meeting
+              FROM %s
              WHERE meeting_id = ?
             """;
 
     private static final String LIST_FIRST_PAGE_SQL = """
             SELECT meeting_id, state, input_state, finalization_receipt_id,
                    manifest_state, created_at, updated_at
-              FROM meeting
+              FROM %s
              WHERE deployment_scope = ?
                AND subject_scope = ?
                AND subject_scope <> 'LEGACY_UNOWNED'
@@ -69,7 +68,7 @@ public final class JdbcMeetingQueryPort implements MeetingQueryPort {
     private static final String LIST_AFTER_CURSOR_SQL = """
             SELECT meeting_id, state, input_state, finalization_receipt_id,
                    manifest_state, created_at, updated_at
-              FROM meeting
+              FROM %s
              WHERE deployment_scope = ?
                AND subject_scope = ?
                AND subject_scope <> 'LEGACY_UNOWNED'
@@ -79,6 +78,7 @@ public final class JdbcMeetingQueryPort implements MeetingQueryPort {
             """;
 
     private final DataSource dataSource;
+    private final JdbcDatabaseEngine engine;
     private final HmacMeetingPageTokenCodec pageTokenCodec;
 
     /**
@@ -95,7 +95,18 @@ public final class JdbcMeetingQueryPort implements MeetingQueryPort {
     JdbcMeetingQueryPort(
             DataSource dataSource,
             HmacMeetingPageTokenCodec pageTokenCodec) {
+        this(dataSource, JdbcDatabaseEngine.POSTGRESQL, pageTokenCodec);
+    }
+
+    /** 从唯一 Context 的固定事实表读取；分页签名与原归属规则保持。 */
+    public JdbcMeetingQueryPort(JdbcDatabaseContext database, byte[] deploymentSecret) {
+        this(database.dataSource(), database.engine(), new HmacMeetingPageTokenCodec(deploymentSecret));
+    }
+
+    private JdbcMeetingQueryPort(DataSource dataSource, JdbcDatabaseEngine engine,
+            HmacMeetingPageTokenCodec pageTokenCodec) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
+        this.engine = Objects.requireNonNull(engine, "engine");
         this.pageTokenCodec = Objects.requireNonNull(pageTokenCodec, "pageTokenCodec");
     }
 
@@ -166,14 +177,14 @@ public final class JdbcMeetingQueryPort implements MeetingQueryPort {
     }
 
     /**
-     * 单条语句读取详情，确保访问守卫与返回状态解释同一个 PostgreSQL statement
+     * 单条语句读取详情，确保访问守卫与返回状态解释同一个 statement
      * snapshot。禁止先查归属、再用另一条语句查状态，否则 READ COMMITTED 下两次
      * 查询之间的并发更新可能产生混合快照。
      */
-    private static Result findDetail(Connection connection, GetRequest request)
+    private Result findDetail(Connection connection, GetRequest request)
             throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(GET_SQL)) {
-            statement.setString(1, request.meetingId());
+        try (PreparedStatement statement = connection.prepareStatement(GET_SQL.formatted(table()))) {
+            JdbcValues.setText(statement, 1, engine, request.meetingId());
             try (ResultSet rows = statement.executeQuery()) {
                 if (!rows.next()) {
                     return new NotFound();
@@ -182,8 +193,8 @@ public final class JdbcMeetingQueryPort implements MeetingQueryPort {
                 // 立即终止，不再解析其 Grant、状态或 receipt，避免暴露行健康。
                 if (MeetingAccessGuard.evaluate(
                         request.context(),
-                        rows.getString("deployment_scope"),
-                        rows.getString("subject_scope"))
+                        JdbcValues.text(rows, "deployment_scope"),
+                        JdbcValues.text(rows, "subject_scope"))
                         != MeetingAccessGuard.Decision.ALLOWED) {
                     return new AccessDenied();
                 }
@@ -197,22 +208,21 @@ public final class JdbcMeetingQueryPort implements MeetingQueryPort {
      * 再由 Java 过滤。{@code LEGACY_UNOWNED} 显式排除，即使未来错误的身份
      * Provider 放行了保留主体值，也不会让历史无主会议出现在列表中。
      */
-    private static List<ListRow> readList(
+    private List<ListRow> readList(
             Connection connection,
             MeetingCommandContext context,
             Optional<HmacMeetingPageTokenCodec.Cursor> cursor,
             int queryLimit) throws SQLException {
-        String sql = cursor.isPresent() ? LIST_AFTER_CURSOR_SQL : LIST_FIRST_PAGE_SQL;
+        String sql = (cursor.isPresent() ? LIST_AFTER_CURSOR_SQL : LIST_FIRST_PAGE_SQL).formatted(table());
         List<ListRow> result = new ArrayList<>();
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, context.deploymentScope());
-            statement.setString(2, context.identity().subject().subjectScope());
+            JdbcValues.setText(statement, 1, engine, context.deploymentScope());
+            JdbcValues.setText(statement, 2, engine, context.identity().subject().subjectScope());
             if (cursor.isPresent()) {
                 HmacMeetingPageTokenCodec.Cursor value = cursor.orElseThrow();
-                Timestamp createdAt = Timestamp.from(value.createdAt());
-                statement.setTimestamp(3, createdAt);
-                statement.setTimestamp(4, createdAt);
-                statement.setString(5, value.meetingId());
+                JdbcValues.setInstant(statement, 3, value.createdAt());
+                JdbcValues.setInstant(statement, 4, value.createdAt());
+                JdbcValues.setText(statement, 5, engine, value.meetingId());
                 statement.setInt(6, queryLimit);
             } else {
                 statement.setInt(3, queryLimit);
@@ -232,9 +242,9 @@ public final class JdbcMeetingQueryPort implements MeetingQueryPort {
             String deploymentScope = requiredText(rows, "deployment_scope");
             String clientSessionId = requiredText(rows, "client_session_id");
             String subjectScope = requiredText(rows, "subject_scope");
-            String grantId = rows.getString("grant_id");
+            String grantId = JdbcValues.text(rows, "grant_id");
             Instant grantExpiresAt = nullableInstant(rows, "grant_expires_at");
-            String reservationId = rows.getString("usage_reservation_id");
+            String reservationId = JdbcValues.text(rows, "usage_reservation_id");
             String profileId = requiredText(rows, "profile_id");
             int profileRevision = rows.getInt("profile_revision");
             if (rows.wasNull()) {
@@ -283,7 +293,7 @@ public final class JdbcMeetingQueryPort implements MeetingQueryPort {
             MeetingState state,
             Instant updatedAt) throws SQLException {
         InputState inputState = InputState.valueOf(requiredText(rows, "input_state"));
-        String receipt = rows.getString("finalization_receipt_id");
+        String receipt = JdbcValues.text(rows, "finalization_receipt_id");
         FinalizationFact finalization = new FinalizationFact(inputState, receipt);
         ManifestStatus manifestState = ManifestStatus.valueOf(
                 requiredText(rows, "manifest_state"));
@@ -300,7 +310,7 @@ public final class JdbcMeetingQueryPort implements MeetingQueryPort {
     }
 
     private static String requiredText(ResultSet rows, String column) throws SQLException {
-        String value = rows.getString(column);
+        String value = JdbcValues.text(rows, column);
         if (value == null || value.isBlank()) {
             throw new IllegalArgumentException("required meeting column is blank");
         }
@@ -308,17 +318,18 @@ public final class JdbcMeetingQueryPort implements MeetingQueryPort {
     }
 
     private static Instant requiredInstant(ResultSet rows, String column) throws SQLException {
-        Timestamp value = rows.getTimestamp(column);
+        Instant value = JdbcValues.instant(rows, column);
         if (value == null) {
             throw new IllegalArgumentException("required meeting timestamp is null");
         }
-        return value.toInstant();
+        return value;
     }
 
     private static Instant nullableInstant(ResultSet rows, String column) throws SQLException {
-        Timestamp value = rows.getTimestamp(column);
-        return value == null ? null : value.toInstant();
+        return JdbcValues.instant(rows, column);
     }
+
+    private String table() { return JdbcDatabaseTable.MEETING.physicalName(engine); }
 
     private static Result fromGetSqlFailure(SQLException failure) {
         JdbcReadLookupSupport.FailureKind kind = JdbcReadLookupSupport.classify(failure);

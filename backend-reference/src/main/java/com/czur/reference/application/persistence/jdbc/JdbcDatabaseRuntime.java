@@ -612,6 +612,12 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
         return dataSource;
     }
 
+    /** 旧 PG 全功能运行时持有的同一 Context；不新建池，也不放开 MySQL Worker 装配。 */
+    public JdbcDatabaseContext databaseContext() {
+        ensureLive();
+        return databaseContext;
+    }
+
     /** 返回使用共享连接池的会议命令工作单元。 */
     public JdbcMeetingUnitOfWork meetingUnitOfWork() {
         ensureLive();

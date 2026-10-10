@@ -40,7 +40,7 @@ public final class JdbcMeetingArtifactContentQueryPort
     private static final Logger LOGGER = Logger.getLogger(
             JdbcMeetingArtifactContentQueryPort.class.getName());
     private static final String OWNER_SQL =
-            "SELECT meeting_id FROM artifact WHERE artifact_id = ?";
+            "SELECT meeting_id FROM %s WHERE artifact_id = ?";
     private static final String PIN_SEARCH_PATH_SQL = """
             SELECT set_config(
                 'search_path', format('%I, pg_temp', current_schema()), TRUE)
@@ -49,6 +49,7 @@ public final class JdbcMeetingArtifactContentQueryPort
     private static final int MAX_CLIENT_CONTENT_BYTES = 1024 * 1024;
 
     private final DataSource dataSource;
+    private final JdbcDatabaseEngine engine;
     private final MeetingManifestPort manifestPort;
     private final ArtifactStore artifactStore;
 
@@ -57,7 +58,19 @@ public final class JdbcMeetingArtifactContentQueryPort
             DataSource dataSource,
             MeetingManifestPort manifestPort,
             ArtifactStore artifactStore) {
+        this(dataSource, JdbcDatabaseEngine.POSTGRESQL, manifestPort, artifactStore);
+    }
+
+    /** 同一 Context／Manifest／Store 读取原产物字节；不另建池或产物状态机。 */
+    public JdbcMeetingArtifactContentQueryPort(JdbcDatabaseContext database,
+            MeetingManifestPort manifestPort, ArtifactStore artifactStore) {
+        this(database.dataSource(), database.engine(), manifestPort, artifactStore);
+    }
+
+    private JdbcMeetingArtifactContentQueryPort(DataSource dataSource, JdbcDatabaseEngine engine,
+            MeetingManifestPort manifestPort, ArtifactStore artifactStore) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
+        this.engine = Objects.requireNonNull(engine, "engine");
         this.manifestPort = Objects.requireNonNull(manifestPort, "manifestPort");
         this.artifactStore = artifactStore;
     }
@@ -167,24 +180,27 @@ public final class JdbcMeetingArtifactContentQueryPort
     private Optional<String> findOwner(String artifactId) throws SQLException {
         try (Connection connection = dataSource.getConnection()) {
             connection.setAutoCommit(false);
-            try (PreparedStatement schema = connection.prepareStatement(
-                    "SELECT current_schema()");
-                 ResultSet rows = schema.executeQuery()) {
-                if (!rows.next() || rows.getString(1) == null
-                        || rows.getString(1).startsWith("pg_temp")) {
-                    throw new SQLException("deployment schema is unavailable");
+            if (engine == JdbcDatabaseEngine.POSTGRESQL) {
+                try (PreparedStatement schema = connection.prepareStatement(
+                        "SELECT current_schema()");
+                     ResultSet rows = schema.executeQuery()) {
+                    if (!rows.next() || rows.getString(1) == null
+                            || rows.getString(1).startsWith("pg_temp")) {
+                        throw new SQLException("deployment schema is unavailable");
+                    }
+                }
+                try (PreparedStatement pin = connection.prepareStatement(PIN_SEARCH_PATH_SQL)) {
+                    pin.execute();
                 }
             }
-            try (PreparedStatement pin = connection.prepareStatement(PIN_SEARCH_PATH_SQL)) {
-                pin.execute();
-            }
-            try (PreparedStatement statement = connection.prepareStatement(OWNER_SQL)) {
-                statement.setString(1, artifactId);
+            try (PreparedStatement statement = connection.prepareStatement(OWNER_SQL.formatted(
+                    JdbcDatabaseTable.ARTIFACT.physicalName(engine)))) {
+                JdbcValues.setText(statement, 1, engine, artifactId);
                 try (ResultSet rows = statement.executeQuery()) {
                     if (!rows.next()) {
                         return Optional.empty();
                     }
-                    String meetingId = rows.getString(1);
+                    String meetingId = JdbcValues.text(rows, "meeting_id");
                     if (meetingId == null || meetingId.isBlank() || rows.next()) {
                         throw new IllegalStateException("artifact owner fact is inconsistent");
                     }
@@ -198,7 +214,7 @@ public final class JdbcMeetingArtifactContentQueryPort
         try (Connection connection = dataSource.getConnection()) {
             connection.setAutoCommit(false);
             Optional<ReadyMetadata> result =
-                    new JdbcArtifactReadyMetadataStore(connection).findByArtifactId(artifactId);
+                    new JdbcArtifactReadyMetadataStore(connection, engine).findByArtifactId(artifactId);
             connection.rollback();
             return result;
         }

@@ -42,7 +42,6 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -74,6 +73,7 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
             JdbcClientMeetingResultFinalizer.class.getName());
     private static final ObjectMapper JSON = new ObjectMapper();
     private final DataSource dataSource;
+    private final JdbcDatabaseEngine engine;
     private final FinalizationReceiptGenerator receipts;
     private final Clock clock;
     private final ArtifactStore artifactStore;
@@ -94,7 +94,27 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
     public JdbcClientMeetingResultFinalizer(DataSource dataSource,
             FinalizationReceiptGenerator receipts, Clock clock, ArtifactStore artifactStore,
             EntitlementProvider entitlementProvider) {
+        this(dataSource, JdbcDatabaseEngine.POSTGRESQL, receipts, clock, artifactStore,
+                entitlementProvider);
+    }
+
+    /**
+     * 使用显式引擎及唯一池完成原客户端 Stop 收口。
+     * Provider 必须与 Create 共用；结果写入仍在同一连接内按原聚合前进到 READY。
+     * 本对象不关闭 Context、存储或部署方 Provider，也不装配旧音频 Worker。
+     */
+    public JdbcClientMeetingResultFinalizer(JdbcDatabaseContext database,
+            FinalizationReceiptGenerator receipts, Clock clock, ArtifactStore artifactStore,
+            EntitlementProvider entitlementProvider) {
+        this(database.dataSource(), database.engine(), receipts, clock, artifactStore,
+                entitlementProvider);
+    }
+
+    private JdbcClientMeetingResultFinalizer(DataSource dataSource, JdbcDatabaseEngine engine,
+            FinalizationReceiptGenerator receipts, Clock clock, ArtifactStore artifactStore,
+            EntitlementProvider entitlementProvider) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
+        this.engine = Objects.requireNonNull(engine, "engine");
         this.receipts = Objects.requireNonNull(receipts, "receipts");
         this.clock = Objects.requireNonNull(clock, "clock");
         // 无 Store 的旧装配仍可服务旧音频会议；客户端会议必须由完整进程装配提供 Store。
@@ -267,7 +287,7 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
             connection.setAutoCommit(false);
             try {
                 JdbcMeetingRepository.VersionedMeeting locked =
-                        JdbcMeetingRepository.findVersionedForUpdate(connection, meetingId)
+                        JdbcMeetingRepository.findVersionedForUpdate(connection, engine, meetingId)
                                 .orElse(null);
                 Instant startedAt = locked == null ? null : clientStartedAt(connection, meetingId);
                 if (startedAt == null) {
@@ -282,7 +302,7 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
                     connection.rollback();
                     return true;
                 }
-                Projection projection = project(connection, meetingId);
+                Projection projection = project(connection, engine, meetingId);
                 if (projection.hasArtifacts() && artifactStore == null) {
                     throw new IllegalStateException("client result artifact store is unavailable");
                 }
@@ -347,7 +367,7 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
                             artifact));
                 }
                 List<ArtifactReadyMetadataStore.ReadyMetadata> captures =
-                        new JdbcArtifactReadyMetadataStore(connection).findByMeetingId(meetingId)
+                        new JdbcArtifactReadyMetadataStore(connection, engine).findByMeetingId(meetingId)
                                 .stream().filter(item -> "presentation.capture".equals(
                                         item.artifact().intent().spec().artifactType()))
                                 .sorted(Comparator.comparingInt(item ->
@@ -383,13 +403,13 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
                                 projection.targetLanguages()),
                         artifactRefs, List.of());
                 try (PreparedStatement statement = connection.prepareStatement("""
-                        INSERT INTO meeting_client_result
+                        INSERT INTO %s
                             (meeting_id, artifact_id, manifest_json)
                         VALUES (?, ?, ?)
-                        """)) {
-                    statement.setString(1, meetingId);
+                        """.formatted(table(JdbcDatabaseTable.MEETING_CLIENT_RESULT)))) {
+                    JdbcValues.setText(statement, 1, engine, meetingId);
                     // 该兼容列只指向字幕；仅译文或零产物时留空，双产物以 Manifest 为准。
-                    statement.setString(2, artifactId);
+                    JdbcValues.setText(statement, 2, engine, artifactId);
                     statement.setString(3, MeetingManifestJson.encode(manifest));
                     statement.executeUpdate();
                 }
@@ -397,20 +417,20 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
                 // 同一事务内按领域状态机依次前进；外部只会看到最终 READY。
                 MeetingAggregate aggregate = MeetingAggregate.fromSnapshot(locked.snapshot());
                 aggregate.apply(MeetingEvent.INPUT_ACCEPTED, endedAt);
-                JdbcMeetingRepository.updateOwnedExisting(connection, locked,
+                JdbcMeetingRepository.updateOwnedExisting(connection, engine, locked,
                         aggregate.snapshot());
                 var finalizing = new JdbcMeetingRepository.VersionedMeeting(
                         aggregate.snapshot(), locked.aggregateVersion() + 1);
                 aggregate.apply(MeetingEvent.READY, endedAt);
-                JdbcMeetingRepository.updateOwnedExisting(connection, finalizing,
+                JdbcMeetingRepository.updateOwnedExisting(connection, engine, finalizing,
                         aggregate.snapshot());
                 try (PreparedStatement statement = connection.prepareStatement("""
-                        UPDATE meeting SET input_state='INPUT_ACCEPTED',
+                        UPDATE %s SET input_state='INPUT_ACCEPTED',
                             finalization_receipt_id=?, manifest_state='READY'
                         WHERE meeting_id=? AND state='READY'
-                        """)) {
-                    statement.setString(1, receipts.newReceipt());
-                    statement.setString(2, meetingId);
+                        """.formatted(table(JdbcDatabaseTable.MEETING)))) {
+                    JdbcValues.setText(statement, 1, engine, receipts.newReceipt());
+                    JdbcValues.setText(statement, 2, engine, meetingId);
                     if (statement.executeUpdate() != 1) {
                         throw new SQLException("client result state update failed");
                     }
@@ -445,16 +465,17 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
              PreparedStatement statement = connection.prepareStatement("""
                      SELECT m.deployment_scope, m.subject_scope, m.usage_reservation_id,
                             i.audio_duration_ms, i.usage_submitted_at, i.usage_expected_version
-                     FROM meeting m JOIN meeting_client_input i USING (meeting_id)
+                     FROM %s m JOIN %s i USING (meeting_id)
                      WHERE m.meeting_id=? AND m.state IN ('STOPPING', 'READY')
-                     """)) {
-            statement.setString(1, meetingId);
+                     """.formatted(table(JdbcDatabaseTable.MEETING),
+                             table(JdbcDatabaseTable.MEETING_CLIENT_INPUT)))) {
+            JdbcValues.setText(statement, 1, engine, meetingId);
             try (ResultSet rows = statement.executeQuery()) {
                 if (rows.next() && rows.getObject("audio_duration_ms", Long.class) != null) {
-                    usage = new FrozenClientUsage(rows.getString("deployment_scope"),
-                            rows.getString("subject_scope"), rows.getString("usage_reservation_id"),
+                    usage = new FrozenClientUsage(JdbcValues.text(rows, "deployment_scope"),
+                            JdbcValues.text(rows, "subject_scope"), JdbcValues.text(rows, "usage_reservation_id"),
                             rows.getLong("audio_duration_ms"),
-                            rows.getTimestamp("usage_submitted_at").toInstant(),
+                            JdbcValues.instant(rows, "usage_submitted_at"),
                             rows.getLong("usage_expected_version"));
                 }
             }
@@ -509,7 +530,7 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
                 "application/json", language, 1, content.length, checksum);
         ArtifactDescriptor descriptor = publish(spec, content);
         ArtifactReadyMetadataStore.PersistResult persisted =
-                new JdbcArtifactReadyMetadataStore(connection).persistReady(descriptor);
+                new JdbcArtifactReadyMetadataStore(connection, engine).persistReady(descriptor);
         if (persisted.status() == ArtifactReadyMetadataStore.PersistStatus.CONFLICT) {
             throw new IllegalStateException("client result artifact metadata conflict");
         }
@@ -518,13 +539,14 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
                 persisted.metadata().recordedAt(), null, null);
     }
 
-    private static Instant clientStartedAt(Connection connection, String meetingId)
+    private Instant clientStartedAt(Connection connection, String meetingId)
             throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT started_at FROM meeting_client_input WHERE meeting_id=?")) {
-            statement.setString(1, meetingId);
+                "SELECT started_at FROM " + table(JdbcDatabaseTable.MEETING_CLIENT_INPUT)
+                        + " WHERE meeting_id=?" + currentRead())) {
+            JdbcValues.setText(statement, 1, engine, meetingId);
             try (ResultSet rows = statement.executeQuery()) {
-                return rows.next() ? rows.getTimestamp(1).toInstant() : null;
+                return rows.next() ? JdbcValues.instant(rows, "started_at") : null;
             }
         }
     }
@@ -535,19 +557,20 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
                 Math.max(0, Duration.between(startedAt, endedAt).toMillis()));
     }
 
-    private static boolean resultExists(Connection connection, String meetingId)
+    private boolean resultExists(Connection connection, String meetingId)
             throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT 1 FROM meeting_client_result WHERE meeting_id=?")) {
-            statement.setString(1, meetingId);
+                "SELECT 1 FROM " + table(JdbcDatabaseTable.MEETING_CLIENT_RESULT)
+                        + " WHERE meeting_id=?" + currentRead())) {
+            JdbcValues.setText(statement, 1, engine, meetingId);
             try (ResultSet rows = statement.executeQuery()) { return rows.next(); }
         }
     }
 
-    private static Projection project(Connection connection, String meetingId)
-            throws SQLException {
-        return project(connection, JdbcDatabaseEngine.POSTGRESQL, meetingId);
-    }
+    private String table(JdbcDatabaseTable table) { return table.physicalName(engine); }
+
+    /** 决定性读均在 Meeting 行锁之后；只读最终快照仍用原普通 SELECT。 */
+    private String currentRead() { return engine == JdbcDatabaseEngine.MYSQL ? " FOR UPDATE" : ""; }
 
     /** 两引擎共享既有最终修订规则；只读快照不使用锁定读取。 */
     private static Projection project(Connection connection, JdbcDatabaseEngine engine, String meetingId)
