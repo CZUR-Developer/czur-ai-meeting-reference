@@ -229,7 +229,12 @@ class JdbcMysqlClientInputIntegrationTest {
         assertEquals(2, count("ai_trans_artifact"));
         assertInstanceOf(ClientMeetingInputPort.UsageSubmitted.class,
                 input.submitUsage(context(), meetingId, 1500));
-        assertEquals(1500, snapshot(meetingId).frozenAudioDurationMs());
+        var snapshot = snapshot(meetingId);
+        assertEquals(1500, snapshot.frozenAudioDurationMs());
+        assertEquals("中文纪要😀", snapshot.summary().path("title").asText());
+        assertEquals("正常本场概述", snapshot.summary().path("overview").asText());
+        assertEquals("保留本场事实", snapshot.summary().path("keyPoints").get(0).asText());
+        assertEquals("读取最终快照", snapshot.summary().path("actionItems").get(0).asText());
         assertUnfinalized();
     }
 

@@ -247,7 +247,7 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
                 Projection projection = project(connection, engine, meetingId);
                 return new Ready(projection.transcripts(), projection.translations(),
                         projection.language(), duration, request.artifactPolicy().retainAudio(),
-                        request.languages().source(), request.title());
+                        request.languages().source(), request.title(), projection.summary());
             }
         }
     }
@@ -262,15 +262,29 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
      * 不可变，列表在构造时复制。language 是最终原文的聚合语种（无最终原文为 und，
      * 混合为 mul）；sourceLanguage 是首次 Create 的源语。frozenAudioDurationMs
      * 始终为已提交的实测采音值，0 有明确含义；retainAudioRequested/title 也仅来自
-     * 首次 Create，title 可为空，不从总结、全局配置或字幕正文补值。</p>
+     * 首次 Create，title 可为空，不从总结、全局配置或字幕正文补值。summary 是同一投影
+     * 读取的已提交标准结构化纪要，未生成时为 null。部署方可以据此做旧结果格式适配，
+     * 无需重复读取提交表、调用模型或等待 Stop 后的产物；快照本身不发布结果。</p>
      */
     public record Ready(List<TranscriptUpsert> transcripts, List<TranslationUpsert> translations,
             String language, long frozenAudioDurationMs, boolean retainAudioRequested,
-            String sourceLanguage, String title) implements SnapshotResult {
+            String sourceLanguage, String title, ObjectNode summary) implements SnapshotResult {
         public Ready {
             transcripts = List.copyOf(transcripts);
             translations = List.copyOf(translations);
+            summary = summary == null ? null : summary.deepCopy();
         }
+
+        /** 原仅字幕调用保持源兼容；此构造器明确没有已提交的纪要事实。 */
+        public Ready(List<TranscriptUpsert> transcripts, List<TranslationUpsert> translations,
+                String language, long frozenAudioDurationMs, boolean retainAudioRequested,
+                String sourceLanguage, String title) {
+            this(transcripts, translations, language, frozenAudioDurationMs, retainAudioRequested,
+                    sourceLanguage, title, null);
+        }
+
+        /** JSON 树可变；返回本次独立副本，不能通过旧格式适配改变其他消费者的快照。 */
+        @Override public ObjectNode summary() { return summary == null ? null : summary.deepCopy(); }
     }
 
     /** 读取未完成或当前事实不适用；原因沿用客户端输入端口，不携带身份／正文。 */

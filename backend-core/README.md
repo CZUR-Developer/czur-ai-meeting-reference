@@ -6,6 +6,11 @@ Java 21 的公共会议核心，输出 `com.czur.ai.meeting:backend-core:0.1.0-S
 
 ## 模块边界
 
+`JdbcClientMeetingResultFinalizer.readFinalSnapshot(...)` 同时返回已提交的标准结构化纪要，
+未提交时 `Ready.summary()` 为 `null`。纪要来自原有唯一投影和客户端提交事实，
+部署方可转换为旧结果格式；快照读取不调用模型、不写产物／READY、不新增表结构。
+JSON 树在进入和离开快照时复制，原仅字幕构造器保持兼容。
+
 - `domain/`：会议状态、归属及能力决策。
 - `application/command/`、`application/port/`：Create、Stop、用量、结果及可替换端口。
 - `application/persistence/jdbc/`：共享 PostgreSQL／MySQL 5.7 正常客户端会议实现。
