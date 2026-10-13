@@ -101,9 +101,12 @@ MeetingOptions named = selected.withCreateParameters("客户会议", "Europe/Par
 // 将 named 交给现有 MeetingClient.start，模型材料和会议编排仍由 SDK 处理。
 ```
 
-`retainAudio` 仅透传已有服务端产物策略，不等于 SDK 已录制或上传音频。
-当前完整入口尚无同源录音产物出口，产品装配继续关闭；后续接通同一输入流的产物后
-才显式启用。不增加私有 metadata map，不从品牌、保存方式或结果动作猜测此开关。
+`retainAudio` 透传已有服务端产物策略；显式启用时还要求 Runtime 同源录音和
+`MeetingArtifactPublisher` 均已装配。Coordinator 在停止后读取 `ModelSession.sealedAudioArtifact()`，
+核对本场 ID 与冻结采音时长，再发布并请求后端 Stop。模型异常不独立阻断已封口录音，
+音频输入失败与显式取消仍不发布；缺失 sealed 事实或封口失败不能伪造完成。
+参考 App 默认继续关闭录音。具体 SDK 编码、上传和旧消费者读回按各自实际证据验收；
+不增加私有 metadata map，不从品牌、保存方式或结果动作猜测此开关。
 
 ### 可注册结果动作
 

@@ -80,8 +80,8 @@ App不计数、不额外采音。时长沿用16kHz／mono／PCM16字节数除以
 `open(..., boolean retainAudio)`，以及 `ModelSession.sealedAudioArtifact()`。旧四参入口和
 既有实现保留，默认不支持录音、getter 返回 empty；参考默认 `retainAudio=false`，
 不产生录音或发布副作用。显式选择 true 时，Coordinator 在 Create 前检查同源录音及发布器
-均已装配，不会静默忽略选择。当前公共片只是接口与收尾编排，SDK 录音实现及 CZUR 真实
-发布器仍待后续装配，不能据此声称已录制、上传或可被旧消费者读取。
+均已装配，不会静默忽略选择。公共核心只定义接口与收尾编排，具体 SDK 录音实现和
+CZUR 发布器由私有模块装配；接口装配、真实上传与旧消费者读回分别验收，不互相代签。
 
 `SealedAudioArtifact` 只描述本场停止并严格封口后的本地文件：真实 meetingId、明确的
 Opus/OGG 或 PCM16 格式／MIME、文件字节长、实交 PCM 字节数及其派生时长。
@@ -91,7 +91,12 @@ Opus/OGG 或 PCM16 格式／MIME、文件字节长、实交 PCM 字节数及其�
 
 部署方通过不可变 `MeetingClientConfig.withArtifactPublisher(...)` 装配窄发布器。
 唯一 IO 队列按“最终标准事件保存→冻结用量→原选定总结→本场发布确认→后端 Stop”执行；
-音频／模型错误与取消不走正常音频发布。发布器 Context 只读本场 sealed、冻结时长及
+模型会话异常与录音封口分开处理：运行时在 `onError` 前停流并完成已采音频封口，
+Coordinator 仍按实际 sealed 快照、本场 ID 和冻结用量发布。音频输入失败或取消不走正常
+音频发布；已请求保留音频却没有 sealed 事实或封口失败时进入 `STOP_PENDING`，不伪造完成。
+听悟 Adapter 在已匹配的失败事件处仅记录事件名和数字 `header.status`，缺失或无效值记为
+`-1`；诊断不改变原失败行为，不输出模型原文或 `status_text`。
+发布器 Context 只读本场 sealed、冻结时长及
 `config.forSession` 已冻结的 serverUrl／accessToken／clientIdentity；即使全局身份已退出或
 更换也不重新登录、交换Token或读取 UserHandler。Context 和产物的默认字符串不输出凭据
 或本地路径，部署方不得将这些字段写入日志或公共结果。

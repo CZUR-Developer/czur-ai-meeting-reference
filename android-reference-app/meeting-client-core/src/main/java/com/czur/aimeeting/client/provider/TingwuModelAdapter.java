@@ -15,6 +15,7 @@ import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.UUID;
 import java.util.Set;
+import java.util.logging.Logger;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -29,6 +30,7 @@ import org.json.JSONObject;
  */
 public final class TingwuModelAdapter implements ModelAdapter {
     public static final String ID = "tingwu-realtime";
+    private static final Logger LOG = Logger.getLogger(TingwuModelAdapter.class.getName());
 
     private final Map<String, SegmentState> segments = new HashMap<>();
     private final Map<String, SegmentState> translations = new HashMap<>();
@@ -93,6 +95,9 @@ public final class TingwuModelAdapter implements ModelAdapter {
                     header.optString("event", ""));
             if ("TranscriptionStarted".equals(name)) return ModelSignal.AUDIO_READY;
             if ("TaskFailed".equals(name) || "TranscriptionFailed".equals(name)) {
+                // 仅在已确认的失败事件处记录数字状态；-1 表示头部未提供有效数字。
+                // 不输出 status_text、原始 JSON 或 Throwable，便于区分供应商终止与宿主回调异常。
+                LOG.warning("听悟失败事件 name=" + name + " status=" + header.optLong("status", -1));
                 throw new IllegalStateException("听悟会话失败：" + name);
             }
 

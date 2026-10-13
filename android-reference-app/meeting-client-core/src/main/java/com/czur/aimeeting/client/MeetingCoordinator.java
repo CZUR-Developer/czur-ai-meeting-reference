@@ -203,7 +203,6 @@ public final class MeetingCoordinator implements MeetingClient {
         private boolean stopInputSent;
         private boolean modelFinished;
         private volatile boolean audioFailed;
-        private volatile boolean modelFailed;
         private boolean completionQueued;
         private boolean acceptingPresentation;
         private int sequence;
@@ -366,7 +365,6 @@ public final class MeetingCoordinator implements MeetingClient {
                             @Override public void onError(String message) {
                                 enqueue(() -> {
                                     if (done) return;
-                                    modelFailed = true;
                                     modelFinished = true;
                                     audioLevelActive = false;
                                     LOG.warning("本场模型运行时终止");
@@ -558,11 +556,14 @@ public final class MeetingCoordinator implements MeetingClient {
                     LOG.info("标准纪要已提交");
                 }
                 if (cancelled || closed) return;
-                if (options.retainAudio() && !audioFailed && !modelFailed && !publicationConfirmed) {
+                // 模型结束状态与同源录音封口是两件事。运行时须在 onFinished/onError 前
+                // 停流并完成封口；只有本场 sealed 快照与冻结用量一致才可进入发布器。
+                // 模型异常不抹掉已采录音；音频输入失败和显式取消仍不走正常发布。
+                if (options.retainAudio() && !audioFailed && !publicationConfirmed) {
                     step = "发布本场封口音频";
                     readAudioArtifactOnce();
                     if (cancelled || closed) return;
-                    if (!audioFailed && !modelFailed) {
+                    if (!audioFailed) {
                         LOG.info("本场封口音频发布开始");
                         sessionConfig.artifactPublisher().publish(publicationContext);
                         publicationConfirmed = true;

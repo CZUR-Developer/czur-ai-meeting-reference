@@ -9,6 +9,9 @@ import com.czur.aimeeting.model.TranslationEvent;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.logging.Handler;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.junit.Test;
@@ -85,6 +88,32 @@ public final class TingwuDomesticSequenceTest {
         assertEquals(1, f.finals().size());
         assertEquals("zh-CN", f.finals().get(0).language());
         assertTrue(f.translations.isEmpty());
+    }
+
+    @Test public void providerFailureReportsOnlyMatchedEventAndNumericStatus() throws Exception {
+        Logger logger = Logger.getLogger(TingwuModelAdapter.class.getName());
+        List<String> diagnostics = new ArrayList<>();
+        Handler handler = new Handler() {
+            @Override public void publish(LogRecord record) { diagnostics.add(record.getMessage()); }
+            @Override public void flush() { }
+            @Override public void close() { }
+        };
+        logger.addHandler(handler);
+        try {
+            for (String name : List.of("TaskFailed", "TranscriptionFailed")) {
+                Fixture f = new Fixture(false);
+                String message = new JSONObject().put("header", new JSONObject().put("name", name)
+                        .put("status", 40000001).put("status_text", "fixture-private-detail"))
+                        .put("payload", new JSONObject().put("result", "fixture-private-transcript")).toString();
+                assertThrows(IllegalStateException.class,
+                        () -> f.adapter.onServerMessage(message, f.transcripts::add));
+                assertTrue(f.transcripts.isEmpty());
+            }
+            assertEquals(List.of("听悟失败事件 name=TaskFailed status=40000001",
+                    "听悟失败事件 name=TranscriptionFailed status=40000001"), diagnostics);
+        } finally {
+            logger.removeHandler(handler);
+        }
     }
 
     private static JSONObject source(int index, String text, boolean end) throws Exception {

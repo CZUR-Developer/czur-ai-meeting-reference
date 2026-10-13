@@ -256,17 +256,43 @@ public final class MeetingCoordinatorTest {
         }
     }
 
-    @Test public void modelErrorCannotTriggerNormalAudioPublication() throws Exception {
+    @Test public void modelErrorPublishesActuallySealedAudioBeforeBackendStop() throws Exception {
         Publisher publisher = new Publisher();
         try (Fixture f = new Fixture(true, ALL, new ReferenceIdentityProvider("fixture-token"), publisher)) {
-            f.runtime.prepareAudio(audio("mtg_test", 32000));
+            SealedAudioArtifact sealed = audio("mtg_test", 32000);
+            f.runtime.prepareAudio(sealed);
             f.runtime.emitFinished = false;
             f.start(retainedOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT));
             f.runtime.listener.onError("fixture-model-ended");
             f.session.requestStop();
-            assertNotNull(f.probe.result()); // 保留原模型错误之后的 Stop/Manifest 行为。
-            assertEquals(0, f.runtime.artifactReads);
-            assertTrue(publisher.contexts.isEmpty());
+            assertNotNull(f.probe.result());
+            assertEquals(1, f.runtime.artifactReads);
+            assertEquals(1, publisher.contexts.size());
+            assertSame(sealed, publisher.contexts.get(0).audio());
+            assertEquals(1000, publisher.contexts.get(0).frozenAudioDurationMs());
+            assertEquals(List.of("discover", "create", "grant", "start", "usage",
+                    "publish", "stop", "manifest"), f.server.steps);
+        }
+    }
+
+    @Test public void modelErrorWithoutSealedAudioCannotBecomeNormalPublicationOrStop() throws Exception {
+        // 分别覆盖运行时没有封口事实和确实封口失败；模型异常不能把二者视作零帧成功。
+        for (IOException sealFailure : new IOException[] { null, new IOException("fixture-seal-failed") }) {
+            Publisher publisher = new Publisher();
+            try (Fixture f = new Fixture(true, ALL, new ReferenceIdentityProvider("fixture-token"), publisher)) {
+                f.runtime.retainedAudioSupported = true;
+                f.runtime.duration = OptionalLong.of(1000);
+                f.runtime.artifactFailure = sealFailure;
+                f.runtime.emitFinished = false;
+                f.start(retainedOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT));
+                f.runtime.listener.onError("fixture-model-ended");
+                f.session.requestStop();
+                f.probe.awaitPhase(MeetingSessionState.Phase.STOP_PENDING);
+                assertEquals(1, f.runtime.artifactReads);
+                assertTrue(publisher.contexts.isEmpty());
+                assertFalse(f.server.steps.contains("stop"));
+                assertTrue(f.probe.results.isEmpty());
+            }
         }
     }
 
