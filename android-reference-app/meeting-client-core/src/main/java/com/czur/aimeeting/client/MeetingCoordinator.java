@@ -522,7 +522,12 @@ public final class MeetingCoordinator implements MeetingClient {
             if (!audioFailed && available.contains(MeetingCapabilityState.SUMMARY)
                     && options.summaryEnabled()) {
                 try { input = finals.input(options.sourceLanguage()); }
-                catch (IllegalArgumentException empty) { completionFailed("没有最终字幕，无法生成纪要"); return; }
+                catch (IllegalArgumentException empty) {
+                    // 静音或过短会议可以没有有效 final。没有总结材料不能把正常停止卡在
+                    // STOP_PENDING：不请求模型、不伪造纪要，继续原冻结用量、录音发布和 Stop。
+                    LOG.info("本场没有有效最终字幕，跳过纪要并继续正常停止");
+                    publish("没有最终字幕，无法生成纪要；继续结束会议");
+                }
             }
             SummaryInput summaryInput = input;
             io.execute(() -> complete(summaryInput));

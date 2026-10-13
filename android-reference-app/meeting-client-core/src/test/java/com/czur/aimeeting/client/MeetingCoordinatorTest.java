@@ -80,6 +80,25 @@ public final class MeetingCoordinatorTest {
         }
     }
 
+    @Test public void shortMinutesWithoutFinalTranscriptSkipsSummaryAndStillPublishesThenStops() throws Exception {
+        Publisher publisher = new Publisher();
+        try (Fixture f = new Fixture(true, ALL, new ReferenceIdentityProvider("fixture-token"), publisher)) {
+            SealedAudioArtifact sealed = audio("mtg_test", 32000);
+            f.runtime.prepareAudio(sealed);
+            f.start(retainedOptions(MeetingOptions.Mode.MEETING_MINUTES));
+            f.session.requestStop();
+            assertNotNull(f.probe.result());
+            assertNull("没有最终字幕不调用总结运行时", f.runtime.summaryInput);
+            assertTrue("不添加占位字幕或伪总结", f.server.transcripts.isEmpty());
+            assertTrue(f.probe.states.stream().anyMatch(value -> value.message().contains("没有最终字幕")));
+            assertSame(sealed, publisher.contexts.get(0).audio());
+            assertEquals(List.of(1000L), f.server.usages);
+            assertEquals(1, f.runtime.stopCalls);
+            assertEquals(List.of("discover", "create", "grant", "start", "usage",
+                    "publish", "stop", "manifest"), f.server.steps);
+        }
+    }
+
     @Test public void retainAudioWithoutRuntimeIsRejectedBeforeCreate() throws Exception {
         try (Fixture f = new Fixture(true, ALL, new ReferenceIdentityProvider("fixture-token"), new Publisher())) {
             f.session = f.client.start(retainedOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT), f.probe);

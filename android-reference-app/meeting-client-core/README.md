@@ -166,6 +166,10 @@ SDK 复用本场唯一音源，标准 16kHz／mono／PCM16 的时长是实际完
 不重复衔接、停音源、已提交用量或纪要。
 首次 Stop 受理后生成一次 `genTime`，Manifest、Artifact、链接和邮件共用它；受理不等于 READY。
 
+开启总结的静音／过短会议若没有有效最终字幕，会明确提示“没有最终字幕，无法生成纪要”，
+跳过总结模型及提交；仍沿原顺序冻结用量、发布真实封口录音并正常 Stop，不停在
+`STOP_PENDING`，也不添加占位字幕或伪造总结成功。后端最终清单按实际已保存产物返回。
+
 - 正常策略：只读真实READY清单，`onResult`先保存事实，随后`onState(READY)`触发动作。
   Web／纯提示不读取正文；需要正文或邮件的插件通过同场窄访问显式执行。
 - `NO_ACTIVE_DELIVERY`（旧TRACELESS）：正常Stop后ENDED，不读Manifest、不触发onResult，
