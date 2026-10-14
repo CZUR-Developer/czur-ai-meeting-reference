@@ -128,8 +128,9 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
      * <p>调用方先用自身认证入口取得可信 context，并传入唯一 Assembly 已持有的
      * DataSource；无需为读取构造 Finalizer、receipt 或 Clock。一次只读
      * REPEATABLE_READ 事务先按会议原始范围校验归属，再核对客户端启动标记、
-     * 已冻结采音用量和首次 Create。最终文字直接复用本类原有 project，
-     * 不创建另一套修订／顺序规则，也不等待 Stop 后才生成的 Artifact。</p>
+     * 已冻结采音用量和首次 Create。最终文字直接复用本类原有 project，截图描述符
+     * 复用 Manifest 的同场 metadata 排序和连续 revision 校验；不读取截图正文，
+     * 不创建另一套修订／顺序规则，也不等待 Stop 后才生成的最终产物。</p>
      *
      * <p>正常发布在 STARTING/RUNNING 读取；STOPPING/READY 同场也可读取以便核对。
      * 返回的 Ready 只说明这些持久事实已读到，不表示结算或资源发布成功；它不调用
@@ -247,7 +248,10 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
                 Projection projection = project(connection, engine, meetingId);
                 return new Ready(projection.transcripts(), projection.translations(),
                         projection.language(), duration, request.artifactPolicy().retainAudio(),
-                        request.languages().source(), request.title(), projection.summary());
+                        request.languages().source(), request.title(), projection.summary(),
+                        request.artifactPolicy().presentationCapture(),
+                        presentationCaptures(connection, engine, meetingId).stream()
+                                .map(ArtifactReadyMetadataStore.ReadyMetadata::artifact).toList());
             }
         }
     }
@@ -263,16 +267,30 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
      * 混合为 mul）；sourceLanguage 是首次 Create 的源语。frozenAudioDurationMs
      * 始终为已提交的实测采音值，0 有明确含义；retainAudioRequested/title 也仅来自
      * 首次 Create，title 可为空，不从总结、全局配置或字幕正文补值。summary 是同一投影
-     * 读取的已提交标准结构化纪要，未生成时为 null。部署方可以据此做旧结果格式适配，
-     * 无需重复读取提交表、调用模型或等待 Stop 后的产物；快照本身不发布结果。</p>
+     * 读取的已提交标准结构化纪要，未生成时为 null。presentationCaptureRequested 同样
+     * 只取首次 Create；presentationCaptures 是已有 READY metadata 的不可变同场描述符，
+     * 按从 1 连续递增的 revision 排序，仅包含引用而不载入 JPEG。部署方可以据此做旧结果
+     * 格式适配，逐包经 ArtifactStore 读取，不调用模型或等待 Stop 后的最终产物；快照本身
+     * 不发布结果。</p>
      */
     public record Ready(List<TranscriptUpsert> transcripts, List<TranslationUpsert> translations,
             String language, long frozenAudioDurationMs, boolean retainAudioRequested,
-            String sourceLanguage, String title, ObjectNode summary) implements SnapshotResult {
+            String sourceLanguage, String title, ObjectNode summary,
+            boolean presentationCaptureRequested,
+            List<ArtifactDescriptor> presentationCaptures) implements SnapshotResult {
         public Ready {
             transcripts = List.copyOf(transcripts);
             translations = List.copyOf(translations);
             summary = summary == null ? null : summary.deepCopy();
+            presentationCaptures = List.copyOf(presentationCaptures);
+        }
+
+        /** 原纪要调用保持源兼容；未提供演示事实时不推断截图请求或引用。 */
+        public Ready(List<TranscriptUpsert> transcripts, List<TranslationUpsert> translations,
+                String language, long frozenAudioDurationMs, boolean retainAudioRequested,
+                String sourceLanguage, String title, ObjectNode summary) {
+            this(transcripts, translations, language, frozenAudioDurationMs, retainAudioRequested,
+                    sourceLanguage, title, summary, false, List.of());
         }
 
         /** 原仅字幕调用保持源兼容；此构造器明确没有已提交的纪要事实。 */
@@ -380,21 +398,8 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
                             "summary.structured", projection.summary().path("language").asText(),
                             artifact));
                 }
-                List<ArtifactReadyMetadataStore.ReadyMetadata> captures =
-                        new JdbcArtifactReadyMetadataStore(connection, engine).findByMeetingId(meetingId)
-                                .stream().filter(item -> "presentation.capture".equals(
-                                        item.artifact().intent().spec().artifactType()))
-                                .sorted(Comparator.comparingInt(item ->
-                                        item.artifact().intent().spec().revision()))
-                                .toList();
-                int nextCapture = 1;
-                for (var capture : captures) {
+                for (var capture : presentationCaptures(connection, engine, meetingId)) {
                     WriteIntentSpec spec = capture.artifact().intent().spec();
-                    if (spec.revision() != nextCapture++
-                            || !"application/json".equals(spec.mediaType())
-                            || spec.language() != null) {
-                        throw new IllegalStateException("presentation capture order is invalid");
-                    }
                     artifactRefs.add(new MeetingManifest.ArtifactRef(
                             spec.artifactId(), spec.artifactType(), spec.mediaType(), null,
                             spec.revision(), capture.artifact().content().size(),
@@ -585,6 +590,28 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
 
     /** 决定性读均在 Meeting 行锁之后；只读最终快照仍用原普通 SELECT。 */
     private String currentRead() { return engine == JdbcDatabaseEngine.MYSQL ? " FOR UPDATE" : ""; }
+
+    /** 快照和最终 Manifest 共用同场截图的唯一 metadata 排序／连续性规则。 */
+    private static List<ArtifactReadyMetadataStore.ReadyMetadata> presentationCaptures(
+            Connection connection, JdbcDatabaseEngine engine, String meetingId) {
+        List<ArtifactReadyMetadataStore.ReadyMetadata> captures =
+                new JdbcArtifactReadyMetadataStore(connection, engine).findByMeetingId(meetingId)
+                        .stream().filter(item -> "presentation.capture".equals(
+                                item.artifact().intent().spec().artifactType()))
+                        .sorted(Comparator.comparingInt(item ->
+                                item.artifact().intent().spec().revision()))
+                        .toList();
+        int nextCapture = 1;
+        for (var capture : captures) {
+            WriteIntentSpec spec = capture.artifact().intent().spec();
+            if (spec.revision() != nextCapture++
+                    || !"application/json".equals(spec.mediaType())
+                    || spec.language() != null) {
+                throw new IllegalStateException("presentation capture order is invalid");
+            }
+        }
+        return captures;
+    }
 
     /** 两引擎共享既有最终修订规则；只读快照不使用锁定读取。 */
     private static Projection project(Connection connection, JdbcDatabaseEngine engine, String meetingId)

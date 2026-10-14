@@ -21,9 +21,9 @@ import java.util.logging.Logger;
  * V013/V011 的实时 Start 专用只读投影；不执行 Start 业务编排或写事务。
  *
  * <p>每次在一个只读 REPEATABLE_READ 快照中先读 Meeting 原始部署/主体；异部署或
- * 旧无主会议在解码 V013/V011 前拒绝。V011 存在时返回其完整冻结事实，不读取 V013；
- * 首次路径则严格解码 V013，并与 Meeting 的会话、Profile、创建时间和接受音频
- * Profile 交叉核对。Token、URL、正文及会议 ID 均不进入日志。</p>
+ * 旧无主会议在解码 V013/V011 前拒绝。V013 与 Meeting 的会话、Profile、创建时间
+ * 和接受音频 Profile 交叉核对，为两条路径提供首次演示请求；V011 存在时仍原样
+ * 返回其完整冻结执行事实。Token、URL、正文及会议 ID 均不进入日志。</p>
  */
 public final class JdbcRealtimeStartFactsLookup implements RealtimeStartFactsLookup {
     private static final Logger LOGGER = Logger.getLogger(
@@ -76,19 +76,21 @@ public final class JdbcRealtimeStartFactsLookup implements RealtimeStartFactsLoo
             FinalizationExecutionFact execution =
                     new JdbcFinalizationExecutionFactStore(connection, engine)
                             .find(meetingId).orElse(null);
+            CreateMeetingFactStore.Record first = new JdbcCreateMeetingFactStore(connection, engine)
+                    .findByMeetingIdReadOnly(meetingId).orElse(null);
+            if (first == null || !sameFirstFacts(meetingId, meeting, first)) {
+                return reject(Reason.CREATE_FACT_INCONSISTENT);
+            }
+            var request = first.request().requestSnapshot();
             Result result;
             if (execution != null) {
-                result = new Started(meeting.subjectScope(), execution);
+                result = new Started(meeting.subjectScope(), execution,
+                        request.artifactPolicy().presentationCapture());
             } else {
-                CreateMeetingFactStore.Record first = new JdbcCreateMeetingFactStore(connection, engine)
-                        .findByMeetingIdReadOnly(meetingId).orElse(null);
-                if (first == null || !sameFirstFacts(meetingId, meeting, first)) {
-                    return reject(Reason.CREATE_FACT_INCONSISTENT);
-                }
-                var request = first.request().requestSnapshot();
                 result = new First(meeting.subjectScope(), request.title(),
                         request.profile().id(), request.profile().revision(),
-                        request.requestedCapabilities());
+                        request.requestedCapabilities(),
+                        request.artifactPolicy().presentationCapture());
             }
             // 只读事务也必须确认结束；rollback 失败不能返回看似已核验的事实。
             connection.rollback();

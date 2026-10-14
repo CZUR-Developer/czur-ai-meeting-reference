@@ -23,6 +23,7 @@ import com.czur.reference.application.command.StopMeetingIntent;
 import com.czur.reference.application.port.OwnedMeetingCreationUnitOfWork;
 import com.czur.reference.application.port.IdempotencyScopeCodec;
 import com.czur.reference.application.port.MeetingStartExecutionUnitOfWork;
+import com.czur.reference.application.port.RealtimeStartFactsLookup;
 import com.czur.reference.application.port.CreateMeetingFactStore;
 import com.czur.reference.application.port.ClientMeetingInputPort;
 import com.czur.reference.application.port.FinalizationAdmissionUnitOfWork;
@@ -296,6 +297,8 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
             assertEquals("und", beforeStop.language());
             assertEquals(0, beforeStop.frozenAudioDurationMs());
             assertFalse(beforeStop.retainAudioRequested());
+            assertFalse(beforeStop.presentationCaptureRequested());
+            assertEquals(List.of(), beforeStop.presentationCaptures());
             assertEquals("zh-CN", beforeStop.sourceLanguage());
             assertEquals(null, beforeStop.title());
             assertEquals("STARTING", meetingState(meetingId));
@@ -334,6 +337,9 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
                     assembly.contextResolver().forClientWrite(request("POST",
                             "/v1/meetings/" + meetingId + ":startClient"))).context();
             DataSource source = assembly.databaseRuntime().dataSource();
+            var first = assertInstanceOf(RealtimeStartFactsLookup.First.class,
+                    new JdbcRealtimeStartFactsLookup(source).find(SCOPE, meetingId));
+            assertFalse(first.presentationCaptureRequested());
             assertEquals(new JdbcClientMeetingResultFinalizer.Rejected(
                     ClientMeetingInputPort.Reason.NOT_FOUND),
                     JdbcClientMeetingResultFinalizer.readFinalSnapshot(source, context, "mtg_missing"));
@@ -342,6 +348,10 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
                     JdbcClientMeetingResultFinalizer.readFinalSnapshot(source, context, meetingId));
             assertEquals(200, status(exchange(port, "POST", "/v1/meetings/" + meetingId
                     + ":startClient", "", networkHeaders(TOKEN, null, false))));
+            var started = assertInstanceOf(RealtimeStartFactsLookup.Started.class,
+                    new JdbcRealtimeStartFactsLookup(source).find(SCOPE, meetingId));
+            assertFalse(started.presentationCaptureRequested());
+            assertEquals(executionFact(source, meetingId), started.executionFact());
             // 未冻结用量不是实测 0；只有真实 submitUsage 后才能取得 Ready。
             assertEquals(new JdbcClientMeetingResultFinalizer.Rejected(
                     ClientMeetingInputPort.Reason.INVALID_STATE),
@@ -1259,6 +1269,8 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
             assertEquals("zh-CN", snapshot.sourceLanguage());
             assertEquals("本场快照标题", snapshot.title());
             assertTrue(snapshot.retainAudioRequested());
+            assertFalse(snapshot.presentationCaptureRequested());
+            assertEquals(List.of(), snapshot.presentationCaptures());
             assertEquals(2000, snapshot.frozenAudioDurationMs());
             assertThrows(UnsupportedOperationException.class, () -> snapshot.transcripts().clear());
             assertThrows(UnsupportedOperationException.class, () -> snapshot.translations().clear());
@@ -1510,8 +1522,9 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
         migrate(1);
         Map<String, String> enabled = enabledConfig();
         enabled.put(ReferenceMeetingDeploymentConfig.RESULT_LINK_TTL_MS, "60000");
+        var artifacts = new PersistentFileSystemMockArtifactStore(artifactRoot, 1024 * 1024);
         try (var assembly = ReferenceMeetingHttpAssembly.start(enabled, CLOCK,
-                    new PersistentFileSystemMockArtifactStore(artifactRoot, 1024 * 1024));
+                    artifacts);
              var network = assembly.newJdkHttpServer(new InetSocketAddress("127.0.0.1", 0))) {
             network.start();
             int port = network.address().getPort();
@@ -1523,9 +1536,27 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
             assertEquals(201, status(created));
             String meetingId = ERROR_JSON.readTree(responseBody(created))
                     .path("meetingId").asText();
+            DataSource source = assembly.databaseRuntime().dataSource();
+            var firstFacts = assertInstanceOf(RealtimeStartFactsLookup.First.class,
+                    new JdbcRealtimeStartFactsLookup(source).find(SCOPE, meetingId));
+            assertTrue(firstFacts.presentationCaptureRequested());
             assertEquals(200, status(exchange(port, "POST",
                     "/v1/meetings/" + meetingId + ":startClient", "",
                     networkHeaders(TOKEN, null, false))));
+            var startedFacts = assertInstanceOf(RealtimeStartFactsLookup.Started.class,
+                    new JdbcRealtimeStartFactsLookup(source).find(SCOPE, meetingId));
+            assertTrue(startedFacts.presentationCaptureRequested());
+            assertEquals(executionFact(source, meetingId), startedFacts.executionFact());
+            assertEquals(201, status(exchange(port, "POST", "/v1/meetings/" + meetingId
+                    + "/usage:submit", "{\"audioDurationMs\":20000}",
+                    networkHeaders(TOKEN, null, true))));
+            var context = assertInstanceOf(AuthenticatedMeetingHttpContextResolver.Ready.class,
+                    assembly.contextResolver().forClientWrite(request("POST",
+                            "/v1/meetings/" + meetingId + ":startClient"))).context();
+            var emptyCaptures = assertInstanceOf(JdbcClientMeetingResultFinalizer.Ready.class,
+                    JdbcClientMeetingResultFinalizer.readFinalSnapshot(source, context, meetingId));
+            assertTrue(emptyCaptures.presentationCaptureRequested());
+            assertEquals(List.of(), emptyCaptures.presentationCaptures());
             String path = "/v1/meetings/" + meetingId + "/presentation-captures:append";
             String first = """
                     {"chunkSequence":1,"frames":[{"offsetMs":0,"jpegBase64":"/9j/2Q=="}]}
@@ -1547,6 +1578,33 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
             assertEquals(201, status(exchange(port, "POST", path, second,
                     networkHeaders(TOKEN, null, true))));
             assertEquals(2, count("artifact"));
+            var snapshot = assertInstanceOf(JdbcClientMeetingResultFinalizer.Ready.class,
+                    JdbcClientMeetingResultFinalizer.readFinalSnapshot(source, context, meetingId));
+            assertTrue(snapshot.presentationCaptureRequested());
+            assertEquals(List.of(1, 2), snapshot.presentationCaptures().stream()
+                    .map(item -> item.intent().spec().revision()).toList());
+            assertThrows(UnsupportedOperationException.class,
+                    () -> snapshot.presentationCaptures().clear());
+            assertEquals(List.of(), emptyCaptures.presentationCaptures());
+            for (var descriptor : snapshot.presentationCaptures()) {
+                assertEquals(meetingId, descriptor.intent().spec().meetingId());
+                try (var connection = source.getConnection()) {
+                    connection.setReadOnly(true);
+                    connection.setAutoCommit(false);
+                    assertEquals(descriptor, new JdbcArtifactReadyMetadataStore(connection)
+                            .findByArtifactId(descriptor.intent().spec().artifactId())
+                            .orElseThrow().artifact());
+                    connection.rollback();
+                }
+                try (var read = artifacts.openRead(descriptor.intent().binding())) {
+                    JsonNode payload = ERROR_JSON.readTree(read.content());
+                    assertEquals(descriptor.intent().spec().revision(),
+                            payload.path("chunkSequence").asInt());
+                }
+            }
+            assertEquals("STARTING", meetingState(meetingId));
+            assertEquals(0, countCommittedUsage());
+            assertEquals(0, count("meeting_client_result"));
             assertEquals(200, status(exchange(port, "POST",
                     "/v1/meetings/" + meetingId + ":stop", "",
                     networkHeaders(TOKEN, "presentation-stop-123456789", false))));
@@ -1555,10 +1613,14 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
             assertEquals(200, status(manifestResponse));
             MeetingManifest manifest = MeetingManifestJson.decode(responseBody(manifestResponse));
             assertEquals(2, manifest.artifacts().size());
+            assertEquals(snapshot, JdbcClientMeetingResultFinalizer.readFinalSnapshot(
+                    source, context, meetingId));
             for (int sequence = 1; sequence <= 2; sequence++) {
                 var ref = manifest.artifacts().get(sequence - 1);
                 assertEquals("presentation.capture", ref.type());
                 assertEquals(sequence, ref.revision());
+                assertEquals(snapshot.presentationCaptures().get(sequence - 1)
+                        .intent().spec().artifactId(), ref.artifactId());
                 String content = exchange(port, "GET", "/v1/artifacts/" + ref.artifactId()
                         + "?genTime=" + NOW.toEpochMilli(), "", "");
                 assertEquals(200, status(content));
@@ -1567,6 +1629,15 @@ class ReferenceMeetingHttpAssemblyIntegrationTest {
                 assertEquals(sequence, payload.path("chunkSequence").asInt());
                 assertEquals(sequence, payload.path("frames").size());
             }
+            // 仅在本例隔离 schema 人为制造 revision 缺口，不能导出看似连续的快照。
+            try (var connection = source.getConnection(); var statement = connection.prepareStatement(
+                    "UPDATE artifact SET revision=3 WHERE meeting_id=? AND revision=2")) {
+                statement.setString(1, meetingId);
+                assertEquals(1, statement.executeUpdate());
+            }
+            assertEquals(new JdbcClientMeetingResultFinalizer.Rejected(
+                    ClientMeetingInputPort.Reason.STORAGE_UNAVAILABLE),
+                    JdbcClientMeetingResultFinalizer.readFinalSnapshot(source, context, meetingId));
         }
     }
 
