@@ -325,8 +325,10 @@ public final class HttpMeetingServerClientAppTest {
     @Test
     public void uploadsOrderedPresentationJpegsBeforeStop() throws Exception {
         try (MockWebServer server = new MockWebServer()) {
-            server.enqueue(new MockResponse().setResponseCode(201).setBody("{}"));
-            server.enqueue(new MockResponse().setResponseCode(201).setBody("{}"));
+            server.enqueue(new MockResponse().setResponseCode(201).setBody(
+                    "{\"artifactId\":\"art_slide1\",\"chunkSequence\":1,\"frameCount\":1}"));
+            server.enqueue(new MockResponse().setResponseCode(201).setBody(
+                    "{\"artifactId\":\"art_slide2\",\"chunkSequence\":2,\"frameCount\":1}"));
             server.enqueue(new MockResponse().setResponseCode(200).setBody("{}"));
             server.start();
             MeetingServerClient client = client(

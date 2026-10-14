@@ -154,6 +154,38 @@ App 停截图 tick，在工作线程完成最后有效截图的 `submitPresentat
 再调用 continuation；无采集时直接延续。不要阻塞 UI 或遗漏延续，延续仅首次有效，之后不再接纳截图。
 JPEG 在调用时复制，`offsetMs` 相对 `startedAtMs`，序号由组合层分配。
 
+需要更新截图去重基线或确认末帧时，使用
+`submitPresentation(offsetMs, jpeg, MeetingClient.Callback<Void>)`：内建Coordinator的回调
+都经配置的串行`callbackExecutor`，只有后端实际ACK的`chunkSequence`、`frameCount=1`
+和非空`artifactId`匹配才`onSuccess(null)`。旧void入口保留，仅表示排队，不代表已保存。
+旧自定义Session未实现此重载时明确抛出`UnsupportedOperationException`，不伪造确认。
+
+截图保存失败独立提示，不设置字幕／译文事件的失败标志，已有文字仍可正常Stop。
+唯一IO队列仅在成功ACK后推进截图序号；响应未确认时至多保留一个原序号／原字节包，
+下一次截图先确认该原包，再保存新图。原包仍失败时，不用新图覆盖它；当前新图通过
+错误回调结束，App后续自行再次采集。不增加定时重试、持久缓存或进程恢复保证。
+请求正文及服务端规范化保存正文的UTF-8 JSON均须满足现行1MiB预算（含Base64、字段和
+保存时补充的`schemaVersion`）；任一超限都在发送和保留前报错，不消耗序号。
+
+App只在成功回调后更新去重基线；停止前截图的成功／失败都必须续接一次，例：
+
+```java
+session.submitPresentation(offsetMs, jpeg, new MeetingClient.Callback<Void>() {
+    @Override public void onSuccess(Void ignored) {
+        updateCaptureBaseline(); // 只在真实保存确认后更新。
+        closeCaptureAndContinueStop();
+    }
+    @Override public void onError(String message) {
+        showCaptureNotice(message); // 仅提示图片失败，文字会议仍应正常停止。
+        closeCaptureAndContinueStop();
+    }
+});
+```
+
+`closeCaptureAndContinueStop`由App装配，在其工作线程完成关闭后调原continuation；
+不要在主线程等待网络或同步执行Bitmap／文件清理。关闭client/session后仍遵守既有
+未派发通知抑制语义，显式取消不产生正常Stop或READY。
+
 随后停止同一音源、排完完整 PCM 尾帧，等待末尾字幕/译文与 FINISHED；
 标准事件和截图先保存，再读取 `ModelSession.frozenAudioDurationMs()`，通过
 `POST /v1/meetings/{meetingId}/usage:submit` 提交已冻结整数毫秒，随后按需总结和后端 Stop。

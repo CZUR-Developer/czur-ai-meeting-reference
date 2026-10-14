@@ -13,8 +13,33 @@ public interface MeetingSession extends AutoCloseable {
     /**
      * offsetMs 相对 onStarted.startedAtMs，单位毫秒；方法调用时复制 JPEG，
      * 序号由组合层分配。仅本场启用 presentationCapture 且未完成停止衔接时接纳。
+     * 此旧入口只表示已排队，不表示后端已保存；需要更新去重基线或等待末帧确认时，
+     * 请使用带 Callback 的重载。单帧保存失败仅提示，不阻断字幕和正常 Stop。
      */
     void submitPresentation(long offsetMs, byte[] jpeg);
+    /**
+     * 异步提交同场的一帧 JPEG，内建 Coordinator 仅在后端确认包序号、单帧数量和
+     * 产物 ID 后调用 {@code onSuccess(null)}；失败调用 {@code onError}，不伪造保存成功。
+     * 每次调用的结果最多交付一次，通知使用配置的串行 callbackExecutor。
+     *
+     * <p>JPEG 在方法调用时复制，编码与网络在独立 IO 队列执行。请求及服务端规范化
+     * 保存正文（含 schemaVersion）任一超出既有1MiB预算时，先报错且不保留图片
+     * 或消耗序号。一次上传未确认时，仅在内存保留
+     * 一个原序号／原字节包；下一次提交先确认该包，再保存本次新图，不自动定时重试。
+     * App 应只在成功回调后更新去重基线；停止前末帧的成功或失败回调都应续接
+     * beforeStop 的 continuation，不能在 UI 线程阻塞等待。</p>
+     *
+     * <p>默认方法保留旧自定义 Session 的源码兼容；未实现 ACK 的 Session 明确抛出
+     * UnsupportedOperationException，不通过调用旧 void 方法伪造成功确认。</p>
+     *
+     * @param offsetMs 相对本场 MeetingStarted.startedAtMs 的毫秒位置
+     * @param jpeg 由 App／系统截图能力生成的 JPEG；调用方随后可复用原数组
+     * @param callback 当前帧的保存确认；成功值为 null，错误不改变字幕结果状态
+     */
+    default void submitPresentation(long offsetMs, byte[] jpeg,
+            MeetingClient.Callback<Void> callback) {
+        throw new UnsupportedOperationException("当前会议实现未提供演示截图保存确认");
+    }
     /** 交换同一显示快照中的呈现位置，语义 A/B 和真实语言不变。 */
     void swapDisplayColumns();
     /**

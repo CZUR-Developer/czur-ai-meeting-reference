@@ -206,11 +206,15 @@ public final class MeetingCoordinator implements MeetingClient {
         private boolean completionQueued;
         private boolean acceptingPresentation;
         private int sequence;
-        private int presentationSequence;
         private int savedEvents;
         private ScheduledFuture<?> deadline;
         // 仅 io 队列访问；所有 append 在 complete 前入队。
         private boolean appendFailed;
+        // 截图与文字事件独立：只有后端 ACK 后才推进序号。网络响应丢失时保留
+        // 至多一个原包，下一次截图先以同一序号／offset／字节确认，不能换新图覆盖。
+        // 这两个字段只由唯一 io 队列读写，不建立持久缓存或定时重试。
+        private int presentationSequence;
+        private PresentationFrame pendingPresentation;
         // 第一次正常收口时读取模型已经冻结的值，同场重试复用该快照。
         private OptionalLong frozenAudioDuration = OptionalLong.empty();
         private boolean usageRead;
@@ -437,7 +441,7 @@ public final class MeetingCoordinator implements MeetingClient {
 
         private void appendFailure() {
             appendFailed = true;
-            enqueue(() -> { if (!done) publish("标准事件或演示截图提交失败，无法完成会议"); });
+            enqueue(() -> { if (!done) publish("标准字幕或译文事件提交失败，无法完成会议"); });
         }
 
         private void scheduleDeadline() {
@@ -465,14 +469,71 @@ public final class MeetingCoordinator implements MeetingClient {
         }
 
         @Override public void submitPresentation(long offsetMs, byte[] jpeg) {
+            // 保留旧排队入口；只有 listener 提示，不把方法返回当保存确认。
+            submitPresentation(offsetMs, jpeg, new Callback<>() {
+                @Override public void onSuccess(Void ignored) { }
+                @Override public void onError(String ignored) { }
+            });
+        }
+
+        @Override public void submitPresentation(long offsetMs, byte[] jpeg, Callback<Void> callback) {
+            Objects.requireNonNull(callback, "callback");
             PresentationFrame frame = new PresentationFrame(offsetMs, jpeg);
             enqueue(() -> {
-                if (done || !acceptingPresentation) return;
-                int number = ++presentationSequence;
-                io.execute(() -> {
-                    try { server.appendPresentation(meetingId, number, frame.offsetMs(), frame.jpeg()); }
-                    catch (IOException failure) { logFailure("保存演示截图", failure); appendFailure(); }
-                });
+                if (done || !acceptingPresentation) {
+                    notifyListener(() -> callback.onError("本场当前不接收演示截图"));
+                    return;
+                }
+                io.execute(() -> savePresentation(frame, callback));
+            });
+        }
+
+        /** IO 队列内先检查新帧预算；不因本地超限保留图片或分配保存序号。 */
+        private void savePresentation(PresentationFrame frame, Callback<Void> callback) {
+            if (closed || cancelled) return;
+            try {
+                // 未确认包若成功重放，新帧才会用下一个序号；这里只计算候选值，
+                // 不提前推进成功序号，也不覆盖 pendingPresentation。
+                int candidate = presentationSequence + (pendingPresentation == null ? 1 : 2);
+                HttpMeetingServerClient.validatePresentationRequestSize(
+                        candidate, frame.offsetMs(), frame.jpeg());
+            } catch (IOException invalidSize) {
+                logFailure("检查演示截图大小", invalidSize);
+                presentationFailure(callback, "演示截图超出1MiB传输预算，请缩小图片；字幕会议继续");
+                return;
+            }
+            try {
+                if (pendingPresentation != null) {
+                    LOG.fine("重新确认原演示截图包 sequence=" + (presentationSequence + 1));
+                    savePendingPresentation();
+                }
+                // 新图只有在旧包已经确认后才成为待确认包；旧包重放失败时丢弃
+                // 本次新图，回调一次错误，下一次调用继续确认同一个旧包。
+                pendingPresentation = frame;
+                savePendingPresentation();
+                enqueue(() -> notifyListener(() -> callback.onSuccess(null)));
+            } catch (IOException | RuntimeException failure) {
+                logFailure("保存演示截图", failure);
+                presentationFailure(callback, "演示截图保存未确认；字幕会议继续");
+            }
+        }
+
+        /** 同步 Server 端口正常返回表示真实 ACK；只在返回后推进，失败仍保留原帧。 */
+        private void savePendingPresentation() throws IOException {
+            int number = presentationSequence + 1;
+            server.appendPresentation(meetingId, number,
+                    pendingPresentation.offsetMs(), pendingPresentation.jpeg());
+            presentationSequence = number;
+            pendingPresentation = null;
+            LOG.fine("演示截图保存已确认 sequence=" + number);
+        }
+
+        private void presentationFailure(Callback<Void> callback, String message) {
+            // 图片是可选产物；独立通知 App，不能设置文字使用的 appendFailed，
+            // 否则一次末帧失败会把已经保存的文字会议永久卡在 STOP_PENDING。
+            enqueue(() -> {
+                if (!done) publish(message);
+                notifyListener(() -> callback.onError(message));
             });
         }
 
@@ -537,7 +598,7 @@ public final class MeetingCoordinator implements MeetingClient {
             if (cancelled || closed) return;
             String step = "检查标准事件保存";
             try {
-                if (appendFailed) throw new IOException("标准事件或截图提交失败");
+                if (appendFailed) throw new IOException("标准字幕或译文事件提交失败");
                 step = "提交冻结采音用量";
                 if (!usageRead) {
                     frozenAudioDuration = model.frozenAudioDurationMs();

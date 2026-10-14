@@ -39,6 +39,10 @@ import org.json.JSONObject;
 
 /** 参考会议后端的最小 HTTP 实现；Token 由登录接口签发，不写入 APK 或日志。 */
 public final class HttpMeetingServerClient implements MeetingServerClient {
+    // 与参考后端 HttpRequest.MAX_BODY_BYTES 的现行 UTF-8 JSON 预算保持一致。
+    // 不以 JPEG 原始大小替代传输大小，Base64、请求字段和服务端保存时补充的
+    // schemaVersion 都计入预算；请求能通过不代表规范化保存正文也能通过。
+    private static final int MAX_PRESENTATION_REQUEST_BYTES = 1_048_576;
     private final String baseUrl;
     private final String bearerToken;
     private final ClientIdentity identity;
@@ -195,14 +199,49 @@ public final class HttpMeetingServerClient implements MeetingServerClient {
     public void appendPresentation(String meetingId, int chunkSequence, long offsetMs, byte[] jpeg)
             throws IOException {
         try {
-            JSONObject frame = new JSONObject()
-                    .put("offsetMs", offsetMs)
+            String body = presentationBody(chunkSequence, offsetMs, jpeg);
+            JSONObject response = parseJson(post(
+                    "/v1/meetings/" + meetingId + "/presentation-captures:append",
+                    body, null, 200, 201).body);
+            // 201（首次保存）和200（同包重放）都必须确认这一包的一帧已被接管。
+            // 不把空JSON、其他包的ACK或缺失产物ID当保存成功，不回显响应正文。
+            if (response.getInt("chunkSequence") != chunkSequence
+                    || response.getInt("frameCount") != 1
+                    || response.getString("artifactId").isBlank()) {
+                throw new IOException("演示截图保存确认与当前包不一致");
+            }
+        } catch (JSONException invalidResponse) {
+            throw new IOException("演示截图保存确认格式错误", invalidResponse);
+        }
+    }
+
+    /**
+     * 组合层在保留未确认帧前使用同一编码器预检实际 UTF-8 JSON 长度，
+     * 同时计入服务端规范化保存正文的 schemaVersion 字段。
+     * 此方法只做当前协议的1MiB预算检查，不发送HTTP、不分配序号、不保留图片。
+     */
+    public static void validatePresentationRequestSize(int chunkSequence, long offsetMs, byte[] jpeg)
+            throws IOException {
+        presentationBody(chunkSequence, offsetMs, jpeg);
+    }
+
+    private static String presentationBody(int chunkSequence, long offsetMs, byte[] jpeg)
+            throws IOException {
+        try {
+            JSONObject frame = new JSONObject().put("offsetMs", offsetMs)
                     .put("jpegBase64", Base64.getEncoder().encodeToString(jpeg));
-            JSONObject body = new JSONObject()
-                    .put("chunkSequence", chunkSequence)
-                    .put("frames", new JSONArray().put(frame));
-            post("/v1/meetings/" + meetingId + "/presentation-captures:append",
-                    body.toString(), null, 200, 201);
+            JSONArray frames = new JSONArray().put(frame);
+            String body = new JSONObject().put("chunkSequence", chunkSequence)
+                    .put("frames", frames).toString();
+            // 复用同一帧，按当前后端 decodePresentationChunk 的真实保存结构计量。
+            // 不把 schemaVersion 发到 HTTP 请求里，也不为它另建预算或恢复机制。
+            String canonical = new JSONObject().put("schemaVersion", "presentation-capture/v1")
+                    .put("chunkSequence", chunkSequence).put("frames", frames).toString();
+            if (body.getBytes(StandardCharsets.UTF_8).length > MAX_PRESENTATION_REQUEST_BYTES
+                    || canonical.getBytes(StandardCharsets.UTF_8).length > MAX_PRESENTATION_REQUEST_BYTES) {
+                throw new IOException("演示截图请求或保存JSON超过1MiB");
+            }
+            return body;
         } catch (JSONException invalidFrame) {
             throw new IOException("演示截图格式错误", invalidFrame);
         }

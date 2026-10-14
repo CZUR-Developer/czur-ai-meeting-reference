@@ -19,11 +19,13 @@ import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import org.json.JSONArray;
 import org.json.JSONObject;
 import org.junit.Test;
 
@@ -227,6 +229,76 @@ public final class HttpMeetingServerClientTest {
         byte[] returned = frame.jpeg();
         returned[1] = 8;
         assertArrayEquals(new byte[]{1, 2}, frame.jpeg());
+    }
+
+    @Test public void presentationFirstSaveAndReplayRequireSameSingleFrameAck() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            String ack = "{\"artifactId\":\"art_slide1\",\"chunkSequence\":1,\"frameCount\":1}";
+            fixture.reply(201, ack);
+            fixture.reply(200, ack);
+            HttpMeetingServerClient client = fixture.client();
+            byte[] jpeg = {(byte) 0xff, (byte) 0xd8, 1, (byte) 0xff, (byte) 0xd9};
+            client.appendPresentation("mtg_slide", 1, 1000, jpeg);
+            client.appendPresentation("mtg_slide", 1, 1000, jpeg);
+            Request first = fixture.request();
+            Request replay = fixture.request();
+            assertEquals("/v1/meetings/mtg_slide/presentation-captures:append", first.path());
+            assertEquals("Bearer test-token", first.authorization());
+            assertEquals(first.body(), replay.body());
+            JSONObject body = new JSONObject(first.body());
+            assertEquals(1, body.getInt("chunkSequence"));
+            assertEquals(1, body.getJSONArray("frames").length());
+            assertEquals(1000, body.getJSONArray("frames").getJSONObject(0).getLong("offsetMs"));
+        }
+    }
+
+    @Test public void presentationAckMustMatchChunkSingleFrameAndNonemptyArtifact() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            List<String> unconfirmed = List.of(
+                    "{\"artifactId\":\"art_slide2\",\"chunkSequence\":2,\"frameCount\":1}",
+                    "{\"artifactId\":\"art_slide1\",\"chunkSequence\":1,\"frameCount\":2}",
+                    "{\"artifactId\":\" \",\"chunkSequence\":1,\"frameCount\":1}",
+                    "{}");
+            HttpMeetingServerClient client = fixture.client();
+            for (String response : unconfirmed) {
+                fixture.reply(200, response);
+                assertThrows(IOException.class,
+                        () -> client.appendPresentation("mtg_slide", 1, 1000, new byte[]{1}));
+                assertEquals("/v1/meetings/mtg_slide/presentation-captures:append", fixture.request().path());
+            }
+        }
+    }
+
+    @Test public void presentationJsonOverExistingBudgetFailsBeforeHttpRequest() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            IOException failure = assertThrows(IOException.class,
+                    () -> fixture.client().appendPresentation("mtg_slide", 1, 1000, new byte[786432]));
+            assertTrue(failure.getMessage().contains("1MiB"));
+            assertTrue("本地超限不得发送HTTP请求", fixture.requests.isEmpty());
+        }
+    }
+
+    @Test public void presentationCanonicalSchemaOverBudgetAlsoFailsBeforeHttpRequest() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            byte[] jpeg = new byte[786381];
+            jpeg[0] = (byte) 0xff;
+            jpeg[1] = (byte) 0xd8;
+            jpeg[jpeg.length - 2] = (byte) 0xff;
+            jpeg[jpeg.length - 1] = (byte) 0xd9;
+            JSONArray frames = new JSONArray().put(new JSONObject().put("offsetMs", 10000)
+                    .put("jpegBase64", Base64.getEncoder().encodeToString(jpeg)));
+            JSONObject request = new JSONObject().put("chunkSequence", 1).put("frames", frames);
+            assertEquals(1048573, request.toString().getBytes(StandardCharsets.UTF_8).length);
+            // HTTP 请求尚在1MiB内，但后端补 schemaVersion 后已超限；发送前必须拒绝。
+            JSONObject canonical = new JSONObject().put("schemaVersion", "presentation-capture/v1")
+                    .put("chunkSequence", 1).put("frames", frames);
+            assertEquals(1048615, canonical.toString().getBytes(StandardCharsets.UTF_8).length);
+            HttpMeetingServerClient.validatePresentationRequestSize(1, 10000, new byte[750000]);
+            IOException failure = assertThrows(IOException.class,
+                    () -> fixture.client().appendPresentation("mtg_slide", 1, 10000, jpeg));
+            assertTrue(failure.getMessage().contains("1MiB"));
+            assertTrue("保存正文超限也不得发送HTTP请求", fixture.requests.isEmpty());
+        }
     }
 
     private static MeetingOptions options() {

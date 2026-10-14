@@ -23,6 +23,7 @@ import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -490,6 +491,124 @@ public final class MeetingCoordinatorTest {
         }
     }
 
+    @Test public void presentationAckUsesCallbackExecutorAndOwnsSubmittedJpeg() throws Exception {
+        BlockingQueue<Runnable> callbacks = new LinkedBlockingQueue<>();
+        try (Fixture f = new Fixture(true, ALL,
+                new ReferenceIdentityProvider("test-token"), callbacks::add)) {
+            f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.WEB, true);
+            Runnable queued;
+            while ((queued = callbacks.poll()) != null) queued.run();
+            CompletableFuture<Void> ack = new CompletableFuture<>();
+            byte[] jpeg = {1, 2};
+            f.session.submitPresentation(1000, jpeg, resultCallback(ack));
+            jpeg[0] = 9;
+            queued = callbacks.poll(2, TimeUnit.SECONDS);
+            assertNotNull("保存确认应交给配置的回调Executor", queued);
+            assertFalse("不能在HTTP/状态线程直接回调App", ack.isDone());
+            queued.run();
+            ack.get(2, TimeUnit.SECONDS);
+            assertEquals(1, f.server.captures.size());
+            assertEquals(1, f.server.captures.get(0).sequence());
+            assertArrayEquals(new byte[]{1, 2}, f.server.captures.get(0).jpeg());
+        }
+    }
+
+    @Test public void unconfirmedCaptureReplaysSameBytesBeforeNextFrameAndSequence() throws Exception {
+        try (Fixture f = new Fixture(true, ALL)) {
+            f.server.failPresentationCalls = 1;
+            f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.WEB, true);
+            CompletableFuture<Void> first = new CompletableFuture<>();
+            byte[] original = {1, 2};
+            f.session.submitPresentation(1000, original, resultCallback(first));
+            original[0] = 9;
+            assertThrows(ExecutionException.class, () -> first.get(2, TimeUnit.SECONDS));
+            CompletableFuture<Void> next = new CompletableFuture<>();
+            f.session.submitPresentation(2000, new byte[]{3}, resultCallback(next));
+            next.get(2, TimeUnit.SECONDS);
+            assertEquals(List.of(1, 1, 2), f.server.captures.stream().map(Capture::sequence).toList());
+            assertEquals(1000, f.server.captures.get(0).offsetMs());
+            assertEquals(1000, f.server.captures.get(1).offsetMs());
+            assertArrayEquals(new byte[]{1, 2}, f.server.captures.get(0).jpeg());
+            assertArrayEquals(f.server.captures.get(0).jpeg(), f.server.captures.get(1).jpeg());
+            assertArrayEquals(new byte[]{3}, f.server.captures.get(2).jpeg());
+            f.session.requestStop();
+            assertNotNull(f.probe.result());
+            assertEquals(1, f.runtime.stopCalls);
+        }
+    }
+
+    @Test public void failedReplayKeepsOriginalFrameAndNeverOverwritesItsSequence() throws Exception {
+        try (Fixture f = new Fixture(true, ALL)) {
+            f.server.failPresentationCalls = 2;
+            f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.WEB, true);
+            CompletableFuture<Void> first = new CompletableFuture<>();
+            f.session.submitPresentation(1000, new byte[]{1}, resultCallback(first));
+            assertThrows(ExecutionException.class, () -> first.get(2, TimeUnit.SECONDS));
+            CompletableFuture<Void> discarded = new CompletableFuture<>();
+            f.session.submitPresentation(2000, new byte[]{2}, resultCallback(discarded));
+            assertThrows(ExecutionException.class, () -> discarded.get(2, TimeUnit.SECONDS));
+            assertEquals(List.of(1, 1), f.server.captures.stream().map(Capture::sequence).toList());
+            CompletableFuture<Void> confirmed = new CompletableFuture<>();
+            f.session.submitPresentation(3000, new byte[]{3}, resultCallback(confirmed));
+            confirmed.get(2, TimeUnit.SECONDS);
+            assertEquals(List.of(1, 1, 1, 2), f.server.captures.stream().map(Capture::sequence).toList());
+            for (int i = 0; i < 3; i++) {
+                assertEquals(1000, f.server.captures.get(i).offsetMs());
+                assertArrayEquals(new byte[]{1}, f.server.captures.get(i).jpeg());
+            }
+            assertEquals(3000, f.server.captures.get(3).offsetMs());
+            assertArrayEquals(new byte[]{3}, f.server.captures.get(3).jpeg());
+        }
+    }
+
+    @Test public void oversizedCaptureUsesNoSequenceAndNextValidFrameStillStopsNormally() throws Exception {
+        try (Fixture f = new Fixture(true, ALL)) {
+            f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.WEB, true);
+            CompletableFuture<Void> oversized = new CompletableFuture<>();
+            // 请求1048573B尚在预算内，保存正文补schemaVersion后1048615B超限；
+            // 必须在保留原包前发现，不能卡住后续正常帧的序号。
+            f.session.submitPresentation(10000, new byte[786381], resultCallback(oversized));
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> oversized.get(2, TimeUnit.SECONDS));
+            assertTrue(failure.getCause().getMessage().contains("1MiB"));
+            assertTrue(f.server.captures.isEmpty());
+            CompletableFuture<Void> valid = new CompletableFuture<>();
+            f.session.submitPresentation(2000, new byte[]{1}, resultCallback(valid));
+            valid.get(2, TimeUnit.SECONDS);
+            assertEquals(List.of(1), f.server.captures.stream().map(Capture::sequence).toList());
+            assertEquals(2000, f.server.captures.get(0).offsetMs());
+            f.session.requestStop();
+            assertNotNull(f.probe.result());
+            assertEquals(1, f.runtime.stopCalls);
+        }
+    }
+
+    @Test public void failedFinalCaptureContinuesBeforeStopAndDoesNotPoisonTextResult() throws Exception {
+        try (Fixture f = new Fixture(true, ALL)) {
+            f.server.failPresentationCalls = 1;
+            f.runtime.emitTail = true;
+            f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.WEB, true);
+            AtomicInteger captureErrors = new AtomicInteger();
+            f.probe.beforeStop = continuation -> f.session.submitPresentation(1000, new byte[]{1},
+                    new MeetingClient.Callback<>() {
+                        @Override public void onSuccess(Void ignored) { continuation.run(); }
+                        @Override public void onError(String message) {
+                            captureErrors.incrementAndGet();
+                            continuation.run();
+                        }
+                    });
+            f.session.requestStop();
+            assertNotNull(f.probe.result());
+            assertEquals(1, captureErrors.get());
+            assertEquals(1, f.probe.beforeStopCalls.get());
+            assertEquals(1, f.runtime.stopCalls);
+            assertEquals(List.of("discover", "create", "grant", "start", "capture1",
+                    "event1", "stop", "manifest"), f.server.steps);
+            assertEquals("最后字幕", f.server.transcripts.get(0).text());
+            f.probe.awaitPhase(MeetingSessionState.Phase.READY);
+        }
+    }
+
     @Test public void serverGrantChoosesFreshAdapterAndTailEventsAreSavedBeforeStop() throws Exception {
         try (Fixture f = new Fixture(true, Set.of(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.TRANSLATION))) {
             f.runtime.emitTail = true;
@@ -941,12 +1060,15 @@ public final class MeetingCoordinatorTest {
         }
     }
 
+    private record Capture(int sequence, long offsetMs, byte[] jpeg) { }
+
     private static final class Server implements MeetingServerClient {
         final Set<String> granted;
         final List<String> steps = Collections.synchronizedList(new ArrayList<>());
         final List<TranscriptEvent> transcripts = Collections.synchronizedList(new ArrayList<>());
         final List<Long> genTimes = Collections.synchronizedList(new ArrayList<>());
         final List<Long> usages = Collections.synchronizedList(new ArrayList<>());
+        final List<Capture> captures = Collections.synchronizedList(new ArrayList<>());
         final CountDownLatch appendEntered = new CountDownLatch(1);
         final CountDownLatch releaseAppend = new CountDownLatch(1);
         final CountDownLatch usageEntered = new CountDownLatch(1);
@@ -958,6 +1080,7 @@ public final class MeetingCoordinatorTest {
         boolean failEmail;
         boolean failContent;
         boolean failUsageOnce;
+        int failPresentationCalls;
         boolean includeContent;
         byte[] jpeg;
         String emailUrl;
@@ -987,7 +1110,16 @@ public final class MeetingCoordinatorTest {
             catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); throw new IOException(interrupted); }
         }
         @Override public void appendTranslation(String id, int number, TranslationEvent event) { steps.add("translation" + number); }
-        @Override public void appendPresentation(String id, int number, long offset, byte[] jpeg) { steps.add("capture" + number); this.jpeg = jpeg; }
+        @Override public void appendPresentation(String id, int number, long offset, byte[] jpeg)
+                throws IOException {
+            steps.add("capture" + number);
+            captures.add(new Capture(number, offset, jpeg.clone()));
+            this.jpeg = jpeg;
+            if (failPresentationCalls > 0) {
+                --failPresentationCalls;
+                throw new IOException("受控截图响应未确认");
+            }
+        }
         @Override public void submitSummary(String id, SummaryResult summary) { steps.add("summary"); }
         @Override public void submitUsage(String id, long duration) throws IOException {
             assertEquals("mtg_test", id);
