@@ -10,6 +10,19 @@ public interface ModelAdapter {
     /** 与后端 modelSession.adapterId 一致的构建期注册标识。 */
     String id();
 
+    /**
+     * 是否可能先输出未知源语种，再在同段修订或配对译文中补充可信源语种。
+     *
+     * <p>默认 false 保留既有 Adapter 的即时显示行为，伙伴的旧实现无需新增方法。
+     * 有此消息时序的实现可返回 true，组合层便在本场双语路由允许等待时复用已有
+     * 语种窗口；明确方向、窗口到期及正常停止仍使用原显示规则。组合层在本场
+     * 第一条字幕前读取该声明，不根据供应商名称、注册 ID 或原始 JSON 推定。</p>
+     *
+     * <p>这只声明消息时序，不代表服务端授权或可支持语言，也不配置等待时长。
+     * 后续语种仍通过同一片段的更高修订号字幕或标准译文回调表达，不新增协议旁路。</p>
+     */
+    default boolean mayEmitDeferredSourceLanguage() { return false; }
+
     /** WebSocket 建立后发送的协议启动消息。音频须等到 AUDIO_READY 才可发送。 */
     String startMessage(ModelSessionGrant grant);
 

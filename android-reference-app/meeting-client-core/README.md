@@ -222,8 +222,11 @@ session/client `close()` 只是取消，不执行后端 Stop、不生成 READY/�
 
 显示层通过 `onSegmentStarted()` 在句开始绑定方向；明确方向区 A=180～260°、B=280～360°。
 `NO_DIRECTION` 保留上次有效角，`UNSUPPORTED` 按语种降级；后续新句采样不移动已锁侧的旧句。
-仅默认听悟、互译且有效模糊方向区启用一次最多1.5秒的语种窗口：最新快照替换旧快照，
+Adapter声明源语种可能迟到、互译且有效模糊方向区时，启用一次最多1.5秒的语种窗口：最新快照替换旧快照，
 可信语种及时到达直接释放，到期/Stop 按会前 A/B 本地评分兜底，平分选 A。
+声明入口为`ModelAdapter.mayEmitDeferredSourceLanguage()`，默认false保留旧伙伴的即时显示；
+有此消息时序的伙伴实现覆盖返回true。内带听悟已声明true，Coordinator只读取实际Adapter声明，
+注册ID和供应商名称不决定等待，也不新增Server能力或App开关。
 
 低层 `MeetingDisplayState.nextLanguageDeadlineMs()` 提供最早单调截止点，使用方独立于网络 IO
 安排一次定时调用 `releaseExpiredLanguages(nowMs)`；停止调用 `flushPendingLanguages()`。

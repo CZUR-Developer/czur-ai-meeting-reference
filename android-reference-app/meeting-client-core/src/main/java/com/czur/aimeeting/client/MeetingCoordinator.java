@@ -3,7 +3,6 @@ package com.czur.aimeeting.client;
 import com.czur.aimeeting.client.display.MeetingDisplaySnapshot;
 import com.czur.aimeeting.client.display.MeetingDisplayState;
 import com.czur.aimeeting.client.result.ResultActionAccess;
-import com.czur.aimeeting.client.provider.TingwuModelAdapter;
 import com.czur.aimeeting.client.server.CreatedMeeting;
 import com.czur.aimeeting.client.server.HttpMeetingServerClient;
 import com.czur.aimeeting.client.server.HttpMeetingSessionClient;
@@ -329,7 +328,7 @@ public final class MeetingCoordinator implements MeetingClient {
             long startedAtMs = monotonicMs.getAsLong();
             display.start(startedAtMs, options.mode() == MeetingOptions.Mode.LIVE_TRANSLATION,
                     options.sourceLanguage(), options.targetLanguage());
-            display.setWaitForModelLanguage(grant != null && TingwuModelAdapter.ID.equals(grant.adapterId()));
+            display.setWaitForModelLanguage(adapter != null && adapter.mayEmitDeferredSourceLanguage());
             try {
                 model = runtime.open(grant, adapter, event -> enqueue(() -> transcript(event)),
                         new ModelSessionListener() {

@@ -18,6 +18,8 @@ public final class ModelAdapterRegistryTest {
     @Test public void defaultsCreateIndependentAdapters() {
         ModelAdapterRegistry registry = new ModelAdapterRegistry();
         assertEquals(TingwuModelAdapter.ID, registry.create(TingwuModelAdapter.ID).id());
+        assertTrue(registry.create(TingwuModelAdapter.ID).mayEmitDeferredSourceLanguage());
+        assertFalse(registry.create(SampleJsonModelAdapter.ID).mayEmitDeferredSourceLanguage());
         assertNotSame(registry.create(TingwuModelAdapter.ID), registry.create(TingwuModelAdapter.ID));
         assertNotSame(registry.create(SampleJsonModelAdapter.ID), registry.create(SampleJsonModelAdapter.ID));
         assertTrue(registry.setupCapabilities().contains(MeetingCapabilityState.SUMMARY));
@@ -35,6 +37,7 @@ public final class ModelAdapterRegistryTest {
         List<TranscriptEvent> events = new ArrayList<>();
         List<String> begins = new ArrayList<>();
         ModelAdapter adapter = new LegacyAdapter();
+        assertFalse("旧伙伴实现默认不等待源语种", adapter.mayEmitDeferredSourceLanguage());
         assertEquals(ModelSignal.NONE, adapter.onServerMessage("text", events::add,
                 event -> { }, event -> begins.add(event.segmentId())));
         assertEquals("text", events.get(0).text());

@@ -666,6 +666,37 @@ public final class MeetingCoordinatorTest {
         }
     }
 
+    @Test public void partnerDeferredLanguageUsesAdapterDeclarationWithoutTingwuId() throws Exception {
+        String partnerId = "partner-delayed-language";
+        Set<String> capabilities = Set.of(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.TRANSLATION);
+        try (Fixture f = new Fixture(true, capabilities)) {
+            f.server.adapterId = partnerId;
+            f.adapters.register(partnerId, () -> new ModelAdapter() {
+                @Override public String id() { return partnerId; }
+                @Override public boolean mayEmitDeferredSourceLanguage() { return true; }
+                @Override public String startMessage(ModelSessionGrant grant) { return null; }
+                @Override public ModelSignal onServerMessage(String message, TranscriptListener listener) {
+                    return ModelSignal.NONE;
+                }
+            }, capabilities);
+            f.start(MeetingOptions.Mode.LIVE_TRANSLATION, MeetingOptions.ResultDelivery.WEB, false);
+            assertEquals(partnerId, f.runtime.adapter.id());
+            assertFalse(TingwuModelAdapter.ID.equals(f.runtime.grant.adapterId()));
+            assertTrue(f.probe.display().rows().isEmpty()); // 先读走本场初始显示快照。
+
+            // 只测组合层的中性声明；复用现有Runtime直接交付归一化事件，不另模拟私有协议。
+            f.runtime.listener.onAudioDirection(new AudioDirectionSample(90, 90, 0, AudioDirectionSample.Status.AVAILABLE));
+            f.runtime.listener.onSegmentStarted(new SegmentStartedEvent("partner-segment", 0));
+            f.runtime.emit("partner-segment", 1, "und", "Hello", false);
+            assertTrue("伙伴未知语种应进入既有等待窗口", f.probe.display().rows().isEmpty());
+
+            f.runtime.emit("partner-segment", 2, "en-US", "Hello", false);
+            MeetingDisplaySnapshot shown = f.probe.visible();
+            assertEquals("en-US", shown.rows().get(0).transcript().language());
+            assertEquals(MeetingDisplaySnapshot.Side.B, shown.rows().get(0).sourceSide());
+        }
+    }
+
     @Test public void blockedHttpDoesNotBlockActivityBeginDirectionDeadlineOrSnapshotSwap() throws Exception {
         try (Fixture f = new Fixture(true, Set.of(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.TRANSLATION))) {
             f.server.blockAppend = true;
@@ -896,6 +927,7 @@ public final class MeetingCoordinatorTest {
         final Server server;
         final Runtime runtime;
         final Probe probe = new Probe();
+        final ModelAdapterRegistry adapters = new ModelAdapterRegistry();
         final AtomicInteger clockCalls = new AtomicInteger();
         final MeetingCoordinator client;
         final MeetingClientConfig config;
@@ -923,7 +955,7 @@ public final class MeetingCoordinatorTest {
                     ClientIdentity.reference(), MeetingProfile.reference(), callbackExecutor)
                     .withArtifactPublisher(publisher);
             client = new MeetingCoordinator(config,
-                    new ModelAdapterRegistry(), runtime, resolved -> { sessionToken = resolved.accessToken(); return server; },
+                    adapters, runtime, resolved -> { sessionToken = resolved.accessToken(); return server; },
                     () -> System.nanoTime() / 1_000_000L, () -> { clockCalls.incrementAndGet(); return 555; });
         }
         void start(MeetingOptions.Mode mode, MeetingOptions.ResultDelivery delivery, boolean capture) throws Exception {
@@ -1084,6 +1116,7 @@ public final class MeetingCoordinatorTest {
         boolean includeContent;
         byte[] jpeg;
         String emailUrl;
+        String adapterId = TingwuModelAdapter.ID;
         MeetingOptions requested;
         Server(Set<String> granted) { this.granted = granted; }
         @Override public DeploymentOptions discover() { steps.add("discover"); return new DeploymentOptions(ALL, 86400000L, true); }
@@ -1096,7 +1129,7 @@ public final class MeetingCoordinatorTest {
                 return new CreatedMeeting("mtg_test", null, MeetingCapabilityState.fromCreateResponse(new JSONObject().put("capabilityDecisions", decisions)), 600000L);
             } catch (Exception failure) { throw new IOException(failure); }
         }
-        @Override public ModelSessionGrant requestModelSession(String id) { steps.add("grant"); return new ModelSessionGrant(id, TingwuModelAdapter.ID, "wss://model.example.test/signed", "2030-01-01T00:00:00Z", null, Map.of()); }
+        @Override public ModelSessionGrant requestModelSession(String id) { steps.add("grant"); return new ModelSessionGrant(id, adapterId, "wss://model.example.test/signed", "2030-01-01T00:00:00Z", null, Map.of()); }
         @Override public SummarySessionGrant requestSummarySession(String id) {
             steps.add("summaryGrant");
             return new SummarySessionGrant(BailianSummaryAdapter.ID, "https://summary.example.test",

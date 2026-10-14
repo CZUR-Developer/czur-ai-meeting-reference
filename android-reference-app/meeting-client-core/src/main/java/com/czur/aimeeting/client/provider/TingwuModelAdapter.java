@@ -50,6 +50,10 @@ public final class TingwuModelAdapter implements ModelAdapter {
         return ID;
     }
 
+    /** 源语种可能随独立译文迟到；通过公共声明复用原语种窗口，不依赖听悟注册名称。 */
+    @Override
+    public boolean mayEmitDeferredSourceLanguage() { return true; }
+
     @Override
     public String startMessage(ModelSessionGrant grant) {
         try {

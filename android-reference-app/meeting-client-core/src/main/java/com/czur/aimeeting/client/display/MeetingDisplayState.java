@@ -139,8 +139,9 @@ public final class MeetingDisplayState {
     }
 
     /**
-     * 只有已确认需要迟到语种处理的默认听悟启用窗口；其他模型复用相同路由但不强加等待。
-     * 必须在本场第一条字幕前设置。App/Coordinator 根据工厂标识设置，不在 UI 解析 JSON。
+     * 为声明源语种可能迟到的 Adapter 启用既有窗口；未声明的实现保持即时显示。
+     * 必须在本场第一条字幕前设置。组合层读取实际 Adapter 的中性行为声明，
+     * 不依赖供应商／注册 ID，不在 UI 解析 JSON；等待时长和方向路由仍由本层处理。
      */
     public void setWaitForModelLanguage(boolean enabled) { waitForModelLanguage = enabled; }
 
