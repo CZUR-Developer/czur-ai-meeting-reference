@@ -517,7 +517,10 @@ public final class MeetingHttpAdapter {
             if (!(meeting instanceof MeetingQueryPort.Found found)) {
                 return errors.query(meeting);
             }
+            // 客户端 Start 冻结执行事实后持久为 STARTING，App 会中显示另投影为 RUNNING。
+            // 同场断网续领必须接受此实际会中状态；不为领取模型材料改写会议状态。
             if (found.meeting().state() != com.czur.reference.domain.meeting.MeetingState.CREATED
+                    && found.meeting().state() != com.czur.reference.domain.meeting.MeetingState.STARTING
                     && found.meeting().state() != com.czur.reference.domain.meeting.MeetingState.RUNNING) {
                 return errors.modelSessionInvalidState();
             }

@@ -142,11 +142,12 @@ class ReferenceMeetingMysqlClientHttpAssemblyIntegrationTest {
                     @Override public String newLeaseToken() { return "lease_" + UUID.randomUUID(); }
                 });
         AtomicReference<ModelSessionIssuer.Request> modelRequest = new AtomicReference<>();
+        AtomicInteger modelIssues = new AtomicInteger();
         ModelSessionIssuer issuer = request -> {
             modelRequest.set(request);
             return new ModelSessionIssuer.Session("sample-json-ws",
                     "ws://model.example.invalid/m2-c", NOW.plusSeconds(300),
-                    Map.of("taskId", "synthetic-m2-c-task"));
+                    Map.of("taskId", "synthetic-m2-c-task-" + modelIssues.incrementAndGet()));
         };
         AtomicInteger decoratorCalls = new AtomicInteger();
         AtomicReference<TrackingEntitlementProvider> decorated = new AtomicReference<>();
@@ -199,7 +200,7 @@ class ReferenceMeetingMysqlClientHttpAssemblyIntegrationTest {
             assertEquals(new ModelSessionIssuer.Request("zh-CN", List.of("en-US"), true, meetingId),
                     modelRequest.get());
             assertEquals("sample-json-ws", json(materials).path("adapterId").asText());
-            assertEquals("synthetic-m2-c-task", json(materials).path("initParams").path("taskId").asText());
+            assertEquals("synthetic-m2-c-task-1", json(materials).path("initParams").path("taskId").asText());
             for (int call = 0; call < 2; call++) {
                 var started = exchange(client, port, "POST", meetingPath + ":startClient", "", null, true);
                 assertEquals(200, started.statusCode());
@@ -207,6 +208,20 @@ class ReferenceMeetingMysqlClientHttpAssemblyIntegrationTest {
             }
             assertEquals(1, count("ai_trans_meeting_client_input"));
             assertEquals(1, count("ai_trans_finalization_execution_fact"));
+
+            // 本段通过真实 HTTP 和同一个 JDBC 装配读取 Start 后的状态，再请求新模型材料；
+            // 只续本场，不伪改 RUNNING、不再 Create，也不改变首次冻结的语言／翻译能力。
+            var running = exchange(client, port, "GET", meetingPath, "", null, true);
+            assertEquals(200, running.statusCode());
+            assertEquals("STARTING", json(running).path("state").asText());
+            var renewed = exchange(client, port, "POST", meetingPath + ":modelSession", "", null, true);
+            assertEquals(200, renewed.statusCode());
+            assertEquals(meetingId, json(renewed).path("meetingId").asText());
+            assertEquals("synthetic-m2-c-task-2", json(renewed).path("initParams").path("taskId").asText());
+            assertEquals(new ModelSessionIssuer.Request("zh-CN", List.of("en-US"), true, meetingId),
+                    modelRequest.get());
+            assertEquals(2, modelIssues.get());
+            assertEquals(1, count("ai_trans_meeting"));
 
             String appendPath = meetingPath + "/events:append";
             append(client, port, appendPath, transcript("partial", 1, "source", 1, "初稿", false));

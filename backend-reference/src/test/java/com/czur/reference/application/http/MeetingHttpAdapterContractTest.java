@@ -138,6 +138,43 @@ class MeetingHttpAdapterContractTest {
     }
 
     @Test
+    void startedClientMeetingCanRenewModelSessionWithItsFrozenLanguages() {
+        RecordingClientInput client = new RecordingClientInput();
+        var frozenRequest = new ModelSessionIssuer.Request(
+                "zh-CN", List.of("ja-JP"), true, "mtg_detail");
+        var issuedRequests = new CopyOnWriteArrayList<ModelSessionIssuer.Request>();
+        ModelSessionIssuer issuer = request -> {
+            issuedRequests.add(request);
+            return new ModelSessionIssuer.Session("tingwu-realtime",
+                    "wss://join.example.invalid/meeting", NOW.plusSeconds(300),
+                    Map.of("taskId", "task-" + issuedRequests.size()));
+        };
+        adapter = new MeetingHttpAdapter(query, deletion, decoder,
+                new HttpErrorMapper(() -> "renewal-diagnostic"), stopService(),
+                null, null, false, null, null, null, null, client, issuer,
+                (context, meetingId) -> {
+                    assertEquals("mtg_detail", meetingId);
+                    return frozenRequest;
+                });
+        var model = new HttpRequest("POST", "/v1/meetings/mtg_detail:modelSession", Map.of(), "");
+        query.getResult = new MeetingQueryPort.Found(status(MeetingState.CREATED));
+        assertEquals(200, adapter.handle(model, context()).status());
+
+        var started = adapter.handle(new HttpRequest("POST",
+                "/v1/meetings/mtg_detail:startClient", Map.of(), ""), context());
+        assertEquals(200, started.status());
+        assertTrue(started.body().contains("\"state\":\"STARTING\""));
+        // 此处保留端口返回的真实状态口径，不把 App 会中 RUNNING 投影当作数据库状态；
+        // 实际 JDBC Start 的持久状态与续领组合另由现有 MySQL HTTP 集成用例验证。
+        query.getResult = new MeetingQueryPort.Found(status(MeetingState.STARTING));
+        var renewed = adapter.handle(model, context());
+        assertEquals(200, renewed.status());
+        assertTrue(renewed.body().contains("\"meetingId\":\"mtg_detail\""));
+        assertTrue(renewed.body().contains("\"taskId\":\"task-2\""));
+        assertEquals(List.of(frozenRequest, frozenRequest), issuedRequests);
+    }
+
+    @Test
     void modelSessionRouteReturnsSecondFormatAdapterWithoutChangingCreateRealtime() {
         var issuer = new SampleJsonWsModelSessionIssuer(
                 URI.create("ws://127.0.0.1:19091/model"), Clock.fixed(NOW, ZoneOffset.UTC));
