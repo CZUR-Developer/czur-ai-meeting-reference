@@ -43,6 +43,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 import java.util.function.Function;
+import java.util.function.BooleanSupplier;
 import java.util.logging.Logger;
 
 /**
@@ -50,7 +51,8 @@ import java.util.logging.Logger;
  * 阻塞 HTTP及总结在独立 io 队列；模型start/stop/close在modelControl队列保持次序，
  * 不被挂起的标准事件HTTP拖住停源。SDK 和 Mock 只注入运行时。
  * 同一客户端同时只持有一场会议；关闭后不可再使用。未确认标准事件只在本场内存中
- * 保留原包，由后续事件或正常停止顺序补交；没有磁盘缓存、定时重试或跨进程恢复框架。
+ * 保留原包，由后续事件或正常停止顺序补交。可选停止记录只覆盖尾部全部确认后的
+ * 发布／同键 Stop／实际 READY，不持久化实时事件，也不建立定时重试或通用恢复框架。
  */
 public final class MeetingCoordinator implements MeetingClient {
     private static final Logger LOG = Logger.getLogger(MeetingCoordinator.class.getName());
@@ -66,6 +68,8 @@ public final class MeetingCoordinator implements MeetingClient {
     private final ExecutorService modelControl = Executors.newSingleThreadExecutor();
     private volatile boolean closed;
     private Session current;
+    // 仅客户端级互斥；恢复过程中不创建 Session，也不阻塞回调线程等待网络。
+    private boolean resumingFinalization;
 
     public MeetingCoordinator(MeetingClientConfig config, ModelAdapterRegistry adapters,
             MeetingRuntimePort runtime) {
@@ -156,11 +160,100 @@ public final class MeetingCoordinator implements MeetingClient {
 
     @Override public synchronized MeetingSession start(MeetingOptions options, MeetingListener listener) {
         requireOpen();
-        if (current != null && !current.done) throw new IllegalStateException("已有会议正在进行");
+        if (resumingFinalization || current != null && !current.done)
+            throw new IllegalStateException("已有会议或停止收尾正在进行");
         Session session = new Session(options, listener);
         current = session;
         enqueue(session::begin);
         return session;
+    }
+
+    @Override public synchronized void resumeFinalization(String checkpointId,
+            Callback<MeetingResult> callback) {
+        requireOpen();
+        Objects.requireNonNull(checkpointId, "checkpointId");
+        Objects.requireNonNull(callback, "callback");
+        var store = config.stoppedMeetingStore();
+        if (store.isEmpty()) {
+            notifyClient(() -> callback.onError("当前部署未装配停止记录续办"));
+            return;
+        }
+        if (resumingFinalization || current != null && !current.done) {
+            notifyClient(() -> callback.onError("已有会议或停止收尾正在进行"));
+            return;
+        }
+        resumingFinalization = true;
+        io.execute(() -> {
+            MeetingResult result = null;
+            String error = null;
+            try {
+                if (closed) return;
+                var checkpoint = store.get().read(checkpointId)
+                        .orElseThrow(() -> new IOException("原场停止记录不存在"));
+                var original = checkpoint.context();
+                // 只取保存的原访问信息创建 HTTP 端口。这里不能读当前 Provider、
+                // discover/Create、领取实时／总结材料或构造 ModelSession。
+                var frozenConfig = new MeetingClientConfig(original.serverUrl(),
+                        original.accessToken(), original.clientIdentity(), config.profile(),
+                        config.callbackExecutor());
+                var server = servers.apply(frozenConfig);
+                LOG.info("原场停止收尾续办开始 phase=" + checkpoint.phase());
+                result = finishSavedFinalization(checkpoint, store.get(), server,
+                        config.artifactPublisher(), () -> closed, wallClockMs, () -> { });
+            } catch (IOException | RuntimeException failure) {
+                logFailure("续办原场停止收尾", failure);
+                error = "原场收尾尚未完成，请检查连接或原凭据后再次续办";
+            } finally {
+                synchronized (MeetingCoordinator.this) { resumingFinalization = false; }
+            }
+            // 先释放客户端互斥，再派发结果，允许宿主在回调中正常开始下一场。
+            if (result != null) {
+                MeetingResult actual = result;
+                notifyClient(() -> callback.onSuccess(actual));
+            } else if (error != null) {
+                String message = error;
+                notifyClient(() -> callback.onError(message));
+            }
+        });
+    }
+
+    /**
+     * 启用停止记录的正常收尾和宿主重建后的续办共用此唯一尾部。每步真实 ACK 先保存，
+     * 成功后才进入下一外部动作；Store 写失败就停在原场，不越过发布或 Stop 屏障。
+     * 旧候选重入由 Store 保留较先进阶段及私有 ACK；READY 记录也只读实际清单，
+     * 不从本地阶段制造结果。不主动打开页面、发送结果或删除录音。
+     */
+    private MeetingResult finishSavedFinalization(StoppedMeetingCheckpoint initial,
+            StoppedMeetingStore store, MeetingServerClient server, MeetingArtifactPublisher publisher,
+            BooleanSupplier aborted, LongSupplier acceptedGenTime, Runnable onStopAccepted)
+            throws IOException {
+        if (aborted.getAsBoolean()) return null;
+        var checkpoint = store.save(initial);
+        if (aborted.getAsBoolean()) return null;
+        if (checkpoint.phase() == StoppedMeetingCheckpoint.Phase.PUBLISH_PENDING) {
+            if (!publisher.supportsAudioPublication())
+                throw new IOException("停止记录续办需要原场产物发布器");
+            LOG.info("原场封口音频发布开始");
+            publisher.publish(checkpoint.context());
+            checkpoint = store.save(checkpoint.published());
+            LOG.info("原场封口音频发布已确认并保存");
+        }
+        if (aborted.getAsBoolean()) return null;
+        if (checkpoint.phase() == StoppedMeetingCheckpoint.Phase.PUBLISHED) {
+            LOG.info("后端原键 Stop 开始");
+            if (!server.stopMeeting(checkpoint.checkpointId(), checkpoint.stableStopKey()).accepted())
+                throw new IOException("后端尚未受理本场停止");
+            // 不得为了提前保存候选将 genTime 前移。只有 Stop 实际接受才首次取值。
+            checkpoint = store.save(checkpoint.stopAccepted(acceptedGenTime.getAsLong()));
+            LOG.info("后端 Stop 已受理并保存，结果尚需确认");
+        }
+        if (aborted.getAsBoolean()) return null;
+        onStopAccepted.run();
+        LOG.info("读取原场实际 READY 清单开始");
+        MeetingResult result = server.readResult(checkpoint.checkpointId(), checkpoint.genTime(), false);
+        if (checkpoint.phase() != StoppedMeetingCheckpoint.Phase.READY)
+            store.save(checkpoint.ready());
+        return result;
     }
 
     private void requireOpen() {
@@ -233,6 +326,7 @@ public final class MeetingCoordinator implements MeetingClient {
         private IOException audioArtifactFailure;
         private MeetingArtifactPublisher.Context publicationContext;
         private boolean publicationConfirmed;
+        private StoppedMeetingCheckpoint stoppedCheckpoint;
         private Long genTime;
         private volatile MeetingResult readyResult;
 
@@ -665,6 +759,26 @@ public final class MeetingCoordinator implements MeetingClient {
                     LOG.info("标准纪要已提交");
                 }
                 if (cancelled || closed) return;
+                // 快照只能在原事件／用量／选定总结全部 ACK 后、真实 sealed 事实成功
+                // 读取后产生。无痕仍走原 Stop→ENDED，不入此记录、不主动读 READY。
+                var store = sessionConfig.stoppedMeetingStore();
+                if (store.isPresent() && options.retainAudio() && !audioFailed
+                        && options.resultOptions().policy()
+                        != com.czur.aimeeting.client.result.ResultOptions.Policy.NO_ACTIVE_DELIVERY) {
+                    step = "保存并完成原场停止收尾";
+                    readAudioArtifactOnce();
+                    if (cancelled || closed) return;
+                    if (stoppedCheckpoint == null)
+                        stoppedCheckpoint = StoppedMeetingCheckpoint.pending(publicationContext);
+                    MeetingResult finalResult = finishSavedFinalization(stoppedCheckpoint, store.get(),
+                            server, sessionConfig.artifactPublisher(), () -> cancelled || closed,
+                            () -> {
+                                if (genTime == null) genTime = wallClockMs.getAsLong();
+                                return genTime;
+                            }, model::close);
+                    if (finalResult != null) enqueue(() -> ready(finalResult));
+                    return;
+                }
                 // 模型结束状态与同源录音封口是两件事。运行时须在 onFinished/onError 前
                 // 停流并完成封口；只有本场 sealed 快照与冻结用量一致才可进入发布器。
                 // 模型异常不抹掉已采录音；音频输入失败和显式取消仍不走正常发布。
@@ -700,20 +814,22 @@ public final class MeetingCoordinator implements MeetingClient {
                 LOG.info("读取实际 READY 清单开始");
                 // 收口只确认产物事实；正文／链接／通知由READY后的显式动作处理。
                 MeetingResult finalResult = server.readResult(meetingId, genTime, false);
-                enqueue(() -> {
-                    if (done) return;
-                    done = true;
-                    active = false;
-                    phase = MeetingSessionState.Phase.READY;
-                    readyResult = finalResult;
-                    notifyListener(() -> listener.onResult(finalResult));
-                    publish("本场结果已就绪");
-                    LOG.info("会议结果已就绪");
-                });
+                enqueue(() -> ready(finalResult));
             } catch (IOException | RuntimeException failure) {
                 logFailure(step, failure);
                 enqueue(() -> completionFailed("结束会议失败，请检查连接后再次确认停止"));
             }
+        }
+
+        private void ready(MeetingResult finalResult) {
+            if (done) return;
+            done = true;
+            active = false;
+            phase = MeetingSessionState.Phase.READY;
+            readyResult = finalResult;
+            notifyListener(() -> listener.onResult(finalResult));
+            publish("本场结果已就绪");
+            LOG.info("会议结果已就绪");
         }
 
         private void readAudioArtifactOnce() throws IOException {

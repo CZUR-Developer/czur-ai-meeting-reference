@@ -33,6 +33,16 @@ public interface MeetingClient extends AutoCloseable {
      */
     MeetingSession start(MeetingOptions options, MeetingListener listener);
     /**
+     * 只续办已保存原场的发布／同键 Stop／实际 READY，结果经 callbackExecutor 返回。
+     * 不创建新会议、读取当前身份、打开音源／实时模型、重跑总结或恢复会中窗口。
+     * 仅适用于尾部全部确认且应用私有恢复条件已齐的主动交付记录；与未完成会议互斥。
+     * 原凭据过期等失败保留待处理，不改用当前账号。默认方法为旧实现保留源码兼容，
+     * 在调用线程明确通知不支持；提供恢复能力的实现须按自己的回调执行器异步派发。
+     */
+    default void resumeFinalization(String checkpointId, Callback<MeetingResult> callback) {
+        callback.onError("当前会议客户端未实现停止记录续办");
+    }
+    /**
      * 幂等取消并释放当前会议，关闭后不可重用；关闭后不再派发尚未执行的业务通知。
      * 不调用后端正常 Stop，也不产生 READY 或结果；交付前应使用 session.requestStop()。
      */

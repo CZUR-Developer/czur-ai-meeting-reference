@@ -45,6 +45,14 @@ public final class MeetingCoordinatorTest {
         assertSame(publisher, configured.artifactPublisher());
         assertFalse("配置复制不能改变旧配置", config.artifactPublisher().supportsAudioPublication());
         assertSame(publisher, configured.forSession(new IdentitySession("scene-token", "用户")).artifactPublisher());
+        assertTrue(config.stoppedMeetingStore().isEmpty());
+        MemoryStore store = new MemoryStore();
+        var withStore = configured.withStoppedMeetingStore(store);
+        assertSame(store, withStore.stoppedMeetingStore().orElseThrow());
+        assertSame(store, withStore.withArtifactPublisher(publisher)
+                .forSession(new IdentitySession("scene-token", "用户")).stoppedMeetingStore().orElseThrow());
+        assertSame(publisher, withStore.artifactPublisher());
+        assertTrue("复制配置不为旧调用启用停止记录", configured.stoppedMeetingStore().isEmpty());
 
         ModelRuntime legacy = (grant, adapter, transcripts, listener) -> null;
         assertFalse(legacy.supportsRetainedAudio());
@@ -407,6 +415,285 @@ public final class MeetingCoordinatorTest {
             assertEquals(1, f.runtime.stopCalls);
             assertEquals(1, publisher.contexts.size());
         }
+    }
+
+    @Test public void unconfirmedTailUsageOrSelectedSummaryNeverCreatesStoppedCheckpoint() throws Exception {
+        // 只覆盖真实切点的三个前置屏障，不建立未 ACK 队列的磁盘恢复。
+        for (int barrier = 0; barrier < 3; ++barrier) {
+            MemoryStore store = new MemoryStore();
+            Publisher publisher = new Publisher();
+            try (Fixture f = new Fixture(true, ALL, new ReferenceIdentityProvider("test-token"),
+                    publisher, store)) {
+                f.runtime.prepareAudio(audio("mtg_test", 32000));
+                f.runtime.emitTail = true;
+                f.server.failAppend = barrier == 0;
+                f.server.failUsageOnce = barrier == 1;
+                f.server.failSummaryOnce = barrier == 2;
+                f.start(retainedOptions(MeetingOptions.Mode.MEETING_MINUTES));
+                f.session.requestStop();
+                f.probe.awaitPhase(MeetingSessionState.Phase.STOP_PENDING);
+                assertTrue("前半段未确认不能留下可恢复记录", store.read("mtg_test").isEmpty());
+                assertTrue(publisher.contexts.isEmpty());
+                assertFalse(f.server.steps.contains("stop"));
+                assertEquals(0, f.runtime.artifactReads);
+                assertEquals("未接受 Stop 前不生成 genTime", 0, f.clockCalls.get());
+            }
+        }
+    }
+
+    @Test public void publicationFailureResumesOriginalSealedAccessWithoutOpeningMeetingOrModels() throws Exception {
+        MemoryStore store = new MemoryStore();
+        Publisher firstPublisher = new Publisher();
+        firstPublisher.failOnce = true;
+        Server server;
+        StoppedMeetingCheckpoint pending;
+        SealedAudioArtifact sealed = audio("mtg_test", 32000);
+        try (Fixture f = new Fixture(true, ALL, new ReferenceIdentityProvider("original-token"),
+                firstPublisher, store)) {
+            f.runtime.prepareAudio(sealed);
+            f.runtime.emitTail = true;
+            f.start(retainedOptions(MeetingOptions.Mode.MEETING_MINUTES));
+            f.session.requestStop();
+            f.probe.awaitPhase(MeetingSessionState.Phase.STOP_PENDING);
+            pending = store.read("mtg_test").orElseThrow();
+            assertEquals(StoppedMeetingCheckpoint.Phase.PUBLISH_PENDING, pending.phase());
+            assertNull(pending.genTime());
+            assertEquals(0, f.clockCalls.get());
+            assertEquals(1, f.runtime.artifactReads);
+            assertTrue(f.probe.results.isEmpty());
+            server = f.server;
+        }
+        MemoryStore restartedStore = store.reopened();
+        Publisher publisher = new Publisher();
+        publisher.server = server;
+        Runtime freshRuntime = new Runtime(true);
+        AtomicInteger currentIdentityReads = new AtomicInteger();
+        try (var client = resumeClient(restartedStore, publisher, server, freshRuntime,
+                currentIdentityReads, Runnable::run, () -> 777)) {
+            var result = resumeResult(client).get(2, TimeUnit.SECONDS);
+            assertEquals("mtg_test", result.meetingId());
+            assertEquals(777, result.genTime());
+            assertEquals(List.of(pending.stableStopKey()), server.stopKeys);
+            var actual = publisher.contexts.get(0);
+            assertEquals(sealed.file(), actual.audio().file());
+            assertEquals(sealed.capturedPcmBytes(), actual.audio().capturedPcmBytes());
+            assertEquals(1000, actual.frozenAudioDurationMs());
+            assertEquals("original-token", actual.accessToken());
+            assertEquals(StoppedMeetingCheckpoint.Phase.READY,
+                    restartedStore.read("mtg_test").orElseThrow().phase());
+            assertResumeDidNotRestartBusiness(server, freshRuntime, currentIdentityReads);
+            assertEquals("已 ACK 的总结不重新请求", 1, Collections.frequency(server.steps, "summaryGrant"));
+            assertEquals(1, Collections.frequency(server.steps, "summary"));
+            assertEquals(List.of(1000L), server.usages);
+        }
+    }
+
+    @Test public void acceptedStopWithLostAckResumesSameKeyWithoutRepeatingPublication() throws Exception {
+        MemoryStore store = new MemoryStore();
+        Publisher originalPublisher = new Publisher();
+        Server server;
+        String originalKey;
+        try (Fixture f = new Fixture(true, ALL, new ReferenceIdentityProvider("test-token"),
+                originalPublisher, store)) {
+            f.runtime.prepareAudio(audio("mtg_test", 32000));
+            f.server.loseStopAckOnce = true;
+            f.start(retainedOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT));
+            f.session.requestStop();
+            f.probe.awaitPhase(MeetingSessionState.Phase.STOP_PENDING);
+            var saved = store.read("mtg_test").orElseThrow();
+            assertEquals(StoppedMeetingCheckpoint.Phase.PUBLISHED, saved.phase());
+            assertNull(saved.genTime());
+            assertEquals(0, f.clockCalls.get());
+            originalKey = saved.stableStopKey();
+            server = f.server;
+        }
+        MemoryStore reopened = store.reopened();
+        Publisher publisher = new Publisher();
+        publisher.server = server;
+        Runtime freshRuntime = new Runtime(true);
+        AtomicInteger identityReads = new AtomicInteger();
+        try (var client = resumeClient(reopened, publisher, server, freshRuntime,
+                identityReads, Runnable::run, () -> 888)) {
+            assertEquals(MeetingResult.Status.READY, resumeResult(client).get(2, TimeUnit.SECONDS).status());
+            assertEquals(List.of(originalKey, originalKey), server.stopKeys);
+            assertTrue("发布已 ACK 落盘，恢复不再发布", publisher.contexts.isEmpty());
+            assertEquals(1, originalPublisher.contexts.size());
+            assertResumeDidNotRestartBusiness(server, freshRuntime, identityReads);
+        }
+    }
+
+    @Test public void acceptedStopRetainsGenTimeAndOnlyActualManifestCompletesOnConfiguredExecutor() throws Exception {
+        MemoryStore store = new MemoryStore();
+        Publisher publisher = new Publisher();
+        Server server;
+        try (Fixture f = new Fixture(true, ALL, new ReferenceIdentityProvider("test-token"),
+                publisher, store)) {
+            f.runtime.prepareAudio(audio("mtg_test", 32000));
+            f.server.failManifest = true;
+            f.start(retainedOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT));
+            f.session.requestStop();
+            f.probe.awaitPhase(MeetingSessionState.Phase.STOP_PENDING);
+            var saved = store.read("mtg_test").orElseThrow();
+            assertEquals(StoppedMeetingCheckpoint.Phase.STOP_ACCEPTED, saved.phase());
+            assertEquals(Long.valueOf(555), saved.genTime());
+            assertTrue("Stop 受理不能制造结果", f.probe.results.isEmpty());
+            server = f.server;
+        }
+        MemoryStore reopened = store.reopened();
+        BlockingQueue<Runnable> callbacks = new LinkedBlockingQueue<>();
+        Runtime freshRuntime = new Runtime(true);
+        AtomicInteger identityReads = new AtomicInteger();
+        server.failManifest = false;
+        try (var client = resumeClient(reopened, publisher, server, freshRuntime,
+                identityReads, callbacks::add, () -> { throw new AssertionError("不得重建 genTime"); })) {
+            var result = resumeResult(client);
+            Runnable callback = callbacks.poll(2, TimeUnit.SECONDS);
+            assertNotNull(callback);
+            assertFalse("回调执行器运行前不交付结果", result.isDone());
+            callback.run();
+            assertEquals(555, result.get(2, TimeUnit.SECONDS).genTime());
+            assertEquals(List.of(555L, 555L), server.genTimes);
+            assertEquals(1, server.stopKeys.size());
+            assertEquals(1, publisher.contexts.size());
+            assertEquals(StoppedMeetingCheckpoint.Phase.READY,
+                    reopened.read("mtg_test").orElseThrow().phase());
+            assertResumeDidNotRestartBusiness(server, freshRuntime, identityReads);
+
+            // 本地 READY 也不能替代实际 Server 结果；读取失败仍返回错误。
+            server.failManifest = true;
+            var failed = resumeResult(client);
+            Runnable failedCallback = callbacks.poll(2, TimeUnit.SECONDS);
+            assertNotNull(failedCallback);
+            failedCallback.run();
+            assertThrows(ExecutionException.class, () -> failed.get(2, TimeUnit.SECONDS));
+            assertEquals(1, server.stopKeys.size());
+        }
+    }
+
+    @Test public void checkpointWriteFailureNeverAdvancesToTheNextExternalStep() throws Exception {
+        for (var failurePhase : List.of(StoppedMeetingCheckpoint.Phase.PUBLISH_PENDING,
+                StoppedMeetingCheckpoint.Phase.PUBLISHED, StoppedMeetingCheckpoint.Phase.STOP_ACCEPTED)) {
+            MemoryStore store = new MemoryStore();
+            store.failPhase = failurePhase;
+            Publisher publisher = new Publisher();
+            try (Fixture f = new Fixture(true, ALL, new ReferenceIdentityProvider("test-token"),
+                    publisher, store)) {
+                f.runtime.prepareAudio(audio("mtg_test", 32000));
+                f.start(retainedOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT));
+                f.session.requestStop();
+                f.probe.awaitPhase(MeetingSessionState.Phase.STOP_PENDING);
+                assertTrue(f.probe.results.isEmpty());
+                assertFalse("保存 Stop ACK 前不得读结果", f.server.steps.contains("manifest"));
+                if (failurePhase == StoppedMeetingCheckpoint.Phase.PUBLISH_PENDING)
+                    assertTrue("候选未持久不得发布", publisher.contexts.isEmpty());
+                if (failurePhase != StoppedMeetingCheckpoint.Phase.STOP_ACCEPTED)
+                    assertTrue("发布 ACK 未持久不得 Stop", f.server.stopKeys.isEmpty());
+                store.failPhase = null;
+                f.session.requestStop();
+                assertNotNull(f.probe.result());
+                assertEquals(1, f.runtime.openCalls);
+                assertEquals(1, f.runtime.artifactReads);
+                assertEquals(1, f.runtime.durationReads);
+                assertEquals("同进程 Stop ACK 写失败也保持首次 genTime", 1, f.clockCalls.get());
+                if (f.server.stopKeys.size() == 2)
+                    assertEquals(f.server.stopKeys.get(0), f.server.stopKeys.get(1));
+            }
+        }
+    }
+
+    @Test public void checkpointMergePreservesOriginalFactsAndNeverDowngradesAcknowledgedStage() throws Exception {
+        var config = MeetingClientConfig.reference("http://original.example.test", "original-token");
+        var sealed = audio("mtg_test", 32000);
+        var pending = StoppedMeetingCheckpoint.restore(sealed, 1000, config, "original-key",
+                StoppedMeetingCheckpoint.Phase.PUBLISH_PENDING, null);
+        var accepted = pending.published().stopAccepted(555);
+        assertSame(accepted, accepted.merge(pending));
+        assertSame(accepted, pending.merge(accepted));
+        assertThrows(IOException.class, () -> accepted.merge(pending.published().stopAccepted(556)));
+        var wrongKey = StoppedMeetingCheckpoint.restore(sealed, 1000, config, "different-key",
+                StoppedMeetingCheckpoint.Phase.PUBLISH_PENDING, null);
+        assertThrows(IOException.class, () -> accepted.merge(wrongKey));
+        assertFalse(accepted.toString().contains("original-token"));
+        assertFalse(accepted.toString().contains("original-key"));
+        assertFalse(accepted.toString().contains(sealed.file().getPath()));
+        assertThrows(IllegalArgumentException.class, () -> StoppedMeetingCheckpoint.restore(sealed,
+                1000, config, "key", StoppedMeetingCheckpoint.Phase.PUBLISH_PENDING, 555L));
+    }
+
+    @Test public void noActiveDeliveryNeverWritesCheckpointOrReadsReadyEvenWhenStoreConfigured() throws Exception {
+        MemoryStore store = new MemoryStore();
+        Publisher publisher = new Publisher();
+        try (Fixture f = new Fixture(true, ALL, new ReferenceIdentityProvider("test-token"),
+                publisher, store)) {
+            f.runtime.prepareAudio(audio("mtg_test", 32000));
+            f.start(options(MeetingOptions.Mode.LIVE_TRANSLATION, MeetingOptions.ResultDelivery.TRACELESS,
+                    false).withCreateParameters("无痕原行为", "Asia/Shanghai", true));
+            f.session.requestStop();
+            f.probe.awaitPhase(MeetingSessionState.Phase.ENDED);
+            assertTrue(store.read("mtg_test").isEmpty());
+            assertTrue(f.server.stopKeys.isEmpty());
+            assertEquals(1, Collections.frequency(f.server.steps, "stop"));
+            assertFalse(f.server.steps.contains("manifest"));
+            assertTrue(f.probe.results.isEmpty());
+        }
+    }
+
+    @Test public void resumeRequiresConfiguredRecordAndCannotRunAlongsideActiveMeeting() throws Exception {
+        try (Fixture f = new Fixture(true, ALL)) {
+            assertThrows(ExecutionException.class, () -> resumeResult(f.client).get(2, TimeUnit.SECONDS));
+            assertTrue(f.server.steps.isEmpty());
+        }
+        MemoryStore store = new MemoryStore();
+        try (Fixture f = new Fixture(true, ALL, new ReferenceIdentityProvider("test-token"),
+                new Publisher(), store)) {
+            assertThrows(ExecutionException.class, () -> resumeResult(f.client).get(2, TimeUnit.SECONDS));
+            assertTrue(f.server.steps.isEmpty());
+            f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.WEB, false);
+            assertThrows(ExecutionException.class, () -> resumeResult(f.client).get(2, TimeUnit.SECONDS));
+            assertEquals(1, f.runtime.openCalls);
+            assertFalse(f.server.steps.contains("stop"));
+        }
+    }
+
+    private static CompletableFuture<MeetingResult> resumeResult(MeetingClient client) {
+        var result = new CompletableFuture<MeetingResult>();
+        client.resumeFinalization("mtg_test", resultCallback(result));
+        return result;
+    }
+
+    /** 重建客户端故意使用另一部署和当前身份；续办必须仍只用磁盘读回的原冻结事实。 */
+    private static MeetingCoordinator resumeClient(MemoryStore store, Publisher publisher,
+            Server server, Runtime runtime, AtomicInteger identityReads,
+            java.util.concurrent.Executor callbacks, java.util.function.LongSupplier wallClock)
+            throws IOException {
+        var original = store.read("mtg_test").orElseThrow().context();
+        IdentityProvider currentIdentity = () -> {
+            identityReads.incrementAndGet();
+            return IdentityResult.loggedIn(new IdentitySession("another-token", "后来账号"));
+        };
+        var config = new MeetingClientConfig("http://another-deployment.example.test", currentIdentity,
+                new ClientIdentity("another-app", "2", "v1", "another-device"),
+                MeetingProfile.reference(), callbacks).withArtifactPublisher(publisher)
+                .withStoppedMeetingStore(store);
+        return new MeetingCoordinator(config, new ModelAdapterRegistry(), runtime, resolved -> {
+            assertEquals(original.serverUrl(), resolved.serverUrl());
+            assertEquals(original.accessToken(), resolved.accessToken());
+            assertEquals(original.clientIdentity(), resolved.clientIdentity());
+            return server;
+        }, () -> { throw new AssertionError("恢复不得读取采音时钟"); }, wallClock);
+    }
+
+    private static void assertResumeDidNotRestartBusiness(Server server, Runtime runtime,
+            AtomicInteger identityReads) {
+        assertEquals(0, identityReads.get());
+        assertEquals(0, runtime.openCalls);
+        assertEquals(0, runtime.durationReads);
+        assertEquals(0, runtime.artifactReads);
+        assertNull(runtime.summaryInput);
+        assertEquals(1, Collections.frequency(server.steps, "discover"));
+        assertEquals(1, Collections.frequency(server.steps, "create"));
+        assertEquals(1, Collections.frequency(server.steps, "grant"));
+        assertEquals(1, Collections.frequency(server.steps, "start"));
     }
 
     @Test public void wrongMeetingDurationOrMissingUsageNeverPublishesOrStops() throws Exception {
@@ -1133,14 +1420,24 @@ public final class MeetingCoordinatorTest {
         Fixture(boolean real, Set<String> granted, IdentityProvider identity, Publisher publisher) {
             this(real, granted, identity, Runnable::run, publisher);
         }
+        Fixture(boolean real, Set<String> granted, IdentityProvider identity, Publisher publisher,
+                StoppedMeetingStore store) {
+            this(real, granted, identity, Runnable::run, publisher, store);
+        }
         Fixture(boolean real, Set<String> granted, IdentityProvider identity,
                 java.util.concurrent.Executor callbackExecutor, MeetingArtifactPublisher publisher) {
+            this(real, granted, identity, callbackExecutor, publisher, null);
+        }
+        Fixture(boolean real, Set<String> granted, IdentityProvider identity,
+                java.util.concurrent.Executor callbackExecutor, MeetingArtifactPublisher publisher,
+                StoppedMeetingStore store) {
             server = new Server(granted);
             runtime = new Runtime(real);
             if (publisher instanceof Publisher) ((Publisher) publisher).server = server;
-            config = new MeetingClientConfig("http://127.0.0.1", identity,
+            var configured = new MeetingClientConfig("http://127.0.0.1", identity,
                     ClientIdentity.reference(), MeetingProfile.reference(), callbackExecutor)
                     .withArtifactPublisher(publisher);
+            config = store == null ? configured : configured.withStoppedMeetingStore(store);
             client = new MeetingCoordinator(config,
                     adapters, runtime, resolved -> { sessionToken = resolved.accessToken(); return server; },
                     () -> System.nanoTime() / 1_000_000L, () -> { clockCalls.incrementAndGet(); return 555; });
@@ -1157,6 +1454,30 @@ public final class MeetingCoordinatorTest {
             server.releaseUsage.countDown();
             server.releaseModelGrant.countDown();
             client.close();
+        }
+    }
+
+    /** 只用于公共合同测试；重开时经 public restore 重建值，不冒充 Android 磁盘持久化。 */
+    private static final class MemoryStore implements StoppedMeetingStore {
+        private StoppedMeetingCheckpoint saved;
+        volatile StoppedMeetingCheckpoint.Phase failPhase;
+        @Override public synchronized StoppedMeetingCheckpoint save(StoppedMeetingCheckpoint checkpoint)
+                throws IOException {
+            if (checkpoint.phase() == failPhase) throw new IOException("fixture-store-save-failed");
+            saved = saved == null ? checkpoint : saved.merge(checkpoint);
+            return saved;
+        }
+        @Override public synchronized Optional<StoppedMeetingCheckpoint> read(String id) {
+            return saved != null && saved.checkpointId().equals(id) ? Optional.of(saved) : Optional.empty();
+        }
+        synchronized MemoryStore reopened() {
+            var original = saved.context();
+            var originalConfig = new MeetingClientConfig(original.serverUrl(), original.accessToken(),
+                    original.clientIdentity(), MeetingProfile.reference(), Runnable::run);
+            var copy = new MemoryStore();
+            copy.saved = StoppedMeetingCheckpoint.restore(original.audio(), original.frozenAudioDurationMs(),
+                    originalConfig, saved.stableStopKey(), saved.phase(), saved.genTime());
+            return copy;
         }
     }
 
@@ -1317,6 +1638,7 @@ public final class MeetingCoordinatorTest {
         final List<TranscriptEvent> transcripts = Collections.synchronizedList(new ArrayList<>());
         final List<Long> genTimes = Collections.synchronizedList(new ArrayList<>());
         final List<Long> usages = Collections.synchronizedList(new ArrayList<>());
+        final List<String> stopKeys = Collections.synchronizedList(new ArrayList<>());
         final List<Capture> captures = Collections.synchronizedList(new ArrayList<>());
         final List<StandardAppend> standardAttempts = Collections.synchronizedList(new ArrayList<>());
         final List<String> modelSessionRequests = Collections.synchronizedList(new ArrayList<>());
@@ -1336,6 +1658,10 @@ public final class MeetingCoordinatorTest {
         boolean failEmail;
         boolean failContent;
         boolean failUsageOnce;
+        boolean failSummaryOnce;
+        boolean loseStopAckOnce;
+        boolean failManifest;
+        String acceptedStopKey;
         int failPresentationCalls;
         boolean includeContent;
         byte[] jpeg;
@@ -1408,7 +1734,10 @@ public final class MeetingCoordinatorTest {
                 throw new IOException("受控截图响应未确认");
             }
         }
-        @Override public void submitSummary(String id, SummaryResult summary) { steps.add("summary"); }
+        @Override public void submitSummary(String id, SummaryResult summary) throws IOException {
+            steps.add("summary");
+            if (failSummaryOnce) { failSummaryOnce = false; throw new IOException("fixture-summary-ack-lost"); }
+        }
         @Override public void submitUsage(String id, long duration) throws IOException {
             assertEquals("mtg_test", id);
             steps.add("usage"); usages.add(duration);
@@ -1422,8 +1751,22 @@ public final class MeetingCoordinatorTest {
             boolean accepted = !pendingStop; pendingStop = false;
             return new StopMeetingResponse(accepted, accepted ? "INPUT_ACCEPTED" : "INPUT_COMPLETE_PENDING", accepted ? "receipt" : null, "GENERATING");
         }
+        @Override public StopMeetingResponse stopMeeting(String id, String stableStopKey) throws IOException {
+            assertEquals("mtg_test", id);
+            assertFalse(stableStopKey.isBlank());
+            stopKeys.add(stableStopKey);
+            if (acceptedStopKey != null) assertEquals("原场 Stop 必须复用首次键", acceptedStopKey, stableStopKey);
+            var response = stopMeeting(id);
+            if (response.accepted()) acceptedStopKey = stableStopKey;
+            if (loseStopAckOnce) {
+                loseStopAckOnce = false;
+                throw new IOException("fixture-stop-accepted-but-ack-lost");
+            }
+            return response;
+        }
         @Override public MeetingResult readResult(String id, long genTime, boolean includeContent) throws IOException {
             steps.add("manifest"); genTimes.add(genTime); this.includeContent = includeContent;
+            if (failManifest) throw new IOException("fixture-manifest-not-ready");
             if (includeContent && failContent) throw new IOException("受控正文读取失败");
             return new MeetingResult(id, "本场", genTime, MeetingResult.Status.READY, Set.of("transcript.final"),
                     includeContent ? new MeetingResultContent(Set.of("transcript.final"), "最终字幕", List.of(), List.of(), null, List.of()) : null);

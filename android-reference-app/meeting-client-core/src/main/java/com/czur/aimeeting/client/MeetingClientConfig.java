@@ -1,6 +1,7 @@
 package com.czur.aimeeting.client;
 
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.Executor;
 import com.czur.aimeeting.client.identity.IdentityProvider;
 import com.czur.aimeeting.client.identity.IdentitySession;
@@ -22,11 +23,12 @@ public final class MeetingClientConfig {
     private final MeetingProfile profile;
     private final Executor callbackExecutor;
     private final MeetingArtifactPublisher artifactPublisher;
+    private final StoppedMeetingStore stoppedMeetingStore;
 
     public MeetingClientConfig(String serverUrl, String accessToken, ClientIdentity clientIdentity,
             MeetingProfile profile, Executor callbackExecutor) {
         this(serverUrl, accessToken, new ReferenceIdentityProvider(accessToken), clientIdentity,
-                profile, callbackExecutor, MeetingArtifactPublisher.none());
+                profile, callbackExecutor, MeetingArtifactPublisher.none(), null);
     }
 
     /**
@@ -36,12 +38,12 @@ public final class MeetingClientConfig {
     public MeetingClientConfig(String serverUrl, IdentityProvider identityProvider,
             ClientIdentity clientIdentity, MeetingProfile profile, Executor callbackExecutor) {
         this(serverUrl, "", identityProvider, clientIdentity, profile, callbackExecutor,
-                MeetingArtifactPublisher.none());
+                MeetingArtifactPublisher.none(), null);
     }
 
     private MeetingClientConfig(String serverUrl, String accessToken, IdentityProvider identityProvider,
             ClientIdentity clientIdentity, MeetingProfile profile, Executor callbackExecutor,
-            MeetingArtifactPublisher artifactPublisher) {
+            MeetingArtifactPublisher artifactPublisher, StoppedMeetingStore stoppedMeetingStore) {
         this.serverUrl = Objects.requireNonNull(serverUrl, "serverUrl");
         this.accessToken = Objects.requireNonNull(accessToken, "accessToken");
         this.identityProvider = Objects.requireNonNull(identityProvider, "identityProvider");
@@ -49,6 +51,7 @@ public final class MeetingClientConfig {
         this.profile = Objects.requireNonNull(profile, "profile");
         this.callbackExecutor = Objects.requireNonNull(callbackExecutor, "callbackExecutor");
         this.artifactPublisher = Objects.requireNonNull(artifactPublisher, "artifactPublisher");
+        this.stoppedMeetingStore = stoppedMeetingStore;
     }
 
     /** 旧参考 App 的薄转发适配；伙伴应显式配置自己的身份和档位。 */
@@ -64,6 +67,10 @@ public final class MeetingClientConfig {
     public MeetingProfile profile() { return profile; }
     public Executor callbackExecutor() { return callbackExecutor; }
     public MeetingArtifactPublisher artifactPublisher() { return artifactPublisher; }
+    /** 未装配时保持原内存收尾路径，无主动结果交付的会议也不会写入停止记录。 */
+    public Optional<StoppedMeetingStore> stoppedMeetingStore() {
+        return Optional.ofNullable(stoppedMeetingStore);
+    }
 
     /**
      * 创建新的不可变部署配置；不改变原配置，不启用 retainAudio，也不产生上传。
@@ -71,12 +78,23 @@ public final class MeetingClientConfig {
      */
     public MeetingClientConfig withArtifactPublisher(MeetingArtifactPublisher publisher) {
         return new MeetingClientConfig(serverUrl, accessToken, identityProvider,
-                clientIdentity, profile, callbackExecutor, publisher);
+                clientIdentity, profile, callbackExecutor, publisher, stoppedMeetingStore);
+    }
+
+    /**
+     * 可选注册应用私有停止记录。仅主动交付、尾部全部 ACK 且有同源 sealed 音频的会议
+     * 保存发布前候选；不为正在采音、未确认尾部或无痕会议建立恢复记录。
+     * 不改变原配置、不启用录音、不执行文件／网络操作；原 Publisher 装配保持。
+     */
+    public MeetingClientConfig withStoppedMeetingStore(StoppedMeetingStore store) {
+        return new MeetingClientConfig(serverUrl, accessToken, identityProvider,
+                clientIdentity, profile, callbackExecutor, artifactPublisher,
+                Objects.requireNonNull(store, "store"));
     }
 
     /** 仅协调器使用：冻结本场凭据，避免账号刷新改变进行中请求所用的身份。 */
     MeetingClientConfig forSession(IdentitySession session) {
         return new MeetingClientConfig(serverUrl, session.accessToken(), identityProvider,
-                clientIdentity, profile, callbackExecutor, artifactPublisher);
+                clientIdentity, profile, callbackExecutor, artifactPublisher, stoppedMeetingStore);
     }
 }
