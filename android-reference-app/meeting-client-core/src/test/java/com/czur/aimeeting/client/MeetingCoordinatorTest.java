@@ -25,6 +25,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.json.JSONArray;
@@ -151,11 +152,122 @@ public final class MeetingCoordinatorTest {
             f.start(retainedOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT));
             f.session.requestStop();
             f.probe.awaitPhase(MeetingSessionState.Phase.STOP_PENDING);
-            assertEquals(List.of("discover", "create", "grant", "start", "event1"), f.server.steps);
+            assertEquals(List.of("discover", "create", "grant", "start", "event1", "event1"), f.server.steps);
             assertTrue(publisher.contexts.isEmpty());
             assertEquals(0, f.runtime.artifactReads);
             assertEquals(0, f.runtime.durationReads);
             assertEquals(1, f.runtime.stopCalls);
+        }
+    }
+
+    @Test public void laterEventConfirmsOriginalTranscriptBeforeQueuedTranslationAndRevision() throws Exception {
+        try (Fixture f = new Fixture(true, ALL)) {
+            f.start(MeetingOptions.Mode.LIVE_TRANSLATION, MeetingOptions.ResultDelivery.WEB, false);
+            TranscriptEvent first = new TranscriptEvent("s1", 1, 0, 100, "zh-CN", "原文", false);
+            TranslationEvent translation = new TranslationEvent("t1", "s1", 1,
+                    "zh-CN", "en-US", "Source", false);
+            TranscriptEvent revision = new TranscriptEvent("s1", 2, 0, 200, "zh-CN", "原文修订", true);
+            f.server.failAppend = true;
+            f.runtime.transcripts.onTranscript(first);
+            assertEquals(0, f.probe.awaitMessage("尚未确认").savedEventCount());
+            f.runtime.listener.onTranslation(translation);
+            f.probe.awaitMessage("尚未确认");
+            assertEquals("失败队首未确认前不发送后续译文", List.of(
+                    "discover", "create", "grant", "start", "event1", "event1"), f.server.steps);
+
+            f.server.failAppend = false;
+            f.runtime.transcripts.onTranscript(revision);
+            f.probe.awaitSavedEvents(2);
+            f.session.requestStop();
+            assertNotNull(f.probe.result());
+            assertEquals(List.of("discover", "create", "grant", "start", "event1", "event1",
+                    "event1", "translation2", "event3", "stop", "manifest"), f.server.steps);
+            assertSame(first, f.server.standardAttempts.get(0).transcript());
+            assertSame(first, f.server.standardAttempts.get(1).transcript());
+            assertSame(first, f.server.standardAttempts.get(2).transcript());
+            assertSame(translation, f.server.standardAccepted.get(2).translation());
+            assertSame(revision, f.server.standardAccepted.get(3).transcript());
+            assertEquals(3, f.server.standardAccepted.size());
+            assertEquals(1, f.runtime.openCalls);
+        }
+    }
+
+    @Test public void failedTranslationRetriesOriginalWithoutRepeatingAcknowledgedTranscript() throws Exception {
+        try (Fixture f = new Fixture(true, ALL)) {
+            f.start(MeetingOptions.Mode.LIVE_TRANSLATION, MeetingOptions.ResultDelivery.WEB, false);
+            f.runtime.emit("s1", 1, "zh-CN", "已确认原文", true);
+            f.probe.awaitSavedEvents(1);
+            TranslationEvent translation = new TranslationEvent("t1", "s1", 1,
+                    "zh-CN", "en-US", "Confirmed source", true);
+            f.server.failAppend = true;
+            f.runtime.listener.onTranslation(translation);
+            assertEquals(1, f.probe.awaitMessage("尚未确认").savedEventCount());
+
+            f.server.failAppend = false;
+            f.runtime.emit("s2", 1, "zh-CN", "恢复后的原文", true);
+            f.probe.awaitSavedEvents(2);
+            f.session.requestStop();
+            assertNotNull(f.probe.result());
+            assertEquals(List.of("discover", "create", "grant", "start", "event1",
+                    "translation2", "translation2", "event3", "stop", "manifest"), f.server.steps);
+            assertSame(translation, f.server.standardAttempts.get(1).translation());
+            assertSame(translation, f.server.standardAttempts.get(2).translation());
+            assertEquals("已确认原文不重复提交", 1, Collections.frequency(f.server.steps, "event1"));
+            assertEquals(3, f.server.standardAccepted.size());
+        }
+    }
+
+    @Test public void lostTranscriptAckReusesOriginalEventBeforeUsageSummaryPublicationAndStop() throws Exception {
+        Publisher publisher = new Publisher();
+        try (Fixture f = new Fixture(true, ALL, new ReferenceIdentityProvider("fixture-token"), publisher)) {
+            f.runtime.prepareAudio(audio("mtg_test", 32000));
+            f.runtime.emitTail = true;
+            f.server.loseAppendAckOnce = true;
+            f.start(retainedOptions(MeetingOptions.Mode.MEETING_MINUTES));
+            f.session.requestStop();
+            assertNotNull(f.probe.result());
+            assertEquals(List.of("discover", "create", "grant", "start", "event1", "event1",
+                    "usage", "summaryGrant", "summary", "publish", "stop", "manifest"), f.server.steps);
+            assertEquals("远端第一次已保存，响应丢失后的同包只确认一次事实", 1, f.server.standardAccepted.size());
+            assertEquals(2, f.server.standardAttempts.size());
+            assertEquals(f.server.standardAttempts.get(0), f.server.standardAttempts.get(1));
+            assertEquals(1, f.probe.awaitPhase(MeetingSessionState.Phase.READY).savedEventCount());
+            assertEquals(1, publisher.contexts.size());
+            assertEquals(1, f.runtime.stopCalls);
+        }
+    }
+
+    @Test public void pendingStopConfirmsSameOriginalEventsWithoutStoppingModelAgain() throws Exception {
+        Publisher publisher = new Publisher();
+        try (Fixture f = new Fixture(true, ALL, new ReferenceIdentityProvider("fixture-token"), publisher)) {
+            f.runtime.prepareAudio(audio("mtg_test", 32000));
+            f.runtime.emitTail = true;
+            f.server.failAppend = true;
+            f.start(retainedOptions(MeetingOptions.Mode.LIVE_TRANSLATION));
+            f.session.requestStop();
+            MeetingSessionState pending = f.probe.awaitPhase(MeetingSessionState.Phase.STOP_PENDING);
+            assertTrue(pending.canStop());
+            assertEquals(0, pending.savedEventCount());
+            assertTrue(f.server.standardAccepted.isEmpty());
+            assertTrue(publisher.contexts.isEmpty());
+            assertFalse(f.server.steps.contains("usage"));
+            assertFalse(f.server.steps.contains("translation2"));
+            assertFalse(f.server.steps.contains("stop"));
+
+            f.server.failAppend = false;
+            f.session.requestStop();
+            assertNotNull(f.probe.result());
+            assertEquals(List.of("discover", "create", "grant", "start", "event1", "event1",
+                    "event1", "event1", "translation2", "usage", "publish", "stop", "manifest"), f.server.steps);
+            assertEquals(2, f.server.standardAccepted.size());
+            StandardAppend original = f.server.standardAttempts.get(0);
+            for (int attempt = 1; attempt < 4; attempt++)
+                assertEquals(original, f.server.standardAttempts.get(attempt));
+            assertEquals(1, f.probe.awaitPhase(MeetingSessionState.Phase.READY).savedEventCount());
+            assertEquals(1, f.probe.beforeStopCalls.get());
+            assertEquals(1, f.runtime.stopCalls);
+            assertEquals(1, f.runtime.openCalls);
+            assertEquals(1, publisher.contexts.size());
         }
     }
 
@@ -1000,6 +1112,18 @@ public final class MeetingCoordinatorTest {
             do { next = states.poll(3, TimeUnit.SECONDS); assertNotNull("应收到会议状态", next); } while (next.phase() != phase);
             return next;
         }
+        MeetingSessionState awaitMessage(String text) throws Exception {
+            MeetingSessionState next;
+            do { next = states.poll(3, TimeUnit.SECONDS); assertNotNull("应收到事件保存状态", next); }
+            while (!next.message().contains(text));
+            return next;
+        }
+        void awaitSavedEvents(int count) throws Exception {
+            MeetingSessionState next;
+            do { next = states.poll(3, TimeUnit.SECONDS); assertNotNull("应收到真实字幕ACK计数", next); }
+            while (next.savedEventCount() < count);
+            assertEquals("译文或重发不能重复增加原文保存计数", count, next.savedEventCount());
+        }
         void awaitCanStop() throws Exception {
             MeetingSessionState next;
             do { next = states.poll(3, TimeUnit.SECONDS); assertNotNull("最终事件保存后可停止", next); } while (!next.canStop());
@@ -1093,6 +1217,8 @@ public final class MeetingCoordinatorTest {
     }
 
     private record Capture(int sequence, long offsetMs, byte[] jpeg) { }
+    private record StandardAppend(String meetingId, int sequence, TranscriptEvent transcript,
+            TranslationEvent translation) { }
 
     private static final class Server implements MeetingServerClient {
         final Set<String> granted;
@@ -1101,13 +1227,16 @@ public final class MeetingCoordinatorTest {
         final List<Long> genTimes = Collections.synchronizedList(new ArrayList<>());
         final List<Long> usages = Collections.synchronizedList(new ArrayList<>());
         final List<Capture> captures = Collections.synchronizedList(new ArrayList<>());
+        final List<StandardAppend> standardAttempts = Collections.synchronizedList(new ArrayList<>());
+        final Map<Integer, StandardAppend> standardAccepted = new ConcurrentHashMap<>();
         final CountDownLatch appendEntered = new CountDownLatch(1);
         final CountDownLatch releaseAppend = new CountDownLatch(1);
         final CountDownLatch usageEntered = new CountDownLatch(1);
         final CountDownLatch releaseUsage = new CountDownLatch(1);
         volatile boolean blockAppend;
         volatile boolean blockUsage;
-        boolean failAppend;
+        volatile boolean failAppend;
+        boolean loseAppendAckOnce;
         boolean pendingStop;
         boolean failEmail;
         boolean failContent;
@@ -1138,11 +1267,28 @@ public final class MeetingCoordinatorTest {
         @Override public void startClient(String id) { steps.add("start"); }
         @Override public void appendTranscript(String id, int number, TranscriptEvent event) throws IOException {
             steps.add("event" + number); transcripts.add(event); appendEntered.countDown();
-            if (failAppend) throw new IOException("fixture-event-save-failed");
+            StandardAppend append = new StandardAppend(id, number, event, null);
+            standardAttempts.add(append);
             if (blockAppend) try { if (!releaseAppend.await(4, TimeUnit.SECONDS)) throw new IOException("测试未释放 HTTP"); }
             catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); throw new IOException(interrupted); }
+            acceptStandardAppend(append);
         }
-        @Override public void appendTranslation(String id, int number, TranslationEvent event) { steps.add("translation" + number); }
+        @Override public void appendTranslation(String id, int number, TranslationEvent event) throws IOException {
+            steps.add("translation" + number);
+            StandardAppend append = new StandardAppend(id, number, null, event);
+            standardAttempts.add(append);
+            acceptStandardAppend(append);
+        }
+        private void acceptStandardAppend(StandardAppend append) throws IOException {
+            if (failAppend) throw new IOException("fixture-event-save-failed");
+            StandardAppend previous = standardAccepted.putIfAbsent(append.sequence(), append);
+            if (previous != null) assertEquals("同号重交必须保持原场和原内容", previous, append);
+            else assertEquals("后来的事件不能跨过未确认序号", standardAccepted.size(), append.sequence());
+            if (loseAppendAckOnce) {
+                loseAppendAckOnce = false;
+                throw new IOException("fixture-event-saved-but-ack-lost");
+            }
+        }
         @Override public void appendPresentation(String id, int number, long offset, byte[] jpeg)
                 throws IOException {
             steps.add("capture" + number);

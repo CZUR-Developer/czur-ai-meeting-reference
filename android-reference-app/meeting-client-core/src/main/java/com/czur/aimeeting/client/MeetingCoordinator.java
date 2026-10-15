@@ -26,6 +26,7 @@ import com.czur.aimeeting.model.SummarySessionGrant;
 import com.czur.aimeeting.model.TranscriptEvent;
 import com.czur.aimeeting.model.TranslationEvent;
 import java.io.IOException;
+import java.util.ArrayDeque;
 import java.util.HashSet;
 import java.util.Objects;
 import java.util.OptionalLong;
@@ -45,7 +46,8 @@ import java.util.logging.Logger;
 /**
  * 平台无关、唯一的正常会议编排。状态/显示/deadline 只在 state 队列访问；
  * 阻塞 HTTP、模型启动/停止及总结在独立 io 队列。SDK 和 Mock 只注入运行时。
- * 同一客户端同时只持有一场会议；关闭后不可再使用。没有持久缓存、恢复或自动重试框架。
+ * 同一客户端同时只持有一场会议；关闭后不可再使用。未确认标准事件只在本场内存中
+ * 保留原包，由后续事件或正常停止顺序补交；没有磁盘缓存、定时重试或跨进程恢复框架。
  */
 public final class MeetingCoordinator implements MeetingClient {
     private static final Logger LOG = Logger.getLogger(MeetingCoordinator.class.getName());
@@ -207,8 +209,10 @@ public final class MeetingCoordinator implements MeetingClient {
         private int sequence;
         private int savedEvents;
         private ScheduledFuture<?> deadline;
-        // 仅 io 队列访问；所有 append 在 complete 前入队。
-        private boolean appendFailed;
+        // 仅唯一 io 队列访问。序号已由 state 分配，字幕与译文共用顺序；HTTP 失败
+        // 也可能只是 ACK 丢失，因此保留同一不可变事件，不改号、不合并修订或跳过队首。
+        // 后续事件／正常 Stop 才触发补交，真实成功后立即出队，不另加定时器或磁盘队列。
+        private final ArrayDeque<PendingStandardEvent> pendingStandardEvents = new ArrayDeque<>();
         // 截图与文字事件独立：只有后端 ACK 后才推进序号。网络响应丢失时保留
         // 至多一个原包，下一次截图先以同一序号／offset／字节确认，不能换新图覆盖。
         // 这两个字段只由唯一 io 队列读写，不建立持久缓存或定时重试。
@@ -411,19 +415,7 @@ public final class MeetingCoordinator implements MeetingClient {
             showDisplay();
             scheduleDeadline();
             int number = ++sequence;
-            io.execute(() -> {
-                try {
-                    server.appendTranscript(meetingId, number, standard);
-                    enqueue(() -> {
-                        if (done) return;
-                        savedEvents++;
-                        if (!runtime.waitsForModelFinish() && standard.isFinal() && !stopRequested)
-                            canStop = true;
-                        publish(phase == MeetingSessionState.Phase.RUNNING
-                                ? "标准字幕已保存" : "正在等待本场正常收口");
-                    });
-                } catch (IOException failure) { logFailure("保存标准字幕", failure); appendFailure(); }
-            });
+            io.execute(() -> saveStandardEvent(new PendingStandardEvent(number, standard, null)));
         }
 
         private void translation(TranslationEvent event) {
@@ -432,15 +424,50 @@ public final class MeetingCoordinator implements MeetingClient {
             showDisplay();
             scheduleDeadline();
             int number = ++sequence;
-            io.execute(() -> {
-                try { server.appendTranslation(meetingId, number, event); }
-                catch (IOException failure) { logFailure("保存标准译文", failure); appendFailure(); }
-            });
+            io.execute(() -> saveStandardEvent(new PendingStandardEvent(number, null, event)));
         }
 
-        private void appendFailure() {
-            appendFailed = true;
-            enqueue(() -> { if (!done) publish("标准字幕或译文事件提交失败，无法完成会议"); });
+        /** 先接纳本次原包，再确认全部队首；失败保留原顺序，不能先发送后来的修订。 */
+        private void saveStandardEvent(PendingStandardEvent event) {
+            if (closed || cancelled) return;
+            pendingStandardEvents.addLast(event);
+            try {
+                savePendingStandardEvents();
+            } catch (IOException failure) {
+                logFailure("保存标准字幕或译文", failure);
+                enqueue(() -> {
+                    if (!done) publish("标准字幕或译文尚未确认，后续事件或停止时继续提交");
+                });
+            }
+        }
+
+        /**
+         * 只能在 io 队列调用。Server 正常返回才代表 ACK，先出队再通知计数；若服务端
+         * 已保存而响应丢失，下次仍以原 ID／序号／内容命中同一幂等事件，绝不分配新号。
+         * complete 也复用此方法，未确认原包时不能进入用量、总结、发布或后端 Stop。
+         */
+        private void savePendingStandardEvents() throws IOException {
+            while (!pendingStandardEvents.isEmpty()) {
+                if (closed || cancelled) return;
+                PendingStandardEvent event = pendingStandardEvents.getFirst();
+                if (event.transcript() != null) {
+                    server.appendTranscript(meetingId, event.sequence(), event.transcript());
+                } else {
+                    server.appendTranslation(meetingId, event.sequence(), event.translation());
+                }
+                pendingStandardEvents.removeFirst();
+                LOG.fine("标准事件保存已确认 sequence=" + event.sequence());
+                enqueue(() -> {
+                    if (done) return;
+                    if (event.transcript() != null) {
+                        savedEvents++;
+                        if (!runtime.waitsForModelFinish() && event.transcript().isFinal() && !stopRequested)
+                            canStop = true;
+                    }
+                    publish(phase == MeetingSessionState.Phase.RUNNING
+                            ? "标准字幕或译文已保存" : "正在等待本场正常收口");
+                });
+            }
         }
 
         private void scheduleDeadline() {
@@ -528,8 +555,8 @@ public final class MeetingCoordinator implements MeetingClient {
         }
 
         private void presentationFailure(Callback<Void> callback, String message) {
-            // 图片是可选产物；独立通知 App，不能设置文字使用的 appendFailed，
-            // 否则一次末帧失败会把已经保存的文字会议永久卡在 STOP_PENDING。
+            // 图片是可选产物，失败独立通知 App，不进入标准文字事件的待确认队列，
+            // 避免一次末帧失败阻断已经保存的文字会议正常停止。
             enqueue(() -> {
                 if (!done) publish(message);
                 notifyListener(() -> callback.onError(message));
@@ -597,7 +624,8 @@ public final class MeetingCoordinator implements MeetingClient {
             if (cancelled || closed) return;
             String step = "检查标准事件保存";
             try {
-                if (appendFailed) throw new IOException("标准字幕或译文事件提交失败");
+                savePendingStandardEvents();
+                if (cancelled || closed) return;
                 step = "提交冻结采音用量";
                 if (!usageRead) {
                     frozenAudioDuration = model.frozenAudioDurationMs();
@@ -774,6 +802,10 @@ public final class MeetingCoordinator implements MeetingClient {
             if (model != null) io.execute(model::close);
         }
     }
+
+    /** 内部原包恰有一种标准事件；对象本身不可变，保留后不重新归一化或分配序号。 */
+    private record PendingStandardEvent(int sequence, TranscriptEvent transcript,
+            TranslationEvent translation) { }
 
     @FunctionalInterface
     private interface ResultCall<T> { T call(MeetingResult result) throws IOException; }

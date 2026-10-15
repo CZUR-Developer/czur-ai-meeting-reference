@@ -154,6 +154,17 @@ registry.execute(prepared.action(), context, actionCallback);
 
 ### 正常停止与结果
 
+标准字幕与译文共用本场 `clientSequence`。Coordinator 在唯一 IO 队列中保留未确认的
+原序号／原不可变事件；后续模型事件或正常停止会先按原顺序补交队首，得到真实 HTTP
+确认后才移出并发送后续事件。响应丢失时仍重交相同事件 ID、序号和内容，复用后端幂等，
+不合并 partial/final 修订、不跳号；已经确认的事件不会再次提交。
+`savedEventCount` 仍只计实际确认的原文事件，译文或同包重交不重复增加。
+
+正常收尾会先确认所有待交标准事件，再进入用量、总结、发布和后端 Stop；仍未确认时
+保持 `STOP_PENDING/canStop=true`，同一句柄再次正常停止可以继续，不重复停音源。
+该机制仅覆盖同宿主内存中的事件补交，不包含定时重试、磁盘队列、进程恢复，
+也不代表 Android 模型 WebSocket 已具备断网重连能力；模型传输续接由 SDK 另行承接。
+
 `requestStop()` 只在 `canStop=true` 时受理：先冲刷显示，再调用 `beforeStop(continuation)`。
 App 停截图 tick，在工作线程完成最后有效截图的 `submitPresentation(offsetMs, jpeg)` 调用并关闭采集，
 再调用 continuation；无采集时直接延续。不要阻塞 UI 或遗漏延续，延续仅首次有效，之后不再接纳截图。
@@ -165,7 +176,7 @@ JPEG 在调用时复制，`offsetMs` 相对 `startedAtMs`，序号由组合层�
 和非空`artifactId`匹配才`onSuccess(null)`。旧void入口保留，仅表示排队，不代表已保存。
 旧自定义Session未实现此重载时明确抛出`UnsupportedOperationException`，不伪造确认。
 
-截图保存失败独立提示，不设置字幕／译文事件的失败标志，已有文字仍可正常Stop。
+截图保存失败独立提示，不进入字幕／译文的待确认队列，已有文字仍可正常Stop。
 唯一IO队列仅在成功ACK后推进截图序号；响应未确认时至多保留一个原序号／原字节包，
 下一次截图先确认该原包，再保存新图。原包仍失败时，不用新图覆盖它；当前新图通过
 错误回调结束，App后续自行再次采集。不增加定时重试、持久缓存或进程恢复保证。
@@ -271,4 +282,4 @@ SDK 从公共契约 JAR 以 `compileOnly` 编译，App 打包唯一一份契约�
 P6-5 与 P6-6 两片已独立签收；组合入口使用相同源码生成的 JAR 作为 SDK 输入。
 P6-7 继续迁移实际 App Service/页面链路并回归真机，主机环回或 AAR/APK 不代签真实听悟、实体方向、采集或 PDF。
 日志 INFO 记录阶段开始/结束/结果，逐段诊断为 FINE；不记录原文、原始载荷、URL、token 或 Throwable 正文。
-本轮仅接入既有后端冻结用量端口，不建设缓存、备份恢复、通用重试或安全矩阵。
+冻结用量沿用既有后端端口；标准事件仅提供上述同场内存补交，不建设备份恢复、通用重试或安全矩阵。
