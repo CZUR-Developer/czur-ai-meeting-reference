@@ -66,6 +66,54 @@ public final class TingwuDomesticSequenceTest {
         assertEquals("und", f.finals().get(0).language());
     }
 
+    @Test public void disconnectDrainsOnlyConfirmedSourceOnceWithoutFinishingPartial() throws Exception {
+        Fixture f = new Fixture(true);
+        assertTrue(f.adapter.supportsSessionReconnect());
+        f.message("SentenceEnd", source(1, "Hello.", true).put("stash_result", new JSONObject()
+                .put("index", 2).put("text", "Unfinished").put("beginTime", 400)));
+        f.message("TranscriptionResultChanged", source(2, "Still unfinished", false));
+        assertTrue("互译原文尚在等待译文配对", f.finals().isEmpty());
+        f.adapter.drainConfirmedOnDisconnect(f.transcripts::add);
+        assertEquals(List.of("tingwu-1"), f.finals().stream().map(TranscriptEvent::segmentId).toList());
+        assertEquals("Hello.", f.finals().get(0).text());
+        assertFalse(f.transcripts.stream().filter(event -> event.segmentId().equals("tingwu-2"))
+                .anyMatch(TranscriptEvent::isFinal));
+        f.adapter.drainConfirmedOnDisconnect(f.transcripts::add);
+        assertEquals("重复交出不重发已经final的原文", 1, f.finals().size());
+        assertTrue("未收到的译文不能伪造", f.translations.isEmpty());
+    }
+
+    @Test public void waitingTranslationKeepsConfirmedTextAgainstLatePartialAndStash() throws Exception {
+        Fixture f = new Fixture(true);
+        f.message("SentenceEnd", source(1, "Confirmed sentence.", true).put("begin_time", 100));
+        // 原文已确认但译文尚未到达：旧 partial 只允许补语种、发言人，不能改正文或时间。
+        f.message("TranscriptionResultChanged", source(1, "Late unfinished partial", false)
+                .put("begin_time", 900).put("time", 1000)
+                .put("detected_source_lang", "EN").put("speaker_id", "speaker-2"));
+        TranscriptEvent waiting = f.transcripts.get(f.transcripts.size() - 1);
+        assertEquals("Confirmed sentence.", waiting.text());
+        assertEquals(100, waiting.startMs());
+        assertEquals(300, waiting.endMs());
+        assertEquals("en-US", waiting.language());
+        assertEquals("speaker-2", waiting.sessionSpeakerId());
+        assertTrue("译文未到，暂不提前结束显示片段", f.finals().isEmpty());
+
+        // 延迟消息携带的 stash 同样不是 SentenceEnd，不得覆盖等待配对的确认原文。
+        f.message("TranscriptionResultChanged", source(2, "Other unfinished sentence", false)
+                .put("stash_result", new JSONObject().put("index", 1)
+                        .put("text", "Stale stash text").put("beginTime", 900)));
+        f.adapter.drainConfirmedOnDisconnect(f.transcripts::add);
+        assertEquals(1, f.finals().size());
+        TranscriptEvent confirmed = f.finals().get(0);
+        assertEquals("tingwu-1", confirmed.segmentId());
+        assertEquals("Confirmed sentence.", confirmed.text());
+        assertEquals(100, confirmed.startMs());
+        assertEquals(300, confirmed.endMs());
+        assertEquals("en-US", confirmed.language());
+        assertEquals("speaker-2", confirmed.sessionSpeakerId());
+        assertTrue("断线交出不生成不存在的译文", f.translations.isEmpty());
+    }
+
     @Test public void lateLanguageCorrectsFinalFactsWithoutReopeningOrReplacingFinalText() throws Exception {
         Fixture f = new Fixture(false);
         f.message("SentenceEnd", source(1, "Hello.", true));

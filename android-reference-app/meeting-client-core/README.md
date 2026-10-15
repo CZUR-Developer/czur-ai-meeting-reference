@@ -174,7 +174,10 @@ Mock 和伙伴实现保持原行为。材料端口可能阻塞，Android Runtime
 不能占用状态锁、采音回调或 `modelControl`；Stop 作废迟到材料，不等待 HTTP 返回。
 Adapter 默认 `supportsSessionReconnect() == false`；显式支持的模型可在旧连接丢弃前通过
 `drainConfirmedOnDisconnect()` 交出真实已确认原文，不能将 partial 改 final 或伪造 FINISHED。
-当前这一步仅完成合同／编排桥和音源控制解耦；Runtime 真正续接及设备断网结果另行验收。
+默认听悟已显式声明，并复用既有 source-final 队列交出等待译文的确认原文；未确认partial
+仍不结束。收到 `SentenceEnd` 后，即使仍在等待译文，同 index 迟到的 partial／stash
+也只补语种和发言人事实，保留确认正文及时间。当前这一步完成合同／编排桥、音源控制解耦及听悟声明；Runtime 真正续接及
+设备断网结果另行验收。
 
 `requestStop()` 只在 `canStop=true` 时受理：先冲刷显示，再调用 `beforeStop(continuation)`。
 App 停截图 tick，在工作线程完成最后有效截图的 `submitPresentation(offsetMs, jpeg)` 调用并关闭采集，

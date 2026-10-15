@@ -23,7 +23,7 @@ import org.json.JSONObject;
 /**
  * 听悟实时转写的公开协议 Adapter。只负责启动/停止消息及字幕、译文映射，不持有网络或 MIC。
  *
- * <p>一个实例只用于一场会议；听悟的 index 是该场字幕片段标识，partial 与 SentenceEnd
+ * <p>一个实例只用于一个听悟任务；同场重新签发任务时由工厂创建新实例。index 是任务内片段标识，partial 与 SentenceEnd
  * 按同一片段递增修订号。partial是完整快照替换；普通final立即收段，启用翻译时按原文
  * final顺序等待同index的译文final，结束时保留缺译文的原文。语种/发言人迟到可更新已final
  * 原文的事实，但旧partial不重新打开final或替换确认文字。模型原始消息和材料不进日志。
@@ -53,6 +53,19 @@ public final class TingwuModelAdapter implements ModelAdapter {
     /** 源语种可能随独立译文迟到；通过公共声明复用原语种窗口，不依赖听悟注册名称。 */
     @Override
     public boolean mayEmitDeferredSourceLanguage() { return true; }
+
+    /** 允许SDK保持原音源与业务会议，断开后用新听悟任务继续；代次与时间由SDK映射。 */
+    @Override
+    public boolean supportsSessionReconnect() { return true; }
+
+    /**
+     * 只交出已收到SentenceEnd的真实原文final；缺失译文不应使这些确认文字丢失。
+     * pendingFinals不包含仍为partial的stash／当前句，重复调用也不会重新交出已final片段。
+     */
+    @Override
+    public void drainConfirmedOnDisconnect(TranscriptListener transcriptListener) {
+        drainSourceFinals(true, transcriptListener);
+    }
 
     @Override
     public String startMessage(ModelSessionGrant grant) {
@@ -223,6 +236,12 @@ public final class TingwuModelAdapter implements ModelAdapter {
 
     private void rememberSource(int index, JSONObject payload, String text, boolean sourceFinal) {
         SourceState previous = sources.get(index);
+        if (previous != null && previous.sourceFinal && !sourceFinal) {
+            // 互译场景中 SentenceEnd 已确认正文，但片段可能仍在等待译文。
+            // 此时还未进入 finalizedIndexes，迟到 partial 只能补事实，不能覆盖确认正文及时间。
+            updateSourceFacts(previous, payload);
+            return;
+        }
         long knownStart = previous == null ? sentenceStarts.getOrDefault(index, 0L) : previous.startMs;
         long startMs = Math.max(0, payload.optLong("begin_time", payload.optLong("start_time", knownStart)));
         long endMs = Math.max(startMs, payload.optLong("time", payload.optLong("end_time", startMs)));
@@ -251,6 +270,11 @@ public final class TingwuModelAdapter implements ModelAdapter {
             beginListener.onSegmentStarted(new SegmentStartedEvent("tingwu-" + index, startMs));
         }
         SourceState previous = sources.get(index);
+        if (previous != null && previous.sourceFinal) {
+            // stash 也是未确认快照；与迟到 partial 一样，不得改写已收到 SentenceEnd 的原文。
+            updateSourceFacts(previous, stash);
+            return;
+        }
         String detected = language(stash.optString("detected_source_lang", ""));
         String speaker = speakerId(stash);
         sources.put(index, new SourceState(text,
