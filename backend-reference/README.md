@@ -46,11 +46,16 @@ App 按公开 Adapter 接口直连听悟，后端继续只保存标准事件。�
 Create v1 的 `realtime` 响应或旧 WSS 路径。部署变量及启用窗口见
 `deploy/README.md`。
 
-单语字幕与已获准的中英双语任务均显式设置
+单语字幕与已获准的双语任务均显式设置
 `Parameters.Transcription.RealtimeDiarizationEnabled=true`、
 `DiarizationEnabled=true` 和 `Diarization.SpeakerCount=0`，按会议未知人数请求
-说话人分离。此参数修正不增加语种或私有会议账本；当前语言仍限 `zh-CN/en-US`，
-连接材料默认五分钟期限保持。请求形状的定向测试不代替真实说话人准确率验收。
+说话人分离。当前听悟实现按现有产品规则映射
+`zh-CN/en-US/ja-JP/ko-KR/de-DE/fr-FR/ru-RU` 七语；双语任务用所选两语生成
+`multilingual`、`LanguageHints` 及双目标翻译。连接材料默认五分钟期限保持。
+部署通过 `AI_MEETING_MODEL_LANGUAGES` 声明实际开放的有序标准语言列表，
+缺省保留原中英；`/v1/capabilities.languages` 直接使用该配置，App不硬编码七语。
+更换Adapter时同时调整部署语言声明，供应商短码转换归各自Adapter。
+定向请求映射测试与真实七语识别／翻译质量验收分别记账。
 
 ## 对象存储传输扩展
 

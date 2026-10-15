@@ -115,11 +115,19 @@ public final class TingwuModelSessionIssuer implements ModelSessionIssuer {
         }
     }
 
-    /** Create 保存 IETF 语言码；听悟 CreateTask 使用自己的 cn/en 枚举。 */
+    /**
+     * Create 保存标准语言码；听悟 CreateTask 使用 cn/en/ja/ko/de/fr/ru。
+     * 此映射与现行产品的听悟实现保持一致；部署开放哪些语种由公共配置另行声明。
+     */
     private static String providerLanguage(String sourceLanguage) {
         return switch (sourceLanguage) {
             case "zh-CN" -> "cn";
             case "en-US" -> "en";
+            case "ja-JP" -> "ja";
+            case "ko-KR" -> "ko";
+            case "de-DE" -> "de";
+            case "fr-FR" -> "fr";
+            case "ru-RU" -> "ru";
             default -> throw new SessionIssueException();
         };
     }
@@ -127,7 +135,7 @@ public final class TingwuModelSessionIssuer implements ModelSessionIssuer {
     /**
      * 单语字幕沿用原有 CreateTask 请求；仅本场翻译能力 ENABLE 时，以同一个
      * multilingual 实时任务识别双语并向两种语言翻译。双目标包含原语言，
-     * 因为说话人可以在一场会中任意切换中文和英文。
+     * 因为说话人可以在一场会中任意切换所选的两种语言。
      */
     private String createBody(Request request) throws IOException {
         String source = providerLanguage(request.sourceLanguage());

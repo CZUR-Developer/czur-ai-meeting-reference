@@ -20,6 +20,39 @@ import org.junit.Test;
 /** 用真实回包字段结构重建的无敏感文本样例核对起流门禁与 partial/final 映射。 */
 public final class TingwuModelAdapterTest {
     @Test
+    public void normalizesAllProductLanguagesInSourceAndTranslationEvents() throws Exception {
+        String[] provider = {"CN", "EN", "ja", "ko", "de", "fr", "ru", "JP", "KR"};
+        String[] standard = {"zh-CN", "en-US", "ja-JP", "ko-KR", "de-DE", "fr-FR", "ru-RU",
+                "ja-JP", "ko-KR"};
+        for (int index = 0; index < provider.length; index++) {
+            TingwuModelAdapter adapter = new TingwuModelAdapter();
+            adapter.startMessage(new ModelSessionGrant("mtg_languages", TingwuModelAdapter.ID,
+                    "wss://example.test/signed", "2030-01-01T00:01:00Z", null,
+                    Map.of("taskId", "task-language", "translationEnabled", "true")));
+            List<TranscriptEvent> transcripts = new ArrayList<>();
+            List<TranslationEvent> translations = new ArrayList<>();
+            adapter.onServerMessage(new JSONObject()
+                    .put("header", new JSONObject().put("name", "SentenceEnd"))
+                    .put("payload", new JSONObject().put("index", 1).put("time", 1000)
+                            .put("result", "source").put("detected_source_lang", provider[index]))
+                    .toString(), transcripts::add, translations::add);
+            int other = (index + 1) % provider.length;
+            adapter.onServerMessage(new JSONObject()
+                    .put("header", new JSONObject().put("name", "TranslationResultChanged"))
+                    .put("payload", new JSONObject().put("source_lang", "multilingual")
+                            .put("target_lang", provider[other])
+                            .put("translate_result", new org.json.JSONArray().put(new JSONObject()
+                                    .put("index", 1).put("text", "translation").put("partial", false)
+                                    .put("detected_source_lang", provider[index]))))
+                    .toString(), transcripts::add, translations::add);
+            assertEquals(standard[index], transcripts.get(transcripts.size() - 1).language());
+            assertTrue(transcripts.get(transcripts.size() - 1).isFinal());
+            assertEquals(standard[index], translations.get(0).sourceLanguage());
+            assertEquals(standard[other], translations.get(0).targetLanguage());
+        }
+    }
+
+    @Test
     public void startsOnlyAfterAckAndMapsRevisionsToOneStandardSegment() throws Exception {
         TingwuModelAdapter adapter = new TingwuModelAdapter();
         ModelSessionGrant grant = new ModelSessionGrant("mtg_test", TingwuModelAdapter.ID,

@@ -12,6 +12,11 @@ Server 协议、模型适配与国内显示规则。Android 控件、权限申�
 - `DeploymentOptions.languages`：透传既有发现协议的语言code清单，供App设置页使用。
 - `client.display`：共享显示状态、句开始方向快照，以及国内 A/B 多语种兜底。
 
+听悟 Adapter 将 `cn/en/ja/ko/de/fr/ru`（兼容旧 `JP/KR` 别名）归一化为
+`zh-CN/en-US/ja-JP/ko-KR/de-DE/fr-FR/ru-RU`，原文和译文使用同一映射。
+部署语言清单来自后端 `AI_MEETING_MODEL_LANGUAGES`；UI 按发现结果显示，
+识别未知语种时仍保留未知事实，不默认当作中文或据此提前锁定分栏。
+
 ## 两层入口与组合契约
 
 基础层由 Android SDK 的 `AudioInput` 提供，不需要 Server/model：App 接收标准 PCM 和物理方向。

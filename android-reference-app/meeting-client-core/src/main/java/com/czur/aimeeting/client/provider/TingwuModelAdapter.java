@@ -375,9 +375,16 @@ public final class TingwuModelAdapter implements ModelAdapter {
     }
 
     private static String language(String raw) {
-        return switch (raw.toUpperCase(java.util.Locale.ROOT)) {
+        // 听悟返回短码，CZUR旧配置也可能使用JP/KR别名；归一化后交给通用分栏规则。
+        // 两侧语言始终使用与发现/Create相同的标准码，App不需要识别供应商别名。
+        return switch (raw.trim().replace('_', '-').toUpperCase(java.util.Locale.ROOT)) {
             case "CN", "ZH", "ZH-CN" -> "zh-CN";
             case "EN", "EN-US" -> "en-US";
+            case "JA", "JP", "JA-JP" -> "ja-JP";
+            case "KO", "KR", "KO-KR" -> "ko-KR";
+            case "DE", "DE-DE" -> "de-DE";
+            case "FR", "FR-FR" -> "fr-FR";
+            case "RU", "RU-RU" -> "ru-RU";
             // 听悟源语种可能晚于第一条 partial；保留未知，不能伪装成中文让分栏误锁 A。
             default -> raw.trim().isEmpty() || "auto".equalsIgnoreCase(raw)
                     || "multilingual".equalsIgnoreCase(raw) ? "und" : raw;

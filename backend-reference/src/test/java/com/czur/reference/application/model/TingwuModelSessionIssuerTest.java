@@ -92,6 +92,35 @@ class TingwuModelSessionIssuerTest {
         assertEquals("en", body.path("Input").path("SourceLanguage").asText());
     }
 
+    @Test void allProductLanguagesMapInSubtitleAndBilingualRequests() throws Exception {
+        var standard = List.of("zh-CN", "en-US", "ja-JP", "ko-KR", "de-DE", "fr-FR", "ru-RU");
+        var provider = List.of("cn", "en", "ja", "ko", "de", "fr", "ru");
+        AtomicReference<HttpRequest> sent = new AtomicReference<>();
+        var issuer = new TingwuModelSessionIssuer(CONFIG, request -> {
+            sent.set(request);
+            return new TingwuModelSessionIssuer.ProviderResponse(200,
+                    "{\"Data\":{\"TaskId\":\"task-language\",\"MeetingJoinUrl\":"
+                            + "\"wss://join.example.invalid/meeting\"}}");
+        }, CLOCK);
+        ObjectMapper json = new ObjectMapper();
+        for (int index = 0; index < standard.size(); index++) {
+            issuer.issue(new ModelSessionIssuer.Request(standard.get(index), List.of(), false));
+            var subtitle = json.readTree(readBody(sent.get()));
+            assertEquals(provider.get(index), subtitle.path("Input").path("SourceLanguage").asText());
+            assertFalse(subtitle.path("Parameters").has("TranslationEnabled"));
+            // 逐个轮转配对，使每种语言都覆盖源、目标以及双向翻译两侧，沿用旧产品请求规则。
+            int other = (index + 1) % standard.size();
+            issuer.issue(new ModelSessionIssuer.Request(standard.get(index),
+                    List.of(standard.get(other)), true));
+            var bilingual = json.readTree(readBody(sent.get()));
+            var expected = json.valueToTree(List.of(provider.get(index), provider.get(other)));
+            assertEquals("multilingual", bilingual.path("Input").path("SourceLanguage").asText());
+            assertEquals(expected, bilingual.path("Input").path("LanguageHints"));
+            assertEquals(expected, bilingual.path("Parameters").path("Translation").path("TargetLanguages"));
+            assertTrue(bilingual.path("Parameters").path("TranslationEnabled").asBoolean());
+        }
+    }
+
     @Test void enabledTranslationUsesOneMultilingualTaskWithBothDirections() throws Exception {
         AtomicReference<HttpRequest> sent = new AtomicReference<>();
         var issuer = new TingwuModelSessionIssuer(CONFIG, request -> {

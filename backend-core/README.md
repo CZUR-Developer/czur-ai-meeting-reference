@@ -18,6 +18,12 @@ JSON 树在进入和离开快照时复制，原仅字幕构造器保持兼容。
 - `protocol/`：统一结果和实时消息编解码；唯一 Protobuf 源为根 `contracts/realtime.proto`。
 - `application/bootstrap/MeetingDeploymentConfig`、`MeetingHttpAssembly`：中性配置和装配。
 
+部署可用 `AI_MEETING_MODEL_LANGUAGES` 声明有序的标准语言码列表，公开发现接口直接返回
+`modelLanguages()`；省略时保持既有中英默认。部署宿主负责声明实际模型可用范围，
+供应商字段和语种短码仍由对应模型实现映射；公共核心不硬编码 CZUR 的 UI 选项。
+默认听悟签发器已覆盖中文、英文、日文、韩文、德文、法文、俄文，双语继续使用所选两语
+作为 `LanguageHints` 和双向翻译目标，沿用既有产品规则。
+
 参考 Main／Process、演示账号与登录、真实 Mock Driver／收口、文件测试存储及默认
 实现选择留在 `backend-reference`。核心不构造这些实现，也不选择宿主日志后端。
 旧参考 WSS／Mock 链的组件由宿主显式注入 `LegacyAudioFactory`，不反向依赖参考模块。

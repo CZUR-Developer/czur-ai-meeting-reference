@@ -41,7 +41,7 @@ public final class ReferenceDeploymentCapabilitiesEndpoint {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("specVersion", "v1");
         body.put("capabilities", available);
-        body.put("languages", List.of("zh-CN", "en-US"));
+        body.put("languages", config.modelLanguages());
         body.put("audioProfiles", List.of("PCM_S16LE"));
         body.put("limits", publicLimits);
         config.resultLinkTtl().ifPresent(ttl ->

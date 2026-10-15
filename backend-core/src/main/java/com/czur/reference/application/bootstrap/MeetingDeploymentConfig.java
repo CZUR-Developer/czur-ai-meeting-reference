@@ -67,6 +67,8 @@ public class MeetingDeploymentConfig {
     public static final String MODEL_CAPABILITIES = "AI_MEETING_MODEL_CAPABILITIES";
     /** 本部署签发的 Android 模型 Adapter；未设置时沿用 P5-1 听悟开关。 */
     public static final String MODEL_ADAPTER = "AI_MEETING_MODEL_ADAPTER";
+    /** 部署方声明的标准语言码，按逗号分隔；发现接口保持配置顺序。 */
+    public static final String MODEL_LANGUAGES = "AI_MEETING_MODEL_LANGUAGES";
     public static final String SAMPLE_JSON_WS_ENDPOINT =
             "AI_MEETING_SAMPLE_JSON_WS_ENDPOINT";
     public static final String DISABLED_CAPABILITIES = "AI_MEETING_DISABLED_CAPABILITIES";
@@ -102,6 +104,7 @@ public class MeetingDeploymentConfig {
     private final TingwuModelSessionConfig tingwuModelSession;
     private final URI sampleJsonWsEndpoint;
     private final BailianSummarySessionConfig bailianSummarySession;
+    private final List<String> modelLanguages;
 
     private MeetingDeploymentConfig(
             DatabaseRuntimeConfig database,
@@ -113,7 +116,7 @@ public class MeetingDeploymentConfig {
             boolean createEnabled, boolean realtimeRenewEnabled, Duration resultLinkTtl,
             ResultEmailConfig resultEmail,
             TingwuModelSessionConfig tingwuModelSession, URI sampleJsonWsEndpoint,
-            BailianSummarySessionConfig bailianSummarySession) {
+            BailianSummarySessionConfig bailianSummarySession, List<String> modelLanguages) {
         this.database = database;
         this.deploymentScope = deploymentScope;
         this.audience = audience;
@@ -134,6 +137,7 @@ public class MeetingDeploymentConfig {
         this.tingwuModelSession = tingwuModelSession;
         this.sampleJsonWsEndpoint = sampleJsonWsEndpoint;
         this.bailianSummarySession = bailianSummarySession;
+        this.modelLanguages = List.copyOf(modelLanguages);
     }
 
     /** 为参考默认配置的薄包装复用已校验字段；不重复解析或持有原始环境。 */
@@ -158,6 +162,7 @@ public class MeetingDeploymentConfig {
         this.tingwuModelSession = config.tingwuModelSession;
         this.sampleJsonWsEndpoint = config.sampleJsonWsEndpoint;
         this.bailianSummarySession = config.bailianSummarySession;
+        this.modelLanguages = config.modelLanguages;
     }
 
     /**
@@ -346,7 +351,7 @@ public class MeetingDeploymentConfig {
                     audience, clientId, profile, entitlement, mock, limits, estimate,
                     runtimeLimits, secret, wssOrigin, tokenTtl,
                     enabled, renewEnabled, resultLinkTtl, resultEmail,
-                    tingwu, sampleEndpoint, bailian);
+                    tingwu, sampleEndpoint, bailian, modelLanguages(environment));
         } finally {
             Arrays.fill(secret, (byte) 0);
         }
@@ -388,6 +393,22 @@ public class MeetingDeploymentConfig {
     /** 仅显式启用且注入永久 Key 时装配百炼临时 Key 签发。 */
     public Optional<BailianSummarySessionConfig> bailianSummarySession() {
         return Optional.ofNullable(bailianSummarySession);
+    }
+    /**
+     * 本部署实际开放的标准语言码；App 直接据此生成语言入口，不内置产品语种列表。
+     * 更换模型时由部署装配同步声明其语言范围，供应商语言码转换仍归各自 Adapter。
+     */
+    public List<String> modelLanguages() { return modelLanguages; }
+
+    private static List<String> modelLanguages(Map<String, String> environment) {
+        // 保持既有参考部署的中英默认值；产品可通过同一个公开配置项恢复或收窄语种。
+        String value = environment.getOrDefault(MODEL_LANGUAGES, "zh-CN,en-US");
+        List<String> languages = Arrays.stream(value.split(",", -1)).map(String::trim).toList();
+        if (languages.stream().anyMatch(String::isEmpty)
+                || languages.stream().distinct().count() != languages.size()) {
+            throw invalid(MODEL_LANGUAGES);
+        }
+        return languages;
     }
 
     @Override

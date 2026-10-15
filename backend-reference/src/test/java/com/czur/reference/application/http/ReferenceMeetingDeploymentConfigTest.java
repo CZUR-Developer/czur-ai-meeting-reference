@@ -43,6 +43,26 @@ class ReferenceMeetingDeploymentConfigTest {
     private static final String SECRET = "page-secret-0123456789-abcdefghijkl";
 
     @Test
+    void discoveryKeepsConfiguredLanguageOrderAndExistingDefault() throws Exception {
+        Map<String, String> values = valid();
+        var defaultConfig = ReferenceMeetingDeploymentConfig.fromEnvironment(values);
+        assertEquals(List.of("zh-CN", "en-US"), defaultConfig.modelLanguages());
+        var languages = List.of("zh-CN", "en-US", "ja-JP", "ko-KR", "de-DE", "fr-FR", "ru-RU");
+        values.put(ReferenceMeetingDeploymentConfig.MODEL_LANGUAGES, String.join(",", languages));
+        var config = ReferenceMeetingDeploymentConfig.fromEnvironment(values);
+        var endpoint = new ReferenceDeploymentCapabilitiesEndpoint(config, new HttpErrorMapper());
+        var response = endpoint.handle(new HttpRequest("GET", "/v1/capabilities", Map.of(), ""));
+        assertEquals(languages, new ObjectMapper().convertValue(
+                new ObjectMapper().readTree(response.body()).get("languages"),
+                new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {}));
+        // 配置完成后不随外部Map改变；独立模型部署也能按原序收窄为非中英语种。
+        values.put(ReferenceMeetingDeploymentConfig.MODEL_LANGUAGES, "fr-FR,ja-JP");
+        assertEquals(languages, config.modelLanguages());
+        assertEquals(List.of("fr-FR", "ja-JP"),
+                ReferenceMeetingDeploymentConfig.fromEnvironment(values).modelLanguages());
+    }
+
+    @Test
     void externalIdentityUsesTrustedInputsWithoutAnyDevCredentialOrLogin() {
         Map<String, String> values = valid();
         values.keySet().removeIf(key -> key.startsWith("REFERENCE_DEV_"));
