@@ -21,4 +21,18 @@ public interface ModelRuntime {
         if (retainAudio) throw new IllegalStateException("同源录音尚未装配");
         return open(grant, adapter, transcriptListener, sessionListener);
     }
+
+    /**
+     * 带可选同场续接材料端口的组合入口，基础四参和录音五参入口均继续可用。
+     *
+     * <p>只有 Runtime 实际支持续接且 Adapter 显式声明支持时才使用该端口；
+     * {@code reconnector == null} 表示未装配。默认仍委托原五参实现，不尝试重连，
+     * 既有伙伴 Runtime／lambda 的启动、录音和终止行为不变。具体实现只能替换
+     * 模型连接，保留唯一音源、录音、用量与业务会议；Stop 不得等待材料 HTTP。</p>
+     */
+    default ModelSession open(ModelSessionGrant grant, ModelAdapter adapter,
+            TranscriptListener transcriptListener, ModelSessionListener sessionListener,
+            boolean retainAudio, ModelSessionReconnector reconnector) {
+        return open(grant, adapter, transcriptListener, sessionListener, retainAudio);
+    }
 }

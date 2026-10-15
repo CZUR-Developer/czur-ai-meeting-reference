@@ -18,6 +18,8 @@ import com.czur.aimeeting.model.ModelAdapter;
 import com.czur.aimeeting.model.ModelSession;
 import com.czur.aimeeting.model.ModelSessionGrant;
 import com.czur.aimeeting.model.ModelSessionListener;
+import com.czur.aimeeting.model.ModelSessionConnection;
+import com.czur.aimeeting.model.ModelSessionReconnector;
 import com.czur.aimeeting.model.SegmentStartedEvent;
 import com.czur.aimeeting.model.SealedAudioArtifact;
 import com.czur.aimeeting.model.SummaryAdapter;
@@ -45,7 +47,8 @@ import java.util.logging.Logger;
 
 /**
  * 平台无关、唯一的正常会议编排。状态/显示/deadline 只在 state 队列访问；
- * 阻塞 HTTP、模型启动/停止及总结在独立 io 队列。SDK 和 Mock 只注入运行时。
+ * 阻塞 HTTP及总结在独立 io 队列；模型start/stop/close在modelControl队列保持次序，
+ * 不被挂起的标准事件HTTP拖住停源。SDK 和 Mock 只注入运行时。
  * 同一客户端同时只持有一场会议；关闭后不可再使用。未确认标准事件只在本场内存中
  * 保留原包，由后续事件或正常停止顺序补交；没有磁盘缓存、定时重试或跨进程恢复框架。
  */
@@ -60,6 +63,7 @@ public final class MeetingCoordinator implements MeetingClient {
     private final LongSupplier wallClockMs;
     private final ScheduledExecutorService state = Executors.newSingleThreadScheduledExecutor();
     private final ExecutorService io = Executors.newSingleThreadExecutor();
+    private final ExecutorService modelControl = Executors.newSingleThreadExecutor();
     private volatile boolean closed;
     private Session current;
 
@@ -178,6 +182,7 @@ public final class MeetingCoordinator implements MeetingClient {
         enqueue(() -> {
             if (current != null) current.cancel();
             io.shutdown();
+            modelControl.shutdown();
             state.shutdown();
         });
     }
@@ -334,6 +339,16 @@ public final class MeetingCoordinator implements MeetingClient {
                     options.sourceLanguage(), options.targetLanguage());
             display.setWaitForModelLanguage(adapter != null && adapter.mayEmitDeferredSourceLanguage());
             try {
+                // 续领闭包冻结原场Server（含身份）与ID，不能用当前账号重新开会。
+                // HTTP由Runtime的续接工作线程执行，不进入state/modelControl/事件保存队列。
+                MeetingServerClient frozenServer = server;
+                String frozenMeetingId = created.meetingId();
+                ModelSessionReconnector reconnector = grant == null ? null : () -> {
+                    ModelSessionGrant next = frozenServer.requestModelSession(frozenMeetingId);
+                    ModelAdapter fresh = adapters.create(next.adapterId());
+                    LOG.fine("本场模型续接材料及新解析实例已准备");
+                    return new ModelSessionConnection(next, fresh);
+                };
                 model = runtime.open(grant, adapter, event -> enqueue(() -> transcript(event)),
                         new ModelSessionListener() {
                             @Override public void onAudioInputMode(AudioInputMode mode) {
@@ -379,7 +394,7 @@ public final class MeetingCoordinator implements MeetingClient {
                                     maybeComplete();
                                 });
                             }
-                        }, options.retainAudio());
+                        }, options.retainAudio(), reconnector);
                 active = true;
                 audioLevelActive = true;
                 canStop = runtime.waitsForModelFinish();
@@ -390,7 +405,8 @@ public final class MeetingCoordinator implements MeetingClient {
                 showDisplay();
                 publish("会议已开始，正在接收标准字幕");
                 LOG.info("会议已开始");
-                io.execute(() -> {
+                modelControl.execute(() -> {
+                    if (cancelled || closed || done) return;
                     try { model.start(); }
                     catch (RuntimeException failure) {
                         logFailure("启动模型运行时", failure);
@@ -588,7 +604,7 @@ public final class MeetingCoordinator implements MeetingClient {
         private void continueStop() {
             if (done || stopInputSent) return;
             acceptingPresentation = false;
-            io.execute(() -> {
+            modelControl.execute(() -> {
                 try {
                     model.stopInput();
                     enqueue(() -> { stopInputSent = true; maybeComplete(); });
@@ -745,7 +761,7 @@ public final class MeetingCoordinator implements MeetingClient {
             canStop = false;
             phase = MeetingSessionState.Phase.FAILED;
             cancelDeadline();
-            if (model != null) io.execute(model::close);
+            if (model != null) modelControl.execute(model::close);
             publish(message);
         }
 
@@ -799,7 +815,7 @@ public final class MeetingCoordinator implements MeetingClient {
             done = true;
             active = false;
             cancelDeadline();
-            if (model != null) io.execute(model::close);
+            if (model != null) modelControl.execute(model::close);
         }
     }
 

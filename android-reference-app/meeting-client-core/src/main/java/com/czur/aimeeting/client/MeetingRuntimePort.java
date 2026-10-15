@@ -4,6 +4,7 @@ import com.czur.aimeeting.model.ModelAdapter;
 import com.czur.aimeeting.model.ModelSession;
 import com.czur.aimeeting.model.ModelSessionGrant;
 import com.czur.aimeeting.model.ModelSessionListener;
+import com.czur.aimeeting.model.ModelSessionReconnector;
 import com.czur.aimeeting.model.SummaryAdapter;
 import com.czur.aimeeting.model.SummaryInput;
 import com.czur.aimeeting.model.SummaryResult;
@@ -32,6 +33,16 @@ public interface MeetingRuntimePort {
             TranscriptListener transcripts, ModelSessionListener listener, boolean retainAudio) {
         if (retainAudio) throw new IllegalStateException("同源录音尚未装配");
         return open(grant, adapter, transcripts, listener);
+    }
+    /**
+     * 与 ModelRuntime 同义的可选续接桥；组合层捕获原场身份、Server及meetingId。
+     * 默认委托旧五参入口，Mock和伙伴旧端口不会因新增方法自动改变终止语义。
+     * 真正支持续接的Android运行时应在独立工作线程调用材料端口，Stop不等待HTTP。
+     */
+    default ModelSession open(ModelSessionGrant grant, ModelAdapter adapter,
+            TranscriptListener transcripts, ModelSessionListener listener, boolean retainAudio,
+            ModelSessionReconnector reconnector) {
+        return open(grant, adapter, transcripts, listener, retainAudio);
     }
     SummaryResult summarize(SummarySessionGrant grant, SummaryAdapter adapter, SummaryInput input)
             throws IOException;

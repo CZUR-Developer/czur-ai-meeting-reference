@@ -76,7 +76,9 @@ App 保留权限、前台服务、时长提醒/自动停止、页面/悬浮窗�
 | `onAudioLevel` | 同流0～100的RMS显示电平及elapsedRealtime单调测量毫秒时刻，不交付PCM |
 | `onResult` | 只保存实际READY清单，先于READY状态；收到该状态后才派发动作 |
 
-Coordinator 使用轻量串行状态/方向/显示/deadline 队列和独立串行 HTTP/模型启动停止/总结队列；
+Coordinator 使用轻量串行状态/方向/显示/deadline 队列、独立串行 HTTP/总结队列和
+独立 `modelControl` 队列；后者顺序处理模型 start/stop/close，挂起的事件或材料 HTTP
+不会拖住停源。用户停止仍先经过既有末帧 `beforeStop`，后端结果只在真实 ACK 后推进。
 `onAudioLevel`沿用串行callbackExecutor，正常停止受理、输入结束或关闭后不再派发在途电平。
 Android SDK每三个完整100ms PCM16LE帧测当次帧，约300ms通知一次；旧RMS相对满幅
 -60～0dB映射0～100，不是物理环境分贝，也不是300ms累计窗口。App停止时复位显示，
@@ -164,6 +166,15 @@ registry.execute(prepared.action(), context, actionCallback);
 保持 `STOP_PENDING/canStop=true`，同一句柄再次正常停止可以继续，不重复停音源。
 该机制仅覆盖同宿主内存中的事件补交，不包含定时重试、磁盘队列、进程恢复，
 也不代表 Android 模型 WebSocket 已具备断网重连能力；模型传输续接由 SDK 另行承接。
+
+组合层新增可选 `ModelSessionReconnector`：捕获开始时冻结的 Server／身份和 meetingId，
+只重新请求本场 `modelSession`，再由注册表创建新 Adapter，不重新 Create／StartClient。
+`ModelRuntime` 与 `MeetingRuntimePort` 的新六参入口默认仍委托原录音五参入口；旧 lambda、
+Mock 和伙伴实现保持原行为。材料端口可能阻塞，Android Runtime 必须放到独立续接工作线程，
+不能占用状态锁、采音回调或 `modelControl`；Stop 作废迟到材料，不等待 HTTP 返回。
+Adapter 默认 `supportsSessionReconnect() == false`；显式支持的模型可在旧连接丢弃前通过
+`drainConfirmedOnDisconnect()` 交出真实已确认原文，不能将 partial 改 final 或伪造 FINISHED。
+当前这一步仅完成合同／编排桥和音源控制解耦；Runtime 真正续接及设备断网结果另行验收。
 
 `requestStop()` 只在 `canStop=true` 时受理：先冲刷显示，再调用 `beforeStop(continuation)`。
 App 停截图 tick，在工作线程完成最后有效截图的 `submitPresentation(offsetMs, jpeg)` 调用并关闭采集，

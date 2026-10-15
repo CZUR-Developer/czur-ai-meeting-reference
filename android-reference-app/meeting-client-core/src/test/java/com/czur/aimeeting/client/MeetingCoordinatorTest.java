@@ -50,6 +50,9 @@ public final class MeetingCoordinatorTest {
         assertFalse(legacy.supportsRetainedAudio());
         assertNull(legacy.open(null, null, null, null, false));
         assertThrows(IllegalStateException.class, () -> legacy.open(null, null, null, null, true));
+        ModelSessionReconnector unused = () -> { throw new AssertionError("旧实现不能自行续领"); };
+        assertNull(legacy.open(null, null, null, null, false, unused));
+        assertThrows(IllegalStateException.class, () -> legacy.open(null, null, null, null, true, unused));
         MeetingRuntimePort port = new MeetingRuntimePort() {
             @Override public ModelSession open(ModelSessionGrant g, ModelAdapter a,
                     TranscriptListener t, ModelSessionListener l) { return null; }
@@ -59,12 +62,83 @@ public final class MeetingCoordinatorTest {
         assertFalse(port.supportsRetainedAudio());
         assertNull(port.open(null, null, null, null, false));
         assertThrows(IllegalStateException.class, () -> port.open(null, null, null, null, true));
+        assertNull(port.open(null, null, null, null, false, unused));
+        assertThrows(IllegalStateException.class, () -> port.open(null, null, null, null, true, unused));
+        ModelAdapter partner = new ModelAdapter() {
+            @Override public String id() { return "partner-legacy"; }
+            @Override public String startMessage(ModelSessionGrant grant) { return null; }
+            @Override public ModelSignal onServerMessage(String raw, TranscriptListener listener) {
+                return ModelSignal.NONE;
+            }
+        };
+        assertFalse("伙伴旧Adapter默认仍终止，不隐式重连", partner.supportsSessionReconnect());
+        partner.drainConfirmedOnDisconnect(event -> fail("默认不伪造final"));
         ModelSession session = new ModelSession() {
             @Override public void start() { }
             @Override public void stopInput() { }
             @Override public void close() { }
         };
         assertTrue(session.sealedAudioArtifact().isEmpty());
+    }
+
+    @Test public void reconnectMaterialsKeepFrozenIdentityAndMeetingWithFreshAdapters() throws Exception {
+        ReferenceIdentityProvider identity = new ReferenceIdentityProvider("original-scene-token");
+        try (Fixture f = new Fixture(true, ALL, identity)) {
+            f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.WEB, false);
+            ModelAdapter initial = f.runtime.adapter;
+            identity.updateSession(new IdentitySession("another-scene-token", "其他账号"));
+            ModelSessionConnection first = f.runtime.reconnector.request();
+            ModelSessionConnection second = f.runtime.reconnector.request();
+            assertEquals(f.probe.info.meetingId(), first.grant().meetingId());
+            assertEquals(f.probe.info.meetingId(), second.grant().meetingId());
+            assertEquals(initial.id(), first.adapter().id());
+            assertNotSame(initial, first.adapter());
+            assertNotSame("每次新模型任务都用新解析实例", first.adapter(), second.adapter());
+            assertEquals("original-scene-token", f.sessionToken);
+            assertEquals(List.of("mtg_test", "mtg_test", "mtg_test"), f.server.modelSessionRequests);
+            assertEquals(1, Collections.frequency(f.server.steps, "create"));
+            assertEquals(1, Collections.frequency(f.server.steps, "start"));
+            assertEquals("续领不重新打开运行时或音源", 1, f.runtime.openCalls);
+        }
+    }
+
+    @Test public void blockedAppendCannotDelayStopButResultStillWaitsForRealAck() throws Exception {
+        try (Fixture f = new Fixture(true, ALL)) {
+            f.server.blockAppend = true;
+            f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.WEB, false);
+            f.runtime.emit("s1", 1, "zh-CN", "断网前字幕", true);
+            assertTrue(f.server.appendEntered.await(2, TimeUnit.SECONDS));
+            f.session.requestStop();
+            assertTrue("停源不能排在挂起HTTP后", f.runtime.stopped.await(2, TimeUnit.SECONDS));
+            assertEquals(1, f.runtime.stopCalls);
+            assertEquals(List.of("start", "stop"), f.runtime.controlCalls);
+            assertEquals("尚未释放标准事件HTTP", 1, f.server.releaseAppend.getCount());
+            assertTrue("未收到事件ACK不能伪造结果", f.probe.results.isEmpty());
+            assertFalse(f.server.steps.contains("stop"));
+            f.server.releaseAppend.countDown();
+            assertNotNull(f.probe.result());
+        }
+    }
+
+    @Test public void blockedReconnectMaterialsCannotDelayRuntimeStop() throws Exception {
+        try (Fixture f = new Fixture(true, ALL)) {
+            f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.WEB, false);
+            f.server.blockModelGrant = true;
+            CompletableFuture<ModelSessionConnection> materials = CompletableFuture.supplyAsync(() -> {
+                try { return f.runtime.reconnector.request(); }
+                catch (IOException failure) { throw new java.util.concurrent.CompletionException(failure); }
+            });
+            assertTrue(f.server.modelGrantEntered.await(2, TimeUnit.SECONDS));
+            f.session.requestStop();
+            assertTrue("材料HTTP不能占用音源控制队列", f.runtime.stopped.await(2, TimeUnit.SECONDS));
+            assertEquals(1, f.server.releaseModelGrant.getCount());
+            assertNotNull("停止／原场结果无需等待续领HTTP", f.probe.result());
+            f.server.releaseModelGrant.countDown();
+            assertEquals("mtg_test", materials.get(2, TimeUnit.SECONDS).grant().meetingId());
+            // 此处只验证端口与线程边界；迟到材料不再接模型由Android Runtime另行验收。
+            assertEquals(1, f.runtime.openCalls);
+            assertEquals(1, f.runtime.stopCalls);
+        }
     }
 
     @Test public void defaultMeetingNeverReadsAudioArtifactOrCallsConfiguredPublisher() throws Exception {
@@ -436,10 +510,11 @@ public final class MeetingCoordinatorTest {
             f.start(retainedOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT));
             f.session.requestStop();
             assertTrue(f.server.usageEntered.await(2, TimeUnit.SECONDS));
-            // 客户端 close 同步关公开门，再由原 state/io 队列释放模型；不用 sleep 猜取消时点。
+            // close同步关公开门，音源控制队列释放模型，不用等挂起的用量HTTP。
             f.client.close();
-            f.server.releaseUsage.countDown();
             assertTrue(f.runtime.closed.await(2, TimeUnit.SECONDS));
+            assertEquals(1, f.server.releaseUsage.getCount());
+            f.server.releaseUsage.countDown();
             assertTrue(publisher.contexts.isEmpty());
             assertEquals(0, f.runtime.artifactReads);
             assertFalse(f.server.steps.contains("stop"));
@@ -1077,7 +1152,12 @@ public final class MeetingCoordinatorTest {
             session = client.start(options, probe);
             assertTrue(runtime.started.await(2, TimeUnit.SECONDS));
         }
-        @Override public void close() { server.releaseAppend.countDown(); server.releaseUsage.countDown(); client.close(); }
+        @Override public void close() {
+            server.releaseAppend.countDown();
+            server.releaseUsage.countDown();
+            server.releaseModelGrant.countDown();
+            client.close();
+        }
     }
 
     private static final class Publisher implements MeetingArtifactPublisher {
@@ -1145,11 +1225,14 @@ public final class MeetingCoordinatorTest {
     private static final class Runtime implements MeetingRuntimePort {
         final boolean real;
         final CountDownLatch started = new CountDownLatch(1);
+        final CountDownLatch stopped = new CountDownLatch(1);
         final CountDownLatch closed = new CountDownLatch(1);
+        final List<String> controlCalls = Collections.synchronizedList(new ArrayList<>());
         TranscriptListener transcripts;
         ModelSessionListener listener;
         ModelSessionGrant grant;
         ModelAdapter adapter;
+        ModelSessionReconnector reconnector;
         SummaryInput summaryInput;
         volatile int stopCalls;
         boolean emitTail;
@@ -1167,6 +1250,12 @@ public final class MeetingCoordinatorTest {
         @Override public Set<String> localCapabilities() { return ALL; }
         @Override public boolean supportsRetainedAudio() { return retainedAudioSupported; }
         @Override public ModelSession open(ModelSessionGrant grant, ModelAdapter adapter,
+                TranscriptListener transcripts, ModelSessionListener listener, boolean retainAudio,
+                ModelSessionReconnector reconnector) {
+            this.reconnector = reconnector;
+            return open(grant, adapter, transcripts, listener, retainAudio);
+        }
+        @Override public ModelSession open(ModelSessionGrant grant, ModelAdapter adapter,
                 TranscriptListener transcripts, ModelSessionListener listener, boolean retainAudio) {
             if (retainAudio && !retainedAudioSupported)
                 return MeetingRuntimePort.super.open(grant, adapter, transcripts, listener, true);
@@ -1177,9 +1266,11 @@ public final class MeetingCoordinatorTest {
             ++openCalls;
             this.grant = grant; this.adapter = adapter; this.transcripts = transcripts; this.listener = listener;
             return new ModelSession() {
-                @Override public void start() { started.countDown(); }
+                @Override public void start() { controlCalls.add("start"); started.countDown(); }
                 @Override public void stopInput() {
+                    controlCalls.add("stop");
                     stopCalls++;
+                    stopped.countDown();
                     if (real) {
                         if (emitTail) {
                             emit("tail", 1, "zh-CN", "最后字幕", true);
@@ -1188,7 +1279,7 @@ public final class MeetingCoordinatorTest {
                         if (emitFinished) listener.onFinished();
                     }
                 }
-                @Override public void close() { closed.countDown(); }
+                @Override public void close() { controlCalls.add("close"); closed.countDown(); }
                 @Override public OptionalLong frozenAudioDurationMs() {
                     ++durationReads;
                     assertTrue("协调器必须在停止输入后读取用量", stopCalls > 0);
@@ -1228,13 +1319,17 @@ public final class MeetingCoordinatorTest {
         final List<Long> usages = Collections.synchronizedList(new ArrayList<>());
         final List<Capture> captures = Collections.synchronizedList(new ArrayList<>());
         final List<StandardAppend> standardAttempts = Collections.synchronizedList(new ArrayList<>());
+        final List<String> modelSessionRequests = Collections.synchronizedList(new ArrayList<>());
         final Map<Integer, StandardAppend> standardAccepted = new ConcurrentHashMap<>();
         final CountDownLatch appendEntered = new CountDownLatch(1);
         final CountDownLatch releaseAppend = new CountDownLatch(1);
         final CountDownLatch usageEntered = new CountDownLatch(1);
         final CountDownLatch releaseUsage = new CountDownLatch(1);
+        final CountDownLatch modelGrantEntered = new CountDownLatch(1);
+        final CountDownLatch releaseModelGrant = new CountDownLatch(1);
         volatile boolean blockAppend;
         volatile boolean blockUsage;
+        volatile boolean blockModelGrant;
         volatile boolean failAppend;
         boolean loseAppendAckOnce;
         boolean pendingStop;
@@ -1258,7 +1353,21 @@ public final class MeetingCoordinatorTest {
                 return new CreatedMeeting("mtg_test", null, MeetingCapabilityState.fromCreateResponse(new JSONObject().put("capabilityDecisions", decisions)), 600000L);
             } catch (Exception failure) { throw new IOException(failure); }
         }
-        @Override public ModelSessionGrant requestModelSession(String id) { steps.add("grant"); return new ModelSessionGrant(id, adapterId, "wss://model.example.test/signed", "2030-01-01T00:00:00Z", null, Map.of()); }
+        @Override public ModelSessionGrant requestModelSession(String id) throws IOException {
+            steps.add("grant");
+            modelSessionRequests.add(id);
+            if (blockModelGrant) {
+                modelGrantEntered.countDown();
+                try {
+                    if (!releaseModelGrant.await(4, TimeUnit.SECONDS)) throw new IOException("测试未释放模型材料HTTP");
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException(interrupted);
+                }
+            }
+            return new ModelSessionGrant(id, adapterId, "wss://model.example.test/signed",
+                    "2030-01-01T00:00:00Z", null, Map.of());
+        }
         @Override public SummarySessionGrant requestSummarySession(String id) {
             steps.add("summaryGrant");
             return new SummarySessionGrant(BailianSummaryAdapter.ID, "https://summary.example.test",
