@@ -280,7 +280,12 @@ public final class HttpMeetingServerClient implements MeetingServerClient {
 
     @Override
     public StopMeetingResponse stopMeeting(String meetingId) throws IOException {
-        Response response = post("/v1/meetings/" + meetingId + ":stop", null, stopKey, 200, 202);
+        return stopMeeting(meetingId, stopKey);
+    }
+
+    @Override
+    public StopMeetingResponse stopMeeting(String meetingId, String stableStopKey) throws IOException {
+        Response response = post("/v1/meetings/" + meetingId + ":stop", null, stableStopKey, 200, 202);
         JSONObject body = parseJson(response.body);
         return new StopMeetingResponse(response.status == 200,
                 body.optString("inputState", response.status == 200

@@ -129,7 +129,40 @@ public final class HttpMeetingServerClientTest {
             assertTrue(accepted.accepted());
             assertEquals("GENERATING", accepted.manifestState());
             assertEquals("receipt-1", accepted.finalizationReceipt());
-            assertEquals(fixture.request().stopKey(), fixture.request().stopKey());
+            Request first = fixture.request();
+            Request replay = fixture.request();
+            assertNotNull(first.stopKey());
+            assertFalse(first.stopKey().isBlank());
+            assertEquals(first.stopKey(), replay.stopKey());
+        }
+    }
+
+    @Test public void explicitStopKeyIsReusedByIndependentClientsForOriginalMeeting() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.reply(202, "{\"inputState\":\"INPUT_COMPLETE_PENDING\",\"manifestState\":\"GENERATING\"}");
+            fixture.reply(200, "{\"inputState\":\"INPUT_ACCEPTED\",\"finalizationReceipt\":\"receipt-1\","
+                    + "\"manifestState\":\"GENERATING\"}");
+            MeetingServerClient firstClient = fixture.client();
+            MeetingServerClient rebuiltClient = fixture.client();
+            String stableStopKey = "original-meeting-stop-key";
+            StopMeetingResponse pending = firstClient.stopMeeting("mtg_stop", stableStopKey);
+            StopMeetingResponse accepted = rebuiltClient.stopMeeting("mtg_stop", stableStopKey);
+            assertFalse(pending.accepted());
+            assertEquals("INPUT_COMPLETE_PENDING", pending.inputState());
+            assertTrue(accepted.accepted());
+            assertEquals("INPUT_ACCEPTED", accepted.inputState());
+            assertEquals("GENERATING", accepted.manifestState());
+            assertEquals("receipt-1", accepted.finalizationReceipt());
+            Request first = fixture.request();
+            Request replay = fixture.request();
+            assertEquals("/v1/meetings/mtg_stop:stop", first.path());
+            assertEquals(first.path(), replay.path());
+            assertEquals("", first.body());
+            assertEquals(first.body(), replay.body());
+            assertEquals("Bearer test-token", first.authorization());
+            assertEquals(first.authorization(), replay.authorization());
+            assertEquals(stableStopKey, first.stopKey());
+            assertEquals(stableStopKey, replay.stopKey());
         }
     }
 

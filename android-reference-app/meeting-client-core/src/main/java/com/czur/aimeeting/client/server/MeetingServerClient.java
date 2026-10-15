@@ -64,6 +64,24 @@ public interface MeetingServerClient {
      */
     StopMeetingResponse stopMeeting(String meetingId) throws IOException;
 
+    /**
+     * 使用调用方保留的稳定幂等键请求结束原会议。
+     * 同一场首次 Stop 与后续重试必须传入同一个非空键，包括重新创建客户端后的重试；
+     * 键的生成、保存与恢复由调用方负责，本端口不提供持久化或进程恢复。
+     * accepted=true 仍只表示输入受理，不表示结果 READY，实际 Manifest 需另行确认。
+     *
+     * <p>默认实现保留旧端口实现的源码兼容，但明确报不支持；不能委托单参方法，
+     * 以免旧实现换用新生成的实例键，破坏原场重试的幂等性。实现与调用方均不得将键值写入日志。
+     *
+     * @param meetingId 原会议 ID，不新建会议
+     * @param stableStopKey 本场首次 Stop 与其重试共用的非空幂等键
+     * @throws IOException 请求失败，或当前端口尚不支持显式稳定幂等键
+     */
+    default StopMeetingResponse stopMeeting(String meetingId, String stableStopKey)
+            throws IOException {
+        throw new IOException("当前后端端口未实现显式停止幂等键");
+    }
+
     /** Stop 成功后由后端向会前选定邮箱发送这一场的有效期结果链接。 */
     void sendResultEmail(String meetingId, List<String> recipients, String resultUrl)
             throws IOException;
