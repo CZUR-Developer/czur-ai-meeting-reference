@@ -5,15 +5,18 @@ import com.czur.reference.application.port.model.CanonicalTranscriptEvent;
 import com.czur.reference.application.port.model.CanonicalTranslationEvent;
 import com.czur.reference.domain.meeting.MeetingState;
 
+import java.io.InputStream;
 import java.util.Objects;
 import java.util.List;
+import java.util.regex.Pattern;
 
 /**
  * Android 直连模型后向参考后端提交标准事件的最小入口。
  *
  * <p>App 只提交客户端事件身份和规范化字幕或译文；服务端负责会议归属、输入来源、
- * 全局事件序号及完整 ServerEnvelope。此端口不接收音频或模型厂商原始响应。
- * 无客户端输入标记的旧会议仍使用 WSS 音频链路。</p>
+ * 全局事件序号及完整 ServerEnvelope。录音使用单独的不可变 {@link AudioArtifact}
+ * 登记入口，正文交给既有 {@code ArtifactStore}，不进入会议事件正文或 JSON 结果。
+ * 此端口不接收模型厂商原始响应。无客户端输入标记的旧会议仍使用 WSS 音频链路。</p>
  */
 public interface ClientMeetingInputPort {
     /** 首次启动客户端事件链路，或读取同一链路已完成的启动。 */
@@ -86,6 +89,19 @@ public interface ClientMeetingInputPort {
         return new Rejected(Reason.STORAGE_UNAVAILABLE);
     }
 
+    /**
+     * 登记本场已经封口的原始录音；正文直接流入 {@code ArtifactStore}，不进入事件或 JSON。
+     *
+     * <p>录音只在首次 Create 的 {@code retainAudio=true} 时接受。调用方拥有输入流的
+     * 生命周期，核心在首次写入时读取但不会关闭它；同值重放会直接返回而不读取输入流。
+     * 这使 Android SDK 可以把本地封口文件交给同一公共产物链，而不要求 HTTP 控制消息
+     * 承载长二进制正文。</p>
+     */
+    default AudioAppendResult appendAudio(MeetingCommandContext context,
+            String meetingId, AudioArtifact request) {
+        return new Rejected(Reason.STORAGE_UNAVAILABLE);
+    }
+
     record PresentationChunk(int chunkSequence, int frameCount, byte[] content) {
         public PresentationChunk {
             if (chunkSequence <= 0 || frameCount <= 0 || content == null || content.length == 0) {
@@ -101,6 +117,42 @@ public interface ClientMeetingInputPort {
 
     record CaptureAppended(String artifactId, int chunkSequence, int frameCount,
             boolean created) implements CaptureAppendResult { }
+
+    /**
+     * 一份已经停止并完成封口的音频输入；checksum 采用小写
+     * {@code sha256:<64 位十六进制>}，contentSize 为编码后正文长度。
+     */
+    record AudioArtifact(String mediaType, long contentSize, String contentChecksum,
+            InputStream content) {
+        private static final Pattern CHECKSUM = Pattern.compile("^sha256:[0-9a-f]{64}$");
+
+        public AudioArtifact {
+            if (mediaType == null || mediaType.isBlank()
+                    || !(mediaType.startsWith("audio/")
+                        || "application/octet-stream".equals(mediaType))) {
+                throw new IllegalArgumentException("audio media type is invalid");
+            }
+            if (contentSize <= 0) {
+                throw new IllegalArgumentException("audio content size must be positive");
+            }
+            if (contentChecksum == null || !CHECKSUM.matcher(contentChecksum).matches()) {
+                throw new IllegalArgumentException("audio checksum is invalid");
+            }
+            Objects.requireNonNull(content, "content");
+        }
+
+        @Override
+        public String toString() {
+            return "AudioArtifact[mediaType=" + mediaType
+                    + ", contentSize=redacted, contentChecksumPresent=true, content=redacted]";
+        }
+    }
+
+    sealed interface AudioAppendResult permits AudioAppended, Rejected { }
+
+    /** created=false 表示同一封口录音的重放，服务端继续使用首次登记的产物。 */
+    record AudioAppended(String artifactId, long contentSize, boolean created)
+            implements AudioAppendResult { }
 
     /** 两种事件共用客户端去重身份和顺序；内容保持强类型。 */
     sealed interface ClientEvent permits ClientTranscript, ClientTranslation {
@@ -154,12 +206,12 @@ public interface ClientMeetingInputPort {
 
     /** 当前会议不可接受客户端事件；不会包含身份或正文。 */
     record Rejected(Reason reason) implements StartResult, AppendResult,
-            CaptureAppendResult, SummarySubmitResult, UsageSubmitResult {
+            CaptureAppendResult, AudioAppendResult, SummarySubmitResult, UsageSubmitResult {
         public Rejected { Objects.requireNonNull(reason, "reason"); }
     }
 
     enum Reason { NOT_FOUND, ACCESS_DENIED, INVALID_STATE, INPUT_SOURCE_CONFLICT,
         EVENT_CONFLICT, CAPABILITY_NOT_GRANTED, SPEAKER_NOT_GRANTED,
-        PRESENTATION_NOT_REQUESTED, SUMMARY_NOT_GRANTED,
+        PRESENTATION_NOT_REQUESTED, AUDIO_NOT_REQUESTED, SUMMARY_NOT_GRANTED,
         STORAGE_UNAVAILABLE }
 }

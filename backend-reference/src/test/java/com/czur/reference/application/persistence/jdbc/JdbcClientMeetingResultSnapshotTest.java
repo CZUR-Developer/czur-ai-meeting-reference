@@ -26,6 +26,7 @@ class JdbcClientMeetingResultSnapshotTest {
         assertNull(subtitle.summary());
         assertFalse(subtitle.presentationCaptureRequested());
         assertEquals(List.of(), subtitle.presentationCaptures());
+        assertNull(subtitle.audioArtifact());
 
         var body = new ObjectMapper().createObjectNode().put("title", "原纪要");
         var summary = new JdbcClientMeetingResultFinalizer.Ready(
@@ -35,6 +36,7 @@ class JdbcClientMeetingResultSnapshotTest {
         assertEquals("原纪要", summary.summary().path("title").asText());
         assertFalse(summary.presentationCaptureRequested());
         assertEquals(List.of(), summary.presentationCaptures());
+        assertNull(summary.audioArtifact());
     }
 
     @Test
@@ -53,5 +55,22 @@ class JdbcClientMeetingResultSnapshotTest {
         assertTrue(ready.presentationCaptureRequested());
         assertEquals(List.of(descriptor), ready.presentationCaptures());
         assertThrows(UnsupportedOperationException.class, () -> ready.presentationCaptures().clear());
+    }
+
+    @Test
+    void audioDescriptorIsOptionalAndKeptOutOfTheLegacyConstructors() {
+        String checksum = "sha256:" + "c".repeat(64);
+        var spec = new WriteIntentSpec("art_client_audio_2", "mtg_audio",
+                "audio.original", "application/octet-stream", null, 1, 4, checksum);
+        var descriptor = new ArtifactDescriptor(
+                new WriteIntent("intent-audio", new StorageBinding("opaque-audio"), spec),
+                new ContentClaim(4, checksum));
+        var ready = new JdbcClientMeetingResultFinalizer.Ready(
+                List.of(), List.of(), "und", 0, true, "zh-CN", null, null,
+                false, List.of(), descriptor);
+
+        assertEquals(descriptor, ready.audioArtifact());
+        assertNull(new JdbcClientMeetingResultFinalizer.Ready(
+                List.of(), List.of(), "und", 0, true, "zh-CN", null).audioArtifact());
     }
 }

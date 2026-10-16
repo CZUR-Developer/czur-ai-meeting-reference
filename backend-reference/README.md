@@ -380,9 +380,20 @@ finalizer的同一个投影。返回的Protobuf消息和列表均不可变，保
 
 `Ready`包含`transcripts`、`translations`、最终原文聚合`language`、实测
 `frozenAudioDurationMs`，以及首次Create的`retainAudioRequested`、`sourceLanguage`
-和可空`title`。真实无final返回空列表／`und`；实测0返回0；未冻结采音值返回
+和可空`title`。当首次Create请求保留录音且客户端已完成封口登记时，`audioArtifact`
+提供同场`audio.original`的不可变描述符；它只引用现有`ArtifactStore`中的流，不把
+长音频读入快照或JSON。真实无final返回空列表／`und`；实测0返回0；未冻结采音值返回
 `Rejected(INVALID_STATE)`。其他拒绝沿用`ClientMeetingInputPort.Reason`的
 `NOT_FOUND`、`ACCESS_DENIED`、`INPUT_SOURCE_CONFLICT`和`STORAGE_UNAVAILABLE`。
+
+客户端录音通过`ClientMeetingInputPort.appendAudio`进入同一公共产物链：首次 Create
+必须声明`retainAudio=true`，调用方传入已封口文件的媒体类型、编码后长度、小写
+`sha256`和`InputStream`。核心只在首次登记时读取流，不接管或关闭调用方流；同一
+`meetingId + audio.original` 的同值重放直接返回原产物，不重复读取。正文由既有
+`ArtifactStore`保存，READY descriptor写入既有产物元数据，Stop时纳入统一 Manifest。
+`MeetingHttpAssembly.artifactMediaPort()`提供与Manifest/genTime访问决定一致的流式
+读取端口，返回可关闭`ReadHandle`；长音频不经过小型JSON正文接口。HTTP上传和播放
+路由在下一小步接入，当前没有新表、新迁移或第二套结果状态机。
 
 正常发布在`STARTING/RUNNING`读取，同场`STOPPING/READY`仍可只读核对。此处的
 `Ready`是快照读取结果，不代表资源发布、用量结算或会议READY：方法只结束只读

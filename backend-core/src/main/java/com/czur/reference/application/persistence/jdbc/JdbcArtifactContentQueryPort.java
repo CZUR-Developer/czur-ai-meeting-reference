@@ -1,6 +1,7 @@
 package com.czur.reference.application.persistence.jdbc;
 
 import com.czur.reference.application.port.MeetingArtifactContentPort;
+import com.czur.reference.application.port.MeetingArtifactMediaPort;
 import com.czur.reference.application.port.MeetingManifest;
 import com.czur.reference.application.port.MeetingManifestPort;
 import com.czur.reference.application.port.artifact.ArtifactReadyMetadataStore.ReadyMetadata;
@@ -35,7 +36,7 @@ import java.util.logging.Logger;
  * 生命周期，也不把正文或底层异常写入日志。</p>
  */
 public class JdbcArtifactContentQueryPort
-        implements MeetingArtifactContentPort {
+        implements MeetingArtifactContentPort, MeetingArtifactMediaPort {
     private static final Logger LOGGER = Logger.getLogger(
             JdbcArtifactContentQueryPort.class.getName());
     private static final String OWNER_SQL =
@@ -94,30 +95,30 @@ public class JdbcArtifactContentQueryPort
     }
 
     @Override
-    public Result get(Request request) {
+    public MeetingArtifactContentPort.Result get(Request request) {
         Objects.requireNonNull(request, "request");
         try {
-            if (artifactStore == null) return new Unavailable(false);
+            if (artifactStore == null) return new MeetingArtifactContentPort.Unavailable(false);
             Optional<String> owner = findOwner(request.artifactId());
             if (owner.isEmpty()) {
-                return new NotFound();
+                return new MeetingArtifactContentPort.NotFound();
             }
             MeetingManifestPort.Result access = manifestPort.get(
                     new MeetingManifestPort.Request(owner.orElseThrow(), request.genTime()));
             if (access instanceof MeetingManifestPort.AccessDenied) {
-                return new AccessDenied();
+                return new MeetingArtifactContentPort.AccessDenied();
             }
             if (access instanceof MeetingManifestPort.Conflict) {
-                return new Conflict();
+                return new MeetingArtifactContentPort.Conflict();
             }
             if (access instanceof MeetingManifestPort.Unavailable unavailable) {
-                return new Unavailable(unavailable.retryable());
+                return new MeetingArtifactContentPort.Unavailable(unavailable.retryable());
             }
             if (access instanceof MeetingManifestPort.Pending pending) {
-                return new Pending(pending.meetingStatus());
+                return new MeetingArtifactContentPort.Pending(pending.meetingStatus());
             }
             if (!(access instanceof MeetingManifestPort.Found found)) {
-                return new NotFound();
+                return new MeetingArtifactContentPort.NotFound();
             }
 
             MeetingManifest.ArtifactRef reference = found.manifest().artifacts().stream()
@@ -131,29 +132,29 @@ public class JdbcArtifactContentQueryPort
                             && "translation.final".equals(reference.type()))
                         || (request.artifactId().startsWith("art_client_summary_")
                             && "summary.structured".equals(reference.type())))) {
-                return new NotFound();
+                return new MeetingArtifactContentPort.NotFound();
             }
             Optional<ReadyMetadata> metadata = findMetadata(request.artifactId());
             if (metadata.isEmpty() || !matches(
                     owner.orElseThrow(), reference, metadata.orElseThrow())) {
-                return new Conflict();
+                return new MeetingArtifactContentPort.Conflict();
             }
             ArtifactDescriptor expected = metadata.orElseThrow().artifact();
             try (ArtifactStore.ReadHandle read = artifactStore.openRead(
                     expected.intent().binding())) {
                 if (!expected.equals(read.artifact())) {
-                    return new Conflict();
+                    return new MeetingArtifactContentPort.Conflict();
                 }
                 int limit = request.artifactId().startsWith("art_client_")
                         ? MAX_CLIENT_CONTENT_BYTES : MAX_LEGACY_CONTENT_BYTES;
                 byte[] bytes = read.content().readNBytes(limit + 1);
                 if (bytes.length != expected.content().size()
                         || !expected.content().checksum().equals(checksum(bytes))) {
-                    return new Conflict();
+                    return new MeetingArtifactContentPort.Conflict();
                 }
                 if (!request.artifactId().startsWith("art_client_")) {
                     if (legacyValidator == null || !legacyValidator.matches(bytes, reference)) {
-                        return new Conflict();
+                        return new MeetingArtifactContentPort.Conflict();
                     }
                 }
                 // Store 读取与数据库结果查询不是一个原子事务；返回前再读一次同一
@@ -161,34 +162,124 @@ public class JdbcArtifactContentQueryPort
                 MeetingManifestPort.Result current = manifestPort.get(
                         new MeetingManifestPort.Request(owner.orElseThrow(), request.genTime()));
                 if (current instanceof MeetingManifestPort.AccessDenied) {
-                    return new AccessDenied();
+                    return new MeetingArtifactContentPort.AccessDenied();
                 }
                 if (current instanceof MeetingManifestPort.Unavailable unavailable) {
-                    return new Unavailable(unavailable.retryable());
+                    return new MeetingArtifactContentPort.Unavailable(unavailable.retryable());
                 }
                 if (!(current instanceof MeetingManifestPort.Found latest)
                         || !latest.manifest().equals(found.manifest())) {
-                    return new Conflict();
+                    return new MeetingArtifactContentPort.Conflict();
                 }
-                return new Found(bytes);
+                return new MeetingArtifactContentPort.Found(bytes);
             }
         } catch (JdbcArtifactReadyMetadataStore.StoredFactException failure) {
             return failure.kind() == JdbcArtifactReadyMetadataStore.FailureKind.CORRUPT_DATA
-                    ? new Conflict() : new Unavailable(true);
+                    ? new MeetingArtifactContentPort.Conflict()
+                    : new MeetingArtifactContentPort.Unavailable(true);
         } catch (ArtifactStoreException failure) {
-            return failure.retryable() ? new Unavailable(true) : new Conflict();
+            return failure.retryable() ? new MeetingArtifactContentPort.Unavailable(true)
+                    : new MeetingArtifactContentPort.Conflict();
         } catch (SQLException | IOException failure) {
             LOGGER.log(Level.WARNING,
                     "Artifact 正文读取失败 reason=STORAGE_UNAVAILABLE exception={0}",
                     failure.getClass().getSimpleName());
-            return new Unavailable(true);
+            return new MeetingArtifactContentPort.Unavailable(true);
         } catch (IllegalArgumentException failure) {
-            return new Conflict();
+            return new MeetingArtifactContentPort.Conflict();
         } catch (RuntimeException failure) {
             LOGGER.log(Level.WARNING,
                     "Artifact 正文读取失败 reason=INTERNAL_ERROR exception={0}",
                     failure.getClass().getSimpleName());
-            return new Unavailable(false);
+            return new MeetingArtifactContentPort.Unavailable(false);
+        }
+    }
+
+    /**
+     * 按统一 Manifest 访问决定打开长媒体流；不会把录音读入内存，也不会通过 JSON
+     * 内容端口返回。只开放已经登记为 {@code audio.original} 的 READY 产物。
+     */
+    @Override
+    public MeetingArtifactMediaPort.Result open(Request request) {
+        Objects.requireNonNull(request, "request");
+        try {
+            if (artifactStore == null) return new MeetingArtifactMediaPort.Unavailable(false);
+            Optional<String> owner = findOwner(request.artifactId());
+            if (owner.isEmpty()) return new MeetingArtifactMediaPort.NotFound();
+            MeetingManifestPort.Result access = manifestPort.get(
+                    new MeetingManifestPort.Request(owner.orElseThrow(), request.genTime()));
+            if (access instanceof MeetingManifestPort.AccessDenied) {
+                return new MeetingArtifactMediaPort.AccessDenied();
+            }
+            if (access instanceof MeetingManifestPort.Conflict) {
+                return new MeetingArtifactMediaPort.Conflict();
+            }
+            if (access instanceof MeetingManifestPort.Unavailable unavailable) {
+                return new MeetingArtifactMediaPort.Unavailable(unavailable.retryable());
+            }
+            if (access instanceof MeetingManifestPort.Pending pending) {
+                return new MeetingArtifactMediaPort.Pending(pending.meetingStatus());
+            }
+            if (!(access instanceof MeetingManifestPort.Found found)) {
+                return new MeetingArtifactMediaPort.NotFound();
+            }
+            MeetingManifest.ArtifactRef reference = found.manifest().artifacts().stream()
+                    .filter(item -> request.artifactId().equals(item.artifactId()))
+                    .findFirst().orElse(null);
+            if (reference == null || reference.status() != MeetingManifest.ArtifactStatus.READY
+                    || !"audio.original".equals(reference.type())) {
+                return new MeetingArtifactMediaPort.NotFound();
+            }
+            Optional<ReadyMetadata> metadata = findMetadata(request.artifactId());
+            if (metadata.isEmpty() || !matchesMedia(
+                    owner.orElseThrow(), reference, metadata.orElseThrow())) {
+                return new MeetingArtifactMediaPort.Conflict();
+            }
+            ArtifactDescriptor expected = metadata.orElseThrow().artifact();
+            ArtifactStore.ReadHandle read = artifactStore.openRead(expected.intent().binding());
+            boolean handedOff = false;
+            try {
+                if (!expected.equals(read.artifact())) {
+                    return new MeetingArtifactMediaPort.Conflict();
+                }
+                MeetingManifestPort.Result current = manifestPort.get(
+                        new MeetingManifestPort.Request(owner.orElseThrow(), request.genTime()));
+                if (current instanceof MeetingManifestPort.AccessDenied) {
+                    return new MeetingArtifactMediaPort.AccessDenied();
+                }
+                if (current instanceof MeetingManifestPort.Unavailable unavailable) {
+                    return new MeetingArtifactMediaPort.Unavailable(unavailable.retryable());
+                }
+                if (!(current instanceof MeetingManifestPort.Found latest)
+                        || !latest.manifest().equals(found.manifest())) {
+                    return new MeetingArtifactMediaPort.Conflict();
+                }
+                MeetingArtifactMediaPort.Found result =
+                        new MeetingArtifactMediaPort.Found(reference, read);
+                handedOff = true;
+                return result;
+            } finally {
+                if (!handedOff) read.close();
+            }
+        } catch (JdbcArtifactReadyMetadataStore.StoredFactException failure) {
+            return failure.kind() == JdbcArtifactReadyMetadataStore.FailureKind.CORRUPT_DATA
+                    ? new MeetingArtifactMediaPort.Conflict()
+                    : new MeetingArtifactMediaPort.Unavailable(true);
+        } catch (ArtifactStoreException failure) {
+            return failure.retryable() ? new MeetingArtifactMediaPort.Unavailable(true)
+                    : new MeetingArtifactMediaPort.Conflict();
+        } catch (SQLException | IOException failure) {
+            LOGGER.log(Level.WARNING,
+                    "Artifact 媒体流打开失败 reason=STORAGE_UNAVAILABLE exception={0}",
+                    failure.getClass().getSimpleName());
+            return new MeetingArtifactMediaPort.Unavailable(true);
+        } catch (IllegalArgumentException failure) {
+            return new MeetingArtifactMediaPort.Conflict();
+        } catch (RuntimeException failure) {
+            LOGGER.log(Level.WARNING,
+                    "Artifact 媒体流打开失败 reason=INTERNAL_ERROR exception={0}",
+                    failure.getClass().getSimpleName());
+            return new MeetingArtifactMediaPort.Unavailable(false);
         }
     }
 
@@ -245,6 +336,26 @@ public class JdbcArtifactContentQueryPort
                 && "application/json".equals(reference.mediaType())
                 && reference.mediaType().equals(spec.mediaType())
                 && Objects.equals(reference.language(), spec.language())
+                && reference.revision() == spec.revision()
+                && reference.size() == artifact.content().size()
+                && reference.size() == spec.expectedSize()
+                && reference.checksum().equals(artifact.content().checksum())
+                && reference.checksum().equals(spec.expectedChecksum())
+                && reference.createdAt().equals(metadata.recordedAt());
+    }
+
+    private static boolean matchesMedia(String meetingId, MeetingManifest.ArtifactRef reference,
+                                        ReadyMetadata metadata) {
+        ArtifactDescriptor artifact = metadata.artifact();
+        WriteIntentSpec spec = artifact.intent().spec();
+        return meetingId.equals(spec.meetingId())
+                && reference.artifactId().equals(spec.artifactId())
+                && "audio.original".equals(reference.type())
+                && reference.type().equals(spec.artifactType())
+                && reference.mediaType().equals(spec.mediaType())
+                && (reference.mediaType().startsWith("audio/")
+                    || "application/octet-stream".equals(reference.mediaType()))
+                && reference.language() == null && spec.language() == null
                 && reference.revision() == spec.revision()
                 && reference.size() == artifact.content().size()
                 && reference.size() == spec.expectedSize()

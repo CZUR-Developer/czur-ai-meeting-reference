@@ -251,7 +251,9 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
                         request.languages().source(), request.title(), projection.summary(),
                         request.artifactPolicy().presentationCapture(),
                         presentationCaptures(connection, engine, meetingId).stream()
-                                .map(ArtifactReadyMetadataStore.ReadyMetadata::artifact).toList());
+                                .map(ArtifactReadyMetadataStore.ReadyMetadata::artifact).toList(),
+                        request.artifactPolicy().retainAudio()
+                                ? audioOriginal(connection, engine, meetingId) : null);
             }
         }
     }
@@ -271,13 +273,15 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
      * 只取首次 Create；presentationCaptures 是已有 READY metadata 的不可变同场描述符，
      * 按从 1 连续递增的 revision 排序，仅包含引用而不载入 JPEG。部署方可以据此做旧结果
      * 格式适配，逐包经 ArtifactStore 读取，不调用模型或等待 Stop 后的最终产物；快照本身
-     * 不发布结果。</p>
+     * 不发布结果。audioArtifact 是可空的同场 {@code audio.original} READY 描述符；
+     * 只在首次 Create 请求保留录音且录音已登记时出现，不读取长音频正文。</p>
      */
     public record Ready(List<TranscriptUpsert> transcripts, List<TranslationUpsert> translations,
             String language, long frozenAudioDurationMs, boolean retainAudioRequested,
             String sourceLanguage, String title, ObjectNode summary,
             boolean presentationCaptureRequested,
-            List<ArtifactDescriptor> presentationCaptures) implements SnapshotResult {
+            List<ArtifactDescriptor> presentationCaptures,
+            ArtifactDescriptor audioArtifact) implements SnapshotResult {
         public Ready {
             transcripts = List.copyOf(transcripts);
             translations = List.copyOf(translations);
@@ -285,12 +289,22 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
             presentationCaptures = List.copyOf(presentationCaptures);
         }
 
+        /** 保留原十参构造器；旧调用方没有录音 descriptor 时明确传入 null。 */
+        public Ready(List<TranscriptUpsert> transcripts, List<TranslationUpsert> translations,
+                String language, long frozenAudioDurationMs, boolean retainAudioRequested,
+                String sourceLanguage, String title, ObjectNode summary,
+                boolean presentationCaptureRequested, List<ArtifactDescriptor> presentationCaptures) {
+            this(transcripts, translations, language, frozenAudioDurationMs, retainAudioRequested,
+                    sourceLanguage, title, summary, presentationCaptureRequested,
+                    presentationCaptures, null);
+        }
+
         /** 原纪要调用保持源兼容；未提供演示事实时不推断截图请求或引用。 */
         public Ready(List<TranscriptUpsert> transcripts, List<TranslationUpsert> translations,
                 String language, long frozenAudioDurationMs, boolean retainAudioRequested,
                 String sourceLanguage, String title, ObjectNode summary) {
             this(transcripts, translations, language, frozenAudioDurationMs, retainAudioRequested,
-                    sourceLanguage, title, summary, false, List.of());
+                    sourceLanguage, title, summary, false, List.of(), null);
         }
 
         /** 原仅字幕调用保持源兼容；此构造器明确没有已提交的纪要事实。 */
@@ -405,6 +419,17 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
                             spec.revision(), capture.artifact().content().size(),
                             capture.artifact().content().checksum(),
                             MeetingManifest.ArtifactStatus.READY, capture.recordedAt(),
+                            null, null));
+                }
+                ArtifactDescriptor audioArtifact = retainAudioRequested(connection, engine, meetingId)
+                        ? audioOriginal(connection, engine, meetingId) : null;
+                if (audioArtifact != null) {
+                    WriteIntentSpec spec = audioArtifact.intent().spec();
+                    artifactRefs.add(new MeetingManifest.ArtifactRef(
+                            spec.artifactId(), spec.artifactType(), spec.mediaType(),
+                            spec.language(), spec.revision(), audioArtifact.content().size(),
+                            audioArtifact.content().checksum(), MeetingManifest.ArtifactStatus.READY,
+                            audioReadyRecordedAt(connection, engine, meetingId, spec.artifactId()),
                             null, null));
                 }
                 MeetingManifest manifest = new MeetingManifest(
@@ -611,6 +636,44 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
             }
         }
         return captures;
+    }
+
+    /** 录音是本场最多一个不可变 audio.original；缺失时维持原无录音结果行为。 */
+    private static ArtifactDescriptor audioOriginal(Connection connection,
+            JdbcDatabaseEngine engine, String meetingId) {
+        List<ArtifactReadyMetadataStore.ReadyMetadata> audio =
+                new JdbcArtifactReadyMetadataStore(connection, engine).findByMeetingId(meetingId)
+                        .stream().filter(item -> "audio.original".equals(
+                                item.artifact().intent().spec().artifactType()))
+                        .toList();
+        if (audio.size() > 1) {
+            throw new IllegalStateException("multiple original audio artifacts");
+        }
+        if (audio.isEmpty()) return null;
+        ArtifactDescriptor descriptor = audio.getFirst().artifact();
+        WriteIntentSpec spec = descriptor.intent().spec();
+        if (!meetingId.equals(spec.meetingId()) || spec.revision() != 1
+                || spec.language() != null
+                || !(spec.mediaType().startsWith("audio/")
+                    || "application/octet-stream".equals(spec.mediaType()))) {
+            throw new IllegalStateException("original audio artifact metadata is invalid");
+        }
+        return descriptor;
+    }
+
+    private static Instant audioReadyRecordedAt(Connection connection,
+            JdbcDatabaseEngine engine, String meetingId, String artifactId) {
+        return new JdbcArtifactReadyMetadataStore(connection, engine).findByArtifactId(artifactId)
+                .filter(item -> meetingId.equals(item.artifact().intent().spec().meetingId()))
+                .map(ArtifactReadyMetadataStore.ReadyMetadata::recordedAt)
+                .orElseThrow(() -> new IllegalStateException("original audio metadata is missing"));
+    }
+
+    private static boolean retainAudioRequested(Connection connection,
+            JdbcDatabaseEngine engine, String meetingId) {
+        var first = new JdbcCreateMeetingFactStore(connection, engine)
+                .findByMeetingId(meetingId).orElse(null);
+        return first != null && first.request().requestSnapshot().artifactPolicy().retainAudio();
     }
 
     /** 两引擎共享既有最终修订规则；只读快照不使用锁定读取。 */

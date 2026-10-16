@@ -194,6 +194,9 @@ public final class HttpErrorMapper {
             case PRESENTATION_NOT_REQUESTED -> error(422, HttpErrorEnvelope.Domain.CONTRACT,
                     "PRESENTATION_NOT_REQUESTED", false, HttpErrorEnvelope.UserAction.NONE,
                     "ai_meeting.contract.presentation_not_requested");
+            case AUDIO_NOT_REQUESTED -> error(422, HttpErrorEnvelope.Domain.CONTRACT,
+                    "AUDIO_NOT_REQUESTED", false, HttpErrorEnvelope.UserAction.NONE,
+                    "ai_meeting.contract.audio_not_requested");
             case CAPABILITY_NOT_GRANTED -> error(422, HttpErrorEnvelope.Domain.ENTITLEMENT,
                     "TRANSLATION_NOT_GRANTED", false, HttpErrorEnvelope.UserAction.NONE,
                     "ai_meeting.entitlement.translation_not_granted");

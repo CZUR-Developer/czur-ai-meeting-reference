@@ -45,6 +45,7 @@ import com.czur.reference.application.persistence.jdbc.JdbcUsageReserveLookup;
 import com.czur.reference.application.port.MeetingIdGenerator;
 import com.czur.reference.application.port.MeetingManifestPort;
 import com.czur.reference.application.port.MeetingArtifactContentPort;
+import com.czur.reference.application.port.MeetingArtifactMediaPort;
 import com.czur.reference.application.port.artifact.ArtifactStore;
 import com.czur.reference.application.port.ProductProfileCatalog;
 import com.czur.reference.application.realtime.RealtimeAudioIngress;
@@ -106,6 +107,7 @@ public class MeetingHttpAssembly implements AutoCloseable {
     private final MeetingInputReconciler inputReconciler;
     private final JdbcMeetingEventLogPort eventLog;
     private final Clock clock;
+    private final MeetingArtifactMediaPort artifactMedia;
     private final EntitlementProvider entitlementProvider;
     private final AtomicBoolean closed;
 
@@ -119,7 +121,8 @@ public class MeetingHttpAssembly implements AutoCloseable {
             RealtimeTranscriptSessions realtimeTranscriptSessions,
             MeetingInputReconciler inputReconciler,
             JdbcMeetingEventLogPort eventLog, Clock clock,
-            ResultEmailEndpoint resultEmail, EntitlementProvider entitlementProvider) {
+            ResultEmailEndpoint resultEmail, MeetingArtifactMediaPort artifactMedia,
+            EntitlementProvider entitlementProvider) {
         this.closed = new AtomicBoolean();
         this.database = database;
         this.databaseContext = Objects.requireNonNull(databaseContext, "databaseContext");
@@ -134,6 +137,7 @@ public class MeetingHttpAssembly implements AutoCloseable {
         this.inputReconciler = inputReconciler;
         this.eventLog = Objects.requireNonNull(eventLog, "eventLog");
         this.clock = clock;
+        this.artifactMedia = artifactMedia;
         this.dispatcher = new MeetingHttpDispatcher(runtime, errors, contextResolver, resultEmail);
         this.entitlementProvider = entitlementProvider;
     }
@@ -154,6 +158,7 @@ public class MeetingHttpAssembly implements AutoCloseable {
         this.inputReconciler = source.inputReconciler;
         this.eventLog = source.eventLog;
         this.clock = source.clock;
+        this.artifactMedia = source.artifactMedia;
         this.entitlementProvider = source.entitlementProvider;
         this.closed = source.closed;
     }
@@ -351,10 +356,12 @@ public class MeetingHttpAssembly implements AutoCloseable {
                     .<MeetingManifestPort>map(ttl -> new JdbcMeetingManifestQueryPort(
                             databaseContext, new ManifestResultAccessPolicy(clock, ttl)))
                     .orElse(null);
-            MeetingArtifactContentPort artifact = manifest != null
+            JdbcArtifactContentQueryPort artifactQuery = manifest != null
                     ? new JdbcArtifactContentQueryPort(
                             databaseContext, manifest, artifactStore,
                             legacy == null ? null : legacy.artifactValidator()) : null;
+            MeetingArtifactContentPort artifact = artifactQuery;
+            MeetingArtifactMediaPort artifactMedia = artifactQuery;
             // REST 补拉和后续 WSS 恢复共用 meeting_event；不建立第二套事件事实源。
             var events = new JdbcMeetingEventLogPort(databaseContext);
             // 只替换模型会话材料签发端口。旧 Create.realtime 与 WSS Mock
@@ -408,7 +415,8 @@ public class MeetingHttpAssembly implements AutoCloseable {
                     realtimeRenewEnabled, realtimeVerifier, realtimeIngress,
                     realtimeTranscripts, inputReconciler, events, clock,
                     config.resultEmail().map(email -> new ResultEmailEndpoint(query, manifest,
-                            new SmtpResultEmailSender(email), errors)).orElse(null), entitlement);
+                            new SmtpResultEmailSender(email), errors)).orElse(null),
+                    artifactMedia, entitlement);
         } catch (RuntimeException | Error failure) {
             try {
                 if (runtime != null) {
@@ -456,6 +464,13 @@ public class MeetingHttpAssembly implements AutoCloseable {
 
     /** 所有模式的唯一 Context，供部署方读取同场 StartFacts／最终快照；不得单独关闭。 */
     public JdbcDatabaseContext databaseContext() { return databaseContext; }
+
+    /**
+     * 返回与统一 Manifest 访问决定共用的媒体流端口；未开启结果链接时为空。
+     * 调用方只负责在响应流结束后关闭 {@link MeetingArtifactMediaPort.Found}，不解释
+     * Store binding，也不把长音频转成 JSON 或内存字节数组。
+     */
+    public MeetingArtifactMediaPort artifactMediaPort() { return artifactMedia; }
 
     /**
      * 返回与Create和客户端Stop共用的持久权益Provider，供部署方装配既有收口Worker。

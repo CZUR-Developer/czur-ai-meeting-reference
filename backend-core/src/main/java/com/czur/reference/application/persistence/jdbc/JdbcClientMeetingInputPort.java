@@ -305,6 +305,79 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
         }
     }
 
+    @Override
+    public AudioAppendResult appendAudio(MeetingCommandContext context, String meetingId,
+            ClientMeetingInputPort.AudioArtifact request) {
+        Objects.requireNonNull(context, "context");
+        MeetingIdPolicy.requireValid(meetingId);
+        Objects.requireNonNull(request, "request");
+        if (artifactStore == null) return new Rejected(Reason.STORAGE_UNAVAILABLE);
+        String artifactId = "art_client_audio_" + sha256((meetingId + "\u0000audio.original")
+                .getBytes(StandardCharsets.UTF_8));
+        WriteIntentSpec spec = new WriteIntentSpec(artifactId, meetingId,
+                "audio.original", request.mediaType(), null, 1,
+                request.contentSize(), request.contentChecksum());
+        try (Connection connection = dataSource.getConnection()) {
+            connection.setAutoCommit(false);
+            try {
+                MeetingRow meeting = lockMeeting(connection, meetingId);
+                Rejected rejected = checkOwner(context, meeting);
+                if (rejected != null) return rollback(connection, rejected);
+                if (!clientSourceExists(connection, meetingId)) {
+                    return rollback(connection, new Rejected(Reason.INPUT_SOURCE_CONFLICT));
+                }
+                if (!audioRetentionRequested(connection, meetingId)) {
+                    return rollback(connection, new Rejected(Reason.AUDIO_NOT_REQUESTED));
+                }
+                var metadata = new JdbcArtifactReadyMetadataStore(connection, engine);
+                var previous = metadata.findByArtifactId(artifactId);
+                if (previous.isPresent()) {
+                    // 重放不读取、不关闭调用方的流；文件可能已经被调用方复用。
+                    connection.rollback();
+                    return previous.orElseThrow().artifact().intent().spec().equals(spec)
+                            ? new AudioAppended(artifactId, request.contentSize(), false)
+                            : new Rejected(Reason.EVENT_CONFLICT);
+                }
+                if (meeting.state() != MeetingState.STARTING
+                        && meeting.state() != MeetingState.RUNNING) {
+                    return rollback(connection, new Rejected(Reason.INVALID_STATE));
+                }
+                var prepared = artifactStore.createWriteIntent(spec);
+                if (prepared.status() == ArtifactStore.PrepareStatus.CONFLICT) {
+                    return rollback(connection, new Rejected(Reason.EVENT_CONFLICT));
+                }
+                var intent = prepared.intent();
+                var claim = new ContentClaim(request.contentSize(), request.contentChecksum());
+                // ArtifactStore 明确不接管输入流；所有权继续由 SDK/调用方持有。
+                artifactStore.writeContent(intent, request.content());
+                var descriptor = artifactStore.completeWrite(intent, claim).artifact();
+                var persisted = metadata.persistReady(descriptor);
+                if (persisted.status() == ArtifactReadyMetadataStore.PersistStatus.CONFLICT) {
+                    return rollback(connection, new Rejected(Reason.EVENT_CONFLICT));
+                }
+                connection.commit();
+                LOGGER.log(Level.INFO, "客户端原始录音已登记 size={0} created={1}",
+                        new Object[]{request.contentSize(),
+                                persisted.status() == ArtifactReadyMetadataStore.PersistStatus.APPLIED});
+                return new AudioAppended(artifactId, request.contentSize(),
+                        persisted.status() == ArtifactReadyMetadataStore.PersistStatus.APPLIED);
+            } catch (Exception failure) {
+                rollbackQuietly(connection);
+                LOGGER.log(Level.WARNING, "客户端原始录音保存失败 reason={0}",
+                        failure.getClass().getSimpleName());
+                return new Rejected(Reason.STORAGE_UNAVAILABLE);
+            }
+        } catch (SQLException failure) {
+            return new Rejected(Reason.STORAGE_UNAVAILABLE);
+        }
+    }
+
+    private boolean audioRetentionRequested(Connection connection, String meetingId) {
+        var first = new JdbcCreateMeetingFactStore(connection, engine)
+                .findByMeetingId(meetingId).orElse(null);
+        return first != null && first.request().requestSnapshot().artifactPolicy().retainAudio();
+    }
+
     private boolean presentationRequested(Connection connection, String meetingId) {
         var first = new JdbcCreateMeetingFactStore(connection, engine)
                 .findByMeetingId(meetingId).orElse(null);
