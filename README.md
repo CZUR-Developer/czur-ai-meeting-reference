@@ -18,7 +18,8 @@
 | `deploy/` | 后端 Docker Compose 示例 |
 
 合作伙伴扩展开会条件时，按 [`android-reference-app/README.md`](android-reference-app/README.md#合作伙伴会前开会条件-hook)
-替换参考 App 的默认放行检查。参考工程不包含扫码接收、小程序或录音归档；伙伴可自行
+替换参考 App 的默认放行检查。参考工程默认不包含扫码接收和小程序接收端；录音已
+按可选 `audio.original` 能力接入公共产物链并由 Web 流式回放，伙伴仍可自行
 开发接收者流程并在开会前读取其已缓存的状态，不必修改模型或会议收口链。
 
 ## 本机开发验证
@@ -66,6 +67,9 @@ Gradle 和 Android 构建插件。Web 按 `web-reference/README.md` 生成静态
 禁止提交生产地址、密钥、证书、用户数据、AOSP Framework/vendor/HAL、
 设备签名配置、CZUR 云端代码和闭源 SDK 二进制。所有本地配置放在未跟踪的
 `.env` 或外部密钥管理系统中；`.env.example` 仅包含占位值。
+
+合作伙伴接入、能力缺失行为、模型／登录／结果动作扩展和交付边界见
+[`docs/partner-integration-guide.md`](docs/partner-integration-guide.md)。
 
 ## 开源发布
 

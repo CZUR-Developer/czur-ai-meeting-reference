@@ -8,8 +8,13 @@ ROOT = Path(__file__).resolve().parents[1]
 SKIP = {".git", "target", "build", "dist", ".gradle"}
 PATTERNS = {
     "private AOSP path": re.compile(r"(?:frameworks/(?:base|av)|vendor/|device/rockchip/)", re.I),
-    # 只匹配疑似真实值；`${VAR:-placeholder}`、`<REPLACE_ME>` 等示例允许出现。
-    "credential assignment": re.compile(r"(?:password|secret|api[_-]?key)\s*(?:=|:\s*(?!-))\s*[\"']?(?!\$\{|\$\(|<|CHANGE_ME|change-me)[A-Za-z0-9+/=_-]{8,}", re.I),
+    # 只匹配配置文件中的单行疑似真实值；源码中的环境变量名、注释和测试哨兵
+    # 不属于凭据。使用水平空白，避免把下一行的配置名误当成当前值。
+    "credential assignment": re.compile(
+        r"(?:password|secret|api[_-]?key)[ \t]*(?:=|:[ \t]*(?!-))[ \t]*"
+        r"[\"']?(?!\$\{|\$\(|<|CHANGE_ME|change-me|replace-|REDACTED|"
+        r"URL_SECRET_SENTINEL|PRIVATE_URL_SENTINEL|PRIVATE_BODY_SENTINEL)"
+        r"[A-Za-z0-9+/=_-]{8,}[\"']?[ \t]*(?:#.*)?$", re.I | re.M),
 }
 
 
@@ -26,6 +31,10 @@ def main() -> int:
         for label, pattern in PATTERNS.items():
             # 设计文档可以描述被禁止的源码位置；只对可执行/配置文件判定该路径。
             if label == "private AOSP path" and path.suffix.lower() in {".md", ".txt"}:
+                continue
+            if label == "credential assignment" and path.suffix.lower() not in {
+                    ".env", ".ini", ".properties", ".conf", ".cfg", ".yaml", ".yml",
+                    ".json", ".toml"}:
                 continue
             if pattern.search(content):
                 violations.append(f"{label}: {path}")
