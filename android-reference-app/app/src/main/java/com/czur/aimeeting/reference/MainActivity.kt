@@ -119,9 +119,11 @@ class MainActivity : Activity() {
             targetLanguageView.isEnabled = translation && deploymentLanguages.size >= 2
             if (translation) presentationCaptureView.isChecked = false
             presentationCaptureView.isEnabled = !translation && ScreenCaptureSourceFactory.isSupported()
-            page.showSetupMode(translation)
+            page.showSetupMode(translation, summaryCapabilityAvailable())
         }
-        summaryEnabledView.setOnCheckedChangeListener { _, _ -> page.showSetupMode(translationModeView.isChecked) }
+        summaryEnabledView.setOnCheckedChangeListener { _, _ ->
+            page.showSetupMode(translationModeView.isChecked, summaryCapabilityAvailable())
+        }
         page.swapLanguages.setOnClickListener {
             val source = sourceLanguageView.selectedItemPosition
             val target = targetLanguageView.selectedItemPosition
@@ -252,23 +254,22 @@ class MainActivity : Activity() {
         Log.i(TAG, "参考账号已退出")
     }
     private fun refreshModeAvailability() {
-        val summary = displayedIdentity != null && deploymentCapabilities.contains(MeetingCapabilityState.SUMMARY)
+        val summary = summaryCapabilityAvailable()
         val translation = displayedIdentity != null && deploymentCapabilities.contains(MeetingCapabilityState.TRANSLATION) && deploymentLanguages.size >= 2
         summaryEnabledView.text = "生成会议纪要"
-        summaryEnabledView.contentDescription = if (summary) "生成会议纪要" else "生成会议纪要，当前不可用"
-        summaryEnabledView.isEnabled = summary
-        if (!summary) summaryEnabledView.isChecked = false
-        translationModeView.text = "AI双语互译"; translationModeView.alpha = if (translation) 1f else .5f
-        translationModeView.isEnabled = translation
-        if (!translation && translationModeView.isChecked) transcriptModeView.isChecked = true
+        summaryEnabledView.contentDescription = "生成会议纪要"
+        translationModeView.text = "AI双语互译"; translationModeView.alpha = 1f
+        page.showCapabilityOptions(summary, translation)
         targetLanguageView.isEnabled = translation && translationModeView.isChecked
         val screenCapture = ScreenCaptureSourceFactory.isSupported()
         presentationCaptureView.text = if (screenCapture) "演示文稿" else "演示文稿（Mock不支持截图）"
         presentationCaptureView.contentDescription = if (screenCapture) "演示文稿，开始时申请系统屏幕采集授权" else "Mock构建不提供截图，请使用SDK构建"
         presentationCaptureView.isEnabled = screenCapture && !translationModeView.isChecked
         if (!screenCapture) presentationCaptureView.isChecked = false
-        page.showSetupMode(translationModeView.isChecked)
+        page.showSetupMode(translationModeView.isChecked, summary)
     }
+    private fun summaryCapabilityAvailable(): Boolean =
+        displayedIdentity != null && deploymentCapabilities.contains(MeetingCapabilityState.SUMMARY)
     /** 保留仍可用的选择，初次发现取后端前两项，不硬编码模型语言。 */
     private fun refreshLanguageOptions(languages: List<String>) {
         val source = deploymentLanguages.getOrNull(sourceLanguageView.selectedItemPosition)
@@ -453,7 +454,9 @@ class MainActivity : Activity() {
         }
         val bilingual = state.display.bilingual()
         val pendingSide = bilingual && state.display.rows().isNotEmpty() && state.display.rows().last().sourceSide() == MeetingDisplaySnapshot.Side.UNRESOLVED
-        meetingTitle.text = if (bilingual) { if (pendingSide) "AI双语互译 · 语言识别中…" else "AI双语互译" } else "AI会议纪要"
+        meetingTitle.text = if (bilingual) {
+            if (pendingSide) "AI双语互译 · 语言识别中…" else "AI双语互译"
+        } else if (state.summaryEnabled) "AI会议纪要" else "AI字幕"
         leftLanguageTitle.text = "左侧发言"; rightLanguageTitle.text = "右侧发言"; page.showBilingual(bilingual)
         transcriptView.visibility = if (!bilingual && transcriptRows.isEmpty()) View.VISIBLE else View.GONE
         // 插件提供的已准备 UI 操作只在可见页面消费，不根据动作类型分支。

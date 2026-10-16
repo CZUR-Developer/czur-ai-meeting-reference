@@ -97,6 +97,39 @@ class ReferenceMeetingPageTest {
         assertEquals("（实时将两种语言进行互译）", page.root.findViewById<TextView>(R.id.setup_subtitle).text.toString())
     }
 
+    @Test fun missingTranslationAndSummaryHideOnlyThoseEntrancesAndKeepCaptions() {
+        val activity = Robolectric.buildActivity(Activity::class.java).create().get()
+        val page = MeetingPageViews.DefaultFactory().create(activity)
+
+        page.showCapabilityOptions(summaryAvailable = false, translationAvailable = false)
+        page.showSetupMode(translation = false, summaryAvailable = false)
+
+        assertEquals(View.GONE, page.translationMode.visibility)
+        assertEquals(View.GONE, page.summary.visibility)
+        assertEquals(View.VISIBLE, page.transcriptMode.visibility)
+        assertTrue(page.transcriptMode.isChecked)
+        assertEquals("AI字幕", page.setupTitle.text.toString())
+        assertEquals(ViewGroup.LayoutParams.MATCH_PARENT, page.transcriptMode.layoutParams.width)
+
+        page.showCapabilityOptions(summaryAvailable = true, translationAvailable = true)
+        page.showSetupMode(translation = false, summaryAvailable = true)
+        assertEquals(View.VISIBLE, page.translationMode.visibility)
+        assertEquals(View.VISIBLE, page.summary.visibility)
+        assertEquals("AI会议纪要", page.setupTitle.text.toString())
+        assertEquals("AI双语互译", page.translationMode.text.toString())
+        assertNotEquals(ViewGroup.LayoutParams.MATCH_PARENT, page.transcriptMode.layoutParams.width)
+        page.translationMode.performClick()
+        assertTrue(page.translationMode.isChecked)
+        page.showSetupMode(translation = true, summaryAvailable = true)
+        assertTrue(page.targetContainer.visibility == View.VISIBLE)
+        page.showCapabilityOptions(summaryAvailable = true, translationAvailable = false)
+        page.showSetupMode(translation = false, summaryAvailable = true)
+        assertEquals(View.GONE, page.translationMode.visibility)
+        assertFalse(page.targetLanguage.isEnabled)
+        assertTrue(page.transcriptMode.isChecked)
+        assertEquals(ViewGroup.LayoutParams.MATCH_PARENT, page.transcriptMode.layoutParams.width)
+    }
+
     @Test fun accountEntryAndConnectionReturnCloseOldClientAndClearOldCapabilities() {
         val activity = Robolectric.buildActivity(MainActivity::class.java).create().get()
         activity.findViewById<View>(R.id.account_button).performClick()
@@ -132,6 +165,7 @@ class ReferenceMeetingPageTest {
         render(activity, single, 1, 47)
         measure(page.root)
         assertEquals(View.VISIBLE, page.meetingPanel.visibility)
+        assertEquals("AI字幕", page.meetingTitle.text.toString())
         assertEquals(47, page.level.progress)
         assertEquals(47, page.voiceLevel.getLevel())
         assertEquals(View.GONE, page.levelText.visibility)

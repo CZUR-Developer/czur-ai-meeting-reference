@@ -65,12 +65,15 @@ class MeetingPageViews(@JvmField val root: FrameLayout) {
     private val bilingualControlsSlot: FrameLayout = root.findViewById(R.id.bilingual_controls_slot)
     @JvmField val placeholder = SubtitleViewFactory.create(root.context, 24f, 3, false)
     private val scale: ReferenceUiScale
+    /** 记录缩放后的原始宽度；只在翻译入口隐藏时让字幕入口填满模式栏。 */
+    private var transcriptModeDesignWidth = 0
     init {
         placeholder.setTextColor(Color.WHITE)
         SubtitleViewFactory.render(placeholder, "", "记录中…", .8f)
         transcriptList.addView(placeholder)
         setupCard.clipToOutline = true
         scale = ReferenceUiScale.bind(root)
+        transcriptModeDesignWidth = transcriptMode.layoutParams.width
         SubtitleViewFactory.setLineHeightPx(placeholder, scale.px(36))
         icon(stop, R.drawable.czur_ref_stop, 40, 40)
         icon(overlay, R.drawable.czur_ref_minimize, 40, 40)
@@ -103,7 +106,31 @@ class MeetingPageViews(@JvmField val root: FrameLayout) {
         choice.setPadding(scale.px(24), 0, 0, 0)
         choice.compoundDrawablePadding = scale.px(24); choice.minHeight = scale.px(58)
     }
-    fun showSetupMode(translation: Boolean) {
+
+    /**
+     * 按登录后能力发现结果收敛会前入口。
+     *
+     * 互译或总结缺失时不留一个看似可点、实际无法建立的入口；字幕是剩余能力时仍
+     * 保持可用，并让唯一的字幕入口占满模式栏。这里仅改变 View 的呈现和选择状态，
+     * 不修改 SDK 的能力快照，也不把缺失能力伪造成降级成功。
+     */
+    fun showCapabilityOptions(summaryAvailable: Boolean, translationAvailable: Boolean) {
+        if (!translationAvailable && translationMode.isChecked) transcriptMode.isChecked = true
+        translationMode.visibility = if (translationAvailable) View.VISIBLE else View.GONE
+        translationMode.isEnabled = translationAvailable
+        summary.visibility = if (summaryAvailable) View.VISIBLE else View.GONE
+        summary.isEnabled = summaryAvailable
+        if (!summaryAvailable) summary.isChecked = false
+        targetLanguage.isEnabled = translationAvailable && translationMode.isChecked
+        transcriptMode.layoutParams = transcriptMode.layoutParams.apply {
+            width = if (translationAvailable) transcriptModeDesignWidth else ViewGroup.LayoutParams.MATCH_PARENT
+        }
+    }
+
+    /**
+     * 保留旧调用者的默认标题行为；参考入口在能力收敛时传入真实的总结能力。
+     */
+    fun showSetupMode(translation: Boolean, summaryAvailable: Boolean = true) {
         targetContainer.visibility = if (translation) View.VISIBLE else View.GONE
         swapLanguages.visibility = if (translation) View.VISIBLE else View.GONE
         presentation.visibility = if (translation) View.GONE else View.VISIBLE
@@ -114,7 +141,7 @@ class MeetingPageViews(@JvmField val root: FrameLayout) {
             setTextSize(TypedValue.COMPLEX_UNIT_PX, scale.px(if (translation) 20 else 30).toFloat())
             setTypeface(null, if (translation) Typeface.NORMAL else Typeface.BOLD)
         }
-        setupTitle.text = if (translation) "AI双语互译" else "AI会议纪要"
+        setupTitle.text = if (translation) "AI双语互译" else if (summaryAvailable) "AI会议纪要" else "AI字幕"
         root.findViewById<TextView>(R.id.setup_subtitle).text = if (translation) "（实时将两种语言进行互译）" else "（实时将声音转文字）"
     }
     fun textRow(ignoredLegacySp: Float, translated: Boolean): TextView =
