@@ -55,8 +55,13 @@ class MeetingSetup(
     fun targetLanguages() = toOptions().targetLanguages()
 
     /** UI 与 Hook 只转换到组合层唯一业务类型，不重建协议状态。 */
-    fun toOptions() = MeetingOptions(MeetingOptions.Mode.valueOf(mode.name), sourceLanguage, targetLanguage,
-        presentationCapture, resultOptions, resultWebUrl, resultEmails, summaryEnabled)
+    fun toOptions(): MeetingOptions {
+        val options = MeetingOptions(MeetingOptions.Mode.valueOf(mode.name), sourceLanguage, targetLanguage,
+            presentationCapture, resultOptions, resultWebUrl, resultEmails, summaryEnabled)
+        // 只有 SDK 运行时真正能封口录音时才向服务端请求 audio.original；Mock 保持无音频路径。
+        return options.withCreateParameters("参考会议", "Asia/Shanghai",
+            MeetingRuntimeFactory.supportsRetainedAudio())
+    }
 
     companion object {
         @JvmStatic fun transcript(sourceLanguage: String, resultWebUrl: String) = MeetingSetup(

@@ -31,4 +31,5 @@ object MeetingRuntimeFactory {
                     + "\"keyPoints\":[\"标准字幕已形成最终结果\"],\"actionItems\":[\"检查会后纪要结果\"]}", input.language())
         })
     @JvmStatic fun requiresMicrophone() = false
+    @JvmStatic fun supportsRetainedAudio() = false
 }

@@ -3,6 +3,7 @@ package com.czur.aimeeting.reference.meeting
 import android.content.Context
 import com.czur.aimeeting.client.ClientIdentity
 import com.czur.aimeeting.client.MeetingClientConfig
+import com.czur.aimeeting.client.HttpMeetingArtifactPublisher
 import com.czur.aimeeting.client.MeetingProfile
 import com.czur.aimeeting.client.MeetingDiscovery
 import com.czur.aimeeting.client.ModelAdapterRegistry
@@ -137,6 +138,7 @@ object MeetingAppAssembly {
     /** 页面和 Service 共用身份来源，分别创建自己的客户端与串行回调队列。 */
     @JvmStatic @Synchronized fun clientConfig(callbacks: Executor) = MeetingClientConfig(serverUrl, identityProvider,
         ClientIdentity.reference(), MeetingProfile.reference(), callbacks)
+        .withArtifactPublisher(HttpMeetingArtifactPublisher())
     @JvmStatic @Synchronized fun clearReferenceSession() { (identityProvider as? LoginIdentityProvider)?.clearSession() }
 
     private const val KEY_BACKEND_URL = "backend_url"
