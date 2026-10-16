@@ -6,17 +6,23 @@ import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.security.MessageDigest
 import java.nio.charset.StandardCharsets
 import java.util.Base64
 import java.util.UUID
 
 /** 参考会议后端 HTTP 实现，身份从冻结配置取得，不写入 APK 或日志。 */
 class HttpMeetingServerClient(config: MeetingClientConfig) : MeetingServerClient {
+    /** 录音发布器只需要地址和本场冻结 Token，不重新读取或刷新应用身份。 */
+    constructor(serverUrl: String, accessToken: String) : this(
+        MeetingClientConfig.reference(serverUrl, accessToken))
+
     private val baseUrl = config.serverUrl().removeSuffix("/")
     private val bearerToken = config.accessToken()
     private val identity = config.clientIdentity()
@@ -138,6 +144,36 @@ class HttpMeetingServerClient(config: MeetingClientConfig) : MeetingServerClient
             post("/v1/meetings/$meetingId:sendResultEmail", body.toString(), null, 200)
         } catch (invalid: JSONException) { throw IOException("邮箱结果请求格式错误", invalid) }
     }
+
+    /**
+     * 发布 SDK 已封口的原始音频。正文始终是文件流，服务端返回的登记事实必须与本场
+     * meetingId、文件长度和 accepted 标记一致；不把对象地址或存储 binding 传播到 App。
+     */
+    @Throws(IOException::class)
+    fun publishAudio(meetingId: String, audio: SealedAudioArtifact) {
+        if (meetingId.isBlank() || meetingId != audio.meetingId()) {
+            throw IOException("音频产物与会议 ID 不一致")
+        }
+        val file = audio.file()
+        val size = file.length()
+        if (!file.isFile || size <= 0L || size != audio.encodedBytes()) {
+            throw IOException("封口音频文件事实不一致")
+        }
+        val checksum = sha256(file)
+        val response = postBinary("/v1/meetings/$meetingId/audio-original", file,
+            audio.contentType(), size, checksum)
+        try {
+            val body = JSONObject(response.body)
+            if (body.getString("meetingId") != meetingId
+                || body.getLong("size") != size
+                || body.getString("artifactId").isBlank()
+                || !body.getBoolean("accepted")) {
+                throw IOException("音频登记确认与本场封口事实不一致")
+            }
+        } catch (invalid: JSONException) {
+            throw IOException("音频登记响应格式错误", invalid)
+        }
+    }
     @Throws(IOException::class)
     override fun readResult(meetingId: String, genTime: Long, includeContent: Boolean): MeetingResult {
         val query = "?genTime=$genTime"
@@ -250,6 +286,47 @@ class HttpMeetingServerClient(config: MeetingClientConfig) : MeetingServerClient
             for (expected in accepted) if (status == expected) return connection.inputStream.use { Response(status, readUtf8(it)) }
             throw IOException("后端请求失败，HTTP $status")
         } finally { connection.disconnect() }
+    }
+
+    private fun postBinary(path: String, file: File, contentType: String,
+        contentLength: Long, checksum: String): Response {
+        val connection = URL(baseUrl + path).openConnection() as HttpURLConnection
+        try {
+            connection.requestMethod = "POST"
+            connection.connectTimeout = 10_000
+            connection.readTimeout = 60_000
+            connection.setRequestProperty("Authorization", "Bearer $bearerToken")
+            connection.setRequestProperty("Accept", "application/json")
+            connection.setRequestProperty("Content-Type", contentType)
+            connection.setRequestProperty("Content-Length", contentLength.toString())
+            connection.setRequestProperty("X-Content-SHA256", checksum)
+            connection.doOutput = true
+            connection.setFixedLengthStreamingMode(contentLength)
+            file.inputStream().use { input ->
+                connection.outputStream.use { output -> input.copyTo(output, 16 * 1024) }
+            }
+            val status = connection.responseCode
+            if (status != 200 && status != 201) {
+                throw IOException("音频上传失败，HTTP $status")
+            }
+            return connection.inputStream.use { Response(status, readUtf8(it)) }
+        } finally { connection.disconnect() }
+    }
+
+    private fun sha256(file: File): String {
+        val digest = try { MessageDigest.getInstance("SHA-256") }
+        catch (missing: Exception) { throw IOException("SHA-256 不可用", missing) }
+        file.inputStream().use { input ->
+            val buffer = ByteArray(16 * 1024)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                if (count > 0) digest.update(buffer, 0, count)
+            }
+        }
+        val hex = StringBuilder("sha256:")
+        for (value in digest.digest()) hex.append("%02x".format(value.toInt() and 0xff))
+        return hex.toString()
     }
     private data class Response(val status: Int, val body: String)
     companion object {

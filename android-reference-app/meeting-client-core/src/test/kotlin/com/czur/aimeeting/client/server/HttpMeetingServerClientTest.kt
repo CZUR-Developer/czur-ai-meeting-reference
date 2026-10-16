@@ -15,10 +15,12 @@ import com.czur.aimeeting.client.MeetingProfile
 import com.czur.aimeeting.client.MeetingResult
 import com.czur.aimeeting.client.PresentationFrame
 import com.czur.aimeeting.client.result.ResultOptions
+import com.czur.aimeeting.model.SealedAudioArtifact
 import com.sun.net.httpserver.HttpServer
 import java.io.IOException
 import java.net.InetSocketAddress
 import java.nio.charset.StandardCharsets
+import java.nio.file.Files
 import java.util.Base64
 import java.util.concurrent.BlockingQueue
 import java.util.concurrent.LinkedBlockingQueue
@@ -327,14 +329,44 @@ class HttpMeetingServerClientTest {
         }
     }
 
+    @Test fun sealedAudioUsesBinaryBodyChecksumAndValidatesRegistration() {
+        Fixture().use { fixture ->
+            val bytes = byteArrayOf(1, 2, 3, 4, 5, 6)
+            val file = Files.createTempFile("reference-audio", ".pcm").toFile()
+            file.writeBytes(bytes)
+            try {
+                fixture.reply(201, "{\"meetingId\":\"mtg_audio\",\"artifactId\":\"art_audio\","
+                    + "\"size\":6,\"accepted\":true}")
+                val audio = SealedAudioArtifact("mtg_audio", file,
+                    SealedAudioArtifact.Format.PCM16, bytes.size.toLong(), bytes.size.toLong())
+                fixture.client().publishAudio("mtg_audio", audio)
+                val request = fixture.request()
+                assertEquals("/v1/meetings/mtg_audio/audio-original", request.path())
+                assertEquals("Bearer test-token", request.authorization())
+                assertEquals("application/octet-stream", request.contentType())
+                assertEquals("6", request.contentLength())
+                assertEquals("sha256:7192385c3c0605de55bb9476ce1d9074"
+                    + "8190ecb32a8eed7f5207b30cf6a1fe89", request.checksum())
+                assertArrayEquals(bytes, request.bodyBytes())
+            } finally {
+                Files.deleteIfExists(file.toPath())
+            }
+        }
+    }
+
     private fun options(): MeetingOptions = MeetingOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT, "en-US", "zh-CN", false,
         MeetingOptions.ResultDelivery.WEB, "https://result.example.test/index.html", emptyList())
     private data class Reply(val status: Int, val body: String)
-    private data class Request(private val path: String, private val body: String, private val authorization: String?, private val stopKey: String?) {
+    private data class Request(private val path: String, private val body: String, private val authorization: String?, private val stopKey: String?,
+        private val contentType: String?, private val contentLength: String?, private val checksum: String?, private val bytes: ByteArray) {
         fun path(): String = path
         fun body(): String = body
         fun authorization(): String? = authorization
         fun stopKey(): String? = stopKey
+        fun contentType(): String? = contentType
+        fun contentLength(): String? = contentLength
+        fun checksum(): String? = checksum
+        fun bodyBytes(): ByteArray = bytes.clone()
     }
     private class Fixture : AutoCloseable {
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
@@ -342,8 +374,11 @@ class HttpMeetingServerClientTest {
         val requests: BlockingQueue<Request> = LinkedBlockingQueue()
         init {
             server.createContext("/") { exchange ->
-                requests.add(Request(exchange.requestURI.toString(), String(exchange.requestBody.readAllBytes(), StandardCharsets.UTF_8),
-                    exchange.requestHeaders.getFirst("Authorization"), exchange.requestHeaders.getFirst("Idempotency-Key")))
+                val bytes = exchange.requestBody.readAllBytes()
+                requests.add(Request(exchange.requestURI.toString(), String(bytes, StandardCharsets.UTF_8),
+                    exchange.requestHeaders.getFirst("Authorization"), exchange.requestHeaders.getFirst("Idempotency-Key"),
+                    exchange.requestHeaders.getFirst("Content-Type"), exchange.requestHeaders.getFirst("Content-Length"),
+                    exchange.requestHeaders.getFirst("X-Content-SHA256"), bytes))
                 val reply = replies.poll()
                 val body = (reply?.body ?: "{}").toByteArray(StandardCharsets.UTF_8)
                 exchange.sendResponseHeaders(reply?.status ?: 500, body.size.toLong())
