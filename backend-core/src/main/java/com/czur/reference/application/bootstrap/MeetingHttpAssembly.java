@@ -308,7 +308,6 @@ public class MeetingHttpAssembly implements AutoCloseable {
                     "entitlementProviderDecorator result");
             var errors = new HttpErrorMapper();
             var referenceLogin = login;
-            var capabilities = new ReferenceDeploymentCapabilitiesEndpoint(config, errors);
             var decoder = new ReferenceMeetingHttpRequestDecoder(
                     config.audience(), config.clientId());
             var resolver = new AuthenticatedMeetingHttpContextResolver(
@@ -368,6 +367,9 @@ public class MeetingHttpAssembly implements AutoCloseable {
                     : config.bailianSummarySession()
                             .<SummarySessionIssuer>map(summary -> new BailianSummarySessionIssuer(summary, clock))
                             .orElse(null);
+            // 能力发现必须依据最终装配结果；不能仅依据百炼配置隐藏宿主自定义总结 Provider。
+            var capabilities = new ReferenceDeploymentCapabilitiesEndpoint(
+                    config, errors, summarySessions != null);
             var modelSessionLanguages = modelSessions == null && summarySessions == null ? null
                     : new JdbcModelSessionLanguageLookup(databaseContext);
             if (config.createEnabled()) {

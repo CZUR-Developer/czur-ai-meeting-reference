@@ -18,6 +18,17 @@ public final class ReferenceDeploymentCapabilitiesEndpoint {
 
     public ReferenceDeploymentCapabilitiesEndpoint(MeetingDeploymentConfig config,
             HttpErrorMapper errors) {
+        this(config, errors, config.bailianSummarySession().isPresent());
+    }
+
+    /**
+     * 由宿主装配后传入总结发行器是否已注册。
+     *
+     * <p>默认构造保留参考配置的百炼判断；自定义宿主可以注入其他
+     * {@code SummarySessionIssuer}，此时不能再用百炼配置反推总结能力。</p>
+     */
+    public ReferenceDeploymentCapabilitiesEndpoint(MeetingDeploymentConfig config,
+            HttpErrorMapper errors, boolean summarySessionAvailable) {
         this.errors = errors;
         TreeSet<String> available = new TreeSet<>();
         if (config.createEnabled()) {
@@ -25,7 +36,7 @@ public final class ReferenceDeploymentCapabilitiesEndpoint {
             available.retainAll(config.entitlement().supportedCapabilities());
             available.retainAll(config.mockCapabilities().capabilities());
             available.removeIf(capability -> !config.capabilityLimits().permits(capability));
-            if (config.bailianSummarySession().isEmpty()) {
+            if (!summarySessionAvailable) {
                 available.remove(CapabilityIds.SUMMARY_STRUCTURED);
             }
         }

@@ -133,6 +133,15 @@ class ReferenceMeetingDeploymentConfigTest {
         String enabled = withIssuer.handle(request).body();
         assertTrue(enabled.contains(CapabilityIds.SUMMARY_STRUCTURED));
         assertFalse(enabled.contains("permanent-local-only"));
+
+        // 宿主可以使用非百炼 SummarySessionIssuer；能力发现应依据装配事实，而非供应商配置。
+        values.remove(BailianSummarySessionConfig.ENABLED);
+        values.remove(BailianSummarySessionConfig.APP_ID);
+        values.remove(BailianSummarySessionConfig.API_KEY);
+        var customIssuer = new ReferenceDeploymentCapabilitiesEndpoint(
+                ReferenceMeetingDeploymentConfig.fromEnvironment(values), new HttpErrorMapper(), true);
+        assertTrue(customIssuer.handle(request).body().contains(CapabilityIds.SUMMARY_STRUCTURED));
+
         values.put(ReferenceMeetingDeploymentConfig.DISABLED_CAPABILITIES,
                 CapabilityIds.SUMMARY_STRUCTURED);
         var disabled = new ReferenceDeploymentCapabilitiesEndpoint(
