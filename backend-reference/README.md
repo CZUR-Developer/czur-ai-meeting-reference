@@ -6,6 +6,39 @@
 现有测试保留在本模块 `src/test/java/`，通过普通核心依赖同时验证公共与参考行为。
 IntelliJ IDEA 打开仓库根 `pom.xml`，即可导入两个 Module。
 
+## 本机局域网客户端直连入口
+
+`ReferenceClientMeetingMain`／`ReferenceClientMeetingProcess` 是 P10 的本机参考入口。
+它只启动 HTTP，不启动旧 WSS 音频链或后台 Mock 收口 Worker；Android 通过
+`POST /v1/meetings/{meetingId}:modelSession` 取得短期模型材料后直连 Provider，标准
+字幕／译文／用量事件仍回写同一会议 HTTP 核心。这样可以直接验证“App→模型”和“App→
+参考后端”的边界，不把音频错误地转发到后端。
+
+开发机可按以下顺序运行（不使用 Docker 做开发检查）：
+
+```bash
+cp tools/reference-client.env.example tools/reference-client.env
+# 编辑本机数据库、演示账号、局域网监听地址和模型 Adapter；不要提交该文件。
+bash tools/migrate-reference-client.sh
+bash tools/run-reference-client-backend.sh
+# 另一个终端：
+bash tools/check-reference-backend.sh
+bash tools/run-reference-web.sh
+```
+
+数据库必须先执行仓库内唯一的 `deploy/migrations/V001__initial_schema.sql`；应用启动
+只做只读 readiness，不自动建表或修补结构。`AI_MEETING_HTTP_BIND` 可以使用
+`0.0.0.0:8080`，Android 的后端地址要填开发 PC 的局域网 IP，例如
+`http://192.168.1.20:8080`，不能填设备自己的 `127.0.0.1`。`AI_MEETING_WSS_ORIGIN`
+在该入口仅保留公开 Create 的兼容字段，不代表本进程启动了 WSS。
+
+最小模板使用本机 `sample-json-ws-model.py`，用于先验证路由和 Adapter 装配；真实
+听悟／总结验证时将 Adapter、语言和能力声明改为已获准的外部配置，长期 Key 只留在
+本机环境或 Secret 注入中。启动日志只记录阶段、端口和固定类别，不打印凭据、模型
+JoinUrl 或请求正文。参考宿主也可通过 `ReferenceMeetingHttpAssembly.startClientModel`
+传入自己的 `SessionLoginEndpoint`、`ModelSessionIssuer` 和 `SummarySessionIssuer`，
+不改核心会议流程。
+
 这是公开仓中的 Java 21 参考后端，用于展示会议领域状态、能力计划、可替换的
 Model Driver 端口和 PostgreSQL 事实源边界。领域、命令和应用端口保持与 HTTP
 框架、数据库实现、厂商 SDK 和生产服务解耦；Provider 特有的响应转换只能位于

@@ -216,7 +216,8 @@ public final class ReferenceMeetingProcess implements AutoCloseable {
         }
     }
 
-    private static InetSocketAddress bind(Map<String, String> values, String key) {
+    /** 解析参考进程的 host:port 配置；客户端直连进程复用同一网络约定。 */
+    static InetSocketAddress bind(Map<String, String> values, String key) {
         String value = required(values, key).trim();
         int separator = value.lastIndexOf(':');
         if (separator <= 0 || separator == value.length() - 1) {
