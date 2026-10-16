@@ -75,9 +75,17 @@ public final class StoppedMeetingCheckpoint {
         return new StoppedMeetingCheckpoint(context, stableStopKey, Phase.READY, genTime);
     }
 
+    /** 只替换正常身份扩展已批准的访问材料，原会议／文件／用量／ACK／停止键保持。 */
+    StoppedMeetingCheckpoint withAccessToken(String accessToken) {
+        return new StoppedMeetingCheckpoint(context.withAccessToken(accessToken),
+                stableStopKey, phase, genTime);
+    }
+
     /**
      * Store 在同一记录上保存公共进度时复用此合并规则：先核对原场／文件／用量／
-     * 访问信息／Stop 键，再保留更先进的 ACK 前缀。旧候选重入不得倒退阶段，Stop 后
+     * 服务归属／Stop 键，再保留更先进的 ACK 前缀。访问凭据是可续签材料，使用 update
+     * 中正常身份流程已批准的值，不当作不可变原事实。协调器重试先读 Store 最新记录，
+     * 再交身份扩展，不能拿较旧内存候选回写旧凭据。旧候选重入不得倒退阶段，Stop 后
      * 已保存的 genTime 不得替换。此方法只合并公共字段，Store 仍须保留自身已有的
      * 私有登记 ACK、发布计划等附加字段，不能拿公共记录整份覆盖私有存储。
      *
@@ -95,12 +103,13 @@ public final class StoppedMeetingCheckpoint {
                 || a.capturedPcmBytes() != b.capturedPcmBytes()
                 || context.frozenAudioDurationMs() != update.context.frozenAudioDurationMs()
                 || !context.serverUrl().equals(update.context.serverUrl())
-                || !context.accessToken().equals(update.context.accessToken())
                 || !context.clientIdentity().equals(update.context.clientIdentity())
                 || !stableStopKey.equals(update.stableStopKey)
                 || genTime != null && update.genTime != null && !genTime.equals(update.genTime))
             throw new IOException("同场停止记录的原事实不一致");
-        return phase.ordinal() >= update.phase.ordinal() ? this : update;
+        var acknowledged = phase.ordinal() >= update.phase.ordinal() ? this : update;
+        return acknowledged.context.accessToken().equals(update.context.accessToken()) ? acknowledged
+                : acknowledged.withAccessToken(update.context.accessToken());
     }
 
     @Override public String toString() {

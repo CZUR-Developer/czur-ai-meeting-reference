@@ -21,8 +21,9 @@ public interface MeetingArtifactPublisher {
     static MeetingArtifactPublisher none() { return None.INSTANCE; }
 
     /**
-     * 仅含本场 sealed 事实及开场已冻结的服务访问信息。不持有全局身份 Provider，
-     * 不在上传时重新登录、交换 Token 或追随其他账号。本地位置与访问凭据禁止日志。
+     * 仅含本场 sealed 事实及已获准的服务访问信息。不持有全局身份 Provider，
+     * 不在上传时重新登录、交换 Token 或追随其他账号；同账号续签由协调器的身份扩展
+     * 完成后交付新的 Context。原会议／音频／用量不变。本地位置与访问凭据禁止日志。
      */
     final class Context {
         private final String meetingId;
@@ -41,6 +42,18 @@ public interface MeetingArtifactPublisher {
             this.accessToken = sessionConfig.accessToken();
             this.clientIdentity = sessionConfig.clientIdentity();
         }
+
+        private Context(Context original, String accessToken) {
+            this.meetingId = original.meetingId;
+            this.audio = original.audio;
+            this.frozenAudioDurationMs = original.frozenAudioDurationMs;
+            this.serverUrl = original.serverUrl;
+            this.accessToken = Objects.requireNonNull(accessToken, "accessToken");
+            this.clientIdentity = original.clientIdentity;
+        }
+
+        /** 仅协调器在身份扩展批准同账号后使用；不改变原场任何产物或部署归属。 */
+        Context withAccessToken(String accessToken) { return new Context(this, accessToken); }
 
         public String meetingId() { return meetingId; }
         public SealedAudioArtifact audio() { return audio; }

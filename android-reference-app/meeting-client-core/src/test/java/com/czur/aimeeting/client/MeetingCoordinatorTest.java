@@ -11,8 +11,13 @@ import com.czur.aimeeting.client.identity.IdentitySession;
 import com.czur.aimeeting.client.identity.ReferenceIdentityProvider;
 import com.czur.aimeeting.client.server.*;
 import com.czur.aimeeting.model.*;
+import com.sun.net.httpserver.HttpServer;
 import java.io.File;
 import java.io.IOException;
+import java.net.HttpURLConnection;
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -576,7 +581,20 @@ public final class MeetingCoordinatorTest {
             MemoryStore store = new MemoryStore();
             store.failPhase = failurePhase;
             Publisher publisher = new Publisher();
-            try (Fixture f = new Fixture(true, ALL, new ReferenceIdentityProvider("test-token"),
+            var renewals = new AtomicInteger();
+            IdentityProvider identity = new IdentityProvider() {
+                @Override public IdentityResult currentIdentity() {
+                    return IdentityResult.loggedIn(new IdentitySession("test-token", "原账号"));
+                }
+                @Override public IdentityResult identityForFinalization(String id, IdentitySession original)
+                        throws IOException {
+                    assertTrue("私有身份扩展核原账号前，首次候选也必须已保存", store.read(id).isPresent());
+                    assertEquals("test-token", store.read(id).orElseThrow().context().accessToken());
+                    renewals.incrementAndGet();
+                    return IdentityResult.loggedIn(original);
+                }
+            };
+            try (Fixture f = new Fixture(true, ALL, identity,
                     publisher, store)) {
                 f.runtime.prepareAudio(audio("mtg_test", 32000));
                 f.start(retainedOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT));
@@ -588,9 +606,11 @@ public final class MeetingCoordinatorTest {
                     assertTrue("候选未持久不得发布", publisher.contexts.isEmpty());
                 if (failurePhase != StoppedMeetingCheckpoint.Phase.STOP_ACCEPTED)
                     assertTrue("发布 ACK 未持久不得 Stop", f.server.stopKeys.isEmpty());
+                assertEquals("首次停止不续签", 0, renewals.get());
                 store.failPhase = null;
                 f.session.requestStop();
                 assertNotNull(f.probe.result());
+                assertEquals("重按只续签一次，且记录已存在可核原账号", 1, renewals.get());
                 assertEquals(1, f.runtime.openCalls);
                 assertEquals(1, f.runtime.artifactReads);
                 assertEquals(1, f.runtime.durationReads);
@@ -618,6 +638,143 @@ public final class MeetingCoordinatorTest {
         assertFalse(accepted.toString().contains(sealed.file().getPath()));
         assertThrows(IllegalArgumentException.class, () -> StoppedMeetingCheckpoint.restore(sealed,
                 1000, config, "key", StoppedMeetingCheckpoint.Phase.PUBLISH_PENDING, 555L));
+
+        // 同账号正常续签的 Bearer 是可更新访问材料；较早阶段也不能抹掉已 ACK 的事实。
+        var renewedPending = pending.withAccessToken("renewed-scene-token");
+        var merged = accepted.merge(renewedPending);
+        assertEquals("renewed-scene-token", merged.context().accessToken());
+        assertEquals(StoppedMeetingCheckpoint.Phase.STOP_ACCEPTED, merged.phase());
+        assertEquals(Long.valueOf(555), merged.genTime());
+        assertEquals(accepted.stableStopKey(), merged.stableStopKey());
+        assertSame(sealed, merged.context().audio());
+    }
+
+    @Test public void pendingStopRenewsSameSceneAccessAndDoesNotOverwriteItOnAnotherRetry() throws Exception {
+        var identityReads = new AtomicInteger();
+        var renewalReads = new AtomicInteger();
+        IdentityProvider identity = new IdentityProvider() {
+            @Override public IdentityResult currentIdentity() {
+                identityReads.incrementAndGet();
+                return IdentityResult.loggedIn(new IdentitySession("expired-scene-token", "原账号"));
+            }
+            @Override public IdentityResult identityForFinalization(String id, IdentitySession previous) {
+                assertEquals("mtg_test", id);
+                int call = renewalReads.incrementAndGet();
+                assertEquals(call == 1 ? "expired-scene-token" : "renewed-scene-token", previous.accessToken());
+                return IdentityResult.loggedIn(new IdentitySession("renewed-scene-token", "原账号"));
+            }
+        };
+        var publisherTokens = new ArrayList<String>();
+        MeetingArtifactPublisher publisher = context -> {
+            publisherTokens.add(context.accessToken());
+            if (publisherTokens.size() <= 2) throw new IOException("fixture-unconfirmed-publication");
+        };
+        MemoryStore store = new MemoryStore();
+        try (Fixture f = new Fixture(true, ALL, identity, Runnable::run, publisher, store)) {
+            var sealed = audio("mtg_test", 32000);
+            f.runtime.prepareAudio(sealed);
+            f.start(retainedOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT));
+            f.session.requestStop();
+            f.probe.awaitPhase(MeetingSessionState.Phase.STOP_PENDING);
+            String originalKey = store.read("mtg_test").orElseThrow().stableStopKey();
+            assertEquals("首次停止不额外续签", 0, renewalReads.get());
+
+            f.session.requestStop();
+            f.probe.awaitPhase(MeetingSessionState.Phase.STOP_PENDING);
+            assertEquals("renewed-scene-token", store.read("mtg_test").orElseThrow().context().accessToken());
+            f.session.requestStop();
+            assertEquals(MeetingResult.Status.READY, f.probe.result().status());
+            assertEquals(List.of("expired-scene-token", "renewed-scene-token", "renewed-scene-token"), publisherTokens);
+            assertEquals("renewed-scene-token", f.sessionToken);
+            assertEquals(List.of(originalKey), f.server.stopKeys);
+            assertEquals(List.of(1000L), f.server.usages);
+            assertSame(sealed, store.read("mtg_test").orElseThrow().context().audio());
+            assertEquals(1, identityReads.get());
+            assertEquals(2, renewalReads.get());
+            assertEquals(1, f.runtime.openCalls);
+            assertEquals(1, f.runtime.artifactReads);
+            assertEquals(1, f.runtime.durationReads);
+            assertEquals(1, Collections.frequency(f.server.steps, "create"));
+            assertFalse(f.server.steps.contains("summary"));
+        }
+    }
+
+    @Test public void expiredSavedAccessResumesOverRealHttpWithRenewedBearerAndOriginalFacts() throws Exception {
+        HttpServer http = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        var requests = Collections.synchronizedList(new ArrayList<String>());
+        var stopKeys = Collections.synchronizedList(new ArrayList<String>());
+        http.createContext("/", exchange -> {
+            String path = exchange.getRequestURI().getPath();
+            String authorization = exchange.getRequestHeaders().getFirst("Authorization");
+            requests.add(path + "|" + authorization);
+            exchange.getRequestBody().readAllBytes();
+            int code = "Bearer renewed-scene-token".equals(authorization) ? 200 : 401;
+            if (path.endsWith(":stop")) stopKeys.add(exchange.getRequestHeaders().getFirst("Idempotency-Key"));
+            String body = path.endsWith("/manifest") ? "{\"status\":\"READY\",\"title\":\"原场\",\"artifacts\":[]}"
+                    : path.endsWith(":stop") ? "{\"inputState\":\"INPUT_ACCEPTED\",\"manifestState\":\"READY\"}" : "{}";
+            byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(code, bytes.length);
+            try (var output = exchange.getResponseBody()) { output.write(bytes); }
+            exchange.close();
+        });
+        http.start();
+        try {
+            String base = "http://127.0.0.1:" + http.getAddress().getPort();
+            MemoryStore store = new MemoryStore();
+            var sealed = audio("mtg_test", 32000);
+            store.save(StoppedMeetingCheckpoint.restore(sealed, 1000,
+                    MeetingClientConfig.reference(base, "expired-scene-token"), "original-stable-key",
+                    StoppedMeetingCheckpoint.Phase.PUBLISH_PENDING, null));
+            var renewals = new AtomicInteger();
+            IdentityProvider identity = new IdentityProvider() {
+                @Override public IdentityResult currentIdentity() { throw new AssertionError("不能调用当前账号替代原场"); }
+                @Override public IdentityResult identityForFinalization(String id, IdentitySession original) {
+                    assertEquals("mtg_test", id);
+                    return IdentityResult.loggedIn(new IdentitySession(renewals.incrementAndGet() == 1
+                            ? original.accessToken() : "renewed-scene-token", ""));
+                }
+            };
+            MeetingArtifactPublisher publisher = context -> {
+                assertEquals(sealed.file(), context.audio().file());
+                assertEquals(32000, context.audio().capturedPcmBytes());
+                assertEquals(1000, context.frozenAudioDurationMs());
+                HttpURLConnection connection = (HttpURLConnection) URI.create(context.serverUrl()
+                        + "/v1/meetings/" + context.meetingId() + "/publication:prepare").toURL().openConnection();
+                try {
+                    connection.setRequestMethod("POST");
+                    connection.setRequestProperty("Authorization", "Bearer " + context.accessToken());
+                    if (connection.getResponseCode() != 200) throw new IOException("fixture-publication-HTTP-401");
+                } finally { connection.disconnect(); }
+            };
+            var config = new MeetingClientConfig(base, identity, ClientIdentity.reference(),
+                    MeetingProfile.reference(), Runnable::run).withStoppedMeetingStore(store)
+                    .withArtifactPublisher(publisher);
+            Runtime runtime = new Runtime(true);
+            try (var client = new MeetingCoordinator(config, new ModelAdapterRegistry(), runtime,
+                    HttpMeetingServerClient::new, () -> { throw new AssertionError("不能重采"); }, () -> 777)) {
+                assertThrows(ExecutionException.class, () -> resumeResult(client).get(2, TimeUnit.SECONDS));
+                assertEquals(StoppedMeetingCheckpoint.Phase.PUBLISH_PENDING, store.read("mtg_test").orElseThrow().phase());
+                assertEquals("expired-scene-token", store.read("mtg_test").orElseThrow().context().accessToken());
+                assertEquals(MeetingResult.Status.READY, resumeResult(client).get(2, TimeUnit.SECONDS).status());
+                var actual = store.read("mtg_test").orElseThrow();
+                assertEquals("renewed-scene-token", actual.context().accessToken());
+                assertEquals("original-stable-key", actual.stableStopKey());
+                assertEquals(777L, actual.genTime().longValue());
+                assertEquals(List.of("original-stable-key"), stopKeys);
+                assertEquals(List.of("/v1/meetings/mtg_test/publication:prepare|Bearer expired-scene-token",
+                        "/v1/meetings/mtg_test/publication:prepare|Bearer renewed-scene-token",
+                        "/v1/meetings/mtg_test:stop|Bearer renewed-scene-token",
+                        "/v1/meetings/mtg_test/manifest|Bearer renewed-scene-token"), requests);
+                assertEquals(0, runtime.openCalls);
+                assertEquals(0, runtime.durationReads);
+                assertEquals(0, runtime.artifactReads);
+                assertNull(runtime.summaryInput);
+                // 已 READY 再读只用已保存新访问，不额外交换身份或再次发布／Stop。
+                assertEquals(MeetingResult.Status.READY, resumeResult(client).get(2, TimeUnit.SECONDS).status());
+                assertEquals(2, renewals.get());
+                assertEquals(1, stopKeys.size());
+            }
+        } finally { http.stop(0); }
     }
 
     @Test public void noActiveDeliveryNeverWritesCheckpointOrReadsReadyEvenWhenStoreConfigured() throws Exception {

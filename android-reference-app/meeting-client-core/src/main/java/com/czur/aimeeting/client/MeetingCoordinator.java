@@ -190,9 +190,10 @@ public final class MeetingCoordinator implements MeetingClient {
                 if (closed) return;
                 var checkpoint = store.get().read(checkpointId)
                         .orElseThrow(() -> new IOException("原场停止记录不存在"));
+                checkpoint = renewFinalizationIdentity(checkpoint, store.get());
                 var original = checkpoint.context();
-                // 只取保存的原访问信息创建 HTTP 端口。这里不能读当前 Provider、
-                // discover/Create、领取实时／总结材料或构造 ModelSession。
+                // 原场事实仍来自 Store；可选身份扩展已核同账号并同步保存新访问材料。
+                // 这里不 discover/Create、领取实时／总结材料或构造 ModelSession。
                 var frozenConfig = new MeetingClientConfig(original.serverUrl(),
                         original.accessToken(), original.clientIdentity(), config.profile(),
                         config.callbackExecutor());
@@ -202,7 +203,7 @@ public final class MeetingCoordinator implements MeetingClient {
                         config.artifactPublisher(), () -> closed, wallClockMs, () -> { });
             } catch (IOException | RuntimeException failure) {
                 logFailure("续办原场停止收尾", failure);
-                error = "原场收尾尚未完成，请检查连接或原凭据后再次续办";
+                error = "原场收尾尚未完成，请检查登录和连接后再次续办";
             } finally {
                 synchronized (MeetingCoordinator.this) { resumingFinalization = false; }
             }
@@ -215,6 +216,26 @@ public final class MeetingCoordinator implements MeetingClient {
                 notifyClient(() -> callback.onError(message));
             }
         });
+    }
+
+    /**
+     * 一次正常续办只调用一次可选身份扩展，不解析 JWT、不自动循环重试。
+     * 默认 Provider 保留原访问；显式部署负责同账号核验和正常交换。先同步新凭据，
+     * 再允许 Publisher／Stop 使用它，Store 不可写时不越过此屏障。
+     */
+    private StoppedMeetingCheckpoint renewFinalizationIdentity(StoppedMeetingCheckpoint checkpoint,
+            StoppedMeetingStore store) throws IOException {
+        if (checkpoint.phase() == StoppedMeetingCheckpoint.Phase.READY) return checkpoint;
+        var original = new IdentitySession(checkpoint.context().accessToken(), "");
+        IdentityResult identity = config.identityProvider()
+                .identityForFinalization(checkpoint.checkpointId(), original);
+        if (identity.status() != IdentityResult.Status.LOGGED_IN)
+            throw new IOException("原场账号身份尚未就绪");
+        String accessToken = identity.session().accessToken();
+        if (accessToken.equals(original.accessToken())) return checkpoint;
+        var refreshed = store.save(checkpoint.withAccessToken(accessToken));
+        LOG.info("原场停止收尾访问凭据已更新，原会议及确认进度保持");
+        return refreshed;
     }
 
     /**
@@ -768,8 +789,22 @@ public final class MeetingCoordinator implements MeetingClient {
                     step = "保存并完成原场停止收尾";
                     readAudioArtifactOnce();
                     if (cancelled || closed) return;
-                    if (stoppedCheckpoint == null)
+                    if (stoppedCheckpoint == null) {
                         stoppedCheckpoint = StoppedMeetingCheckpoint.pending(publicationContext);
+                    } else {
+                        // 已确认阶段和最新访问材料以持久记录为准，不能把上次失败前持有的
+                        // 内存候选重新保存而倒写旧 Bearer。首次 Stop 不额外交换身份。
+                        stoppedCheckpoint = store.get().read(stoppedCheckpoint.checkpointId())
+                                .orElse(stoppedCheckpoint);
+                        // 首次候选写失败时仍允许原句柄正常重按；先保存候选，私有身份
+                        // 扩展才有原账号归属可核对，不能永远卡在“原记录不存在”。
+                        stoppedCheckpoint = store.get().save(stoppedCheckpoint);
+                        stoppedCheckpoint = renewFinalizationIdentity(stoppedCheckpoint, store.get());
+                        publicationContext = stoppedCheckpoint.context();
+                        sessionConfig = sessionConfig.forSession(
+                                new IdentitySession(publicationContext.accessToken(), ""));
+                        server = servers.apply(sessionConfig);
+                    }
                     MeetingResult finalResult = finishSavedFinalization(stoppedCheckpoint, store.get(),
                             server, sessionConfig.artifactPublisher(), () -> cancelled || closed,
                             () -> {

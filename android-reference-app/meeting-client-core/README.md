@@ -244,6 +244,26 @@ session/client `close()` 只是取消，不执行后端 Stop、不生成 READY/�
 当前阶段为 CREATING/RUNNING/STOPPING/FINALIZING、必要时 STOP_PENDING，以及 READY/ENDED/FAILED；
 枚举 STARTING/CLOSED 暂未独立通知。
 
+### 可选原场停止记录与同账号续签
+
+部署可通过 `withStoppedMeetingStore(store)` 注册自己的私有持久化实现。只有主动交付、
+标准尾事件／冻结用量／选定总结已确认且真实录音已 sealed 后，协调器才保存发布前
+`StoppedMeetingCheckpoint`。宿主重建后调用 `resumeFinalization(id, callback)`，只续原场
+发布、同键 Stop 与实际 READY；不 Create、采音、重开模型或重新生成总结。默认不装配，
+无痕仍是 Stop → ENDED。Store 不由 SDK 扫描音频目录或迁移、删除文件。
+
+`IdentityProvider.identityForFinalization(meetingId, originalIdentity)` 是可选同账号续签扩展。
+默认返回原访问会话，不读取后来登录的当前账号；普通首次 Stop 及已 READY 的记录也不
+额外调用。原 `STOP_PENDING` 再次确认和宿主重开续办才调用一次此扩展：部署先核私有
+原账号仍是当前账号，再正常认证并返回新 `IdentitySession`。不能用 displayName 或 JWT
+猜账号相同；没有登录、账号变化或认证失败时保留原记录，App 仍负责登录界面。
+
+获准的新凭据由协调器同步保存，并同时用于 Publisher Context、Stop 和 Manifest HTTP。
+会议 ID、原 sealed 文件、冻结用量、服务及 ClientIdentity、Stop 幂等键、已 ACK 阶段和
+Stop 首次受理后的 genTime 保持。每次重试先读 Store 最新记录，防止旧内存候选回写旧
+Bearer；Store.save 仍须保留自己的登记 ACK、发布计划等私有字段。不新增 401 自动循环、
+后台重试器或认证框架；未确认尾事件、未完成总结与跨账号恢复不由此入口补造成功。
+
 ### 默认听悟与国内显示
 
 听悟按同一 `index` 替换全量 partial，原文 final 与独立译文 final 按源句顺序配对；

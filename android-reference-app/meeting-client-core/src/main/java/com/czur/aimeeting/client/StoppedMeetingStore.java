@@ -11,7 +11,8 @@ import java.util.Optional;
 public interface StoppedMeetingStore {
     /**
      * 首次保存原场候选；已有记录时通过 existing.merge(checkpoint) 核原事实并合并
-     * 公共进度，禁止阶段／genTime 倒退或覆盖原文件、凭据、Stop 键。返回真正持久化的
+     * 公共进度，禁止阶段／genTime 倒退或覆盖原文件、Stop 键。访问凭据允许协调器经
+     * 同账号身份扩展批准后更新，不能把旧凭据相同作为原场归属的判定。返回真正持久化的
      * 最先进公共记录；只有同步成功才正常返回，否则抛 IOException，后续外部步骤不推进。
      * 私有实现须在同一记录中保留已有登记 ACK／prepareId 等附加事实，不能因为公共保存
      * 重写或清空它们。私有发布器的 ACK 更新亦须遵守同一规则。

@@ -22,4 +22,28 @@ public interface IdentityProvider {
      * @throws IOException 读取服务不可用；SDK转换为可读的身份读取失败提示
      */
     IdentityResult currentIdentity() throws IOException;
+
+    /**
+     * 已停止原场再次确认、或宿主重开续办时，可选取得同一原账号的新会议凭据。
+     *
+     * <p>此方法只在原场尾部全部确认后的发布／Stop／结果读取阶段调用，不用于会中
+     * 切换账号，也不会重新 Create、采音或调用模型。默认实现原样保留已冻结凭据，
+     * 不调用 {@link #currentIdentity()}，因而已有伙伴实现不会追随后来登录的账号。
+     * 需要续签的部署必须显式重写：先按 meetingId 读取自己的原账号归属，核对调用时
+     * 仍为同一账号，再通过该部署正常认证流程取得会话；账号变化或需要登录时返回
+     * 对应状态，不打开界面。SDK 不解析凭据或使用 displayName 判定账号相同。</p>
+     *
+     * <p>调用在唯一 IO 队列执行。成功后 SDK 同步更新原停止记录、发布上下文和后续
+     * Stop／结果 HTTP 所用凭据；会议、音频、冻结用量、停止幂等键及已确认阶段不变。
+     * 普通首次停止及已 READY 记录不额外调用此入口。</p>
+     *
+     * @param meetingId 待完成的原会议，用于部署私有的归属核对；不是新会议编号
+     * @param originalIdentity 原场当前保存的访问会话，展示名可能为空，不能当作账号标识
+     * @return 获准访问同一原场的会话，或未登录／读取失败状态；提示及日志不得带凭据
+     * @throws IOException 正常认证暂不可用，保留原场供下次正常确认
+     */
+    default IdentityResult identityForFinalization(String meetingId, IdentitySession originalIdentity)
+            throws IOException {
+        return IdentityResult.loggedIn(originalIdentity);
+    }
 }
