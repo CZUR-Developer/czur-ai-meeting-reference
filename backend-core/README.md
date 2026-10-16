@@ -14,19 +14,31 @@ JSON 树在进入和离开快照时复制，原仅字幕构造器保持兼容。
 - `domain/`：会议状态、归属及能力决策。
 - `application/command/`、`application/port/`：Create、Stop、用量、结果及可替换端口。
 - `application/persistence/jdbc/`：共享 PostgreSQL／MySQL 5.7 正常客户端会议实现。
-- `application/model/`：听悟等公共临时材料签发工具，模型音频由 Android SDK 直连。
+- `application/model/`：当前暂存的模型材料发行实现；模型音频由 Android SDK 直连。P10 会将听悟／百炼等具体 Provider 移到参考宿主或同仓可选 Provider Module，公共核心只保留中性端口、标准值对象和能力协商。
 - `protocol/`：统一结果和实时消息编解码；唯一 Protobuf 源为根 `contracts/realtime.proto`。
 - `application/bootstrap/MeetingDeploymentConfig`、`MeetingHttpAssembly`：中性配置和装配。
 
-部署可用 `AI_MEETING_MODEL_LANGUAGES` 声明有序的标准语言码列表，公开发现接口直接返回
-`modelLanguages()`；省略时保持既有中英默认。部署宿主负责声明实际模型可用范围，
-供应商字段和语种短码仍由对应模型实现映射；公共核心不硬编码 CZUR 的 UI 选项。
-默认听悟签发器已覆盖中文、英文、日文、韩文、德文、法文、俄文，双语继续使用所选两语
-作为 `LanguageHints` 和双向翻译目标，沿用既有产品规则。
+部署必须用 `AI_MEETING_MODEL_LANGUAGES`（或宿主等价配置）显式声明有序的标准语言码列表，公开发现接口再返回 `modelLanguages()`；P10 会移除公共核心缺省的中英回退。最终可用语言取部署声明、Provider 能力描述和 Product Profile 的交集，双语使用交集内由业务选择的两种语言。供应商字段和语种短码只由对应 Adapter 映射；公共核心不硬编码 CZUR 的 UI 选项，也不把七语或任何听悟能力写成通用保证。
+
+参考宿主可以装配 `tingwu-realtime` 作为示例 Provider，但公开源码、模板、日志和构建产物不包含真实听悟 Key。合作伙伴更换 ASR 模型时，实现并注册自己的 Adapter，核心只消费标准会话材料和标准实时事件。
 
 参考 Main／Process、演示账号与登录、真实 Mock Driver／收口、文件测试存储及默认
 实现选择留在 `backend-reference`。核心不构造这些实现，也不选择宿主日志后端。
 旧参考 WSS／Mock 链的组件由宿主显式注入 `LegacyAudioFactory`，不反向依赖参考模块。
+
+## 能力缺失时的结果边界
+
+每场会议的能力由 Provider、Product Profile、本场授权和部署限制计算并冻结；核心只
+输出稳定的能力决策和最终 `MeetingManifest`，不因为某个 Provider 缺失就回退到
+CZUR 模型。`transcript.realtime`／`transcript.final` 是参考产品档位的必选能力；
+翻译、结构化总结、本场发言人、跨会议身份、录音和演示产物均可缺失。
+
+缺失可选能力时，服务仍可完成剩余能力的 Stop 与 READY；相应的材料、事件和
+`ArtifactRef` 不产生。消费端必须按最终决策和 Manifest 隐藏对应入口／结果区，不能
+展示空译文、空总结、虚假的“未知发言人”列表，也不能把本场 `sessionSpeakerId`
+当成 `speaker.identity.cross_meeting`。参考 Web 的默认行为是只读取 READY 产物；
+伙伴动作和渲染器沿用同一规则。能力矩阵与 P10 验收证据见仓库外的
+`docs/ai-meeting-decoupling/67-p10-reference-completion-plan.md`。
 
 ## 构建与接入
 
