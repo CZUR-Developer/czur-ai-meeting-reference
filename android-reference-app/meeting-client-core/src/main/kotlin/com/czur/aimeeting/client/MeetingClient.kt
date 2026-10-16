@@ -12,7 +12,7 @@ interface MeetingClient : AutoCloseable {
     fun discover(callback: Callback<MeetingDiscovery>)
     /** IO 读取注册身份，不创建会议／注销账号／替换进行中会议凭据；未登录也是类型化成功结果。 */
     fun refreshIdentity(callback: Callback<IdentityResult>)
-    /** 默认参考账号密码登录，更新同一内存身份来源；自定义身份返回后调用 refreshIdentity。 */
+    /** 默认参考账号密码登录，更新同一 LoginIdentityProvider；自定义身份返回后调用 refreshIdentity。 */
     fun login(username: String, password: String, callback: Callback<ReferenceLoginSession>)
     /** 立即返回控制句柄；同一客户端最多一场未完成会议，异步发现／创建／启动。 */
     fun start(options: MeetingOptions, listener: MeetingListener): MeetingSession

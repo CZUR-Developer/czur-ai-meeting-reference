@@ -1,5 +1,6 @@
 package com.czur.aimeeting.reference.meeting
 
+import android.content.Context
 import com.czur.aimeeting.client.ClientIdentity
 import com.czur.aimeeting.client.MeetingClientConfig
 import com.czur.aimeeting.client.MeetingProfile
@@ -14,7 +15,9 @@ import com.czur.aimeeting.reference.MeetingPageViews
 import com.czur.aimeeting.reference.ui.MeetingOverlayFactory
 import com.czur.aimeeting.reference.ui.OverlayViewFactory
 import com.czur.aimeeting.client.identity.IdentityProvider
+import com.czur.aimeeting.client.identity.LoginIdentityProvider
 import com.czur.aimeeting.client.identity.ReferenceIdentityProvider
+import com.czur.aimeeting.reference.identity.PersistentReferenceIdentityProvider
 import java.util.ArrayDeque
 import java.util.concurrent.Executor
 
@@ -27,6 +30,8 @@ object MeetingAppAssembly {
     private var serverUrl = ""
     private var resultWebUrl = ""
     private var identityProvider: IdentityProvider = ReferenceIdentityProvider()
+    private var preferences: android.content.SharedPreferences? = null
+    private var initialized = false
     private var modelAdapters: ModelAdapterRegistry? = null
     private var resultActions: List<AppResultActionPlugin> = listOf(WebResultActionPlugin())
     private var resultRegistry = ResultActionRegistry(resultActions)
@@ -36,12 +41,30 @@ object MeetingAppAssembly {
     private var overlayFactory: MeetingOverlayFactory = OverlayViewFactory()
     private var pageFactory: MeetingPageViews.Factory = MeetingPageViews.DefaultFactory()
 
+    /**
+     * 由 Application 页面在首次启动时调用一次。连接地址和参考登录插件共用同一份
+     * 应用设置，因此进程重启后仍可自动恢复“后端＋会话”的配对；自定义身份插件仍可
+     * 通过 registerIdentityProvider 替换默认实现。
+     */
+    @JvmStatic @Synchronized fun initialize(context: Context) {
+        if (initialized) return
+        val application = context.applicationContext
+        preferences = application.getSharedPreferences("czur_reference_settings", Context.MODE_PRIVATE)
+        serverUrl = preferences?.getString(KEY_BACKEND_URL, "") ?: ""
+        resultWebUrl = preferences?.getString(KEY_RESULT_WEB_URL, "") ?: ""
+        identityProvider = PersistentReferenceIdentityProvider(application)
+        initialized = true
+    }
+
     /** 会前构建期登记工厂，每场返回新的 Adapter，不在会中修改注册表。 */
     @JvmStatic @Synchronized fun registerModelAdapters(adapters: ModelAdapterRegistry) { modelAdapters = adapters }
     @JvmStatic @Synchronized fun modelAdapters(): ModelAdapterRegistry = modelAdapters ?: ModelAdapterRegistry().also { modelAdapters = it }
     @JvmStatic @Synchronized fun registerPageFactory(factory: MeetingPageViews.Factory) { pageFactory = factory }
     @JvmStatic @Synchronized fun pageFactory() = pageFactory
-    @JvmStatic @Synchronized fun configureResultWeb(url: String) { resultWebUrl = url }
+    @JvmStatic @Synchronized fun configureResultWeb(url: String) {
+        resultWebUrl = url
+        preferences?.edit()?.putString(KEY_RESULT_WEB_URL, url)?.apply()
+    }
     @JvmStatic @Synchronized fun resultWebUrl() = resultWebUrl
 
     /** 只替换显示工厂，不持有 Activity，不重开音源或会议。 */
@@ -50,8 +73,9 @@ object MeetingAppAssembly {
 
     /** 默认内存账号切换后端时清除旧会话，自定义 Provider 自行决定账号生命周期。 */
     @JvmStatic @Synchronized fun configureBackend(backend: String) {
-        if (serverUrl != backend) (identityProvider as? ReferenceIdentityProvider)?.clearSession()
+        if (serverUrl != backend) (identityProvider as? LoginIdentityProvider)?.clearSession()
         serverUrl = backend
+        preferences?.edit()?.putString(KEY_BACKEND_URL, backend)?.apply()
     }
     @JvmStatic @Synchronized fun registerIdentityProvider(provider: IdentityProvider) { identityProvider = provider }
     @JvmStatic @Synchronized fun serverUrl() = serverUrl
@@ -113,5 +137,8 @@ object MeetingAppAssembly {
     /** 页面和 Service 共用身份来源，分别创建自己的客户端与串行回调队列。 */
     @JvmStatic @Synchronized fun clientConfig(callbacks: Executor) = MeetingClientConfig(serverUrl, identityProvider,
         ClientIdentity.reference(), MeetingProfile.reference(), callbacks)
-    @JvmStatic @Synchronized fun clearReferenceSession() { (identityProvider as? ReferenceIdentityProvider)?.clearSession() }
+    @JvmStatic @Synchronized fun clearReferenceSession() { (identityProvider as? LoginIdentityProvider)?.clearSession() }
+
+    private const val KEY_BACKEND_URL = "backend_url"
+    private const val KEY_RESULT_WEB_URL = "result_web_url"
 }

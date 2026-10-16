@@ -42,9 +42,12 @@ Mock 注入窄端口 `MeetingRuntimePort`；二者使用唯一 `MeetingCoordinat
 `MeetingClient.refreshIdentity()`，通过串行回调处理状态；开始会议时SDK再次读取，并把本次
 凭据冻结到本场Server客户端。会中刷新身份不会悄悄更换该场请求使用的账号。
 
-参考默认`ReferenceIdentityProvider`只保存进程内会话；`MeetingClient.login()`沿用已有账号密码
-端点，成功后更新同一Provider并保留旧typed返回值。伙伴自定义Provider使用自己的App登录动作，
-返回后刷新即可，无须实现账号密码接口。
+参考核心仍提供不落盘的`ReferenceIdentityProvider`用于纯 JVM／Mock；参考 Android App 默认
+装配的`PersistentReferenceIdentityProvider`把后端地址对应的会话材料保存到应用私有设置，
+只保存访问令牌、显示名和服务端到期时间，不保存密码。`MeetingClient.login()`通过公开的
+`LoginIdentityProvider`写入会话并保留旧 typed 返回值；进程重启后读取仍经过同一
+`IdentityProvider`，过期或主动退出会清除。伙伴可以用同一接口替换为 ContentProvider、系统
+账号或自己的凭据仓库，会议编排和模型流程无需改变。
 
 ```kotlin
 val identity = IdentityProvider {
@@ -55,6 +58,10 @@ val identity = IdentityProvider {
 }
 val config = MeetingClientConfig(serverUrl, identity, clientIdentity, productProfile, mainThreadExecutor)
 ```
+
+如果伙伴提供自己的账号登录入口，不需要实现`MeetingClient.login()`；登录成功后将服务端认可
+的短期会话写入自定义`LoginIdentityProvider`，再调用`refreshIdentity()`即可。该接口不接收
+密码，也不规定凭据存储方式，Activity 与前台 Service 仍通过同一个 App 装配实例共享身份。
 
 参考App的`MeetingAppAssembly`集中注册来源并供Activity与Service共用；开始时同进程交接冻结设置与动作，
 不复制可能过时的token。账号密码登录界面是默认示例，伙伴可替换页面动作和身份来源。

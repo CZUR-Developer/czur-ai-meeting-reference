@@ -22,3 +22,18 @@ fun interface IdentityProvider {
     fun identityForFinalization(meetingId: String, originalIdentity: IdentitySession): IdentityResult =
         IdentityResult.loggedIn(originalIdentity)
 }
+
+/**
+ * 可由参考 App 或合作伙伴实现的登录会话写入边界。
+ *
+ * <p>会议编排只依赖上面的 {@link IdentityProvider}；本接口只给“账号登录入口”一个
+ * 可替换的会话写入点。实现可以保存到 ContentProvider、系统账号、加密存储或仅保存在
+ * 内存中。接口不接收密码，也不要求实现负责打开 UI、申请权限或刷新业务页面。</p>
+ */
+interface LoginIdentityProvider : IdentityProvider {
+    /** 登录成功后写入当前会话。expiresAt 由服务端返回，空值表示由实现自行决定生命周期。 */
+    fun updateSession(session: IdentitySession, expiresAt: String? = null)
+
+    /** 清除当前登录会话；不得影响正在进行会议已经冻结的身份快照。 */
+    fun clearSession()
+}

@@ -7,7 +7,7 @@ import android.widget.EditText
 import android.widget.TextView
 import com.czur.aimeeting.reference.meeting.MeetingAppAssembly
 
-/** 进程内连接配置页，不持久化凭据；保存后会前宿主走原身份和能力链刷新。 */
+/** 参考连接配置页；只保存后端／结果页地址，不保存账号密码，保存后重新刷新身份和能力。 */
 class ConnectionSettingsActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)

@@ -3,7 +3,7 @@ package com.czur.aimeeting.client
 import com.czur.aimeeting.client.display.MeetingDisplayState
 import com.czur.aimeeting.client.identity.IdentityResult
 import com.czur.aimeeting.client.identity.IdentitySession
-import com.czur.aimeeting.client.identity.ReferenceIdentityProvider
+import com.czur.aimeeting.client.identity.LoginIdentityProvider
 import com.czur.aimeeting.client.result.ResultActionAccess
 import com.czur.aimeeting.client.result.ResultOptions
 import com.czur.aimeeting.client.server.*
@@ -87,14 +87,14 @@ class MeetingCoordinator(
         requireOpen()
         io.execute {
             val identityProvider = config.identityProvider()
-            if (identityProvider !is ReferenceIdentityProvider) {
+            if (identityProvider !is LoginIdentityProvider) {
                 notifyClient { callback.onError("请使用当前身份来源的应用登录入口") }
                 return@execute
             }
             try {
                 LOG.info("终端用户登录开始")
                 val login = HttpMeetingSessionClient(config.serverUrl()).login(username, password)
-                identityProvider.updateSession(IdentitySession(login.accessToken(), username))
+                identityProvider.updateSession(IdentitySession(login.accessToken(), username), login.expiresAt())
                 LOG.info("终端用户登录完成")
                 notifyClient { callback.onSuccess(login) }
             } catch (failure: Exception) {

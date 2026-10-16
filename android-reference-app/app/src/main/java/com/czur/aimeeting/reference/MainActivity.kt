@@ -99,6 +99,8 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 先恢复后端地址与默认登录插件，再创建页面和 Service 共用的客户端。
+        MeetingAppAssembly.initialize(this)
         startCondition = MeetingStartConditions.create(applicationContext)
         page = MeetingAppAssembly.pageFactory().create(this)
         loginButton = page.account; settingsButton = page.settings; resultGroup = page.results
