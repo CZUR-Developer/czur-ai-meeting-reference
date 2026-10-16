@@ -14,7 +14,7 @@ JSON 树在进入和离开快照时复制，原仅字幕构造器保持兼容。
 - `domain/`：会议状态、归属及能力决策。
 - `application/command/`、`application/port/`：Create、Stop、用量、结果及可替换端口。
 - `application/persistence/jdbc/`：共享 PostgreSQL／MySQL 5.7 正常客户端会议实现。
-- `application/model/`：当前暂存的模型材料发行实现；模型音频由 Android SDK 直连。P10 会将听悟／百炼等具体 Provider 移到参考宿主或同仓可选 Provider Module，公共核心只保留中性端口、标准值对象和能力协商。
+- `application/model/`：模型材料发行端口和可替换的总结材料发行端口；模型音频由 Android SDK 直连。`SummarySessionIssuer` 只描述“为本场总结 Adapter 签发短期材料”的中性边界，百炼是参考宿主的默认实现，公共核心不绑定供应商。
 - `protocol/`：统一结果和实时消息编解码；唯一 Protobuf 源为根 `contracts/realtime.proto`。
 - `application/bootstrap/MeetingDeploymentConfig`、`MeetingHttpAssembly`：中性配置和装配。
 
@@ -56,6 +56,21 @@ mvn -B -pl backend-core -am package -DskipTests
 注入身份、资格、产物 Store、模型发行器及可选结算装饰器，再调用
 `MeetingHttpAssembly.startClientModel(...)`。宿主负责先关闭 HTTP listener 再关闭装配；
 共享装配仅管理自己的会议连接池，外部账号／模型／存储资源归注入者所有。
+
+需要自定义总结模型时，宿主额外注入 `SummarySessionIssuer`；它只返回
+`adapterId`、短期 `endpoint`、`expiresAt` 和 `token`，不会把长期模型 Key 交给核心或
+Android。传入 `null` 时，核心才会按部署配置使用参考默认实现（当前为可选的百炼）；
+没有配置发行器时，能力发现不会声明 `summary.structured`。因此替换总结模型只改
+宿主装配和对应 Adapter，不复制会议状态机、HTTP 路由或结果 Manifest。
+
+```java
+SummarySessionIssuer partnerSummary = new PartnerSummaryIssuer(partnerConfig);
+try (var assembly = MeetingHttpAssembly.startClientModel(
+        config, clock, artifactStore, identity, policy, modelIssuer,
+        java.util.function.UnaryOperator.identity(), login, partnerSummary)) {
+    // HTTP transport 使用 assembly.newJdkHttpServer(...) 或 dispatcher()。
+}
+```
 
 通过 Maven 消费普通核心 JAR 和本 POM，三方依赖会正常传递。生产宿主可固定版本随仓
 交付；不要复制会议源码、依赖整个参考应用或使用 `systemPath`。

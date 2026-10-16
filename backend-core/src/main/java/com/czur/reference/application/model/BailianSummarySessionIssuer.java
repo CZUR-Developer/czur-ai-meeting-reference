@@ -13,7 +13,7 @@ import java.time.Instant;
 import java.util.Objects;
 
 /** 仅后端持有永久 Key，按次向百炼换取 Android 文本应用所用的短期 Key。 */
-public final class BailianSummarySessionIssuer {
+public final class BailianSummarySessionIssuer implements SummarySessionIssuer {
     public static final String ADAPTER_ID = "bailian-summary";
     private static final ObjectMapper JSON = new ObjectMapper();
     private final BailianSummarySessionConfig config;
@@ -30,7 +30,7 @@ public final class BailianSummarySessionIssuer {
         this.clock = Objects.requireNonNull(clock, "clock");
     }
 
-    public Session issue() {
+    @Override public Session issue() {
         HttpRequest request = HttpRequest.newBuilder(config.tokenRequestUrl())
                 .timeout(Duration.ofSeconds(20))
                 .header("Authorization", "Bearer " + config.permanentApiKey())
@@ -56,14 +56,15 @@ public final class BailianSummarySessionIssuer {
     }
 
     /** 响应对象的诊断文本不包含 endpoint 或短期 Key。 */
-    public record Session(String adapterId, String endpoint, Instant expiresAt, String token) {
+    public record Session(String adapterId, String endpoint, Instant expiresAt, String token)
+            implements SummarySessionIssuer.Session {
         @Override public String toString() {
             return "BailianSummarySessionIssuer.Session[adapterId=" + adapterId
                     + ", materials=REDACTED]";
         }
     }
 
-    public static final class SessionIssueException extends RuntimeException {
-        public SessionIssueException() { super("summary session unavailable"); }
+    public static final class SessionIssueException extends SummarySessionIssuer.SessionIssueException {
+        public SessionIssueException() { super(); }
     }
 }

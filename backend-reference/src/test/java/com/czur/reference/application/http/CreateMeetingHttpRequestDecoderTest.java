@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -170,6 +171,22 @@ class CreateMeetingHttpRequestDecoderTest {
                 "\"clientSessionId\":\"client-session-1\",\"idempotencyKey\":\"" + KEY + "\""));
     }
 
+    @Test
+    void declaredDeploymentLanguagesAreAcceptedWithoutProviderSpecificMapping() {
+        var decoder = new CreateMeetingHttpRequestDecoder("meeting-api", "trusted-client",
+                Set.of("zh-CN", "en-US", "ja-JP"));
+        try (var decoded = decoder.decode(request(BODY.replace("\"en-US\"", "\"ja-JP\"")))) {
+            assertEquals("ja-JP", decoded.requestFact().requestSnapshot().languages().targets().get(0));
+        }
+    }
+
+    @Test
+    void undeclaredDeploymentLanguageIsRejectedBeforeCreateFact() {
+        var decoder = new CreateMeetingHttpRequestDecoder("meeting-api", "trusted-client",
+                Set.of("zh-CN", "en-US"));
+        reject(decoder, request(BODY.replace("\"en-US\"", "\"ko-KR\"")));
+    }
+
     private static HttpRequest request(String body) {
         return new HttpRequest("POST", "/v1/meetings", Map.of(
                 "Authorization", "Bearer " + TOKEN,
@@ -178,6 +195,13 @@ class CreateMeetingHttpRequestDecoderTest {
     }
 
     private static void reject(String body) { reject(request(body)); }
+
+    private static void reject(CreateMeetingHttpRequestDecoder decoder, HttpRequest request) {
+        var failure = assertThrows(CreateMeetingHttpRequestDecoder.DecodeFailure.class,
+                () -> decoder.decode(request));
+        assertEquals(CreateMeetingHttpRequestDecoder.DecodeFailure.Kind.CONTRACT, failure.kind());
+        assertEquals("invalid Create HTTP request", failure.getMessage());
+    }
 
     private static void reject(HttpRequest request) {
         var failure = assertThrows(CreateMeetingHttpRequestDecoder.DecodeFailure.class,

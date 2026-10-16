@@ -44,14 +44,27 @@ public final class CreateMeetingHttpRequestDecoder {
 
     private final String audience;
     private final String clientId;
+    /** 空集合表示由调用方自行承担语言能力校验；正式参考装配传入部署声明。 */
+    private final Set<String> declaredLanguages;
 
     /**
      * @param audience 可信服务端配置中的 Token 受众
      * @param clientId 可信服务端配置中的身份客户端标识；与 body 的 appId 无关
      */
     public CreateMeetingHttpRequestDecoder(String audience, String clientId) {
+        this(audience, clientId, Set.of());
+    }
+
+    /**
+     * 绑定本部署公开的标准语言码。Provider 的厂商短码转换仍在 Provider 内部，
+     * HTTP Create 只接受已经由部署发现接口公开的标准码。
+     */
+    public CreateMeetingHttpRequestDecoder(String audience, String clientId,
+            java.util.Collection<String> declaredLanguages) {
         this.audience = requireTrusted(audience);
         this.clientId = requireTrusted(clientId);
+        Objects.requireNonNull(declaredLanguages, "declaredLanguages");
+        this.declaredLanguages = Set.copyOf(declaredLanguages);
     }
 
     /**
@@ -80,6 +93,12 @@ public final class CreateMeetingHttpRequestDecoder {
                 requireHeaderValue(requestId, 0, 128);
             }
             CreateMeetingRequestSnapshot snapshot = decodeBody(request.body(), idempotencyKey);
+            if (!declaredLanguages.isEmpty()
+                    && (!declaredLanguages.contains(snapshot.languages().source())
+                    || snapshot.languages().targets().stream()
+                    .anyMatch(language -> !declaredLanguages.contains(language)))) {
+                throw invalid();
+            }
             CreateMeetingRequestFact fact = new CreateMeetingRequestFact(snapshot,
                     MeetingRequestCanonicalizer.digest(snapshot),
                     MeetingRequestCanonicalizer.CREATE_SNAPSHOT_SCHEMA_VERSION);

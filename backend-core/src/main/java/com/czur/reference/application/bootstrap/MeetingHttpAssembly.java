@@ -20,6 +20,7 @@ import com.czur.reference.application.http.SmtpResultEmailSender;
 import com.czur.reference.application.manifest.ManifestResultAccessPolicy;
 import com.czur.reference.application.model.ModelSessionIssuer;
 import com.czur.reference.application.model.BailianSummarySessionIssuer;
+import com.czur.reference.application.model.SummarySessionIssuer;
 import com.czur.reference.application.persistence.jdbc.JdbcDatabaseRuntime;
 import com.czur.reference.application.persistence.jdbc.JdbcDatabaseContext;
 import com.czur.reference.application.persistence.jdbc.JdbcCompleteMeetingCreateReplayLookup;
@@ -221,13 +222,35 @@ public class MeetingHttpAssembly implements AutoCloseable {
             IdentityProvider identityProvider, EntitlementPolicy entitlementPolicy,
             ModelSessionIssuer modelSessionIssuer,
             UnaryOperator<EntitlementProvider> entitlementProviderDecorator) {
+        return startClientModel(config, clock, artifactStore, identityProvider,
+                entitlementPolicy, modelSessionIssuer, entitlementProviderDecorator,
+                null, null);
+    }
+
+    /**
+     * SDK 直连模型的可替换宿主装配。
+     *
+     * <p>登录入口和总结材料发行器都属于宿主插件：参考宿主可以装配预置登录和
+     * 默认 Provider，合作伙伴则可传入自己的实现。传入 {@code null} 的登录入口
+     * 表示该 HTTP 实例不提供演示登录；传入 {@code null} 的总结发行器表示继续
+     * 使用可信配置中的默认实现（当前参考配置为百炼），没有配置时总结能力保持
+     * 关闭。会议状态机、权限校验、结果发布不会因替换 Provider 而复制。</p>
+     */
+    public static MeetingHttpAssembly startClientModel(
+            MeetingDeploymentConfig config, Clock clock, ArtifactStore artifactStore,
+            IdentityProvider identityProvider, EntitlementPolicy entitlementPolicy,
+            ModelSessionIssuer modelSessionIssuer,
+            UnaryOperator<EntitlementProvider> entitlementProviderDecorator,
+            com.czur.reference.application.http.SessionLoginEndpoint login,
+            SummarySessionIssuer summarySessionIssuer) {
         Objects.requireNonNull(artifactStore, "artifactStore");
         Objects.requireNonNull(identityProvider, "identityProvider");
         Objects.requireNonNull(entitlementPolicy, "entitlementPolicy");
         Objects.requireNonNull(modelSessionIssuer, "modelSessionIssuer");
         Objects.requireNonNull(entitlementProviderDecorator, "entitlementProviderDecorator");
         return start(config, clock, artifactStore, identityProvider, entitlementPolicy,
-                modelSessionIssuer, entitlementProviderDecorator, null, null, true);
+                modelSessionIssuer, entitlementProviderDecorator, login, null, true,
+                summarySessionIssuer);
     }
 
     private static MeetingHttpAssembly start(
@@ -237,6 +260,19 @@ public class MeetingHttpAssembly implements AutoCloseable {
             UnaryOperator<EntitlementProvider> entitlementProviderDecorator,
             com.czur.reference.application.http.SessionLoginEndpoint login,
             LegacyAudioFactory legacyFactory, boolean clientModel) {
+        return start(config, clock, artifactStore, identityProvider, entitlementPolicy,
+                modelSessionIssuer, entitlementProviderDecorator, login, legacyFactory,
+                clientModel, null);
+    }
+
+    private static MeetingHttpAssembly start(
+            MeetingDeploymentConfig config, Clock clock,
+            ArtifactStore artifactStore, IdentityProvider identityProvider,
+            EntitlementPolicy entitlementPolicy, ModelSessionIssuer modelSessionIssuer,
+            UnaryOperator<EntitlementProvider> entitlementProviderDecorator,
+            com.czur.reference.application.http.SessionLoginEndpoint login,
+            LegacyAudioFactory legacyFactory, boolean clientModel,
+            SummarySessionIssuer suppliedSummarySessionIssuer) {
         Objects.requireNonNull(config, "config");
         Objects.requireNonNull(clock, "clock");
         JdbcDatabaseRuntime database = clientModel ? null : JdbcDatabaseRuntime.start(config.database());
@@ -326,8 +362,12 @@ public class MeetingHttpAssembly implements AutoCloseable {
             // 继续保留既有语义，Android 直连模型的选择由 adapterId 驱动。
             // 模型默认选择属于宿主装配；共享核心仅使用显式注入的发行器。
             ModelSessionIssuer modelSessions = modelSessionIssuer;
-            var summarySessions = config.bailianSummarySession()
-                    .map(summary -> new BailianSummarySessionIssuer(summary, clock)).orElse(null);
+            // 百炼只是参考默认实现；核心只持有中性的总结发行 SPI，未来宿主可注入其他 Provider。
+            SummarySessionIssuer summarySessions = suppliedSummarySessionIssuer != null
+                    ? suppliedSummarySessionIssuer
+                    : config.bailianSummarySession()
+                            .<SummarySessionIssuer>map(summary -> new BailianSummarySessionIssuer(summary, clock))
+                            .orElse(null);
             var modelSessionLanguages = modelSessions == null && summarySessions == null ? null
                     : new JdbcModelSessionLanguageLookup(databaseContext);
             if (config.createEnabled()) {
@@ -346,7 +386,7 @@ public class MeetingHttpAssembly implements AutoCloseable {
                         config.capabilityLimits());
                 runtime = new MeetingHttpRuntime(query, deletion, decoder, errors, stopService,
                         create, new CreateMeetingHttpRequestDecoder(
-                                config.audience(), config.clientId()), true, manifest,
+                                config.audience(), config.clientId(), config.modelLanguages()), true, manifest,
                         renewService, artifact, events, clientInput, modelSessions,
                         modelSessionLanguages, summarySessions,
                         referenceLogin, capabilities);

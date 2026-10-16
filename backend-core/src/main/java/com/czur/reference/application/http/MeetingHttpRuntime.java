@@ -5,7 +5,7 @@ import com.czur.reference.application.command.AuthenticatedCompleteMeetingApplic
 import com.czur.reference.application.command.AuthenticatedRealtimeTokenRenewApplicationService;
 import com.czur.reference.application.model.ModelSessionIssuer;
 import com.czur.reference.application.model.ModelSessionLanguageLookup;
-import com.czur.reference.application.model.BailianSummarySessionIssuer;
+import com.czur.reference.application.model.SummarySessionIssuer;
 import com.czur.reference.application.port.MeetingDeletionPort;
 import com.czur.reference.application.port.MeetingQueryPort;
 import com.czur.reference.application.port.MeetingManifestPort;
@@ -254,7 +254,7 @@ public final class MeetingHttpRuntime implements AutoCloseable {
             MeetingArtifactContentPort artifactPort, MeetingEventLogPort eventLogPort,
             ClientMeetingInputPort clientInputPort, ModelSessionIssuer modelSessions,
             ModelSessionLanguageLookup modelSessionLanguages,
-            BailianSummarySessionIssuer summarySessions,
+            SummarySessionIssuer summarySessions,
             SessionLoginEndpoint referenceLogin) {
         this(queryPort, deletionPort, decoder, errors, stopService, createService,
                 createDecoder, createEnabled, manifestPort, renewService, artifactPort,
@@ -273,7 +273,7 @@ public final class MeetingHttpRuntime implements AutoCloseable {
             MeetingArtifactContentPort artifactPort, MeetingEventLogPort eventLogPort,
             ClientMeetingInputPort clientInputPort, ModelSessionIssuer modelSessions,
             ModelSessionLanguageLookup modelSessionLanguages,
-            BailianSummarySessionIssuer summarySessions,
+            SummarySessionIssuer summarySessions,
             SessionLoginEndpoint referenceLogin,
             ReferenceDeploymentCapabilitiesEndpoint capabilities) {
         this(new MeetingHttpAdapter(queryPort, deletionPort, decoder, errors, stopService,

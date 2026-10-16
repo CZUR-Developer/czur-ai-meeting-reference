@@ -7,6 +7,7 @@ import com.czur.reference.application.http.HttpErrorMapper;
 import com.czur.reference.application.http.ReferenceDevSessionLoginEndpoint;
 import com.czur.reference.application.identity.referencedev.ReferenceDevIdentityProvider;
 import com.czur.reference.application.model.ModelSessionIssuer;
+import com.czur.reference.application.model.SummarySessionIssuer;
 import com.czur.reference.application.model.SampleJsonWsModelSessionIssuer;
 import com.czur.reference.application.model.TingwuModelSessionIssuer;
 import com.czur.reference.application.persistence.jdbc.JdbcAcceptedInputFactLookup;
@@ -92,11 +93,31 @@ public final class ReferenceMeetingHttpAssembly extends MeetingHttpAssembly {
     public static ReferenceMeetingHttpAssembly startClientModel(ReferenceMeetingDeploymentConfig config,
             Clock clock, ArtifactStore artifacts, IdentityProvider identity, EntitlementPolicy policy,
             ModelSessionIssuer issuer, UnaryOperator<EntitlementProvider> decorator) {
-        return new ReferenceMeetingHttpAssembly(MeetingHttpAssembly.startClientModel(config, clock,
-                artifacts, identity, policy, issuer, decorator));
+        return startClientModel(config, clock, artifacts, identity, policy, issuer, decorator,
+                null, null);
     }
 
-    private static ModelSessionIssuer defaultIssuer(MeetingDeploymentConfig config, Clock clock) {
+    /**
+     * 参考宿主的 SDK 直连模型装配扩展点。登录入口、总结发行器和实时模型发行器
+     * 均由宿主选择；会议核心只消费接口，不把百炼、听悟或参考预置账号写入流程。
+     */
+    public static ReferenceMeetingHttpAssembly startClientModel(ReferenceMeetingDeploymentConfig config,
+            Clock clock, ArtifactStore artifacts, IdentityProvider identity, EntitlementPolicy policy,
+            ModelSessionIssuer issuer, UnaryOperator<EntitlementProvider> decorator,
+            com.czur.reference.application.http.SessionLoginEndpoint login,
+            SummarySessionIssuer summaryIssuer) {
+        return new ReferenceMeetingHttpAssembly(MeetingHttpAssembly.startClientModel(config, clock,
+                artifacts, identity, policy, issuer, decorator, login, summaryIssuer));
+    }
+
+    /**
+     * 参考本机进程使用的默认模型发行器选择。
+     *
+     * <p>模型材料仍由部署配置决定；此方法只把参考宿主已经提供的
+     * Adapter 装配到公共核心，不把供应商协议下沉到核心。客户端直连
+     * 进程和旧 WSS 兼容进程共用这一选择规则。</p>
+     */
+    static ModelSessionIssuer defaultIssuer(MeetingDeploymentConfig config, Clock clock) {
         return config.sampleJsonWsEndpoint().<ModelSessionIssuer>map(endpoint ->
                 new SampleJsonWsModelSessionIssuer(endpoint, clock)).orElseGet(() ->
                 config.tingwuModelSession().<ModelSessionIssuer>map(value ->
@@ -123,7 +144,7 @@ public final class ReferenceMeetingHttpAssembly extends MeetingHttpAssembly {
     }
 
     /** 参考默认策略的无业务语义ID；具体授权／预占算法仅由共享策略实现。 */
-    private static final class RandomEntitlementIds implements EntitlementIdGenerator {
+    static final class RandomEntitlementIds implements EntitlementIdGenerator {
         private final SecureRandom random = new SecureRandom();
         @Override public String newGrantId() { return next("grant_"); }
         @Override public String newReservationId() { return next("reservation_"); }

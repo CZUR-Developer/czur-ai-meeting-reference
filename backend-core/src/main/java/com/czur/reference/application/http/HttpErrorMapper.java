@@ -12,7 +12,7 @@ import com.czur.reference.application.port.MeetingQueryPort;
 import com.czur.reference.application.port.MeetingEventLogPort;
 import com.czur.reference.application.port.ClientMeetingInputPort;
 import com.czur.reference.application.model.ModelSessionIssuer;
-import com.czur.reference.application.model.BailianSummarySessionIssuer;
+import com.czur.reference.application.model.SummarySessionIssuer;
 import com.czur.reference.application.port.MeetingManifestPort;
 import com.czur.reference.application.port.MeetingArtifactContentPort;
 import com.czur.reference.application.port.OwnedMeetingStopUnitOfWork;
@@ -116,7 +116,7 @@ public final class HttpErrorMapper {
 
     /** 永久 Key 不进入响应；只把本场短期材料交给已认证 App。 */
     public HttpResponse summarySession(String meetingId,
-            BailianSummarySessionIssuer.Session session) {
+            SummarySessionIssuer.Session session) {
         return success(200, Map.of("meetingId", meetingId, "adapterId", session.adapterId(),
                 "endpoint", session.endpoint(), "expiresAt", session.expiresAt().toString(),
                 "token", session.token()));

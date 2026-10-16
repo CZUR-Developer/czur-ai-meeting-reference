@@ -6,7 +6,7 @@ import com.czur.reference.application.command.AuthenticatedCompleteMeetingApplic
 import com.czur.reference.application.command.AuthenticatedRealtimeTokenRenewApplicationService;
 import com.czur.reference.application.command.StopMeetingIntent;
 import com.czur.reference.application.model.ModelSessionIssuer;
-import com.czur.reference.application.model.BailianSummarySessionIssuer;
+import com.czur.reference.application.model.SummarySessionIssuer;
 import com.czur.reference.application.model.ModelSessionLanguageLookup;
 import com.czur.reference.application.model.TingwuModelSessionIssuer;
 import com.czur.reference.application.port.DeleteRequest;
@@ -107,7 +107,7 @@ public final class MeetingHttpAdapter {
     private final ClientMeetingInputPort clientInputPort;
     private final ModelSessionIssuer modelSessions;
     private final ModelSessionLanguageLookup modelSessionLanguages;
-    private final BailianSummarySessionIssuer summarySessions;
+    private final SummarySessionIssuer summarySessions;
 
     /** 使用随机 opaque diagnosticId 的默认错误映射器。 */
     public MeetingHttpAdapter(
@@ -330,7 +330,7 @@ public final class MeetingHttpAdapter {
             MeetingArtifactContentPort artifactPort, MeetingEventLogPort eventLogPort,
             ClientMeetingInputPort clientInputPort, ModelSessionIssuer modelSessions,
             ModelSessionLanguageLookup modelSessionLanguages,
-            BailianSummarySessionIssuer summarySessions) {
+            SummarySessionIssuer summarySessions) {
         this.queryPort = Objects.requireNonNull(queryPort, "queryPort");
         // 显式客户端模型装配不构造旧删除工作单元；null 仅关闭该路由，不能伪装可用。
         this.deletionPort = deletionPort;
@@ -560,8 +560,7 @@ public final class MeetingHttpAdapter {
                     return errors.summaryNotGranted();
                 }
                 return errors.summarySession(meetingId, summarySessions.issue());
-            } catch (BailianSummarySessionIssuer.SessionIssueException
-                    | IllegalStateException unavailable) {
+            } catch (SummarySessionIssuer.SessionIssueException | IllegalStateException unavailable) {
                 return errors.summarySessionUnavailable();
             }
         }
