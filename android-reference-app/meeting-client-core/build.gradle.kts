@@ -1,11 +1,19 @@
 plugins {
     `java-library`
+    kotlin("jvm")
 }
 
 version = "0.1.0"
 
-// core 与 Android App 共用 Java 17；SDK 本身保持 Java 11，最终 APK 的 D8 构建验证兼容。
+// 保持原 Java 17 字节码基线，由 Kotlin 编写；D8/APK 构建验证实际消费者兼容。
 tasks.withType<JavaCompile>().configureEach { options.release.set(17) }
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+        jvmDefault.set(org.jetbrains.kotlin.gradle.dsl.JvmDefaultMode.ENABLE)
+    }
+}
 
 dependencies {
     api(project(":model-runtime-contract"))

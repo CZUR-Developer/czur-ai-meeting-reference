@@ -1,6 +1,6 @@
 # 会议客户端公共核心
 
-本模块是平台无关的普通 Java 17 JAR，供参考 Mock App 和 CZUR SDK 使用同一套会议编排、
+本模块由 Kotlin/JVM 实现，产物是目标 JVM 17 的普通 JAR，供参考 Mock App 和 CZUR SDK 使用同一套会议编排、
 Server 协议、模型适配与国内显示规则。Android 控件、权限申请、音源、模型网络传输、
 屏幕采集和本地 PDF 不在本模块。模型直连仍在设备 SDK，不在后端代转音频。
 
@@ -46,15 +46,14 @@ Mock 注入窄端口 `MeetingRuntimePort`；二者使用唯一 `MeetingCoordinat
 端点，成功后更新同一Provider并保留旧typed返回值。伙伴自定义Provider使用自己的App登录动作，
 返回后刷新即可，无须实现账号密码接口。
 
-```java
-IdentityProvider identity = () -> {
+```kotlin
+val identity = IdentityProvider {
     // 伙伴从自己的会话来源读取；需要时在实现内交换成其会议后端可接受的凭据。
-    String token = myAccount.currentMeetingToken();
-    return token == null ? IdentityResult.loginRequired("请登录伙伴账号")
-            : IdentityResult.loggedIn(new IdentitySession(token, "伙伴账号"));
-};
-MeetingClientConfig config = new MeetingClientConfig(serverUrl, identity,
-        clientIdentity, productProfile, mainThreadExecutor);
+    val token = myAccount.currentMeetingToken()
+    if (token == null) IdentityResult.loginRequired("请登录伙伴账号")
+    else IdentityResult.loggedIn(IdentitySession(token, "伙伴账号"))
+}
+val config = MeetingClientConfig(serverUrl, identity, clientIdentity, productProfile, mainThreadExecutor)
 ```
 
 参考App的`MeetingAppAssembly`集中注册来源并供Activity与Service共用；开始时同进程交接冻结设置与动作，
@@ -103,8 +102,8 @@ P6的采音、模型、DOA或尾部收口时序。
 原七／八／九参 PUBLIC 构造器全部保留，默认仍是 `参考会议`、`Asia/Shanghai`、
 `retainAudio=false`，参考 App 不因本接口改变默认行为。
 
-```java
-MeetingOptions named = selected.withCreateParameters("客户会议", "Europe/Paris", false);
+```kotlin
+val named = selected.withCreateParameters("客户会议", "Europe/Paris", false)
 // 将 named 交给现有 MeetingClient.start，模型材料和会议编排仍由 SDK 处理。
 ```
 
@@ -132,15 +131,15 @@ Web／纯提示不调用正文读取；PDF等显式动作才按需读取。请�
 串行callbackExecutor。动作失败与READY分开；App可用同一准备闭包、READY和访问对象
 手动再执行，不重新Stop、采音、总结或计费。结果交互结束后关闭原client，关闭后不再派发回调。
 
-```java
-ResultActionRegistry registry = new ResultActionRegistry(List.of(myNoticePlugin));
+```kotlin
+val registry = ResultActionRegistry(listOf(myNoticePlugin))
 // 先在会前Hook主线程准备；prepared应在开始时冻结并由Service持有。
-var prepared = registry.prepare("partner.notice", options, discovery);
-if (!prepared.allowed()) showMessage(prepared.message());
+val prepared = registry.prepare("partner.notice", options, discovery)
+if (!prepared.allowed()) showMessage(prepared.message())
 // 下方只能在SDK已经确认同场READY后执行；平台工作／UI队列由App提供。
-var context = new ResultActionContext(readyResult, session.resultActionAccess(),
-        ResultActionRegistry.serviceCapabilities(discovery), platformWork, mainExecutor);
-registry.execute(prepared.action(), context, actionCallback);
+val context = ResultActionContext(readyResult, session.resultActionAccess(),
+    ResultActionRegistry.serviceCapabilities(discovery), platformWork, mainExecutor)
+registry.execute(requireNotNull(prepared.action()), context, actionCallback)
 ```
 
 `MeetingOptions`原七／八参构造器保留并转换旧结果枚举；新八参构造器用`ResultOptions`
@@ -185,7 +184,7 @@ App 停截图 tick，在工作线程完成最后有效截图的 `submitPresentat
 JPEG 在调用时复制，`offsetMs` 相对 `startedAtMs`，序号由组合层分配。
 
 需要更新截图去重基线或确认末帧时，使用
-`submitPresentation(offsetMs, jpeg, MeetingClient.Callback<Void>)`：内建Coordinator的回调
+`submitPresentation(offsetMs, jpeg, MeetingClient.Callback<Void?>)`：内建Coordinator的回调
 都经配置的串行`callbackExecutor`，只有后端实际ACK的`chunkSequence`、`frameCount=1`
 和非空`artifactId`匹配才`onSuccess(null)`。旧void入口保留，仅表示排队，不代表已保存。
 旧自定义Session未实现此重载时明确抛出`UnsupportedOperationException`，不伪造确认。
@@ -199,17 +198,17 @@ JPEG 在调用时复制，`offsetMs` 相对 `startedAtMs`，序号由组合层�
 
 App只在成功回调后更新去重基线；停止前截图的成功／失败都必须续接一次，例：
 
-```java
-session.submitPresentation(offsetMs, jpeg, new MeetingClient.Callback<Void>() {
-    @Override public void onSuccess(Void ignored) {
-        updateCaptureBaseline(); // 只在真实保存确认后更新。
-        closeCaptureAndContinueStop();
+```kotlin
+session.submitPresentation(offsetMs, jpeg, object : MeetingClient.Callback<Void?> {
+    override fun onSuccess(ignored: Void?) {
+        updateCaptureBaseline() // 只在真实保存确认后更新。
+        closeCaptureAndContinueStop()
     }
-    @Override public void onError(String message) {
-        showCaptureNotice(message); // 仅提示图片失败，文字会议仍应正常停止。
-        closeCaptureAndContinueStop();
+    override fun onError(message: String) {
+        showCaptureNotice(message) // 仅提示图片失败，文字会议仍应正常停止。
+        closeCaptureAndContinueStop()
     }
-});
+})
 ```
 
 `closeCaptureAndContinueStop`由App装配，在其工作线程完成关闭后调原continuation；
@@ -289,9 +288,9 @@ core 的窗口诊断使用 Java 日志 `FINE` 级，包含片段ID/修订/等待
 
 伙伴只需新增 Adapter 实现，并在会议开始前注册工厂和可解析能力：
 
-```java
-ModelAdapterRegistry adapters = new ModelAdapterRegistry(); // 自带听悟、样例和百炼。
-adapters.register("partner-json", PartnerAdapter::new, Set.of("transcript.realtime"));
+```kotlin
+val adapters = ModelAdapterRegistry() // 自带听悟、样例和百炼。
+adapters.register("partner-json", ::PartnerAdapter, setOf("transcript.realtime"))
 // 将 adapters 交给 AiMeetingClient；Server 本场返回 adapterId，Coordinator 自动选新实例。
 ```
 
@@ -308,6 +307,8 @@ adapters.register("partner-json", PartnerAdapter::new, Set.of("transcript.realti
 Mock App 直接依赖本模块；SDK App 使用私有 AAR 内带的同一 JAR，不再依赖本工程模块。
 SDK 从公共契约 JAR 以 `compileOnly` 编译，App 打包唯一一份契约；Android 提供 JSON 类。
 `api(project(":model-runtime-contract"))` 仅表达源码模块的编译依赖，不生成合并 JAR。
+两个公共模块使用 Kotlin 2.4.21。源码 Module 依赖会传递 Kotlin 标准库；如以裸 JAR
+交给未启用 Kotlin 插件的宿主，需显式提供匹配的 `org.jetbrains.kotlin:kotlin-stdlib:2.4.21`。
 
 `MeetingRuntimePort` 是平台/Mock 装配边界，不供业务 App 另写会议流程；真实运行时接收材料/新 Adapter，
 本地 Mock 可固定声明能力且不领材料（参数为 null），仍用同一 Coordinator。Android 装配覆盖
