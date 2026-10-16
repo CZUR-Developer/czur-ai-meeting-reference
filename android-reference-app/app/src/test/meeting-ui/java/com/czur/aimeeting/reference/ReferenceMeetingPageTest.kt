@@ -128,6 +128,15 @@ class ReferenceMeetingPageTest {
         assertFalse(page.targetLanguage.isEnabled)
         assertTrue(page.transcriptMode.isChecked)
         assertEquals(ViewGroup.LayoutParams.MATCH_PARENT, page.transcriptMode.layoutParams.width)
+
+        page.showCapabilityOptions(summaryAvailable = true, translationAvailable = true, transcriptAvailable = false)
+        page.showSetupMode(translation = false, summaryAvailable = true, transcriptAvailable = false)
+        assertEquals(View.GONE, page.modes.visibility)
+        assertEquals(View.GONE, page.transcriptMode.visibility)
+        assertEquals(View.GONE, page.translationMode.visibility)
+        assertEquals(View.GONE, page.summary.visibility)
+        assertEquals("实时字幕不可用", page.setupTitle.text.toString())
+        assertEquals("当前部署未提供实时字幕能力", page.root.findViewById<TextView>(R.id.language_hint).text.toString())
     }
 
     @Test fun accountEntryAndConnectionReturnCloseOldClientAndClearOldCapabilities() {

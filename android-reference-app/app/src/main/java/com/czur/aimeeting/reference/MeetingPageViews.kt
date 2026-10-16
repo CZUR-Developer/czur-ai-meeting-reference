@@ -114,35 +114,57 @@ class MeetingPageViews(@JvmField val root: FrameLayout) {
      * 保持可用，并让唯一的字幕入口占满模式栏。这里仅改变 View 的呈现和选择状态，
      * 不修改 SDK 的能力快照，也不把缺失能力伪造成降级成功。
      */
-    fun showCapabilityOptions(summaryAvailable: Boolean, translationAvailable: Boolean) {
-        if (!translationAvailable && translationMode.isChecked) transcriptMode.isChecked = true
-        translationMode.visibility = if (translationAvailable) View.VISIBLE else View.GONE
-        translationMode.isEnabled = translationAvailable
-        summary.visibility = if (summaryAvailable) View.VISIBLE else View.GONE
-        summary.isEnabled = summaryAvailable
-        if (!summaryAvailable) summary.isChecked = false
-        targetLanguage.isEnabled = translationAvailable && translationMode.isChecked
+    fun showCapabilityOptions(
+        summaryAvailable: Boolean,
+        translationAvailable: Boolean,
+        transcriptAvailable: Boolean = true,
+    ) {
+        val usableTranslation = transcriptAvailable && translationAvailable
+        if (!usableTranslation && translationMode.isChecked) transcriptMode.isChecked = true
+        modes.visibility = if (transcriptAvailable) View.VISIBLE else View.GONE
+        transcriptMode.visibility = if (transcriptAvailable) View.VISIBLE else View.GONE
+        transcriptMode.isEnabled = transcriptAvailable
+        translationMode.visibility = if (usableTranslation) View.VISIBLE else View.GONE
+        translationMode.isEnabled = usableTranslation
+        summary.visibility = if (transcriptAvailable && summaryAvailable) View.VISIBLE else View.GONE
+        summary.isEnabled = transcriptAvailable && summaryAvailable
+        if (!transcriptAvailable || !summaryAvailable) summary.isChecked = false
+        targetLanguage.isEnabled = usableTranslation && translationMode.isChecked
         transcriptMode.layoutParams = transcriptMode.layoutParams.apply {
-            width = if (translationAvailable) transcriptModeDesignWidth else ViewGroup.LayoutParams.MATCH_PARENT
+            width = if (usableTranslation) transcriptModeDesignWidth else ViewGroup.LayoutParams.MATCH_PARENT
         }
     }
 
     /**
      * 保留旧调用者的默认标题行为；参考入口在能力收敛时传入真实的总结能力。
      */
-    fun showSetupMode(translation: Boolean, summaryAvailable: Boolean = true) {
-        targetContainer.visibility = if (translation) View.VISIBLE else View.GONE
-        swapLanguages.visibility = if (translation) View.VISIBLE else View.GONE
-        presentation.visibility = if (translation) View.GONE else View.VISIBLE
-        root.findViewById<View>(R.id.presentation_hint).visibility = if (translation) View.GONE else View.VISIBLE
-        root.findViewById<View>(R.id.translation_illustration).visibility = if (translation) View.VISIBLE else View.GONE
+    fun showSetupMode(translation: Boolean, summaryAvailable: Boolean = true, transcriptAvailable: Boolean = true) {
+        val usableTranslation = translation && transcriptAvailable
+        targetContainer.visibility = if (usableTranslation) View.VISIBLE else View.GONE
+        swapLanguages.visibility = if (usableTranslation) View.VISIBLE else View.GONE
+        presentation.visibility = if (usableTranslation || !transcriptAvailable) View.GONE else View.VISIBLE
+        root.findViewById<View>(R.id.presentation_hint).visibility = if (usableTranslation || !transcriptAvailable) View.GONE else View.VISIBLE
+        root.findViewById<View>(R.id.translation_illustration).visibility = if (usableTranslation) View.VISIBLE else View.GONE
         root.findViewById<TextView>(R.id.language_hint).apply {
-            text = if (translation) "提示：两种语言的人群，分坐左右两侧" else "语言"
-            setTextSize(TypedValue.COMPLEX_UNIT_PX, scale.px(if (translation) 20 else 30).toFloat())
-            setTypeface(null, if (translation) Typeface.NORMAL else Typeface.BOLD)
+            text = when {
+                !transcriptAvailable -> "当前部署未提供实时字幕能力"
+                usableTranslation -> "提示：两种语言的人群，分坐左右两侧"
+                else -> "语言"
+            }
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, scale.px(if (usableTranslation) 20 else 30).toFloat())
+            setTypeface(null, if (usableTranslation) Typeface.NORMAL else Typeface.BOLD)
         }
-        setupTitle.text = if (translation) "AI双语互译" else if (summaryAvailable) "AI会议纪要" else "AI字幕"
-        root.findViewById<TextView>(R.id.setup_subtitle).text = if (translation) "（实时将两种语言进行互译）" else "（实时将声音转文字）"
+        setupTitle.text = when {
+            !transcriptAvailable -> "实时字幕不可用"
+            usableTranslation -> "AI双语互译"
+            summaryAvailable -> "AI会议纪要"
+            else -> "AI字幕"
+        }
+        root.findViewById<TextView>(R.id.setup_subtitle).text = when {
+            !transcriptAvailable -> "（当前部署未声明 transcript.realtime）"
+            usableTranslation -> "（实时将两种语言进行互译）"
+            else -> "（实时将声音转文字）"
+        }
     }
     fun textRow(ignoredLegacySp: Float, translated: Boolean): TextView =
         SubtitleViewFactory.create(root.context, scale.textSp(24), Int.MAX_VALUE, false).apply {

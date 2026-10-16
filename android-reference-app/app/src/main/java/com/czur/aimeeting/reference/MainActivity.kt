@@ -119,10 +119,10 @@ class MainActivity : Activity() {
             targetLanguageView.isEnabled = translation && deploymentLanguages.size >= 2
             if (translation) presentationCaptureView.isChecked = false
             presentationCaptureView.isEnabled = !translation && ScreenCaptureSourceFactory.isSupported()
-            page.showSetupMode(translation, summaryCapabilityAvailable())
+            page.showSetupMode(translation, summaryCapabilityAvailable(), transcriptCapabilityAvailable())
         }
         summaryEnabledView.setOnCheckedChangeListener { _, _ ->
-            page.showSetupMode(translationModeView.isChecked, summaryCapabilityAvailable())
+            page.showSetupMode(translationModeView.isChecked, summaryCapabilityAvailable(), transcriptCapabilityAvailable())
         }
         page.swapLanguages.setOnClickListener {
             val source = sourceLanguageView.selectedItemPosition
@@ -237,7 +237,14 @@ class MainActivity : Activity() {
                 this@MainActivity.discovery = discovery
                 refreshResultAvailability(); refreshModeAvailability(); setConfigurationEnabled(!meetingBusy)
                 startButton.isEnabled = displayedIdentity != null && !meetingBusy && deploymentCapabilities.contains(MeetingCapabilityState.TRANSCRIPT) && deploymentLanguages.isNotEmpty()
-                if (!meetingBusy && !hasReadyResult) statusView.text = if (deploymentLanguages.isEmpty()) "当前部署尚未声明会议语言" else "登录成功，可开始会议"
+                if (!meetingBusy && !hasReadyResult) {
+                    statusView.text = when {
+                        !deploymentCapabilities.contains(MeetingCapabilityState.TRANSCRIPT) ->
+                            "当前部署未提供实时字幕能力，暂时无法开始会议"
+                        deploymentLanguages.isEmpty() -> "当前部署尚未声明会议语言"
+                        else -> "登录成功，可开始会议"
+                    }
+                }
             }
             override fun onError(message: String) {
                 setConfigurationEnabled(!meetingBusy); startButton.isEnabled = false
@@ -254,20 +261,24 @@ class MainActivity : Activity() {
         Log.i(TAG, "参考账号已退出")
     }
     private fun refreshModeAvailability() {
-        val summary = summaryCapabilityAvailable()
-        val translation = displayedIdentity != null && deploymentCapabilities.contains(MeetingCapabilityState.TRANSLATION) && deploymentLanguages.size >= 2
+        val transcript = transcriptCapabilityAvailable()
+        val summary = transcript && summaryCapabilityAvailable()
+        val translation = transcript && displayedIdentity != null && deploymentCapabilities.contains(MeetingCapabilityState.TRANSLATION) && deploymentLanguages.size >= 2
         summaryEnabledView.text = "生成会议纪要"
         summaryEnabledView.contentDescription = "生成会议纪要"
         translationModeView.text = "AI双语互译"; translationModeView.alpha = 1f
-        page.showCapabilityOptions(summary, translation)
+        page.showCapabilityOptions(summary, translation, transcript)
         targetLanguageView.isEnabled = translation && translationModeView.isChecked
         val screenCapture = ScreenCaptureSourceFactory.isSupported()
         presentationCaptureView.text = if (screenCapture) "演示文稿" else "演示文稿（Mock不支持截图）"
         presentationCaptureView.contentDescription = if (screenCapture) "演示文稿，开始时申请系统屏幕采集授权" else "Mock构建不提供截图，请使用SDK构建"
         presentationCaptureView.isEnabled = screenCapture && !translationModeView.isChecked
         if (!screenCapture) presentationCaptureView.isChecked = false
-        page.showSetupMode(translationModeView.isChecked, summary)
+        page.showSetupMode(translationModeView.isChecked, summary, transcript)
     }
+    /** 实时字幕是所有参考会议的必选能力；未发现部署结果前保留默认会前页面。 */
+    private fun transcriptCapabilityAvailable(): Boolean =
+        displayedIdentity == null || discovery == null || deploymentCapabilities.contains(MeetingCapabilityState.TRANSCRIPT)
     private fun summaryCapabilityAvailable(): Boolean =
         displayedIdentity != null && deploymentCapabilities.contains(MeetingCapabilityState.SUMMARY)
     /** 保留仍可用的选择，初次发现取后端前两项，不硬编码模型语言。 */
@@ -357,6 +368,10 @@ class MainActivity : Activity() {
     }
     /** 页面检查后 SDK 在真实建会前仍重新读取身份，避免沿用会前过时凭据。 */
     private fun continueStartMeeting() {
+        if (!deploymentCapabilities.contains(MeetingCapabilityState.TRANSCRIPT)) {
+            statusView.text = "当前部署未提供实时字幕能力，暂时无法开始会议"
+            startButton.isEnabled = false; setConfigurationEnabled(true); return
+        }
         if (deploymentLanguages.isEmpty()) { statusView.text = "当前部署尚未声明会议语言"; return }
         val currentDiscovery = discovery
         if (resultGroup.checkedRadioButtonId == -1 || currentDiscovery == null) {
