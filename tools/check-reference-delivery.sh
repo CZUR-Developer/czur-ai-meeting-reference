@@ -10,6 +10,7 @@ required_files=(
   README.md
   pom.xml
   Dockerfile
+  docs/README.md
   docs/partner-integration-guide.md
   backend-core/README.md
   backend-reference/README.md
