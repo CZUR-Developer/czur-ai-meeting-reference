@@ -1,0 +1,119 @@
+package com.czur.aimeeting.reference.meeting
+import com.czur.aimeeting.client.display.MeetingDisplayState
+import com.czur.aimeeting.client.display.DisplayRouter
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import com.czur.aimeeting.model.AudioDirectionSample
+import com.czur.aimeeting.model.TranscriptEvent
+import com.czur.aimeeting.model.TranslationEvent
+import org.junit.Test
+class MeetingDisplayStateTest {
+    @Test fun revisionAndFinalShareOneDisplayState() {
+        val state = MeetingDisplayState()
+        state.start(1000L)
+        assertEquals("等待字幕…", state.transcript())
+        assertEquals("00:00:00", state.elapsed(1000L))
+        state.apply(TranscriptEvent("part-1", 1, 0, 100, "zh-CN", "大家", false))
+        assertEquals("大家", state.transcript())
+        assertEquals(0.8f, state.transcriptAlpha(), 0.0f)
+        state.apply(TranscriptEvent("part-1", 2, 0, 500, "zh-CN", "大家好", true))
+        assertEquals("大家好", state.transcript())
+        assertEquals(1.0f, state.transcriptAlpha(), 0.0f)
+        state.apply(TranscriptEvent("part-2", 1, 500, 900, "zh-CN", "欢迎", false))
+        assertEquals(2, state.segments().size)
+        assertEquals("大家好", state.segments()[0].text())
+        assertEquals("欢迎", state.segments()[1].text())
+        state.apply(TranscriptEvent("part-2", 2, 500, 900, "zh-CN", "欢迎参加", true))
+        assertEquals(2, state.segments().size)
+        assertEquals("欢迎参加", state.segments()[1].text())
+        assertEquals(1.0f, state.segments()[1].alpha(), 0.0f)
+        assertEquals("01:01:01", state.elapsed(3662000L))
+    }
+
+    @Test fun bilingualRowsPairBySourceAndPlaceEnglishSpeechOnRight() {
+        val state = MeetingDisplayState()
+        state.start(0L, true, "zh-CN", "en-US")
+        state.apply(TranscriptEvent("speech-1", 1, 0, 100, "en-US", "Hello", false))
+        state.apply(TranslationEvent("translation-1", "speech-1", 1,
+                "en-US", "zh-CN", "你", false))
+        assertEquals(1, state.bilingualRows().size)
+        assertEquals("你", state.bilingualRows()[0].left())
+        assertEquals("Hello", state.bilingualRows()[0].right())
+        assertEquals(0.8f, state.bilingualRows()[0].leftAlpha(), 0.0f)
+        state.apply(TranslationEvent("translation-1", "speech-1", 2,
+                "en-US", "zh-CN", "你好", true))
+        state.apply(TranslationEvent("translation-1", "speech-1", 1,
+                "en-US", "zh-CN", "旧译文", false))
+        assertEquals("你好", state.bilingualRows()[0].left())
+        assertEquals(1.0f, state.bilingualRows()[0].leftAlpha(), 0.0f)
+        state.apply(TranscriptEvent("speech-2", 1, 100, 200,
+                "zh-CN", "早上好", true))
+        state.apply(TranslationEvent("translation-2", "speech-2", 1,
+                "zh-CN", "en-US", "Good morning", true))
+        assertEquals("早上好", state.bilingualRows()[1].left())
+        assertEquals("Good morning", state.bilingualRows()[1].right())
+        state.start(200L)
+        assertEquals(0, state.bilingualRows().size)
+        assertFalse(state.hasTranslation())
+    }
+
+    @Test fun bilingualModeStartsInTwoColumnsAndBothSurfacesReadSameRoutedRow() {
+        val state = MeetingDisplayState()
+        state.start(0L, true, "en-US", "zh-CN")
+        assertEquals(true, state.isBilingual())
+        assertEquals("en-US", state.leftLanguage())
+        assertEquals("zh-CN", state.rightLanguage())
+        assertEquals("English", state.leftLabel())
+        assertEquals("中文", state.rightLabel())
+        assertEquals(0, state.bilingualRows().size)
+        state.apply(TranscriptEvent("speech", 1, 0, 100, "en-US", "Hello", false))
+        assertEquals("Hello", state.latestBilingualRow()!!.left())
+        assertEquals(state.bilingualRows()[0].left(), state.latestBilingualRow()!!.left())
+        state.swapColumns()
+        assertEquals("zh-CN", state.leftLanguage())
+        assertEquals("中文", state.leftLabel())
+        assertEquals("Hello", state.latestBilingualRow()!!.right())
+        assertEquals(state.bilingualRows()[0].right(), state.latestBilingualRow()!!.right())
+    }
+
+    @Test fun sdkDirectionRoutesBeforeFirstDisplayAndKeepsSegmentLocked() {
+        val state = MeetingDisplayState()
+        state.start(0L, true, "zh-CN", "en-US")
+        state.updateAudioDirection(AudioDirectionSample(218f, 220f, 100L,
+                AudioDirectionSample.Status.AVAILABLE))
+        state.apply(TranscriptEvent("speech", 1, 0, 100, "en-US", "Hello", false))
+        assertEquals(DisplayRouter.Basis.STABLE_DIRECTION, state.route("speech")!!.basis())
+        assertEquals("Hello", state.latestBilingualRow()!!.left())
+        state.updateAudioDirection(AudioDirectionSample(302f, 300f, 200L,
+                AudioDirectionSample.Status.AVAILABLE))
+        state.apply(TranscriptEvent("speech", 2, 0, 200, "en-US", "Hello again", true))
+        assertEquals("Hello again", state.latestBilingualRow()!!.left())
+    }
+
+    @Test fun noDirectionKeepsLastStableAngleForNewSegment() {
+        val state = MeetingDisplayState()
+        state.start(0L, true, "zh-CN", "en-US")
+        state.updateAudioDirection(AudioDirectionSample(218f, 220f, 100L,
+                AudioDirectionSample.Status.AVAILABLE))
+        state.updateAudioDirection(AudioDirectionSample(Float.NaN, Float.NaN, 200L,
+                AudioDirectionSample.Status.NO_DIRECTION))
+        state.apply(TranscriptEvent("speech", 1, 0, 100, "en-US", "Hello", true))
+        assertEquals(DisplayRouter.Basis.STABLE_DIRECTION, state.route("speech")!!.basis())
+        assertEquals("Hello", state.latestBilingualRow()!!.left())
+    }
+
+    @Test fun unsupportedDirectionClearsOldAngleAndNewSegmentUsesModelLanguage() {
+        assertUnavailableDirectionFallsBack(AudioDirectionSample.Status.UNSUPPORTED)
+    }
+
+    private fun assertUnavailableDirectionFallsBack(status: AudioDirectionSample.Status) {
+        val state = MeetingDisplayState()
+        state.start(0L, true, "zh-CN", "en-US")
+        state.updateAudioDirection(AudioDirectionSample(218f, 220f, 100L,
+                AudioDirectionSample.Status.AVAILABLE))
+        state.updateAudioDirection(AudioDirectionSample(Float.NaN, Float.NaN, 200L, status))
+        state.apply(TranscriptEvent("speech", 1, 0, 100, "en-US", "Hello", true))
+        assertEquals(DisplayRouter.Basis.MODEL_LANGUAGE, state.route("speech")!!.basis())
+        assertEquals("Hello", state.latestBilingualRow()!!.right())
+    }
+}

@@ -5,6 +5,12 @@ application. The app consumes the public audio-source SDK and canonical
 meeting protocols; it does not contain CZUR launcher or production-only UI
 integration.
 
+Android 自有应用层、会议公共核心、模型契约及其测试统一使用 Kotlin。
+工程使用 Kotlin 2.4.21，App／公共 JAR 的目标 JVM 为 17；Android SDK 与 UI 工具由 Starry
+生成匹配的 Kotlin AAR。接口保留既有回调和 JVM 方法入口，本轮不同时重写业务状态机。
+Gradle／Android Gradle Plugin 沿用既有版本；Lint 单独使用 9.4.0，以正确解析 Kotlin 2.4
+制品元数据，配置见 `gradle.properties`，不关闭原有 Release 检查。
+
 ## 当前交付状态（2026-10-08）
 
 P6核心音频底座和分层SDK已于2026-10-07完成对应新固件验收。真实Broker MIC字幕、
@@ -55,9 +61,10 @@ App侧`MeetingPageViews.Factory`只创建／绑定View；默认XML中的dp／sp�
 蓝标题86高、40圆角，语言／开关／开始按钮复用国内比例与样式；小窗内容可滚动，Start／Stop不随文本滚走。
 伙伴可编辑公开XML，或在首次创建Activity前登记自己的薄工厂：
 
-```java
-MeetingAppAssembly.registerPageFactory(activity -> new MeetingPageViews(
-    (FrameLayout) activity.getLayoutInflater().inflate(R.layout.partner_meeting_page, null)));
+```kotlin
+MeetingAppAssembly.registerPageFactory { activity ->
+    MeetingPageViews(activity.layoutInflater.inflate(R.layout.partner_meeting_page, null) as FrameLayout)
+}
 ```
 
 自定义布局提供相同的控件ID即可由原Activity接线，不创建另一份会议状态；页面不放入SDK。
@@ -214,8 +221,8 @@ Mock与SDK使用同一独立UI AAR。正式SDK参考交付同时注入主AAR和U
   -PmeetingUiAar=/absolute/path/ai-meeting-ui-0.2.0-release.aar
 ```
 
-`src/meeting-ui/.../ui/SubtitleViewFactory.java`直接调用UI工具；未提供UI AAR时只编译
-`src/basic-ui/.../ui/SubtitleViewFactory.java`基础TextView版。两份工厂互斥，不反射加载，
+`src/meeting-ui/.../ui/SubtitleViewFactory.kt`直接调用UI工具；未提供UI AAR时只编译
+`src/basic-ui/.../ui/SubtitleViewFactory.kt`基础TextView版。两份工厂互斥，不反射加载，
 也不在公开仓提交AAR。基础版保障可重建和正常文字显示，不复制完整最近文字裁切功能。
 UI AAR只含控件和必要呈现类型，无core、contract、网络或原生采音，也没有其他运行依赖。
 
@@ -242,7 +249,7 @@ UI AAR只含控件和必要呈现类型，无core、contract、网络或原生�
   大窗左右独立滚动历史；Mini恢复之前形态。窗口隐藏／切换
   只影响UI，不暂停会议或修改音源、模型、计费及收口。
 
-`meeting-ui/.../ui/OverlayViewFactory.java`同时是公开可编辑的px布局和内容装配例。
+`meeting-ui/.../ui/OverlayViewFactory.kt`同时是公开可编辑的px布局和内容装配例。
 App按1920×1080设计尺度等比换算：宽1800、字幕高222、普通互译293、大互译1008，
 Mini126×60；位置由App决定。字幕24设计字号／36设计行高，原文白色、译文黄色，
 普通互译的控制区在双栏中央；简洁模式高度164、背景透明，文字2行。
@@ -256,12 +263,12 @@ Mini复用国内APNG和声音图，点击可恢复。原素材／动画字节不
 提醒仍由原App卡片及规则管理，没有放入UI AAR。宿主结束／退出时调用dismiss释放窗口，
 不是另发一次Stop。
 
-伙伴只要一个形态时，直接使用可编辑的`SingleFormOverlayFactory.java`：
+伙伴只要一个形态时，直接使用可编辑的`SingleFormOverlayFactory.kt`：
 
-```java
+```kotlin
 // 有 meetingUiAar 的构建，在首次显示之前（例如伙伴 Application.onCreate）显式装配：
-MeetingAppAssembly.registerOverlayFactory(new SingleFormOverlayFactory());
-// 默认恢复：MeetingAppAssembly.registerOverlayFactory(new OverlayViewFactory());
+MeetingAppAssembly.registerOverlayFactory(SingleFormOverlayFactory())
+// 默认恢复：MeetingAppAssembly.registerOverlayFactory(OverlayViewFactory())
 ```
 
 例子只注册`partner.single`，替换自己的View／位置尺寸，消费同一已投影字幕／双栏输入，
@@ -429,10 +436,10 @@ Assembly的同进程内存宿主暂存已经准备好的通用操作，Service�
 
 最小替换例，修改Assembly默认初始化即可（未加入默认清单）：
 
-```java
-private static List<AppResultActionPlugin> resultActions =
-        List.of(new CompletionNoticeAction()); // example.notice：同场READY完成提示，无正文或网络。
-// 显式可选：new LocalPdfResultActionPlugin()、new EmailResultActionPlugin()
+```kotlin
+private var resultActions: List<AppResultActionPlugin> =
+    listOf(CompletionNoticeAction()) // example.notice：同场READY完成提示，无正文或网络。
+// 显式可选：LocalPdfResultActionPlugin()、EmailResultActionPlugin()
 ```
 
 PDF插件READY后按需读取typed正文，复用原`LocalPdfWriter`／`LocalResultActivity`；
@@ -456,13 +463,12 @@ ENDED且不读Manifest／主动交付，不承诺无服务端记录。
 伙伴先实现公开`ModelAdapter`，
 再在首次创建Activity／Service客户端前（例如自己的`Application.onCreate`）注册：
 
-```java
+```kotlin
 // PartnerModelAdapter是伙伴自己的协议实现；每次调用工厂须创建新实例。
-ModelAdapterRegistry adapters = new ModelAdapterRegistry();
-adapters.register(PartnerModelAdapter.ID, PartnerModelAdapter::new,
-        Set.of(MeetingCapabilityState.TRANSCRIPT));
-MeetingAppAssembly.registerModelAdapters(adapters);
-// 恢复默认组合：MeetingAppAssembly.registerModelAdapters(new ModelAdapterRegistry());
+val adapters = ModelAdapterRegistry()
+adapters.register(PartnerModelAdapter.ID, ::PartnerModelAdapter, setOf(MeetingCapabilityState.TRANSCRIPT))
+MeetingAppAssembly.registerModelAdapters(adapters)
+// 恢复默认组合：MeetingAppAssembly.registerModelAdapters(ModelAdapterRegistry())
 ```
 
 会后文本协议可在同一注册表调用`registerSummary(id, factory)`。相同ID后注册替换原工厂；
@@ -471,22 +477,22 @@ MeetingAppAssembly.registerModelAdapters(adapters);
 SDK版执行选中的真实Adapter；Mock版继续固定字幕／纪要演示，不领取真实材料、不执行伙伴Adapter，
 不能用Mock结果代签伙伴协议。更换模型实现只需新增实现并在此登记，无需修改两份运行工厂或SDK源码。
 
-```java
-MeetingClient client = MeetingRuntimeFactory.create(context, config);
-MeetingSession session = client.start(setup.toOptions(), new MeetingListener() {
-    @Override public void onDisplay(MeetingDisplaySnapshot snapshot) {
+```kotlin
+val client = MeetingRuntimeFactory.create(context, config)
+val session = client.start(setup.toOptions(), object : MeetingListener {
+    override fun onDisplay(snapshot: MeetingDisplaySnapshot) {
         // SDK 已决定片段配对、源侧和交换；UI 只渲染 final=100%、partial=80%。
     }
-    @Override public void beforeStop(Runnable continuation) {
+    override fun beforeStop(continuation: Runnable) {
         // 停止周期屏采，在平台队列提交最后有效截图、关闭投影，再调用 continuation。
-        continuation.run(); // 没有屏采时直接继续；详细接线见 MeetingService。
+        continuation.run() // 没有屏采时直接继续；详细接线见 MeetingService。
     }
-    @Override public void onResult(MeetingResult result) {
+    override fun onResult(result: MeetingResult) {
         // 只保存同场READY清单；收到onState(READY)后再用冻结动作通用派发。
     }
-});
+})
 // 稍后用户点击停止，且最近 onState 的 state.canStop() 为 true 时调用：
-session.requestStop(); // 正常收口；client.close() 仅用于取消/释放，不产生会议结果。
+session.requestStop() // 正常收口；client.close() 仅用于取消/释放，不产生会议结果。
 ```
 
 `start()` 异步创建会议并立即返回句柄；App 保存该句柄，过早的 Stop 不受理。
@@ -499,7 +505,7 @@ session.requestStop(); // 正常收口；client.close() 仅用于取消/释放�
 
 ### 合作伙伴会前开会条件 Hook
 
-`app/src/main/java/com/czur/aimeeting/reference/meeting/MeetingStartConditions.java`
+`app/src/main/java/com/czur/aimeeting/reference/meeting/MeetingStartConditions.kt`
 是唯一需要修改的装配入口。参考实现返回始终放行的 `MeetingStartCondition`；合作伙伴
 可新增自己的实现类，再让 `create(Context)` 返回该实现。`MainActivity` 在登录、模型能力
 检查之后，申请录屏权限与启动会议Service之前，通过`MeetingStartConditions.prepare`组合

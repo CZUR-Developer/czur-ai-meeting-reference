@@ -1,0 +1,421 @@
+package com.czur.aimeeting.reference
+
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.ApplicationInfo
+import android.content.pm.ServiceInfo
+import android.os.Binder
+import android.os.Build
+import android.os.Handler
+import android.os.IBinder
+import android.os.Looper
+import android.os.SystemClock
+import android.util.Log
+import com.czur.aimeeting.client.*
+import com.czur.aimeeting.client.result.ResultActionContext
+import com.czur.aimeeting.client.result.ResultActionOutcome
+import com.czur.aimeeting.client.display.MeetingDisplaySnapshot
+import com.czur.aimeeting.model.AudioInputErrorCode
+import com.czur.aimeeting.model.AudioInputMode
+import com.czur.aimeeting.model.AudioInputLevel
+import com.czur.aimeeting.reference.meeting.*
+import java.util.concurrent.Executors
+
+/**
+ * 单场参考会议的平台与 UI 所有者。SDK 持有模型、音源、显示规则和服务端流程；
+ * 此 Service 只消费类型快照，管理通知、窗口、计时、截图及 READY 后的通用动作。
+ * Activity 离开仅解除观察，所有会议回调仍走主线程串行队列。
+ */
+class MeetingService : Service() {
+    fun interface Observer { fun onMeetingState(state: State) }
+    class State(
+        @JvmField val display: MeetingDisplaySnapshot, @JvmField val status: String,
+        @JvmField val capabilityText: String, @JvmField val busy: Boolean, @JvmField val active: Boolean,
+        @JvmField val canStop: Boolean, @JvmField val overlayShowing: Boolean, @JvmField val transcriptVersion: Int,
+        @JvmField val readyResult: MeetingResult?, @JvmField val actionOutcome: ResultActionOutcome?,
+        @JvmField val actionRunning: Boolean, @JvmField val timeText: String,
+        @JvmField val reminder: MeetingReminderPresentation.Notice, @JvmField val mode: MeetingSetup.Mode,
+        @JvmField val summaryEnabled: Boolean, @JvmField val audioLevel: AudioInputLevel?,
+        @JvmField val presentationNotice: String
+    )
+    inner class LocalBinder : Binder() { fun service() = this@MeetingService }
+    private val binder = LocalBinder()
+    private val main = Handler(Looper.getMainLooper())
+    private val debugStopReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action != ACTION_DEBUG_STOP) return
+            Log.d(TAG, "收到调试正常停止命令 active=$active canStop=$canStop")
+            requestStop()
+        }
+    }
+    /** 原平台队列只运行 JPEG/PDF，不在这里放置网络或模型收口。 */
+    private val platformWork = Executors.newSingleThreadExecutor()
+    private var display = MeetingDisplaySnapshot(false, "zh-CN", "en-US", false, emptyList(), null)
+    private var reminderPresentation = MeetingReminderPresentation()
+    private val clockTick = object : Runnable {
+        override fun run() {
+            val currentTiming = timing
+            if (active && currentTiming != null) {
+                val now = currentTiming.at(SystemClock.elapsedRealtime())
+                if (now.limitWarning() && !limitReminderLogged) { limitReminderLogged = true; Log.i(TAG, "本场剩余20分钟提醒 meetingId=$meetingId") }
+                if (now.noTranscriptWarning() && !idleReminderLogged) { idleReminderLogged = true; Log.i(TAG, "连续4分钟无转写提醒 meetingId=$meetingId") }
+                if (canStop && now.stopCause() != MeetingTimeRule.StopCause.NONE) {
+                    Log.i(TAG, "自动停止会议 meetingId=$meetingId cause=${now.stopCause()}")
+                    requestStop(if (now.stopCause() == MeetingTimeRule.StopCause.TIME_LIMIT)
+                        "已到本场时长上限，正在等待模型最终字幕…" else "连续5分钟无转写，正在等待模型最终字幕…")
+                } else publish()
+            }
+            if (active) main.postDelayed(this, 1000L)
+        }
+    }
+    private val presentationTick = object : Runnable {
+        override fun run() {
+            if (!active || stopRequested || presentation == null) return
+            captureAndSubmit(null)
+            main.postDelayed(this, PRESENTATION_INTERVAL_MS)
+        }
+    }
+    private lateinit var overlay: MeetingOverlay
+    private var observer: Observer? = null
+    private var client: MeetingClient? = null
+    private var session: MeetingSession? = null
+    private var timing: MeetingTimeRule? = null
+    private var stoppedClock: MeetingTimeRule.Snapshot? = null
+    @Volatile private var presentation: PresentationCapture? = null
+    /** 正常停止末帧的唯一续接点，授权撤销同样必须结束等待。 */
+    private var presentationStopContinuation: Runnable? = null
+    /** 仅窗口停止登记；末帧完成后才回页面，避免末帧截到自己的整页。 */
+    private var returnToMeetingAfterPresentation = false
+    private var presentationNotice = ""
+    private var setup: MeetingSetup? = null
+    private var meetingId: String? = null
+    private var status = "请先登录，再开始会议"
+    private var capabilityText = "本场功能将在创建会议后按后端能力显示"
+    private var audioInputMode: AudioInputMode? = null
+    private var audioErrorText: String? = null
+    private var audioLevel: AudioInputLevel? = null
+    private var preparedMeeting: MeetingAppAssembly.PreparedMeeting? = null
+    private var readyResult: MeetingResult? = null
+    private var actionOutcome: ResultActionOutcome? = null
+    private var actionRunning = false
+    private val resultUiAvailable = Runnable(::publish)
+    private var transcriptVersion = 0
+    private var busy = false
+    private var active = false
+    private var canStop = false
+    private var stopRequested = false
+    private var limitReminderLogged = false
+    private var idleReminderLogged = false
+    private var debugStopReceiverRegistered = false
+    private var destroyed = false
+    private var projectionData: Intent? = null
+    private var projectionResultCode = 0
+
+    override fun onCreate() {
+        super.onCreate()
+        overlay = MeetingOverlay(this)
+        getSystemService(NotificationManager::class.java).createNotificationChannel(
+            NotificationChannel(CHANNEL, "AI 会议进行中", NotificationManager.IMPORTANCE_LOW))
+        if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+            val filter = IntentFilter(ACTION_DEBUG_STOP)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) registerReceiver(debugStopReceiver, filter, Context.RECEIVER_EXPORTED)
+            else registerReceiver(debugStopReceiver, filter)
+            debugStopReceiverRegistered = true
+            Log.d(TAG, "调试正常停止命令已注册")
+        }
+    }
+    override fun onBind(intent: Intent?): IBinder = binder
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent == null || intent.action != ACTION_BEGIN || busy) return START_NOT_STICKY
+        val prepared = MeetingAppAssembly.consumePreparedMeeting()
+        if (prepared == null) { status = "缺少本场会前准备，会议未创建"; publish(); stopSelf(); return START_NOT_STICKY }
+        val requested = prepared.setup()
+        if (requested.presentationCapture()) {
+            if (!ScreenCaptureSourceFactory.isSupported()) {
+                status = "Mock构建不提供屏幕截图，请使用SDK构建，会议未创建"; publish(); stopSelf(); return START_NOT_STICKY
+            }
+            projectionData = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+                intent.getParcelableExtra(EXTRA_PROJECTION_DATA, Intent::class.java) else intent.getParcelableExtra(EXTRA_PROJECTION_DATA)
+            projectionResultCode = intent.getIntExtra(EXTRA_PROJECTION_RESULT_CODE, 0)
+            if (projectionData == null) { status = "缺少本场系统屏幕采集授权，会议未创建"; publish(); stopSelf(); return START_NOT_STICKY }
+        }
+        startForegroundForMeeting(requested.presentationCapture())
+        begin(prepared)
+        return START_NOT_STICKY
+    }
+    private fun startForegroundForMeeting(withPresentation: Boolean) {
+        val open = Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        val pending = PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val notification = Notification.Builder(this, CHANNEL).setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setContentTitle("AI 会议进行中").setContentText("点击返回会议页面").setContentIntent(pending).setOngoing(true).build()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            var type = if (MeetingRuntimeFactory.requiresMicrophone()) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            if (withPresentation) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            startForeground(NOTIFICATION_ID, notification, type)
+        } else startForeground(NOTIFICATION_ID, notification)
+    }
+    fun observe(next: Observer) {
+        if (destroyed) return
+        observer = next; MeetingAppAssembly.observeResultUi(resultUiAvailable); publish()
+    }
+    fun unobserve(old: Observer) {
+        if (observer === old) { observer = null; MeetingAppAssembly.unobserveResultUi(resultUiAvailable); publish() }
+    }
+    fun confirmReminder() { reminderPresentation.confirm(); publish() }
+    fun takeUiOperation() = MeetingAppAssembly.consumeResultUiOperation()
+    private fun queueUiOperation(command: Runnable) {
+        main.post {
+            if (command is AppResultActionPlugin.UiOperation) MeetingAppAssembly.queueResultUiOperation(command)
+            else command.run() // 原宿主关闭不吞掉 Registry 的普通完成闭包。
+        }
+    }
+    fun toggleOverlay() {
+        if (!active) return
+        if (overlay.isShowing()) { overlay.dismiss(); Log.i(TAG, "跨应用字幕窗已关闭") }
+        else {
+            overlay.show(display, Runnable(::openMeetingPage), Runnable(::swapDisplayColumns), Runnable(::confirmReminder), Runnable(::requestStopFromOverlay))
+            Log.i(TAG, "跨应用字幕窗已显示")
+        }
+        publish()
+    }
+    private fun requestStopFromOverlay() {
+        if (!active || !canStop || session == null) return
+        returnToMeetingAfterPresentation = presentation != null
+        Log.i(TAG, "悬浮窗请求正常停止 waitForFinalFrame=$returnToMeetingAfterPresentation meetingId=$meetingId")
+        if (!returnToMeetingAfterPresentation) openMeetingPage()
+        requestStop()
+    }
+    private fun openMeetingPage() {
+        startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
+    }
+    fun swapDisplayColumns() {
+        if (!active || !display.bilingual() || session == null) return
+        session?.swapDisplayColumns()
+        Log.i(TAG, "双语分栏左右交换已请求 meetingId=$meetingId")
+    }
+    private fun begin(prepared: MeetingAppAssembly.PreparedMeeting) {
+        releaseResultAccess()
+        val requested = prepared.setup()
+        preparedMeeting = prepared; setup = requested; busy = true; active = false; canStop = false
+        stopRequested = false; presentationStopContinuation = null; returnToMeetingAfterPresentation = false
+        presentationNotice = ""; readyResult = null; actionOutcome = null; actionRunning = false
+        timing = null; stoppedClock = null; meetingId = null; audioInputMode = null; audioErrorText = null; audioLevel = null
+        display = MeetingDisplaySnapshot(requested.mode() == MeetingSetup.Mode.LIVE_TRANSLATION,
+            requested.sourceLanguage(), requested.targetLanguage(), false, emptyList(), null)
+        transcriptVersion++; status = "正在创建会议…"; capabilityText = "本场功能将在创建会议后按后端能力显示"
+        publish()
+        try {
+            val config = MeetingAppAssembly.clientConfig { main.post(it) }
+            val created = MeetingRuntimeFactory.create(this, config)
+            client = created
+            session = created.start(requested.toOptions(), object : MeetingListener {
+                override fun onStarted(started: MeetingStarted) {
+                    meetingId = started.meetingId(); timing = MeetingTimeRule(started.startedAtMs(), started.maxMeetingDurationMs())
+                    reminderPresentation = MeetingReminderPresentation(); limitReminderLogged = false; idleReminderLogged = false
+                    capabilityText = describeCapabilities(started.availableCapabilities())
+                    if (requested.presentationCapture()) startPresentation(started.startedAtMs())
+                    main.removeCallbacks(clockTick); main.post(clockTick)
+                    Log.i(TAG, "组合会议已启动 meetingId=$meetingId mode=${requested.mode()}")
+                }
+                override fun onState(next: MeetingSessionState) {
+                    active = next.active(); canStop = next.canStop()
+                    if (next.phase() != MeetingSessionState.Phase.RUNNING) audioLevel = null
+                    status = next.message()
+                    Log.d(TAG, "组合会议状态 phase=${next.phase()} savedEventCount=${next.savedEventCount()}")
+                    when (next.phase()) {
+                        MeetingSessionState.Phase.FAILED, MeetingSessionState.Phase.ENDED, MeetingSessionState.Phase.CLOSED -> finishWithStatus(next.message())
+                        MeetingSessionState.Phase.READY -> resultReady()
+                        else -> publish()
+                    }
+                }
+                override fun onDisplay(next: MeetingDisplaySnapshot) {
+                    display = next; transcriptVersion++
+                    Log.d(TAG, "已路由显示快照 rows=${next.rows().size} swapped=${next.swapped()}")
+                    publish()
+                }
+                override fun onTranscriptActivity(nowMs: Long) {
+                    val clock = timing ?: return
+                    clock.onTranscriptActivity(nowMs)
+                    if (idleReminderLogged) { idleReminderLogged = false; Log.i(TAG, "转写恢复，无转写提醒已解除 meetingId=$meetingId") }
+                }
+                override fun onAudioInputMode(mode: AudioInputMode) {
+                    audioInputMode = mode; Log.i(TAG, "本场实际音频来源 mode=$mode meetingId=$meetingId"); publish()
+                }
+                override fun onAudioLevel(level: AudioInputLevel) {
+                    if (!active || stopRequested || audioErrorText != null) return
+                    audioLevel = level
+                    Log.d(TAG, "同场输入电平 level=${level.level()} sampledAtMs=${level.sampledAtElapsedRealtimeMs()}")
+                    publish()
+                }
+                override fun onAudioError(code: AudioInputErrorCode, message: String) {
+                    audioLevel = null
+                    audioErrorText = if (code == AudioInputErrorCode.PERMISSION_DENIED)
+                        "没有麦克风权限，请在应用中授予权限后重新开始会议" else "音频输入失败：$message"
+                    Log.w(TAG, "音频输入失败 code=$code meetingId=$meetingId"); publish()
+                }
+                override fun beforeStop(continuation: Runnable) = stopPresentationBefore(continuation)
+                override fun onResult(result: MeetingResult) {
+                    // 早于 READY 状态，只保存事实，不提前关闭 client 或跳转。
+                    readyResult = result; Log.i(TAG, "已接收本场READY清单 meetingId=${result.meetingId()}")
+                }
+            })
+        } catch (failure: RuntimeException) {
+            Log.e(TAG, "打开组合会议失败 errorType=${failure.javaClass.simpleName}")
+            finishWithStatus("打开会议失败，请检查接入配置")
+        }
+    }
+    private fun startPresentation(startedAtMs: Long) {
+        try {
+            val source = ScreenCaptureSourceFactory.create(this, projectionResultCode, projectionData, { main.post(it) }, Runnable(::onPresentationStopped))
+            presentation = PresentationCapture(source, startedAtMs, platformWork) { main.post(it) }
+            presentationNotice = if (source.supportsWindowExclusion()) "" else "当前系统仅支持整屏截图，演示图片会包含悬浮窗"
+            main.postDelayed(presentationTick, PRESENTATION_INTERVAL_MS)
+            Log.i(TAG, "SDK演示采集已开始 mode=${source.mode()} excludeWindows=${source.supportsWindowExclusion()} meetingId=$meetingId")
+        } catch (failure: RuntimeException) {
+            Log.e(TAG, "演示文稿屏幕采集启动失败 errorType=${failure.javaClass.simpleName}")
+            presentationNotice = "屏幕采集启动失败；字幕会议继续，可停止后重试"
+        } finally { projectionData = null }
+    }
+    /** 周期帧→末帧→关闭→SDK 收口仍经原两级异步回调，不阻塞主线程。 */
+    private fun captureAndSubmit(completed: Runnable?) {
+        val current = presentation
+        val currentSession = session
+        if (current == null || currentSession == null) { completed?.run(); return }
+        try {
+            val excluded = if (current.supportsWindowExclusion()) overlay.captureWindowTokens() else emptyArray()
+            current.capture(SystemClock.elapsedRealtime(), excluded, object : PresentationCapture.Callback {
+                override fun onSuccess(frame: PresentationCapture.Frame) {
+                    try {
+                        if (destroyed || presentation !== current || session !== currentSession) return
+                        currentSession.submitPresentation(frame.offsetMs(), frame.jpeg())
+                        Log.i(TAG, "演示截图已提交组合会话 offsetMs=${frame.offsetMs()}")
+                    } finally { completed?.run() }
+                }
+                override fun onError(message: String) {
+                    try { presentationFailed(message) } finally { completed?.run() }
+                }
+            })
+        } catch (failure: RuntimeException) {
+            try { presentationFailed("SDK截图请求无法执行") } finally { completed?.run() }
+        }
+    }
+    private fun presentationFailed(message: String) {
+        if (destroyed) return
+        Log.w(TAG, "演示截图未完成：$message"); main.removeCallbacks(presentationTick)
+        if (!stopRequested) presentationNotice = "演示截图采集失败；字幕会议继续"
+        publish()
+    }
+    /** beforeStop 主线程入口，末帧经同一编码队列提交后再关闭和续接，不同步等待。 */
+    fun stopPresentationBefore(continuation: Runnable) {
+        main.removeCallbacks(presentationTick)
+        presentationStopContinuation = continuation
+        captureAndSubmit(Runnable(::finishPresentationStop))
+    }
+    private fun finishPresentationStop() {
+        val continuation = presentationStopContinuation
+        presentationStopContinuation = null
+        try {
+            closePresentation()
+            if (returnToMeetingAfterPresentation) {
+                returnToMeetingAfterPresentation = false
+                Log.i(TAG, "停止末帧处理结束，返回会议页面 meetingId=$meetingId")
+                openMeetingPage()
+            }
+        } finally { continuation?.run() }
+    }
+    private fun onPresentationStopped() {
+        closePresentation(); main.removeCallbacks(presentationTick)
+        if (presentationStopContinuation != null) finishPresentationStop()
+        if (active && !stopRequested) { presentationNotice = "系统已结束屏幕共享，字幕会议继续"; publish() }
+    }
+    private fun closePresentation() { val current = presentation; presentation = null; current?.close() }
+    fun requestStop() = requestStop("正在等待模型最终字幕…")
+    private fun requestStop(progressText: String) {
+        val current = session
+        if (!active || !canStop || current == null) return
+        stopRequested = true; audioLevel = null; canStop = false; status = progressText; publish()
+        current.requestStop()
+    }
+    private fun resultReady() { stopMeetingUi(); status = "本场结果已就绪"; publish(); executeResultAction() }
+    fun retryResultAction() { if (actionOutcome?.status() == ResultActionOutcome.Status.FAILED) executeResultAction() }
+    private fun executeResultAction() {
+        val result = readyResult ?: return
+        val executingSession = session ?: return
+        val prepared = preparedMeeting ?: return
+        val action = prepared.action() ?: return
+        if (actionRunning) return
+        actionRunning = true; busy = true; actionOutcome = null
+        status = "本场结果已就绪，正在执行结果动作…"; publish()
+        val context = ResultActionContext(result, executingSession.resultActionAccess(), prepared.serviceCapabilities(), platformWork, ::queueUiOperation)
+        MeetingAppAssembly.resultRegistry().execute(action, context, object : MeetingClient.Callback<ResultActionOutcome> {
+            override fun onSuccess(outcome: ResultActionOutcome) {
+                if (destroyed || session !== executingSession) return
+                actionRunning = false; busy = false; actionOutcome = outcome
+                status = "本场结果已就绪；${outcome.message()}"
+                if (outcome.status() == ResultActionOutcome.Status.FAILED) Log.w(TAG, "结果动作失败，会议READY保持 id=${outcome.actionId()}")
+                if (outcome.status() == ResultActionOutcome.Status.SUCCEEDED) { releaseResultAccess(); stopSelf() }
+                publish()
+            }
+            override fun onError(message: String) = onSuccess(ResultActionOutcome.failure(action.id(), message))
+        })
+    }
+    fun endResultInteraction() {
+        if (readyResult == null || actionRunning) return
+        releaseResultAccess(); actionOutcome = null; busy = false; status = "本场结果已就绪，结果交互已结束"
+        stopSelf(); publish()
+    }
+    private fun releaseResultAccess() { client?.close(); client = null; session = null }
+    private fun stopMeetingUi() {
+        returnToMeetingAfterPresentation = false; audioLevel = null
+        if (timing != null && stoppedClock == null) stoppedClock = timing!!.at(SystemClock.elapsedRealtime())
+        active = false; canStop = false; main.removeCallbacks(clockTick); main.removeCallbacks(presentationTick)
+        closePresentation(); projectionData = null; overlay.dismiss(); stopForeground(STOP_FOREGROUND_REMOVE)
+    }
+    private fun finishWithStatus(message: String) {
+        stopMeetingUi(); busy = false; canStop = false; status = message
+        releaseResultAccess(); stopSelf(); publish()
+    }
+    private fun publish() {
+        if (destroyed) return
+        val clock = stoppedClock ?: timing?.at(SystemClock.elapsedRealtime())
+        val timeText = if (clock == null) "" else "已进行 ${MeetingTimeRule.format(clock.elapsedMs())} · 剩余 ${MeetingTimeRule.format(clock.remainingMs())}"
+        val reminder = if (active && clock != null) reminderPresentation.at(clock) else MeetingReminderPresentation.Notice.NONE
+        var audioText = if (audioInputMode == null) "" else "\n音频来源：$audioInputMode"
+        audioErrorText?.let { audioText += "\n$it" }
+        val state = State(display, status, capabilityText + audioText, busy, active, canStop,
+            overlay.isShowing(), transcriptVersion, readyResult, actionOutcome, actionRunning, timeText, reminder,
+            setup?.mode() ?: MeetingSetup.Mode.LIVE_TRANSCRIPT, setup?.summaryEnabled() == true, audioLevel, presentationNotice)
+        overlay.render(display, state.mode, state.summaryEnabled, timeText, reminder, canStop, observer == null, audioLevel?.level() ?: 0)
+        observer?.onMeetingState(state)
+    }
+    override fun onDestroy() {
+        destroyed = true; presentationStopContinuation = null; returnToMeetingAfterPresentation = false; observer = null
+        MeetingAppAssembly.unobserveResultUi(resultUiAvailable); audioLevel = null
+        if (debugStopReceiverRegistered) {
+            unregisterReceiver(debugStopReceiver); debugStopReceiverRegistered = false; Log.d(TAG, "调试正常停止命令已注销")
+        }
+        main.removeCallbacks(clockTick); main.removeCallbacks(presentationTick); closePresentation()
+        overlay.dismiss(); releaseResultAccess(); platformWork.shutdownNow(); super.onDestroy()
+    }
+    companion object {
+        const val ACTION_BEGIN = "com.czur.aimeeting.reference.BEGIN"
+        const val ACTION_DEBUG_STOP = "com.czur.aimeeting.reference.DEBUG_STOP"
+        const val EXTRA_PROJECTION_RESULT_CODE = "projectionResultCode"
+        const val EXTRA_PROJECTION_DATA = "projectionData"
+        private const val TAG = "AiMeetingReference"
+        private const val CHANNEL = "ai_meeting_active"
+        private const val NOTIFICATION_ID = 100
+        private const val PRESENTATION_INTERVAL_MS = 10_000L
+        private fun describeCapabilities(available: Set<String>) = "本场功能：实时字幕" +
+            (if (available.contains(MeetingCapabilityState.TRANSLATION)) "、实时翻译" else "；实时翻译已关闭") +
+            (if (available.contains(MeetingCapabilityState.SPEAKER)) "、本场发言人" else "；本场发言人已关闭") +
+            (if (available.contains(MeetingCapabilityState.SUMMARY)) "、会议纪要" else "；会议纪要已关闭")
+    }
+}

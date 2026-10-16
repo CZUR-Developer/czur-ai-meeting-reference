@@ -9,7 +9,7 @@
 | `pom.xml` | IntelliJ IDEA 的 Maven 聚合入口（Java 21） |
 | `backend-core/` | 独立普通 JAR：共享会议、协议、能力、持久化与扩展端口 |
 | `backend-reference/` | 依赖核心的参考应用：启动、演示登录、Mock 和默认装配 |
-| `android-reference-app/` | 可由 Android Studio 打开的参考应用工程 |
+| `android-reference-app/` | Kotlin First 的参考应用、会议公共核心及模型契约，可由 Android Studio 打开 |
 | `web-reference/` | 参考 Web 静态页面源码 |
 | `contracts/` | OpenAPI、JSON Schema、实时事件协议与 Fixture |
 | `system-audio-contract/` | 音频源 SDK 的公开接口、Stub 和 Mock |
