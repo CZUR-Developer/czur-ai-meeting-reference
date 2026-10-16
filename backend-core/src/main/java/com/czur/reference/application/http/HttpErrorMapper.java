@@ -15,6 +15,7 @@ import com.czur.reference.application.model.ModelSessionIssuer;
 import com.czur.reference.application.model.SummarySessionIssuer;
 import com.czur.reference.application.port.MeetingManifestPort;
 import com.czur.reference.application.port.MeetingArtifactContentPort;
+import com.czur.reference.application.port.MeetingArtifactMediaPort;
 import com.czur.reference.application.port.OwnedMeetingStopUnitOfWork;
 import com.czur.reference.application.port.RenewRealtimeTokenUnitOfWork;
 import com.czur.reference.protocol.json.MeetingManifestJson;
@@ -180,6 +181,22 @@ public final class HttpErrorMapper {
         return clientInputFailure(((ClientMeetingInputPort.Rejected) result).reason());
     }
 
+    /**
+     * 原始录音上传只返回公共 Artifact 登记事实；不返回对象地址或存储 binding。
+     */
+    public HttpResponse audioAppend(String meetingId,
+            ClientMeetingInputPort.AudioAppendResult result) {
+        Objects.requireNonNull(result, "result");
+        if (result instanceof ClientMeetingInputPort.AudioAppended appended) {
+            return success(appended.created() ? 201 : 200, Map.of(
+                    "meetingId", meetingId,
+                    "artifactId", appended.artifactId(),
+                    "size", appended.contentSize(),
+                    "accepted", true));
+        }
+        return clientInputFailure(((ClientMeetingInputPort.Rejected) result).reason());
+    }
+
     private HttpResponse clientInputFailure(ClientMeetingInputPort.Reason reason) {
         return switch (reason) {
             case NOT_FOUND -> error(404, HttpErrorEnvelope.Domain.SESSION,
@@ -261,6 +278,35 @@ public final class HttpErrorMapper {
                     HttpErrorEnvelope.UserAction.CONTACT_ADMIN,
                     "ai_meeting.identity.access_denied");
             case MeetingArtifactContentPort.Unavailable unavailable -> error(
+                    unavailable.retryable() ? 503 : 500,
+                    unavailable.retryable()
+                            ? HttpErrorEnvelope.Domain.STORAGE : HttpErrorEnvelope.Domain.INTERNAL,
+                    "ARTIFACT_UNAVAILABLE", unavailable.retryable(),
+                    unavailable.retryable() ? HttpErrorEnvelope.UserAction.RETRY
+                            : HttpErrorEnvelope.UserAction.CONTACT_ADMIN,
+                    "ai_meeting.storage.artifact_unavailable");
+        };
+    }
+
+    /** 媒体流之外的结果只映射稳定状态；Found 由 HTTP 宿主直接流式写出。 */
+    public HttpResponse artifactMedia(MeetingArtifactMediaPort.Result result) {
+        Objects.requireNonNull(result, "result");
+        return switch (result) {
+            case MeetingArtifactMediaPort.Found ignored ->
+                    throw new IllegalArgumentException("media Found must be streamed");
+            case MeetingArtifactMediaPort.Pending pending ->
+                    success(202, meetingStatus(pending.meetingStatus()));
+            case MeetingArtifactMediaPort.NotFound ignored -> error(404,
+                    HttpErrorEnvelope.Domain.SESSION, "ARTIFACT_NOT_FOUND", false,
+                    HttpErrorEnvelope.UserAction.NONE, "ai_meeting.session.artifact_not_found");
+            case MeetingArtifactMediaPort.Conflict ignored -> error(409,
+                    HttpErrorEnvelope.Domain.CONTRACT, "ARTIFACT_INCONSISTENT", false,
+                    HttpErrorEnvelope.UserAction.NONE, "ai_meeting.contract.artifact_conflict");
+            case MeetingArtifactMediaPort.AccessDenied ignored -> error(403,
+                    HttpErrorEnvelope.Domain.IDENTITY, "ACCESS_DENIED", false,
+                    HttpErrorEnvelope.UserAction.CONTACT_ADMIN,
+                    "ai_meeting.identity.access_denied");
+            case MeetingArtifactMediaPort.Unavailable unavailable -> error(
                     unavailable.retryable() ? 503 : 500,
                     unavailable.retryable()
                             ? HttpErrorEnvelope.Domain.STORAGE : HttpErrorEnvelope.Domain.INTERNAL,

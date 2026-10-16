@@ -19,16 +19,17 @@ public final class MeetingHttpDispatcher {
     private final HttpErrorMapper errors;
     private final AuthenticatedMeetingHttpContextResolver contextResolver;
     private final ResultEmailEndpoint resultEmail;
+    private final MeetingArtifactHttpEndpoint artifactEndpoint;
 
     /** 无外层身份解析器；保留旧JDK构造器的空上下文及邮件关闭行为。 */
     public MeetingHttpDispatcher(MeetingHttpRuntime runtime, HttpErrorMapper errors) {
-        this(runtime, errors, null, null);
+        this(runtime, errors, null, null, null);
     }
 
     /** 接入已有可信上下文解析器，结果邮件仍关闭。 */
     public MeetingHttpDispatcher(MeetingHttpRuntime runtime, HttpErrorMapper errors,
             AuthenticatedMeetingHttpContextResolver contextResolver) {
-        this(runtime, errors, contextResolver, null);
+        this(runtime, errors, contextResolver, null, null);
     }
 
     /**
@@ -42,6 +43,15 @@ public final class MeetingHttpDispatcher {
     public MeetingHttpDispatcher(MeetingHttpRuntime runtime, HttpErrorMapper errors,
             AuthenticatedMeetingHttpContextResolver contextResolver,
             ResultEmailEndpoint resultEmail) {
+        this(runtime, errors, contextResolver, resultEmail, null);
+    }
+
+    /**
+     * 共享 JDK／其它 transport 的媒体接线；不改变既有 JSON 路由和身份解析。
+     */
+    public MeetingHttpDispatcher(MeetingHttpRuntime runtime, HttpErrorMapper errors,
+            AuthenticatedMeetingHttpContextResolver contextResolver,
+            ResultEmailEndpoint resultEmail, MeetingArtifactHttpEndpoint artifactEndpoint) {
         this.runtime = Objects.requireNonNull(runtime, "runtime");
         this.errors = Objects.requireNonNull(errors, "errors");
         if (contextResolver != null && contextResolver.errorMapper() != errors) {
@@ -49,6 +59,7 @@ public final class MeetingHttpDispatcher {
         }
         this.contextResolver = contextResolver;
         this.resultEmail = resultEmail;
+        this.artifactEndpoint = artifactEndpoint;
     }
 
     /**
@@ -90,6 +101,44 @@ public final class MeetingHttpDispatcher {
         throw new IllegalStateException("unknown authentication resolution");
     }
 
-    /** 供同包JDK transport复用唯一错误映射器，不重复装配业务依赖。 */
+    /** 原始录音上传的网络入口；正文只在公共输入端口中消费一次。 */
+    public HttpResponse handle(BinaryHttpRequest request) {
+        Objects.requireNonNull(request, "request");
+        try (request) {
+            if (artifactEndpoint == null || !artifactEndpoint.matchesUpload(request)) {
+                return errors.notImplemented();
+            }
+            if (contextResolver == null) {
+                return errors.missingContext();
+            }
+            var resolution = contextResolver.forClientWrite(request.metadata());
+            if (resolution instanceof AuthenticatedMeetingHttpContextResolver.Rejected rejected) {
+                return rejected.response();
+            }
+            return artifactEndpoint.upload(request,
+                    ((AuthenticatedMeetingHttpContextResolver.Ready) resolution).context());
+        } catch (java.io.IOException transportFailure) {
+            return errors.exception(transportFailure);
+        } catch (RuntimeException unexpected) {
+            return errors.exception(unexpected);
+        }
+    }
+
+    /** JDK transport 在 JSON 适配器前判断是否应直接回放二进制媒体。 */
+    boolean handlesArtifactMedia(HttpRequest request) {
+        return artifactEndpoint != null && artifactEndpoint.matchesDownload(request);
+    }
+
+    /** 打开已经由公共媒体端口核对的结果流。 */
+    com.czur.reference.application.port.MeetingArtifactMediaPort.Result openArtifactMedia(
+            HttpRequest request) {
+        if (artifactEndpoint == null) {
+            return new com.czur.reference.application.port.MeetingArtifactMediaPort.Unavailable(false);
+        }
+        return artifactEndpoint.openDownload(request);
+    }
+
+    /** 供 JDK transport 映射媒体错误，不暴露 dispatcher 的 mapper 所有权。 */
     HttpErrorMapper errorMapper() { return errors; }
+
 }

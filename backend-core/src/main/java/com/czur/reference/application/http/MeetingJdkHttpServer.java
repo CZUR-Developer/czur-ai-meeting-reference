@@ -234,9 +234,20 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
             try {
                 if (closed.get()) {
                     response = shutdownResponse(exchange);
+                } else if (MeetingArtifactHttpEndpoint.matchesUploadPath(
+                        exchange.getRequestMethod(), exchange.getRequestURI().getRawPath())) {
+                    // 录音正文必须保持原始流；不能先走 UTF-8 String/JSON 解码。
+                    response = dispatcher.handle(decodeBinary(exchange));
                 } else {
                     HttpRequest request = decode(exchange);
-                    response = closed.get() ? shutdownResponse(exchange) : dispatch(request);
+                    if (closed.get()) {
+                        response = shutdownResponse(exchange);
+                    } else if (dispatcher.handlesArtifactMedia(request)) {
+                        writeMedia(exchange, dispatcher.openArtifactMedia(request));
+                        return;
+                    } else {
+                        response = dispatch(request);
+                    }
                 }
             } catch (IllegalArgumentException badRequest) {
                 LOGGER.log(Level.WARNING, "meeting HTTP 原始请求被拒绝 reason=INVALID_TRANSPORT");
@@ -312,6 +323,42 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
         }
         return new HttpRequest(exchange.getRequestMethod(), path, headers, query,
                 decodeUtf8(body));
+    }
+
+    /**
+     * 只解码媒体上传的元数据并保留请求流；正文长度必须显式声明，避免把未知长度
+     * 的网络输入交给 ArtifactStore。关闭责任由 BinaryHttpRequest/dispatcher 负责。
+     */
+    private static BinaryHttpRequest decodeBinary(HttpExchange exchange) throws IOException {
+        URI uri = exchange.getRequestURI();
+        String path = uri.getRawPath();
+        if (uri.isAbsolute() || uri.getRawAuthority() != null || uri.getRawFragment() != null
+                || path == null || path.length() > HttpRequest.MAX_PATH_CHARS
+                || !path.startsWith("/") || path.contains("%") || path.contains("\\")
+                || path.contains("//") || path.endsWith("/.") || path.endsWith("/..")
+                || path.contains("/./") || path.contains("/../") || !isVisibleAscii(path)) {
+            throw new IllegalArgumentException("URI path is invalid");
+        }
+        Map<String, String> query = decodeQuery(uri.getRawQuery());
+        Map<String, String> headers = decodeHeaders(exchange.getRequestHeaders());
+        String rawLength = headers.get("content-length");
+        if (rawLength == null || !rawLength.matches("[1-9][0-9]*")) {
+            throw new IllegalArgumentException("binary content-length is invalid");
+        }
+        long contentLength;
+        try {
+            contentLength = Long.parseLong(rawLength);
+        } catch (NumberFormatException failure) {
+            throw new IllegalArgumentException("binary content-length is invalid");
+        }
+        var input = exchange.getRequestBody();
+        try {
+            return new BinaryHttpRequest(exchange.getRequestMethod(), path, headers, query,
+                    contentLength, input);
+        } catch (RuntimeException failure) {
+            input.close();
+            throw failure;
+        }
     }
 
     private static Map<String, String> decodeHeaders(Headers raw) {
@@ -431,6 +478,40 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
         if (body.length > 0) {
             exchange.getResponseBody().write(body);
         }
+    }
+
+    /** 将 READY 媒体按 Manifest 长度流式写出；不把长录音读成 byte[]。 */
+    private void writeMedia(HttpExchange exchange,
+            com.czur.reference.application.port.MeetingArtifactMediaPort.Result result)
+            throws IOException {
+        if (!(result instanceof com.czur.reference.application.port.MeetingArtifactMediaPort.Found found)) {
+            write(exchange, dispatcher.errorMapper().artifactMedia(result));
+            return;
+        }
+        var reference = found.reference();
+        exchange.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
+        exchange.getResponseHeaders().set("Content-Type", reference.mediaType());
+        exchange.getResponseHeaders().set("Cache-Control", "no-store");
+        exchange.getResponseHeaders().set("Content-Disposition", "inline");
+        exchange.sendResponseHeaders(200, reference.size());
+        try (found) {
+            copyExactly(found.content(), exchange.getResponseBody(), reference.size());
+        }
+    }
+
+    private static void copyExactly(java.io.InputStream input, java.io.OutputStream output,
+            long expected) throws IOException {
+        byte[] buffer = new byte[16 * 1024];
+        long copied = 0;
+        while (copied < expected) {
+            int wanted = (int) Math.min(buffer.length, expected - copied);
+            int count = input.read(buffer, 0, wanted);
+            if (count < 0) throw new IOException("media stream ended before declared length");
+            if (count == 0) continue;
+            output.write(buffer, 0, count);
+            copied += count;
+        }
+        if (input.read() >= 0) throw new IOException("media stream exceeds declared length");
     }
 
     /**

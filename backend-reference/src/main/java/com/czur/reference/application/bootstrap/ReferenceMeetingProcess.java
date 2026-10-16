@@ -43,7 +43,8 @@ import java.util.logging.Logger;
 public final class ReferenceMeetingProcess implements AutoCloseable {
     private static final Logger LOGGER = Logger.getLogger(ReferenceMeetingProcess.class.getName());
     private static final int SCAN_PAGE_SIZE = 32;
-    private static final long MAX_ARTIFACT_BYTES = 1024 * 1024;
+    /** 参考会议的封口录音可持续数十分钟，和 HTTP 二进制上传上限保持同一量级。 */
+    private static final long MAX_ARTIFACT_BYTES = 64L * 1024L * 1024L;
     private static final long TICK_SECONDS = 1;
 
     public static final String HTTP_BIND = "AI_MEETING_HTTP_BIND";

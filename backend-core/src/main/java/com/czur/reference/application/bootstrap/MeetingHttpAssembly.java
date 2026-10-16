@@ -13,6 +13,7 @@ import com.czur.reference.application.http.HttpErrorMapper;
 import com.czur.reference.application.http.MeetingJdkHttpServer;
 import com.czur.reference.application.http.MeetingHttpDispatcher;
 import com.czur.reference.application.http.MeetingHttpRuntime;
+import com.czur.reference.application.http.MeetingArtifactHttpEndpoint;
 import com.czur.reference.application.http.ReferenceMeetingHttpRequestDecoder;
 import com.czur.reference.application.http.ReferenceDeploymentCapabilitiesEndpoint;
 import com.czur.reference.application.http.ResultEmailEndpoint;
@@ -122,7 +123,8 @@ public class MeetingHttpAssembly implements AutoCloseable {
             MeetingInputReconciler inputReconciler,
             JdbcMeetingEventLogPort eventLog, Clock clock,
             ResultEmailEndpoint resultEmail, MeetingArtifactMediaPort artifactMedia,
-            EntitlementProvider entitlementProvider) {
+            EntitlementProvider entitlementProvider,
+            MeetingArtifactHttpEndpoint artifactEndpoint) {
         this.closed = new AtomicBoolean();
         this.database = database;
         this.databaseContext = Objects.requireNonNull(databaseContext, "databaseContext");
@@ -138,7 +140,8 @@ public class MeetingHttpAssembly implements AutoCloseable {
         this.eventLog = Objects.requireNonNull(eventLog, "eventLog");
         this.clock = clock;
         this.artifactMedia = artifactMedia;
-        this.dispatcher = new MeetingHttpDispatcher(runtime, errors, contextResolver, resultEmail);
+        this.dispatcher = new MeetingHttpDispatcher(runtime, errors, contextResolver, resultEmail,
+                artifactEndpoint);
         this.entitlementProvider = entitlementProvider;
     }
 
@@ -416,7 +419,9 @@ public class MeetingHttpAssembly implements AutoCloseable {
                     realtimeTranscripts, inputReconciler, events, clock,
                     config.resultEmail().map(email -> new ResultEmailEndpoint(query, manifest,
                             new SmtpResultEmailSender(email), errors)).orElse(null),
-                    artifactMedia, entitlement);
+                    artifactMedia, entitlement,
+                    artifactMedia == null ? null
+                            : new MeetingArtifactHttpEndpoint(clientInput, artifactMedia, errors));
         } catch (RuntimeException | Error failure) {
             try {
                 if (runtime != null) {
