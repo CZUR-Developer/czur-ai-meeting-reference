@@ -23,6 +23,7 @@
     .presentation-frame { margin: 0; }
     .presentation-frame img { display: block; width: 100%; height: auto; }
     .presentation-frame figcaption { margin-top: 6px; color: #5f6368; }
+    #audio-player { width: 100%; }
   </style>
 </head>
 <body>
@@ -45,6 +46,10 @@
     <section id="presentation-result" hidden aria-label="演示文稿">
       <h2>演示文稿</h2>
       <div id="presentation-frames"></div>
+    </section>
+    <section id="audio-result" hidden aria-label="会议录音">
+      <h2>会议录音</h2>
+      <audio id="audio-player" controls preload="metadata"></audio>
     </section>
   </main>
   <script type="module" src="./result.mjs"></script>

@@ -7,6 +7,8 @@
 仅当同一 Manifest 还含 READY 的 `translation.final` 时追加最终译文区；
 仅当有 READY 的 `summary.structured` 时展示结构化纪要的标题、概述、要点和待办；
 READY 的 `presentation.capture` 截图包按修订序号读取，画面按会议时间展示。
+若 Manifest 含 READY 的 `audio.original`，页面只生成同一 Artifact 的流式播放地址，
+不把录音正文下载到结果 JSON；没有录音产物时整个录音区保持隐藏。
 纯字幕结果保持原页面；不会预览会议中的字幕或演示画面，也不要求 Web 单独登录。
 
 页面按本场 Manifest 动态决定结果模块：没有翻译、总结、本场发言人、跨会议身份、录音

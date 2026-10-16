@@ -127,6 +127,38 @@ test('无字幕结果只读取空产物清单，不请求不存在的正文', as
     ['http://api.test/v1/meetings/mtg_empty/manifest?genTime=12345']);
 });
 
+test('READY 原始录音只生成流式 Artifact 地址并显示播放器', async () => {
+  const requests = [];
+  const fetcher = async url => {
+    requests.push(url);
+    return { ok: true, status: 200, json: async () => ({ title: '录音会议', artifacts: [
+      { type: 'audio.original', status: 'READY', artifactId: 'art_audio',
+        mediaType: 'audio/ogg', size: 32000 }
+    ] }) };
+  };
+  const result = await readFinalTranscript('http://api.test', 'mtg_audio', '123', fetcher);
+  assert.deepEqual(result.audio, {
+    artifactId: 'art_audio', mediaType: 'audio/ogg', size: 32000,
+    url: 'http://api.test/v1/artifacts/art_audio?genTime=123'
+  });
+  assert.deepEqual(requests, [
+    'http://api.test/v1/meetings/mtg_audio/manifest?genTime=123'
+  ]);
+  const node = () => ({ hidden: true, textContent: '', children: [],
+    append(...items) { this.children.push(...items); } });
+  const nodes = Object.fromEntries([
+    '#status', '#title', '#transcript', '#transcript-segments', '#result', '#translations',
+    '#translation-result', '#summary-result', '#summary-content', '#presentation-result',
+    '#presentation-frames', '#audio-result', '#audio-player'
+  ].map(selector => [selector, node()]));
+  renderFinalResult(result, { querySelector: selector => nodes[selector], createElement: node });
+  assert.equal(nodes['#audio-result'].hidden, false);
+  assert.equal(nodes['#audio-player'].src, result.audio.url);
+  assert.equal(nodes['#audio-player'].controls, true);
+  assert.equal(nodes['#audio-player'].preload, 'metadata');
+  assert.equal(nodes['#status'].textContent, '结果已生成');
+});
+
 test('READY 演示截图包按修订顺序读取，包内画面顺序保持不变', async () => {
   const requests = [];
   const content = {

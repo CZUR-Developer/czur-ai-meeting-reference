@@ -28,6 +28,17 @@ export async function readFinalTranscript(apiBaseUrl, meetingId, genTime,
   const presentation = artifacts.filter(item => item.type === 'presentation.capture'
     && item.status === 'READY').sort((a, b) => a.revision - b.revision);
   const result = { title: manifest.title, text: null };
+  const audio = artifacts.find(item => item.type === 'audio.original'
+    && item.status === 'READY');
+  // 音频正文不随结果 JSON 下载；页面只拿到统一 Artifact 引用并让浏览器流式播放。
+  if (audio) {
+    result.audio = {
+      artifactId: audio.artifactId,
+      mediaType: audio.mediaType,
+      size: audio.size,
+      url: `${base}/v1/artifacts/${encodeURIComponent(audio.artifactId)}?${query}`
+    };
+  }
   if (transcript) {
     const response = await fetcher(
       `${base}/v1/artifacts/${encodeURIComponent(transcript.artifactId)}?${query}`);
@@ -95,7 +106,8 @@ export function renderFinalResult(result, page) {
   const hasSummary = result.summary != null;
   const hasPresentation = Array.isArray(result.presentationFrames)
     && result.presentationFrames.length > 0;
-  if (!hasTranscript && !hasTranslation && !hasSummary && !hasPresentation) {
+  const hasAudio = result.audio != null;
+  if (!hasTranscript && !hasTranslation && !hasSummary && !hasPresentation && !hasAudio) {
     status.textContent = '本场会议没有识别到字幕';
     return;
   }
@@ -178,6 +190,13 @@ export function renderFinalResult(result, page) {
       entries.append(figure);
     }
     page.querySelector('#presentation-result').hidden = false;
+  }
+  if (hasAudio) {
+    const player = page.querySelector('#audio-player');
+    player.controls = true;
+    player.preload = 'metadata';
+    player.src = result.audio.url;
+    page.querySelector('#audio-result').hidden = false;
   }
   status.textContent = '结果已生成';
 }
