@@ -56,4 +56,36 @@ class MeetingOptionsTest {
         assertEquals(listOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.SPEAKER),
             original.requestedCapabilities())
     }
+
+    @Test fun publishedTwelveArgumentJvmSignaturesRemainAvailable() {
+        // 直接核对 JVM 描述符，避免“默认参数在 Kotlin 中可调用”掩盖已编译消费者的 ABI 变化。
+        val parameters = arrayOf(MeetingOptions.Mode::class.java, String::class.java,
+            String::class.java, java.lang.Boolean.TYPE, MeetingOptions.ResultDelivery::class.java,
+            String::class.java, List::class.java, java.lang.Boolean.TYPE, ResultOptions::class.java,
+            String::class.java, String::class.java, java.lang.Boolean.TYPE)
+        assertNotNull(MeetingOptions::class.java.getConstructor(*parameters))
+        assertEquals(MeetingOptions::class.java,
+            MeetingOptions::class.java.getMethod("copy", *parameters).returnType)
+        val defaultParameters = arrayOf(MeetingOptions::class.java, *parameters,
+            Integer.TYPE, Any::class.java)
+        assertEquals(MeetingOptions::class.java,
+            MeetingOptions::class.java.getMethod("copy\$default", *defaultParameters).returnType)
+    }
+
+    @Test fun negotiatedCapabilitiesStayFrozenWhenCreateParametersAreCopied() {
+        val original = MeetingOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT, "zh-CN", "en-US",
+            false, MeetingOptions.ResultDelivery.WEB, "https://result.example.test", emptyList())
+        val available = mutableSetOf(MeetingCapabilityState.TRANSCRIPT)
+        val negotiated = original.withAvailableCapabilities(available)
+        available.add(MeetingCapabilityState.SPEAKER)
+        val copied = negotiated.withCreateParameters("已协商会议", "Asia/Shanghai", true)
+        assertEquals(listOf(MeetingCapabilityState.TRANSCRIPT), negotiated.requestedCapabilities())
+        assertEquals(negotiated.requestedCapabilities(), copied.requestedCapabilities())
+        assertEquals("已协商会议", copied.title()); assertTrue(copied.retainAudio())
+        assertThrows(UnsupportedOperationException::class.java) {
+            (copied.requestedCapabilities() as MutableList<String>).clear()
+        }
+        assertEquals(listOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.SPEAKER),
+            original.requestedCapabilities())
+    }
 }

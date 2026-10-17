@@ -20,8 +20,12 @@ data class MeetingOptions(
     private val title: String?,
     private val timezone: String,
     private val retainAudio: Boolean,
-    private var requestedCapabilitiesOverride: List<String>? = null,
 ) {
+    // 协商结果属于本场内部快照，不加入 data class 主构造器。
+    // 主构造器保持原十二参，连同 Kotlin 生成的 copy／copy$default 保留原 JVM 签名，
+    // 已编译的 SDK／伙伴调用方可继续消费新版 core；赋值入口只在下方两个复制方法内。
+    private var requestedCapabilitiesOverride: List<String>? = null
+
     constructor(mode: Mode, sourceLanguage: String, targetLanguage: String,
         presentationCapture: Boolean, resultDelivery: ResultDelivery, resultWebUrl: String,
         resultEmails: List<String>, summaryEnabled: Boolean, resultOptions: ResultOptions) : this(
@@ -50,7 +54,6 @@ data class MeetingOptions(
         require(timezone.isNotBlank()) { "建会时区不能为空" }
         resultEmails = java.util.List.copyOf(resultEmails)
         summaryEnabled = summaryEnabled || mode == Mode.MEETING_MINUTES
-        requestedCapabilitiesOverride = requestedCapabilitiesOverride?.let { java.util.List.copyOf(it) }
     }
 
     fun mode(): Mode = mode
@@ -69,8 +72,9 @@ data class MeetingOptions(
     /** 仅复制建会参数，不改变其他会前选择；title 可为空由 HTTP 省略，不启动或保证录音。 */
     fun withCreateParameters(title: String?, timezone: String, retainAudio: Boolean): MeetingOptions =
         MeetingOptions(mode, sourceLanguage, targetLanguage, presentationCapture, resultDelivery,
-            resultWebUrl, resultEmails, summaryEnabled, resultOptions, title, timezone, retainAudio,
-            requestedCapabilitiesOverride)
+            resultWebUrl, resultEmails, summaryEnabled, resultOptions, title, timezone, retainAudio).also {
+            it.requestedCapabilitiesOverride = requestedCapabilitiesOverride
+        }
 
     /**
      * 根据本场能力发现冻结建会请求。
@@ -82,8 +86,10 @@ data class MeetingOptions(
      */
     fun withAvailableCapabilities(availableCapabilities: Set<String>): MeetingOptions =
         MeetingOptions(mode, sourceLanguage, targetLanguage, presentationCapture, resultDelivery,
-            resultWebUrl, resultEmails, summaryEnabled, resultOptions, title, timezone, retainAudio,
-            requiredCapabilities() + optionalCapabilities().filter(availableCapabilities::contains))
+            resultWebUrl, resultEmails, summaryEnabled, resultOptions, title, timezone, retainAudio).also {
+            it.requestedCapabilitiesOverride = java.util.List.copyOf(
+                requiredCapabilities() + optionalCapabilities().filter(availableCapabilities::contains))
+        }
 
     enum class Mode(private val displayName: String, private val requiredCapability: String) {
         LIVE_TRANSCRIPT("实时字幕", MeetingCapabilityState.TRANSCRIPT),
