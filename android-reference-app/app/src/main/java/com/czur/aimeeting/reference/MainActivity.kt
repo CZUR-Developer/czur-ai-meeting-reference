@@ -67,6 +67,11 @@ class MainActivity : Activity() {
     private lateinit var leftLanguageTitle: TextView
     private lateinit var rightLanguageTitle: TextView
     private val transcriptRows = linkedMapOf<String, TextView>()
+    /** 仅缓存本页面已画出的文字，跳过未变化历史的排版；不保存或修改 SDK 事件。 */
+    private val renderedSubtitleRows = linkedMapOf<String, DisplaySnapshotPresentation.SubtitleRow>()
+    private class BilingualRowViews(val source: TextView, val translated: TextView,
+        var rendered: DisplaySnapshotPresentation.SpeakerColumnRow? = null)
+    private val bilingualRows = linkedMapOf<String, BilingualRowViews>()
     private lateinit var elapsedView: TextView
     private lateinit var audioLevelBar: ProgressBar
     private lateinit var audioLevelView: TextView
@@ -529,24 +534,7 @@ class MainActivity : Activity() {
         if (renderedTranscriptVersion != state.transcriptVersion) {
             val followSingle = page.followsLatest(R.id.transcript_scroll)
             val followLeft = page.followsLatest(R.id.left_scroll); val followRight = page.followsLatest(R.id.right_scroll)
-            if (state.display.rows().isEmpty()) { transcriptRows.clear(); transcriptList.removeAllViews(); transcriptList.addView(transcriptView) }
-            for (source in state.display.rows()) {
-                val segment = DisplaySnapshotPresentation.subtitle(source) ?: continue
-                val row = transcriptRows.getOrPut(segment.segmentId()) { page.textRow(28f, false).also { transcriptList.addView(it) } }
-                SubtitleViewFactory.render(row, segment.segmentId(), segment.text(), segment.alpha())
-            }
-            if (state.display.bilingual()) {
-                page.leftList.removeAllViews(); page.rightList.removeAllViews()
-                for (source in state.display.rows()) {
-                    val segment = DisplaySnapshotPresentation.speakerColumn(source, state.display.swapped())
-                    if (segment.side() == MeetingDisplaySnapshot.Side.UNRESOLVED) continue
-                    val column = if (segment.side() == MeetingDisplaySnapshot.Side.A) page.leftList else page.rightList
-                    val left = page.textRow(26f, false)
-                    SubtitleViewFactory.render(left, segment.segmentId(), segment.source(), segment.sourceAlpha()); column.addView(left)
-                    val right = page.textRow(26f, true)
-                    SubtitleViewFactory.render(right, segment.segmentId(), segment.translated(), segment.translatedAlpha()); column.addView(right)
-                }
-            }
+            renderTranscriptRows(state.display)
             renderedTranscriptVersion = state.transcriptVersion
             page.scrollLatest(R.id.transcript_scroll, followSingle); page.scrollLatest(R.id.left_scroll, followLeft); page.scrollLatest(R.id.right_scroll, followRight)
         }
@@ -560,6 +548,70 @@ class MainActivity : Activity() {
         // 插件提供的已准备 UI 操作只在可见页面消费，不根据动作类型分支。
         if (resumed) while (true) { val operation = meetingService?.takeUiOperation() ?: break; operation.run() }
     }
+
+    /**
+     * 一次快照只更新变化的可见单元。连续临时句不会重新创建整场 TextView，也不会让
+     * 未改变的历史重复 setParts／排版；纯电平和计时推送仍由原 transcriptVersion 门禁跳过。
+     * 显示顺序、原译配对和实际物理侧继续直接消费 SDK 投影，不在这里重新判断 DOA／语种。
+     */
+    private fun renderTranscriptRows(display: MeetingDisplaySnapshot) {
+        if (!display.bilingual()) {
+            bilingualRows.clear()
+            reconcileRows(page.leftList, emptyList()); reconcileRows(page.rightList, emptyList())
+            val projected = display.rows().mapNotNull(DisplaySnapshotPresentation::subtitle)
+            val retained = projected.mapTo(mutableSetOf()) { it.segmentId() }
+            transcriptRows.keys.retainAll(retained); renderedSubtitleRows.keys.retainAll(retained)
+            val desired = mutableListOf<View>(transcriptView)
+            for (segment in projected) {
+                val view = transcriptRows.getOrPut(segment.segmentId()) { page.textRow(28f, false) }
+                if (renderedSubtitleRows[segment.segmentId()] != segment) {
+                    SubtitleViewFactory.render(view, segment.segmentId(), segment.text(), segment.alpha())
+                    renderedSubtitleRows[segment.segmentId()] = segment
+                }
+                desired += view
+            }
+            reconcileRows(transcriptList, desired)
+            return
+        }
+        // 互译只画同侧的原译对，不同时为隐藏的单语列表构建整场历史。
+        transcriptRows.clear(); renderedSubtitleRows.clear()
+        reconcileRows(transcriptList, listOf(transcriptView))
+        val left = mutableListOf<View>()
+        val right = mutableListOf<View>()
+        val retained = mutableSetOf<String>()
+        for (row in display.rows()) {
+            val segment = DisplaySnapshotPresentation.speakerColumn(row, display.swapped())
+            if (segment.side() == MeetingDisplaySnapshot.Side.UNRESOLVED) continue
+            retained += segment.segmentId()
+            val views = bilingualRows.getOrPut(segment.segmentId()) {
+                BilingualRowViews(page.textRow(26f, false), page.textRow(26f, true))
+            }
+            val previous = views.rendered
+            if (previous == null || previous.source() != segment.source() || previous.sourceAlpha() != segment.sourceAlpha())
+                SubtitleViewFactory.render(views.source, segment.segmentId(), segment.source(), segment.sourceAlpha())
+            if (previous == null || previous.translated() != segment.translated() || previous.translatedAlpha() != segment.translatedAlpha())
+                SubtitleViewFactory.render(views.translated, segment.segmentId(), segment.translated(), segment.translatedAlpha())
+            views.rendered = segment
+            val column = if (segment.side() == MeetingDisplaySnapshot.Side.A) left else right
+            column += views.source; column += views.translated
+        }
+        bilingualRows.keys.retainAll(retained)
+        reconcileRows(page.leftList, left); reconcileRows(page.rightList, right)
+    }
+
+    /**
+     * 顺序不变时不触碰 View 树。新增段才挂载；分栏／交换时移动同一对 View；
+     * 快照清空时只移除页面内容，SDK 的标准事件和最终结果完全不在此处处理。
+     */
+    private fun reconcileRows(column: LinearLayout, desired: List<View>) {
+        for ((index, view) in desired.withIndex()) {
+            if (column.getChildAt(index) === view) continue
+            (view.parent as? ViewGroup)?.removeView(view)
+            column.addView(view, index)
+        }
+        while (column.childCount > desired.size) column.removeViewAt(column.childCount - 1)
+    }
+
     private fun toggleOverlay() {
         val service = meetingService
         if (service == null) { statusView.text = "会议服务正在连接，请稍后重试"; return }

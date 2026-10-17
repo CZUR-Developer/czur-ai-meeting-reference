@@ -281,6 +281,77 @@ class ReferenceMeetingPageTest {
             opened.getStringExtra(ResultActivity.EXTRA_RESULT_URL))
     }
 
+    @Test fun bilingualRevisionsReuseAllHistoryViewsAndUpdateOnlyChangedSourceOrTranslation() {
+        val host = Robolectric.buildActivity(MainActivity::class.java).create()
+        val activity = host.get()
+        val page = field(activity, "page") as MeetingPageViews
+        fun snapshot(text: String, sourceFinal: Boolean, translationFinal: Boolean, swapped: Boolean = false): MeetingDisplaySnapshot {
+            val history = (0 until 80).map { index -> MeetingDisplaySnapshot.Row("history-$index",
+                TranscriptEvent("history-$index", 1, index.toLong(), index + 1L, "zh-CN", "历史$index", true),
+                TranslationEvent("translation-$index", "history-$index", 1, "zh-CN", "ja-JP", "履歴$index", true),
+                MeetingDisplaySnapshot.Side.A, DisplayRouter.Basis.MODEL_LANGUAGE) }
+            val current = MeetingDisplaySnapshot.Row("current",
+                TranscriptEvent("current", 2, 100, 200, "zh-CN", text, sourceFinal),
+                TranslationEvent("current-translation", "current", 1, "zh-CN", "ja-JP", "現在", translationFinal),
+                MeetingDisplaySnapshot.Side.B, DisplayRouter.Basis.MODEL_LANGUAGE)
+            return MeetingDisplaySnapshot(true, "zh-CN", "ja-JP", swapped, history + current, "current")
+        }
+        try {
+            render(activity, snapshot("临时", false, false), 1, 40)
+            val historicalViews = (0 until page.leftList.childCount).map { page.leftList.getChildAt(it) as SubtitleTextView }
+            val historicalParts = historicalViews.map { it.getParts()[0] }
+            val source = page.rightList.getChildAt(0) as SubtitleTextView
+            val translated = page.rightList.getChildAt(1) as SubtitleTextView
+            val originalTranslationPart = translated.getParts()[0]
+            for (revision in 2..12) render(activity, snapshot("临时$revision", false, false), revision, revision)
+            for ((index, view) in historicalViews.withIndex()) {
+                assertSame("历史View不重复创建", view, page.leftList.getChildAt(index))
+                assertSame("未改变的历史不重复setParts", historicalParts[index], view.getParts()[0])
+            }
+            assertSame(source, page.rightList.getChildAt(0))
+            assertSame(translated, page.rightList.getChildAt(1))
+            assertSame("只有原文更新时译文不重复排版", originalTranslationPart, translated.getParts()[0])
+            assertFalse(source.getParts()[0].isFinal())
+            render(activity, snapshot("原文完成", true, false), 13, 65)
+            assertTrue(source.getParts()[0].isFinal()); assertFalse(translated.getParts()[0].isFinal())
+            val finalSourcePart = source.getParts()[0]
+            render(activity, snapshot("原文完成", true, true, true), 14, 65)
+            assertSame(source, page.leftList.getChildAt(0)); assertSame(translated, page.leftList.getChildAt(1))
+            assertSame(finalSourcePart, source.getParts()[0]); assertTrue(translated.getParts()[0].isFinal())
+            assertSame(historicalViews[0], page.rightList.getChildAt(0))
+            // 同一个显示版本的电平推送不重画字幕。
+            val finalTranslationPart = translated.getParts()[0]
+            render(activity, snapshot("原文完成", true, true, true), 14, 17)
+            assertSame(finalTranslationPart, translated.getParts()[0]); assertEquals(17, page.voiceLevel.getLevel())
+        } finally { host.destroy() }
+    }
+
+    @Test fun singleRevisionsKeepUnchangedPartsAndEmptyProjectionClearsOnlyVisibleRows() {
+        val host = Robolectric.buildActivity(MainActivity::class.java).create()
+        val activity = host.get()
+        val page = field(activity, "page") as MeetingPageViews
+        try {
+            render(activity, display(false, false, false), 1, 40)
+            val row = page.transcriptList.getChildAt(1) as SubtitleTextView
+            val part = row.getParts()[0]
+            render(activity, display(false, false, false), 2, 45)
+            assertSame(row, page.transcriptList.getChildAt(1)); assertSame(part, row.getParts()[0])
+            render(activity, display(false, false, true), 3, 50)
+            assertSame(row, page.transcriptList.getChildAt(1)); assertTrue(row.getParts()[0].isFinal())
+            val empty = MeetingDisplaySnapshot(false, "zh-CN", "en-US", false, emptyList(), null)
+            render(activity, empty, 4, 0)
+            assertEquals(1, page.transcriptList.childCount); assertEquals(View.VISIBLE, (field(activity, "transcriptView") as View).visibility)
+            assertEquals("source", row.getParts()[0].text().toString())
+            render(activity, display(true, false, false), 5, 20)
+            assertEquals(2, page.leftList.childCount)
+            render(activity, MeetingDisplaySnapshot(true, "zh-CN", "en-US", false, emptyList(), null), 6, 0)
+            assertEquals(0, page.leftList.childCount); assertEquals(0, page.rightList.childCount)
+            render(activity, display(true, false, true), 7, 20)
+            assertEquals("source", (page.leftList.getChildAt(0) as SubtitleTextView).getParts()[0].text().toString())
+            assertTrue((page.leftList.getChildAt(0) as SubtitleTextView).getParts()[0].isFinal())
+        } finally { host.destroy() }
+    }
+
     @Test fun necessaryCaptureNoticesRenderThroughRealServiceStateWithoutShowingDiagnostics() {
         val serviceHost = Robolectric.buildService(MeetingService::class.java).create()
         val service = serviceHost.get()
