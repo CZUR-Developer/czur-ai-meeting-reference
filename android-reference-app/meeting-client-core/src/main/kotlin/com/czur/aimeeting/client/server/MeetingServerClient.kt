@@ -14,6 +14,10 @@ interface MeetingServerClient {
     @Throws(IOException::class) fun startClient(meetingId: String)
     /** 模型直连材料独立领取，Create realtime 不是模型地址。 */
     @Throws(IOException::class) fun requestModelSession(meetingId: String): ModelSessionGrant
+    /** 独立翻译短期材料临近过期时按原场续领；不重签实时 ASR、不创建第二场会议。 */
+    @Throws(IOException::class) fun requestTranslationSession(meetingId: String): TranslationSessionGrant {
+        throw IOException("当前后端端口未实现独立翻译材料续领")
+    }
     /** 最终字幕齐备后领取文本模型材料，Mock 不调用。 */
     @Throws(IOException::class) fun requestSummarySession(meetingId: String): SummarySessionGrant
     @Throws(IOException::class) fun appendTranscript(meetingId: String, clientSequence: Int, event: TranscriptEvent)

@@ -62,7 +62,12 @@ class HttpMeetingServerClient(config: MeetingClientConfig) : MeetingServerClient
             }
             if (meetingId != model.getString("meetingId")) throw IOException("模型会话与会议 ID 不一致")
             return ModelSessionGrant(meetingId, model.getString("adapterId"), model.getString("endpoint"),
-                model.getString("expiresAt"), model.optString("token", null), initParams)
+                model.getString("expiresAt"), model.optString("token", null), initParams,
+                model.optJSONObject("translationSession")?.let { translation ->
+                    TranslationSessionGrant(translation.getString("adapterId"), translation.getString("endpoint"),
+                        translation.getString("expiresAt"), translation.optString("token", null),
+                        modelParams(translation.optJSONObject("initParams")))
+                })
         } catch (invalidResponse: JSONException) { throw IOException("模型会话响应格式错误", invalidResponse) }
     }
     @Throws(IOException::class)
@@ -70,8 +75,25 @@ class HttpMeetingServerClient(config: MeetingClientConfig) : MeetingServerClient
         try {
             val body = JSONObject(post("/v1/meetings/$meetingId:summarySession", null, null, 200).body)
             if (meetingId != body.getString("meetingId")) throw IOException("文本模型材料与会议 ID 不一致")
-            return SummarySessionGrant(body.getString("adapterId"), body.getString("endpoint"), body.getString("expiresAt"), body.getString("token"))
+            return SummarySessionGrant(body.getString("adapterId"), body.getString("endpoint"),
+                body.getString("expiresAt"), body.optString("token", null), modelParams(body.optJSONObject("initParams")))
         } catch (invalidResponse: JSONException) { throw IOException("文本模型材料响应格式错误", invalidResponse) }
+    }
+    @Throws(IOException::class)
+    override fun requestTranslationSession(meetingId: String): TranslationSessionGrant {
+        try {
+            val body = JSONObject(post("/v1/meetings/$meetingId:translationSession", null, null, 200).body)
+            if (meetingId != body.getString("meetingId")) throw IOException("翻译材料与会议 ID 不一致")
+            return TranslationSessionGrant(body.getString("adapterId"), body.getString("endpoint"),
+                body.getString("expiresAt"), body.optString("token", null), modelParams(body.optJSONObject("initParams")))
+        } catch (invalid: JSONException) { throw IOException("翻译材料响应格式错误", invalid) }
+    }
+    /** 可选厂商参数只传给匹配 Adapter；旧服务不提供时得到空只读材料。 */
+    private fun modelParams(params: JSONObject?): Map<String, String> = buildMap {
+        if (params != null) {
+            val keys = params.keys()
+            while (keys.hasNext()) { val key = keys.next(); put(key, params.getString(key)) }
+        }
     }
     @Throws(IOException::class)
     override fun startClient(meetingId: String) { post("/v1/meetings/$meetingId:startClient", null, null, 200) }

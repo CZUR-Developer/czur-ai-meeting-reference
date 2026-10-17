@@ -5,6 +5,7 @@ import com.czur.aimeeting.client.display.MeetingDisplaySnapshot
 import com.czur.aimeeting.client.provider.TingwuModelAdapter
 import com.czur.aimeeting.client.provider.BailianSummaryAdapter
 import com.czur.aimeeting.client.provider.SampleJsonModelAdapter
+import com.czur.aimeeting.client.provider.SampleJsonTranslationAdapter
 import com.czur.aimeeting.client.identity.IdentityProvider
 import com.czur.aimeeting.client.identity.IdentityResult
 import com.czur.aimeeting.client.identity.IdentitySession
@@ -40,6 +41,69 @@ class MeetingCoordinatorTest {
             MeetingCapabilityState.TRANSLATION, MeetingCapabilityState.SUMMARY, MeetingCapabilityState.SPEAKER)
         private const val CROSS_MEETING = MeetingCapabilityState.SPEAKER_IDENTITY_CROSS_MEETING
     }
+
+    @Test fun independentTranslationCombinesAsrOnlyAndPreservesBothLanguageDirectionsAndStopOrder() {
+        Fixture(true, ALL).use { f ->
+            f.server.adapterId = SampleJsonModelAdapter.ID
+            f.server.translationGrant = textGrant()
+            f.runtime.blockTranslation = true
+            f.start(MeetingOptions(MeetingOptions.Mode.LIVE_TRANSLATION, "zh-CN", "ja-JP", false,
+                MeetingOptions.ResultDelivery.WEB, "https://result.example.test", emptyList(), false))
+            f.runtime.emit("chinese", 1, "zh-CN", "你好", true)
+            assertTrue(f.runtime.translationEntered.await(2, TimeUnit.SECONDS))
+            f.runtime.emit("chinese", 1, "zh-CN", "你好", true)
+            f.runtime.emit("japanese", 1, "ja-JP", "こんにちは", true)
+            f.session.requestStop()
+            assertTrue("翻译HTTP不能拖住真实音源停止", f.runtime.stopped.await(2, TimeUnit.SECONDS))
+            assertFalse("翻译还在进行时不能先发后端Stop", f.server.steps.contains("stop"))
+            f.runtime.releaseTranslation.countDown()
+            assertNotNull(f.probe.result())
+            assertEquals(listOf("ja-JP", "zh-CN"), f.runtime.translationInputs.map { it.targetLanguage() })
+            val translated = f.server.standardAttempts.mapNotNull { it.translation() }
+            assertEquals(listOf("chinese", "japanese"), translated.map { it.sourceSegmentId() })
+            assertTrue(translated.all { it.isFinal() })
+            val lastTranslation = f.server.steps.indexOfLast { it.startsWith("translation") }
+            assertTrue("应真实保存译文", lastTranslation >= 0)
+            assertTrue("原译文共用先确认事件后Stop", lastTranslation < f.server.steps.indexOf("stop"))
+            assertEquals(1, f.runtime.openCalls)
+            assertEquals(1, f.server.modelSessionRequests.size)
+        }
+    }
+
+    @Test fun expiringIndependentTranslationRenewsOnlyItsOwnGrantWithoutReopeningAsr() {
+        Fixture(true, ALL).use { f ->
+            f.server.adapterId = SampleJsonModelAdapter.ID
+            f.server.translationGrant = textGrant("1970-01-01T00:00:00.600Z")
+            f.server.renewedTranslationGrant = textGrant()
+            f.start(MeetingOptions.Mode.LIVE_TRANSLATION, MeetingOptions.ResultDelivery.WEB, false)
+            f.runtime.emit("one", 1, "en-US", "Hello", true)
+            f.session.requestStop()
+            assertNotNull(f.probe.result())
+            assertEquals(1, f.server.translationGrantRequests)
+            assertEquals(1, f.server.modelSessionRequests.size)
+            assertEquals(1, f.runtime.openCalls)
+            assertEquals("zh-CN", f.runtime.translationInputs.single().targetLanguage())
+        }
+    }
+
+    @Test fun independentTranslationFailureKeepsOriginalInputForExplicitStopRetry() {
+        Fixture(true, ALL).use { f ->
+            f.server.adapterId = SampleJsonModelAdapter.ID
+            f.server.translationGrant = textGrant()
+            f.runtime.failTranslationOnce = true
+            f.start(MeetingOptions.Mode.LIVE_TRANSLATION, MeetingOptions.ResultDelivery.WEB, false)
+            f.runtime.emit("one", 1, "zh-CN", "需要保留原文", true)
+            f.probe.awaitMessage("独立翻译尚未完成")
+            f.session.requestStop()
+            assertNotNull(f.probe.result())
+            assertEquals(2, f.runtime.translationInputs.size)
+            assertSame(f.runtime.translationInputs[0], f.runtime.translationInputs[1])
+            assertEquals(1, f.server.standardAttempts.count { it.translation() != null })
+        }
+    }
+
+    private fun textGrant(expiresAt: String = "2030-01-01T00:00:00Z") = TranslationSessionGrant(
+        SampleJsonTranslationAdapter.ID, "https://translation.example.test", expiresAt, null)
 
     @Test fun optionalSpeakerIsRequestedOnlyWhenDeploymentAndLocalAdapterProvideIt() {
         Fixture(true, setOf(MeetingCapabilityState.TRANSCRIPT)).use { f ->
@@ -1692,6 +1756,7 @@ class MeetingCoordinatorTest {
             assertTrue(runtime.started.await(2, TimeUnit.SECONDS))
         }
         override fun close() {
+            runtime.releaseTranslation.countDown()
             server.releaseAppend.countDown()
             server.releaseUsage.countDown()
             server.releaseModelGrant.countDown()
@@ -1823,12 +1888,25 @@ class MeetingCoordinatorTest {
         @Volatile var artifactReads = 0
         @Volatile var openCalls = 0
         var retainedAudioSupported = false
+        val translationInputs: MutableList<TranslationInput> = Collections.synchronizedList(ArrayList())
+        val translationEntered = CountDownLatch(1)
+        val releaseTranslation = CountDownLatch(1)
+        var blockTranslation = false
+        var failTranslationOnce = false
         var retainAudio = false
         @Volatile var artifact: Optional<SealedAudioArtifact> = Optional.empty()
         @Volatile var artifactFailure: IOException? = null
         override fun usesServerModelMaterials() = real
         override fun localCapabilities() = ALL
         override fun supportsRetainedAudio() = retainedAudioSupported
+        override fun supportsTextTranslation() = true
+        override fun translate(grant: TranslationSessionGrant, adapter: TranslationAdapter, input: TranslationInput): TranslationEvent {
+            translationInputs.add(input)
+            translationEntered.countDown()
+            if (blockTranslation) check(releaseTranslation.await(3, TimeUnit.SECONDS))
+            if (failTranslationOnce) { failTranslationOnce = false; throw IOException("受控翻译请求失败") }
+            return adapter.parseResponse(JSONObject().put("text", "译文：${input.text()}").toString(), input)
+        }
         override fun open(grant: ModelSessionGrant?, adapter: ModelAdapter?, transcripts: TranscriptListener,
             listener: ModelSessionListener, retainAudio: Boolean, reconnector: ModelSessionReconnector?): ModelSession {
             this.reconnector = reconnector
@@ -1939,6 +2017,9 @@ class MeetingCoordinatorTest {
         var jpeg: ByteArray? = null
         var emailUrl: String? = null
         var adapterId = TingwuModelAdapter.ID
+        var translationGrant: TranslationSessionGrant? = null
+        var renewedTranslationGrant: TranslationSessionGrant? = null
+        var translationGrantRequests = 0
         lateinit var requested: MeetingOptions
         override fun discover(): DeploymentOptions {
             steps.add("discover")
@@ -1968,7 +2049,12 @@ class MeetingCoordinatorTest {
                 }
             }
             return ModelSessionGrant(id, adapterId, "wss://model.example.test/signed",
-                "2030-01-01T00:00:00Z", null, emptyMap())
+                "2030-01-01T00:00:00Z", null, emptyMap(), translationGrant)
+        }
+        override fun requestTranslationSession(id: String): TranslationSessionGrant {
+            assertEquals("mtg_test", id)
+            translationGrantRequests++
+            return renewedTranslationGrant!!
         }
         override fun requestSummarySession(id: String): SummarySessionGrant {
             steps.add("summaryGrant")

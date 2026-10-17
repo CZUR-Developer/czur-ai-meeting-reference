@@ -11,6 +11,12 @@ interface MeetingRuntimePort {
     fun waitsForModelFinish(): Boolean = usesServerModelMaterials()
     /** 只有本地 Mock 使用固定能力，真实模型从注册表读取。 */
     fun localCapabilities(): Set<String> = emptySet()
+    /** 仅已装配文本翻译请求执行器时返回 true；旧 Runtime 默认不声称支持 sidecar。 */
+    fun supportsTextTranslation(): Boolean = false
+    /** 阻塞模型请求由 Coordinator 的 IO 队列执行，不得占用采音／主线程。 */
+    @Throws(IOException::class)
+    fun translate(grant: TranslationSessionGrant, adapter: TranslationAdapter, input: TranslationInput): TranslationEvent =
+        throw IOException("当前 Runtime 未装配独立文本翻译")
     fun open(grant: ModelSessionGrant?, adapter: ModelAdapter?, transcripts: TranscriptListener, listener: ModelSessionListener): ModelSession
     fun supportsRetainedAudio(): Boolean = false
     /** false 委托旧入口，true 必须显式支持同源录音。 */

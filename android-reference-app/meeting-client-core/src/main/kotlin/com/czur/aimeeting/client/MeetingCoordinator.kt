@@ -1,6 +1,7 @@
 package com.czur.aimeeting.client
 
 import com.czur.aimeeting.client.display.MeetingDisplayState
+import com.czur.aimeeting.client.display.BilingualLanguageResolver
 import com.czur.aimeeting.client.identity.IdentityResult
 import com.czur.aimeeting.client.identity.IdentitySession
 import com.czur.aimeeting.client.identity.LoginIdentityProvider
@@ -9,6 +10,7 @@ import com.czur.aimeeting.client.result.ResultOptions
 import com.czur.aimeeting.client.server.*
 import com.czur.aimeeting.model.*
 import java.io.IOException
+import java.time.Instant
 import java.util.ArrayDeque
 import java.util.OptionalLong
 import java.util.concurrent.*
@@ -259,6 +261,12 @@ class MeetingCoordinator(
         private var stoppedCheckpoint: StoppedMeetingCheckpoint? = null
         private var genTime: Long? = null
         @Volatile private var readyResult: MeetingResult? = null
+        /** 唯一 state 队列跟踪待译原文；HTTP 仍走既有 IO 队列，不创建第二套会议状态。 */
+        private var textTranslationGrant: TranslationSessionGrant? = null
+        private var textTranslationAdapter: TranslationAdapter? = null
+        private val latestTextTranslationRevisions = HashMap<String, Int>()
+        private val pendingTextTranslations = LinkedHashMap<String, TranslationInput>()
+        private val translating = HashSet<TranslationInput>()
 
         private fun notifyListener(task: Runnable) { notifyClient { if (!cancelled) task.run() } }
         private fun publish(message: String) {
@@ -304,6 +312,9 @@ class MeetingCoordinator(
                     step = "模型材料/工厂选择"
                     val grant = if (runtime.usesServerModelMaterials()) server.requestModelSession(created.meetingId()) else null
                     val local = HashSet(if (runtime.usesServerModelMaterials()) adapters.realtimeCapabilities(grant!!.adapterId()) else runtime.localCapabilities())
+                    if (grant?.translationSession() != null && runtime.supportsTextTranslation() &&
+                        adapters.hasTranslation(grant.translationSession()!!.adapterId()))
+                        local.add(MeetingCapabilityState.TRANSLATION)
                     if (setupCapabilities().contains(MeetingCapabilityState.SUMMARY)) local.add(MeetingCapabilityState.SUMMARY)
                     val enabled = HashSet<String>()
                     for (capability in createOptions.requestedCapabilities())
@@ -342,6 +353,12 @@ class MeetingCoordinator(
             display.start(startedAtMs, options.mode() == MeetingOptions.Mode.LIVE_TRANSLATION, options.sourceLanguage(), options.targetLanguage())
             display.setWaitForModelLanguage(adapter?.mayEmitDeferredSourceLanguage() == true)
             try {
+                // 明确 sidecar 才组合独立翻译；听悟原生译文没有此字段，保持原路径。
+                if (enabled.contains(MeetingCapabilityState.TRANSLATION)) grant?.translationSession()?.let {
+                    check(runtime.supportsTextTranslation()) { "当前 Runtime 未装配独立文本翻译" }
+                    textTranslationGrant = it
+                    textTranslationAdapter = adapters.createTranslation(it.adapterId())
+                }
                 // 闭包冻结原场 Server 和 ID，HTTP 由 Runtime 续接线程执行，不占 state／modelControl。
                 val frozenServer = server
                 val frozenMeetingId = created.meetingId()
@@ -404,12 +421,69 @@ class MeetingCoordinator(
             finals.apply(standard); display.apply(standard, nowMs); showDisplay(); scheduleDeadline()
             val number = ++sequence
             io.execute { saveStandardEvent(PendingStandardEvent(number, standard, null)) }
+            queueTextTranslation(standard)
         }
-        private fun translation(event: TranslationEvent) {
-            if (done || modelFinished || !available.contains(MeetingCapabilityState.TRANSLATION)) return
+        private fun translation(event: TranslationEvent, fromTextAdapter: Boolean = false) {
+            if (done || modelFinished && !fromTextAdapter || !available.contains(MeetingCapabilityState.TRANSLATION) ||
+                textTranslationGrant != null && !fromTextAdapter) return
             display.apply(event, monotonicMs.asLong); showDisplay(); scheduleDeadline()
             val number = ++sequence
             io.execute { saveStandardEvent(PendingStandardEvent(number, null, event)) }
+        }
+        /** partial 只显示；相同 final 修订不重复请求，真正更高修订仍产生对应标准译文修订。 */
+        private fun queueTextTranslation(event: TranscriptEvent) {
+            if (textTranslationGrant == null || !event.isFinal() || event.text().isBlank()) return
+            if (event.revision() <= (latestTextTranslationRevisions[event.segmentId()] ?: 0)) return
+            latestTextTranslationRevisions[event.segmentId()] = event.revision()
+            val source = BilingualLanguageResolver.normalize(event.language())
+            val first = BilingualLanguageResolver.normalize(options.sourceLanguage())
+            val second = BilingualLanguageResolver.normalize(options.targetLanguage())
+            // 真实源语种优先决定翻译目标；未知语种沿已有方向/字形锁侧作两语种默认，不改原文事实。
+            val sourceIsSecond = when (source) {
+                first -> false
+                second -> true
+                else -> display.route(event.segmentId())?.side() == 2
+            }
+            val input = TranslationInput(event.segmentId(), event.revision(), event.language(),
+                if (sourceIsSecond) options.sourceLanguage() else options.targetLanguage(), event.text())
+            pendingTextTranslations[event.segmentId()] = input
+            submitTextTranslation(input)
+        }
+        private fun submitTextTranslation(input: TranslationInput) {
+            if (!translating.add(input)) return
+            io.execute {
+                try {
+                    if (closed || cancelled) return@execute
+                    var grant = textTranslationGrant!!
+                    // 无需定时续领；下一句前才检查短期材料，续领只换翻译，不动原ASR/音源。
+                    if (Instant.parse(grant.expiresAt()).toEpochMilli() - wallClockMs.asLong <= 30_000L) {
+                        grant = server.requestTranslationSession(id)
+                        textTranslationGrant = grant
+                        textTranslationAdapter = adapters.createTranslation(grant.adapterId())
+                        LOG.fine("本场文本翻译材料已续领")
+                    }
+                    val result = runtime.translate(grant, textTranslationAdapter!!, input)
+                    enqueue {
+                        translating.remove(input)
+                        if (!done && !cancelled) {
+                            translation(result, true)
+                            if (pendingTextTranslations[input.sourceSegmentId()] === input)
+                                pendingTextTranslations.remove(input.sourceSegmentId())
+                            maybeComplete()
+                        }
+                    }
+                } catch (failure: Exception) {
+                    if (failure !is IOException && failure !is RuntimeException) throw failure
+                    logFailure("独立文本翻译", failure)
+                    enqueue {
+                        translating.remove(input)
+                        if (!done && !cancelled) {
+                            publish("独立翻译尚未完成；原文继续保存，停止时可重试")
+                            maybeComplete()
+                        }
+                    }
+                }
+            }
         }
         /** 先接纳原包再确认队首，失败不跳过顺序。 */
         private fun saveStandardEvent(event: PendingStandardEvent) {
@@ -514,6 +588,8 @@ class MeetingCoordinator(
                 phase = MeetingSessionState.Phase.STOPPING
                 if (display.flushPendingLanguages()) showDisplay()
                 cancelDeadline(); publish("正在等待模型最终字幕…")
+                // 只在用户确认停止时重试已失败的原输入，不增加定时任务或无限重试。
+                pendingTextTranslations.values.toList().forEach(::submitTextTranslation)
                 if (stopInputSent) { maybeComplete(); return@enqueue }
                 val continued = AtomicBoolean()
                 notifyListener { listener.beforeStop { if (continued.compareAndSet(false, true)) enqueue { continueStop() } } }
@@ -532,6 +608,11 @@ class MeetingCoordinator(
         }
         private fun maybeComplete() {
             if (done || completionQueued || !stopRequested || !stopInputSent || runtime.waitsForModelFinish() && !modelFinished) return
+            if (translating.isNotEmpty()) return
+            if (pendingTextTranslations.isNotEmpty()) {
+                completionFailed("独立翻译尚未完成，请检查模型连接后再次确认停止")
+                return
+            }
             completionQueued = true; phase = MeetingSessionState.Phase.FINALIZING
             publish("正在保存本场最终结果…")
             var input: SummaryInput? = null

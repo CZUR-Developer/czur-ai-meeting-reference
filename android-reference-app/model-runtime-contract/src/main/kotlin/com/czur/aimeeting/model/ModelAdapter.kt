@@ -3,10 +3,20 @@ package com.czur.aimeeting.model
 /**
  * 模型 WebSocket 协议端口，实现者只解析协议；MIC、连接及二进制 PCM 由 SDK 管理。
  * 每次连接使用独立实例；同场续接重新签发任务后也使用新实例，不能泄露短期访问材料。
+ * Adapter 输出的字幕／句开始时间以本次模型任务收到的音频起点为零；不要先加会议偏移。
+ * SDK 会加本代首个实际发送帧在完整录音中的位置，再向上交付本场时间。
  */
 interface ModelAdapter {
     /** 与后端 modelSession.adapterId 一致的构建期注册标识。 */
     fun id(): String
+
+    /**
+     * WebSocket 握手请求。默认保留 GET 与非空 token 的 Bearer；伙伴可覆盖请求头，
+     * 例如从 Grant 的 token／initParams 生成 x-api-key 或版本头。此处不访问网络。
+     * 实时传输仍使用 GET、无正文的 WebSocket；该端口不改变 PCM 格式和启停消息。
+     */
+    fun connectionRequest(grant: ModelSessionGrant): ModelHttpRequest =
+        ModelHttpRequest("GET", ModelHttpRequest.bearerHeaders(grant.token()))
 
     /**
      * 是否先发未知源语种、随后在同段修订／配对译文补充可信语种。

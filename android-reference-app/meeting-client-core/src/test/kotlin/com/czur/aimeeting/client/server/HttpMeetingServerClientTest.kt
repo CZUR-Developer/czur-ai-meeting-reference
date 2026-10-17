@@ -117,6 +117,35 @@ class HttpMeetingServerClientTest {
         }
     }
 
+    @Test fun optionalTranslationSidecarAndRenewalUseTheSameMeetingWithNoTokenRequired() {
+        Fixture().use { fixture ->
+            val translation = JSONObject().put("adapterId", "sample-json-translation")
+                .put("endpoint", "https://translation.example.test").put("expiresAt", "2030-01-01T00:00:00Z")
+                .put("initParams", JSONObject().put("tokenHeader", "x-api-key"))
+            fixture.reply(200, JSONObject().put("meetingId", "mtg_model").put("adapterId", "sample-json-ws")
+                .put("endpoint", "wss://asr.example.test").put("expiresAt", "2030-01-01T00:00:00Z")
+                .put("initParams", JSONObject()).put("translationSession", translation).toString())
+            val grant = fixture.client().requestModelSession("mtg_model")
+            assertEquals("x-api-key", grant.translationSession()!!.initParams()["tokenHeader"])
+            assertNull(grant.translationSession()!!.token())
+            assertEquals("/v1/meetings/mtg_model:modelSession", fixture.request().path())
+            fixture.reply(200, translation.put("meetingId", "mtg_model").toString())
+            assertEquals("sample-json-translation", fixture.client().requestTranslationSession("mtg_model").adapterId())
+            assertEquals("/v1/meetings/mtg_model:translationSession", fixture.request().path())
+        }
+    }
+
+    @Test fun summaryOptionalParamsAndSignedUrlDoNotRequireABearerToken() {
+        Fixture().use { fixture ->
+            fixture.reply(200, JSONObject().put("meetingId", "mtg_summary").put("adapterId", "partner-summary")
+                .put("endpoint", "https://summary.example.test/signed").put("expiresAt", "2030-01-01T00:00:00Z")
+                .put("initParams", JSONObject().put("apiVersion", "v2")).toString())
+            val grant = fixture.client().requestSummarySession("mtg_summary")
+            assertNull(grant.token())
+            assertEquals("v2", grant.initParams()["apiVersion"])
+        }
+    }
+
     @Test fun stopAcceptanceKeepsManifestStateSeparateAndReusesSameStopKey() {
         Fixture().use { fixture ->
             fixture.reply(202, "{\"inputState\":\"INPUT_COMPLETE_PENDING\",\"manifestState\":\"GENERATING\"}")

@@ -6,7 +6,7 @@ Server 协议、模型适配与国内显示规则。Android 控件、权限申�
 
 当前包含：
 
-- `client.provider`：默认听悟、第二格式 JSON 样例、百炼总结的唯一公开解析实现。
+- `client.provider`：默认听悟、第二格式 JSON 样例、百炼总结及可选独立 JSON 文本翻译的公开解析实现。
 - `ModelAdapterRegistry`：按 Server 下发的 `adapterId` 选择工厂，每场会议创建独立实例。
 - `MeetingCapabilityState`：Create 响应的本场能力决策，不由厂商名字推断。
 - `DeploymentOptions.languages`：透传既有发现协议的语言code清单，供App设置页使用。
@@ -100,6 +100,49 @@ Android SDK每三个完整100ms PCM16LE帧测当次帧，约300ms通知一次；
 `translation.realtime`；独立`summaryEnabled`开启时另需`summary.structured`。
 互译＋总结同时请求／要求两项能力，缺少用户选择的必需能力不启动模型。
 speaker 可选，未授予时移除字段、不拒绝开场；总结工厂独立参与求交，不误当实时解析能力。
+
+### 模型请求描述与独立文本翻译
+
+`ModelHttpRequest` 是无网络对象的文本请求描述，地址仍来自本场 Server Grant。
+实时 `ModelAdapter.connectionRequest(grant)` 默认 GET＋非空 token 的 Bearer；
+`SummaryAdapter.request(grant, input)` 默认使用原 `requestBody(input)` 发 POST/JSON，
+并保留 Accept 与非空 token 的 Bearer。伙伴可以覆盖请求方法／头／内容类型／正文，
+SDK 按描述执行，不额外注入 Bearer。例如 x-api-key 模型由插件把 `grant.token()` 放入
+选定头，版本参数取 `grant.initParams()`；这些字段不进入标准事件或日志。已签名 URL
+可以不提供 token。旧 Adapter 方法与原 Grant 构造器保持可用。
+
+Adapter 输出的 `TranscriptEvent`／`SegmentStartedEvent` 时间是本次模型任务收到音频的
+相对毫秒；SDK 加一次连接首帧偏移，再向 App/core 交付本场完整录音相对时间。伙伴不要
+在 Adapter 里先加会议／续接偏移，避免第二代连接发生双重偏移。
+
+需要“仅 ASR＋另一家文本翻译”时，在 Server 注入独立翻译签发器，并声明实际
+`translation.realtime` 和支持语言；同场 `modelSession` 附可选 `translationSession`
+（`adapterId/endpoint/expiresAt/token/initParams`）。原实时模型关闭原生翻译，App 仍只建
+一场会议、开一路音源。没有 sidecar 的默认听悟继续原生实时原译文路径。
+
+```kotlin
+val adapters = ModelAdapterRegistry()
+// 默认已注册 sample-json-translation；伙伴换协议时只新增自己的实现和稳定ID。
+adapters.registerTranslation("partner-translation", ::PartnerTranslationAdapter)
+```
+
+`TranslationAdapter` 只处理一段已确认原文的文本请求／响应；调用在既有 IO 队列，
+`TranslationInput` 提供原文 ID、revision、源语种、目标语种和正文。按实际源语种在会前两种
+语言之间选择目标，未知语种才沿现有方向／字形锁侧默认；交换显示列不改变目标语言。
+用 `input.result(text, detectedSourceLanguage)` 返回既有标准 `TranslationEvent`，可保持
+同一原文关联、稳定译文 ID、revision 和 final。相同 final 修订不重复调用，更新修订可再译。
+
+公开 `SampleJsonTranslationAdapter`（ID `sample-json-translation`）发送 JSON 字段
+`sourceSegmentId/sourceRevision/sourceLanguage/targetLanguage/text`，响应为
+`{"text":"译文","sourceLanguage":"实际源语种（可省略）"}`。材料可选
+`tokenHeader`（默认 Authorization）及 `tokenPrefix`（Authorization 默认 Bearer，其他头
+默认空），可演示 x-api-key；公开代码不包含真实 Key 或私有地址。
+
+停止仍先关闭实时音源。Coordinator 等已接纳的独立译文走完既有标准事件序号／保存确认，
+再执行原总结、录音发布与 Stop，未收到模型译文不能假装 READY。翻译请求失败保留原输入，
+用户确认停止时重试，不引入磁盘翻译队列、定时重试或新会议状态机。长期会议在下一句
+翻译前检查 `expiresAt`，临近到期才经同场 `:translationSession` 续领；不重签实时材料、
+不重建 ASR，不在无语音时后台轮询。旧服务或 Runtime 没有此扩展时不声明 sidecar 支持。
 
 `speaker.identity.cross_meeting` 是明确的**服务端会后能力**，不进入实时 Adapter 白名单。
 能力发现仅在部署已声明该能力、客户端具备本场 speaker 工厂、Runtime 同源录音和实际
