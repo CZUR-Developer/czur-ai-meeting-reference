@@ -37,7 +37,9 @@ class MeetingAppAssemblyTest {
         assertEquals(TingwuModelAdapter.ID, adapters.create(TingwuModelAdapter.ID).id())
         assertEquals(SampleJsonModelAdapter.ID, adapters.create(SampleJsonModelAdapter.ID).id())
         assertEquals(BailianSummaryAdapter.ID, adapters.createSummary(BailianSummaryAdapter.ID).id())
-        assertEquals(setOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.TRANSLATION, MeetingCapabilityState.SUMMARY), adapters.setupCapabilities())
+        // 注册表声明本地能力；本场发言人仍须与部署能力和 Create 授权取交集。
+        assertEquals(setOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.TRANSLATION,
+            MeetingCapabilityState.SUMMARY, MeetingCapabilityState.SPEAKER), adapters.setupCapabilities())
     }
     @Test fun partnerRegistryIsRegisteredAtAssemblyAndKeepsDefaults() {
         val adapters = ModelAdapterRegistry().register("partner-ws", ::PartnerAdapter, setOf(MeetingCapabilityState.TRANSCRIPT))
