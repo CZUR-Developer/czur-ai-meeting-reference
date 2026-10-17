@@ -67,7 +67,7 @@ class MeetingService : Service() {
             requestStop("屏幕已关闭，正在等待模型最终字幕…")
         }
     }
-    /** 原平台队列只运行 JPEG/PDF，不在这里放置网络或模型收口。 */
+    /** 仅用于结果动作的本地 HTML/PDF 工作；截图处理已全部由 SDK 接管。 */
     private val platformWork = Executors.newSingleThreadExecutor()
     private var display = MeetingDisplaySnapshot(false, "zh-CN", "en-US", false, emptyList(), null)
     private var reminderPresentation = MeetingReminderPresentation()
@@ -314,7 +314,7 @@ class MeetingService : Service() {
     private fun startPresentation(startedAtMs: Long) {
         try {
             val source = ScreenCaptureSourceFactory.create(this, projectionResultCode, projectionData, { main.post(it) }, Runnable(::onPresentationStopped))
-            presentation = PresentationCapture(source, startedAtMs, platformWork) { main.post(it) }
+            presentation = PresentationCapture(source, startedAtMs)
             presentationNotice = if (source.supportsWindowExclusion()) "" else "当前系统仅支持整屏截图，演示图片会包含悬浮窗"
             main.postDelayed(presentationTick, PRESENTATION_INTERVAL_MS)
             Log.i(TAG, "SDK演示采集已开始 mode=${source.mode()} excludeWindows=${source.supportsWindowExclusion()} meetingId=$meetingId")
@@ -323,7 +323,7 @@ class MeetingService : Service() {
             presentationNotice = "屏幕采集启动失败；字幕会议继续，可停止后重试"
         } finally { projectionData = null }
     }
-    /** 周期帧→末帧→关闭→SDK 收口仍经原两级异步回调，不阻塞主线程。 */
+    /** 周期帧→真实保存ACK→末帧→关闭→SDK收口；全部异步，不阻塞主线程。 */
     private fun captureAndSubmit(completed: Runnable?) {
         val current = presentation
         val currentSession = session
@@ -331,12 +331,42 @@ class MeetingService : Service() {
         try {
             val excluded = if (current.supportsWindowExclusion()) overlay.captureWindowTokens() else emptyArray()
             current.capture(SystemClock.elapsedRealtime(), excluded, object : PresentationCapture.Callback {
-                override fun onSuccess(frame: PresentationCapture.Frame) {
+                override fun onSuccess(frame: PresentationCapture.Frame?) {
+                    if (frame == null) { completed?.run(); return }
+                    if (destroyed || presentation !== current || session !== currentSession) {
+                        frame.close()
+                        return
+                    }
                     try {
-                        if (destroyed || presentation !== current || session !== currentSession) return
-                        currentSession.submitPresentation(frame.offsetMs(), frame.jpeg())
-                        Log.i(TAG, "演示截图已提交组合会话 offsetMs=${frame.offsetMs()}")
-                    } finally { completed?.run() }
+                        // 两参旧入口只代表入队；必须等三参入口的后端保存ACK才确认SDK图片。
+                        currentSession.submitPresentation(frame.offsetMs(), frame.jpeg(), object : MeetingClient.Callback<Void?> {
+                            override fun onSuccess(result: Void?) {
+                                try {
+                                    if (!destroyed && presentation === current && session === currentSession) {
+                                        frame.confirmAccepted()
+                                        Log.i(TAG, "演示截图已由业务接受 offsetMs=${frame.offsetMs()}")
+                                    }
+                                } finally {
+                                    frame.close()
+                                    if (!destroyed && presentation === current && session === currentSession) completed?.run()
+                                }
+                            }
+                            override fun onError(message: String) {
+                                try {
+                                    if (presentation === current && session === currentSession) presentationFailed(message)
+                                } finally {
+                                    frame.close()
+                                    if (!destroyed && presentation === current && session === currentSession) completed?.run()
+                                }
+                            }
+                        })
+                    } catch (failure: RuntimeException) {
+                        try { presentationFailed("演示截图提交无法执行") }
+                        finally {
+                            frame.close()
+                            if (!destroyed && presentation === current && session === currentSession) completed?.run()
+                        }
+                    }
                 }
                 override fun onError(message: String) {
                     try { presentationFailed(message) } finally { completed?.run() }
@@ -352,7 +382,7 @@ class MeetingService : Service() {
         if (!stopRequested) presentationNotice = "演示截图采集失败；字幕会议继续"
         publish()
     }
-    /** beforeStop 主线程入口，末帧经同一编码队列提交后再关闭和续接，不同步等待。 */
+    /** beforeStop主线程入口；末帧排在周期ACK后，无新图／失败也关闭并续接原停止。 */
     fun stopPresentationBefore(continuation: Runnable) {
         main.removeCallbacks(presentationTick)
         presentationStopContinuation = continuation

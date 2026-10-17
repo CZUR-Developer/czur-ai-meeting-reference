@@ -137,6 +137,8 @@ dependencies {
         // SDK AAR 内带同一 core JAR；不要再次依赖 :meeting-client-core 造成重复类。
         // 本地 AAR 文件不传递 POM 依赖；SDK 的 WebSocket 运行时需要 OkHttp。
         implementation("com.squareup.okhttp3:okhttp:4.12.0")
+        // 本地 AAR 不携带 POM；显式补齐截图 suspend API 的同版协程运行依赖。
+        implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
     }
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")

@@ -1,99 +1,105 @@
 package com.czur.aimeeting.reference
 
-import android.graphics.Bitmap
 import android.os.IBinder
-import java.io.ByteArrayOutputStream
-import java.io.IOException
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.Executor
-import java.util.concurrent.RejectedExecutionException
+import java.util.ArrayDeque
 
 /**
- * SDK 截图的 App 薄装配，保持原长边、JPEG 体积及会议相对时间规则。
- * 主线程发起并接收结果，缩放编码仍使用 platformWork；周期、末帧由 Service 控制。
+ * 单场截图的 App 编排：只保留会议相对时间、窗口排除以及周期帧／末帧的先后顺序。
+ * 图像处理全部由 SDK 完成，字节原样提交。主线程发起并接收结果；上一帧业务回执结束前，
+ * 不开始下一帧，避免末帧越过周期帧的接受确认。周期和停止规则仍归 Service。
  */
 class PresentationCapture(
-    private val source: ScreenCaptureSource, private val meetingStartedAtMs: Long,
-    private val work: Executor, private val callbacks: Executor
+    private val source: ScreenCaptureSource, private val meetingStartedAtMs: Long
 ) : AutoCloseable {
-    data class Frame(private val offsetMs: Long, private val jpeg: ByteArray) {
+    /**
+     * 一次交付及其本场编排生命周期。只有业务 ACK 后调用 confirmAccepted；成功、失败均需
+     * close 释放本次请求，之后才允许下一帧。close 不代表业务接受，不执行图片处理或上传。
+     */
+    class Frame internal constructor(
+        private val offsetMs: Long, private val image: ScreenCaptureSource.Image,
+        private val finished: () -> Unit
+    ) : AutoCloseable {
+        private var closed = false
         fun offsetMs() = offsetMs
-        fun jpeg() = jpeg
+        fun jpeg() = image.jpeg
+        fun confirmAccepted() = image.confirmAccepted()
+        override fun close() {
+            if (closed) return
+            closed = true
+            finished()
+        }
     }
+
     interface Callback {
-        fun onSuccess(frame: Frame)
+        /** null 是 SDK 的正常无新图结果，不应变成失败提示或阻塞停止。 */
+        fun onSuccess(frame: Frame?)
         fun onError(message: String)
     }
-    /** 已交付但尚未开始编码的图片由本层关闭时回收，编码中的图归 encode 的 finally。 */
-    private val pendingEncoding = ConcurrentHashMap.newKeySet<Bitmap>()
-    @Volatile private var closed = false
+
+    private class Request(val nowMs: Long, val excluded: Array<IBinder?>, val callback: Callback) {
+        var delivered = false
+    }
+    private val queued = ArrayDeque<Request>()
+    private var current: Request? = null
+    private var closed = false
 
     fun mode() = source.mode()
     fun supportsWindowExclusion() = source.supportsWindowExclusion()
 
     fun capture(nowMs: Long, excluded: Array<IBinder?>, callback: Callback) {
         if (closed) { callback.onError("本场截图已关闭"); return }
-        source.captureBitmap(excluded, object : ScreenCaptureSource.Callback {
-            override fun onSuccess(bitmap: Bitmap) {
-                if (closed) { bitmap.recycle(); callback.onError("本场截图已关闭"); return }
-                pendingEncoding += bitmap
-                try {
-                    work.execute {
-                        if (!pendingEncoding.remove(bitmap)) return@execute
-                        val result = try { encode(bitmap, maxOf(0L, nowMs - meetingStartedAtMs)) }
-                        catch (failure: IOException) {
-                            callbacks.execute { callback.onError("演示截图JPEG处理失败") }
-                            return@execute
-                        } catch (failure: RuntimeException) {
-                            callbacks.execute { callback.onError("演示截图JPEG处理失败") }
-                            return@execute
-                        }
-                        callbacks.execute { callback.onSuccess(result) }
-                    }
-                } catch (ended: RejectedExecutionException) {
-                    if (pendingEncoding.remove(bitmap)) bitmap.recycle()
-                    callback.onError("本场截图处理队列已关闭")
-                }
-            }
-            override fun onError(message: String) = callback.onError(message)
-        })
+        queued.add(Request(nowMs, excluded.copyOf(), callback))
+        startNext()
     }
 
-    /** 正常末帧完成后关闭，不阻塞主线程。 */
+    private fun startNext() {
+        if (closed || current != null || queued.isEmpty()) return
+        val request = queued.remove()
+        current = request
+        try {
+            source.capture(request.excluded, object : ScreenCaptureSource.Callback {
+                override fun onSuccess(image: ScreenCaptureSource.Image?) {
+                    if (closed || current !== request) return
+                    if (image == null) {
+                        finish(request)
+                        request.callback.onSuccess(null)
+                    } else {
+                        request.delivered = true
+                        request.callback.onSuccess(Frame(maxOf(0L, request.nowMs - meetingStartedAtMs), image) {
+                            finish(request)
+                        })
+                    }
+                }
+                override fun onError(message: String) {
+                    if (closed || current !== request) return
+                    finish(request)
+                    request.callback.onError(message)
+                }
+            })
+        } catch (failure: RuntimeException) {
+            if (current !== request) throw failure
+            finish(request)
+            request.callback.onError("SDK截图请求无法执行")
+        }
+    }
+
+    private fun finish(request: Request) {
+        if (current !== request) return
+        current = null
+        startNext()
+    }
+
+    /** 正常末帧确认后关闭；授权撤销也释放等待中的请求，迟到输出不会重复续接停止。 */
     override fun close() {
         if (closed) return
         closed = true
-        for (bitmap in pendingEncoding) if (pendingEncoding.remove(bitmap)) bitmap.recycle()
+        val waiting = ArrayList<Request>()
+        current?.takeUnless { it.delivered }?.let(waiting::add)
+        waiting.addAll(queued)
+        current = null
+        queued.clear()
+        // 先结束 SDK 会话和授权，再通知末帧失败，保持回页／停止的原顺序。
         source.close()
-    }
-
-    companion object {
-        private const val MAX_EDGE = 1280
-        private const val MAX_JPEG_BYTES = 750_000
-
-        /** 工作线程接管 Bitmap，在全部编码出口释放；语言迁移不调整现有 JPEG 策略。 */
-        @JvmStatic @Throws(IOException::class)
-        fun encode(bitmap: Bitmap, offsetMs: Long): Frame {
-            var scaled = bitmap
-            try {
-                val ratio = minOf(1.0, MAX_EDGE.toDouble() / maxOf(bitmap.width, bitmap.height))
-                if (ratio < 1.0) {
-                    scaled = Bitmap.createScaledBitmap(bitmap,
-                        maxOf(1, Math.round(bitmap.width * ratio).toInt()),
-                        maxOf(1, Math.round(bitmap.height * ratio).toInt()), true)
-                }
-                val encoded = ByteArrayOutputStream()
-                if (!scaled.compress(Bitmap.CompressFormat.JPEG, 65, encoded)) throw IOException("演示截图 JPEG 编码失败")
-                if (encoded.size() > MAX_JPEG_BYTES) {
-                    encoded.reset()
-                    if (!scaled.compress(Bitmap.CompressFormat.JPEG, 45, encoded)) throw IOException("演示截图 JPEG 编码失败")
-                }
-                if (encoded.size() > MAX_JPEG_BYTES) throw IOException("演示截图超过本场 HTTP 上传上限")
-                return Frame(offsetMs, encoded.toByteArray())
-            } finally {
-                if (scaled !== bitmap) scaled.recycle()
-                bitmap.recycle()
-            }
-        }
+        for (request in waiting) request.callback.onError("本场截图已关闭")
     }
 }

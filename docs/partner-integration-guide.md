@@ -19,8 +19,9 @@ Android App、Java 21 后端和静态 Web 结果页，并指出各项能力的�
 | `deploy/` | 交付阶段的 Dockerfile、Compose 和唯一 V001 初始化脚本 | 产品部署示例 |
 
 参考 App 默认提供 Web 结果动作。邮箱、本地 PDF、扫码／小程序或伙伴自己的
-结果渲染器都通过结果动作扩展，不在核心会议状态机中写死。截图新增算法仍按
-当前项目决定暂缓；现有基础截图能力不代表完整去重算法已经交付。
+结果渲染器都通过结果动作扩展，不在核心会议状态机中写死。参考 App 已接入 SDK
+截图黑盒会话，内置处理可选启用，输出 Bitmap 或 File；调用方不接触内部算法，
+周期、末帧和窗口排除仍由 App 决定。接入方式见下文“SDK 截图扩展”。
 
 ## 2. 本机开发和局域网短会
 
@@ -163,7 +164,43 @@ val withoutRecording = options.withCreateParameters(
 
 演示采集同样使用既有 Create `artifactPolicy.presentationCapture`；
 `presentation.capture` 是其结果产物类型，不作为模型能力配置。未启用时不启动
-采集、Web 不显示演示区。截图新增实装与算法封装仍按本期决定暂缓。
+采集、Web 不显示演示区。SDK 构建已接入内置处理的黑盒会话；干净 Mock 不提供
+截图引擎，其演示开关保持禁用。
+
+### SDK 截图扩展
+
+系统授权与前台 Service 仍由 App 管理，取得 `ScreenCaptureClient` 后为每场创建
+独立会话。参考 App 显式开启内置处理；伙伴也可选择 `enableProcessing = false`
+取得未处理原图。公开接口只返回图片、正常的空结果或技术失败，不提供算法判断原因。
+
+```kotlin
+// 每场只创建一次；目录预先在 IO 上创建，窗口句柄每次在主线程取最新值。
+val images = captureClient.createSession(enableProcessing = true)
+suspend fun captureOneFrame() {
+    val image = images.captureFile(screenshotDirectory, currentWindowTokens()) ?: return
+    try {
+        // 伙伴自己的业务方法：返回时必须已经保存成功或收到服务端真实保存 ACK。
+        saveOrUploadAndAwaitAck(image.value)
+        image.confirmAccepted()
+    } finally {
+        // 示例选择不保留临时 File；取消时同样完成 IO 清理，不阻塞主线程。
+        withContext(NonCancellable + Dispatchers.IO) { image.value.delete() }
+    }
+}
+```
+
+上述保存方法是伙伴业务的示意，不是 SDK 的上传入口。参考 App 对应接线使用现有
+三参 `MeetingSession.submitPresentation`，只有 `onSuccess` 后才确认；两参旧入口
+只代表入队，不能用作保存确认。失败不确认，后续仍可取得该图；`null` 正常续接。
+
+需要 Bitmap 时改用 `captureBitmap(...)`。开启处理的 File 为 JPEG，关闭处理的 File
+为 PNG；交付后的 Bitmap／File 归调用方管理。确认不回收 Bitmap、不删除 File，
+也不执行网络请求。SDK 处理、编码和文件输出不阻塞主线程，App 自己的读写同样须放 IO。
+
+App 决定周期、末帧、排除哪些窗口及会议相对时间。每场沿用一次在途截图／提交，
+周期帧 ACK 结束后才开始末帧；末帧成功、无新图或失败均须续接原会议停止流程。
+停止后关闭 `images`，释放本场状态；`captureClient.close()` 另行释放原采集授权。
+完整参考接线见 [Android 截图说明](../android-reference-app/README.md#独立sdk截图与参考演示帧)。
 
 ## 5. 结果动作和 Web 扩展
 

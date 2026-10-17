@@ -1,13 +1,10 @@
 package com.czur.aimeeting.reference
 
-import android.content.Intent
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.Color
 import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
 import android.view.View
+import com.czur.aimeeting.client.MeetingClient
 import com.czur.aimeeting.client.MeetingSession
 import com.czur.aimeeting.client.display.MeetingDisplaySnapshot
 import com.czur.aimeeting.reference.meeting.MeetingAppAssembly
@@ -17,7 +14,6 @@ import com.czur.aimeeting.reference.ui.MeetingOverlayFactory
 import com.czur.aimeeting.reference.ui.OverlayViewFactory
 import com.czur.aimeeting.ui.DefaultMeetingOverlay
 import java.util.ArrayDeque
-import java.util.concurrent.Executor
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Test
@@ -29,54 +25,93 @@ import org.robolectric.Shadows
 import org.robolectric.annotation.Config
 import org.robolectric.shadows.ShadowSettings
 
-/** 正常SDK图像接入、JPEG策略和Service异步末帧；不操作设备或连接会议后端。 */
+/** SDK成品字节的薄接入、真实保存确认与Service异步末帧；不复制算法或连接后端。 */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], qualifiers = "w1920dp-h1080dp-mdpi")
 class PresentationCaptureTest {
     @After fun resetFactory() = MeetingAppAssembly.registerOverlayFactory(OverlayViewFactory())
 
-    @Test fun jpegRetains1280AspectRatioOffsetAndRecyclesDeliveredBitmap() {
-        val captured = Bitmap.createBitmap(2560, 1440, Bitmap.Config.ARGB_8888)
-        captured.eraseColor(Color.RED)
-        val frame = PresentationCapture.encode(captured, 12345)
+    @Test fun sdkBytesRemainUnchangedAndConfirmationBelongsToBusiness() {
+        val events = ArrayList<String>()
+        val source = FakeSource(true, events)
+        val capture = PresentationCapture(source, 1000)
+        var delivered: PresentationCapture.Frame? = null
+        capture.capture(13345, emptyArray(), object : PresentationCapture.Callback {
+            override fun onSuccess(frame: PresentationCapture.Frame?) { delivered = frame }
+            override fun onError(message: String) { fail(message) }
+        })
+        val image = source.deliver()
+        val frame = requireNotNull(delivered)
         assertEquals(12345L, frame.offsetMs())
-        assertTrue(captured.isRecycled)
-        assertTrue(frame.jpeg().size < 750_000)
-        val decoded = BitmapFactory.decodeByteArray(frame.jpeg(), 0, frame.jpeg().size)
-        assertEquals(1280, decoded.width)
-        assertEquals(720, decoded.height)
-        decoded.recycle()
+        assertSame("SDK成品字节不得在App重新编码或改写", image.jpeg, frame.jpeg())
+        assertTrue(events.isEmpty())
+        frame.confirmAccepted()
+        assertEquals(listOf("confirm"), events)
+        frame.close()
+        capture.close()
     }
 
-    @Test fun periodicAndFinalFramesSubmitThenCloseBeforeContinuationWithoutWaiting() {
+    @Test fun periodicAckPrecedesFinalCaptureAndFinalAckPrecedesStopContinuation() {
         val host = Robolectric.buildService(MeetingService::class.java).create()
         val service = host.get()
         val events = ArrayList<String>()
         val source = FakeSource(true, events)
-        val work = WorkQueue()
-        val callbacks = WorkQueue()
-        val presentation = PresentationCapture(source, SystemClock.elapsedRealtime() - 1200, work, callbacks)
+        val presentation = PresentationCapture(source, SystemClock.elapsedRealtime() - 1200)
+        val session = RecordingSession(events)
         set(service, "presentation", presentation)
         set(service, "active", true)
-        set(service, "session", RecordingSession(events))
+        set(service, "session", session)
         try {
-            // 实际10秒tick中的请求与Stop末帧共用原Service和同一JPEG工作队列。
+            // 周期尚未取得真实ACK时，末帧只排队，不先调用SDK采集。
             (get(service, "presentationTick") as Runnable).run()
             service.stopPresentationBefore { events.add("continue") }
-            assertEquals(2, source.pending.size)
+            assertEquals(1, source.pending.size)
             assertTrue(events.isEmpty())
             val first = source.deliver()
-            val last = source.deliver()
-            assertTrue(events.isEmpty())
-            assertFalse(first.isRecycled)
-            assertFalse(last.isRecycled)
-            work.drain()
-            assertTrue(first.isRecycled)
-            assertTrue(last.isRecycled)
-            assertTrue(events.isEmpty())
-            callbacks.drain()
-            assertEquals(listOf("submit:1200", "submit:1200", "close", "continue"), events)
+            assertEquals(listOf("submit:1200"), events)
+            assertSame(first.jpeg, session.submitted.single())
+            assertEquals(0, source.pending.size)
+            session.acknowledge()
+            assertEquals(listOf("submit:1200", "confirm"), events)
+            assertEquals(1, source.pending.size)
+            source.deliver()
+            assertEquals(listOf("submit:1200", "confirm", "submit:1200"), events)
+            session.acknowledge()
+            assertEquals(listOf("submit:1200", "confirm", "submit:1200", "confirm", "close", "continue"), events)
             assertNull(get(service, "presentation"))
+        } finally { host.destroy() }
+    }
+
+    @Test fun rejectedFinalFrameDoesNotConfirmButStillContinuesStop() {
+        val host = Robolectric.buildService(MeetingService::class.java).create()
+        val service = host.get()
+        val events = ArrayList<String>()
+        val source = FakeSource(true, events)
+        val session = RecordingSession(events)
+        set(service, "presentation", PresentationCapture(source, SystemClock.elapsedRealtime() - 1200))
+        set(service, "session", session)
+        try {
+            service.stopPresentationBefore { events.add("continue") }
+            source.deliver()
+            assertEquals(listOf("submit:1200"), events)
+            session.reject()
+            assertEquals(listOf("submit:1200", "close", "continue"), events)
+            assertNull(get(service, "presentation"))
+        } finally { host.destroy() }
+    }
+
+    @Test fun noNewImageFinalFrameClosesAndContinuesWithoutFailureNotice() {
+        val host = Robolectric.buildService(MeetingService::class.java).create()
+        val service = host.get()
+        val events = ArrayList<String>()
+        val source = FakeSource(true, events)
+        set(service, "presentation", PresentationCapture(source, 0))
+        set(service, "session", RecordingSession(events))
+        try {
+            service.stopPresentationBefore { events.add("continue") }
+            source.skip()
+            assertEquals(listOf("close", "continue"), events)
+            assertEquals("", get(service, "presentationNotice"))
         } finally { host.destroy() }
     }
 
@@ -112,10 +147,9 @@ class PresentationCaptureTest {
         val host = Robolectric.buildService(MeetingService::class.java).create()
         val service = host.get()
         val source = FakeSource(false, ArrayList())
-        val work = WorkQueue()
-        val callbacks = WorkQueue()
-        set(service, "presentation", PresentationCapture(source, 0, work, callbacks))
-        set(service, "session", RecordingSession(ArrayList()))
+        val session = RecordingSession(ArrayList())
+        set(service, "presentation", PresentationCapture(source, 0))
+        set(service, "session", session)
         val overlay = get(service, "overlay") as MeetingOverlay
         overlay.show(emptyDisplay(), {}, {}, {}, {})
         try {
@@ -123,26 +157,21 @@ class PresentationCaptureTest {
             service.stopPresentationBefore {}
             assertEquals(0, source.excluded.size)
             source.deliver()
-            work.drain()
-            callbacks.drain()
+            session.acknowledge()
         } finally { host.destroy() }
     }
 
-    @Test fun closingHostRecyclesDeliveredImageStillQueuedForEncoding() {
-        val source = FakeSource(true, ArrayList())
-        val work = WorkQueue()
-        val callbacks = WorkQueue()
-        val capture = PresentationCapture(source, 0, work, callbacks)
+    @Test fun closingHostEndsPendingRequestAndIgnoresLateOutputWithoutConfirming() {
+        val events = ArrayList<String>()
+        val source = FakeSource(true, events)
+        val capture = PresentationCapture(source, 0)
         capture.capture(1000, emptyArray(), object : PresentationCapture.Callback {
-            override fun onSuccess(frame: PresentationCapture.Frame) { fail("已关闭宿主不再交付此帧") }
-            override fun onError(message: String) {}
+            override fun onSuccess(frame: PresentationCapture.Frame?) { fail("已关闭宿主不再交付此帧") }
+            override fun onError(message: String) { events.add("ended") }
         })
-        val delivered = source.deliver()
-        assertFalse(delivered.isRecycled)
         capture.close()
-        assertTrue(delivered.isRecycled)
-        work.drain()
-        callbacks.drain()
+        source.deliver()
+        assertEquals(listOf("close", "ended"), events)
     }
 
     @Test fun actualOverlayStopWaitsForFinalFrameBeforeReturningAndContinuing() {
@@ -152,11 +181,10 @@ class PresentationCaptureTest {
             assertNull(Shadows.shadowOf(RuntimeEnvironment.getApplication()).nextStartedActivity)
             assertEquals(1, fixture.source.pending.size)
             fixture.source.deliver()
-            fixture.work.drain()
-            assertEquals(listOf("stop"), fixture.events)
+            assertEquals(listOf("stop", "submit"), fixture.events)
             assertNull(Shadows.shadowOf(RuntimeEnvironment.getApplication()).nextStartedActivity)
-            fixture.callbacks.drain()
-            assertEquals(listOf("stop", "submit", "close", "return", "continue"), fixture.events)
+            fixture.session.acknowledge()
+            assertEquals(listOf("stop", "submit", "confirm", "close", "return", "continue"), fixture.events)
             assertNull(get(fixture.service, "presentation"))
             assertFalse(get(fixture.service, "canStop") as Boolean)
         }
@@ -180,22 +208,35 @@ class PresentationCaptureTest {
             }
             assertEquals(listOf("stop", "close", "return", "continue"), fixture.events)
             // 撤销时末帧尚在途：沿原SDK回调结束，不再回页或重复续接停止。
-            val late = fixture.source.deliver()
-            assertTrue(late.isRecycled)
-            fixture.work.drain()
-            fixture.callbacks.drain()
+            fixture.source.deliver()
             assertEquals(listOf("stop", "close", "return", "continue"), fixture.events)
             assertNull(Shadows.shadowOf(RuntimeEnvironment.getApplication()).nextStartedActivity)
         }
     }
 
-    /** 仅控制截图返回的时刻；实际默认窗口按钮→Service→beforeStop链和JPEG路径保持。 */
+    @Test fun lateBusinessAckDoesNotConfirmOrFinishAnotherCaptureSession() {
+        OverlayStopFixture(true).use { fixture ->
+            fixture.clickStop()
+            fixture.source.deliver()
+            MeetingService::class.java.getDeclaredMethod("onPresentationStopped").apply {
+                isAccessible = true
+                invoke(fixture.service)
+            }
+            assertEquals(listOf("stop", "submit", "close", "return", "continue"), fixture.events)
+            val next = PresentationCapture(FakeSource(true, fixture.events), 0)
+            set(fixture.service, "presentation", next)
+            set(fixture.service, "presentationStopContinuation", Runnable { fixture.events.add("nextContinue") })
+            fixture.session.acknowledge()
+            assertEquals(listOf("stop", "submit", "close", "return", "continue"), fixture.events)
+            assertSame(next, get(fixture.service, "presentation"))
+        }
+    }
+
+    /** 只控制SDK输出和业务ACK时刻；默认窗口按钮→Service→beforeStop仍走实际实现。 */
     private class OverlayStopFixture(withCapture: Boolean) : AutoCloseable {
         val host = Robolectric.buildService(MeetingService::class.java).create()
         val service = host.get()
         val events = ArrayList<String>()
-        val work = WorkQueue()
-        val callbacks = WorkQueue()
         val source = object : FakeSource(true, events) {
             override fun close() {
                 assertNull("发出关闭请求前不能先打开MainActivity",
@@ -203,30 +244,28 @@ class PresentationCaptureTest {
                 super.close()
             }
         }
+        val session = object : RecordingSession(events) {
+            override fun recordSubmission(offsetMs: Long) { events.add("submit") }
+            override fun requestStop() {
+                if (!withCapture) { assertReturnedToMeeting(); events.add("return") }
+                events.add("stop")
+                service.stopPresentationBefore {
+                    if (withCapture) { assertReturnedToMeeting(); events.add("return") }
+                    events.add("continue")
+                }
+            }
+        }
 
         init {
             ShadowSettings.setCanDrawOverlays(true)
             set(service, "active", true)
             set(service, "canStop", true)
-            set(service, "session", object : RecordingSession(events) {
-                override fun submitPresentation(offsetMs: Long, jpeg: ByteArray) {
-                    // 验证回页顺序；点击控件推进测试时钟，偏移规则由前面的原测试验证。
-                    events.add("submit")
-                }
-                override fun requestStop() {
-                    if (!withCapture) { assertReturnedToMeeting(); events.add("return") }
-                    events.add("stop")
-                    service.stopPresentationBefore {
-                        if (withCapture) { assertReturnedToMeeting(); events.add("return") }
-                        events.add("continue")
-                    }
-                }
-            })
+            set(service, "session", session)
             service.toggleOverlay()
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             // 窗口挂载会执行UI消息并推进时钟；在点击Stop前建立受控会议起点。
             if (withCapture) set(service, "presentation", PresentationCapture(source,
-                SystemClock.elapsedRealtime() - 1200, work, callbacks))
+                SystemClock.elapsedRealtime() - 1200))
         }
 
         fun clickStop() {
@@ -247,27 +286,36 @@ class PresentationCaptureTest {
         override fun close() { host.destroy() }
     }
 
-    private class WorkQueue : Executor {
-        val queued = ArrayDeque<Runnable>()
-        override fun execute(command: Runnable) { queued.add(command) }
-        fun drain() { while (queued.isNotEmpty()) queued.remove().run() }
-    }
-
     private open class FakeSource(private val exclusion: Boolean, private val events: MutableList<String>) : ScreenCaptureSource {
         val pending = ArrayDeque<ScreenCaptureSource.Callback>()
         lateinit var excluded: Array<IBinder?>
         override fun mode() = if (exclusion) "SYSTEM_CAPTURE" else "MEDIA_PROJECTION"
         override fun supportsWindowExclusion() = exclusion
-        override fun captureBitmap(excludedWindowTokens: Array<IBinder?>, callback: ScreenCaptureSource.Callback) {
+        override fun capture(excludedWindowTokens: Array<IBinder?>, callback: ScreenCaptureSource.Callback) {
             excluded = excludedWindowTokens
             pending.add(callback)
         }
-        fun deliver(): Bitmap = Bitmap.createBitmap(32, 18, Bitmap.Config.ARGB_8888).also { pending.remove().onSuccess(it) }
+        fun deliver() = ScreenCaptureSource.Image(byteArrayOf(1, 2, 3)) { events.add("confirm") }.also {
+            pending.remove().onSuccess(it)
+        }
+        fun skip() = pending.remove().onSuccess(null)
         override fun close() { events.add("close") }
     }
 
     private open class RecordingSession(private val events: MutableList<String>) : MeetingSession {
-        override fun submitPresentation(offsetMs: Long, jpeg: ByteArray) { events.add("submit:$offsetMs") }
+        private val acknowledgements = ArrayDeque<MeetingClient.Callback<Void?>>()
+        val submitted = ArrayList<ByteArray>()
+        override fun submitPresentation(offsetMs: Long, jpeg: ByteArray) {
+            fail("两参旧入口不能代签保存ACK")
+        }
+        override fun submitPresentation(offsetMs: Long, jpeg: ByteArray, callback: MeetingClient.Callback<Void?>) {
+            recordSubmission(offsetMs)
+            submitted.add(jpeg)
+            acknowledgements.add(callback)
+        }
+        protected open fun recordSubmission(offsetMs: Long) { events.add("submit:$offsetMs") }
+        fun acknowledge() = acknowledgements.remove().onSuccess(null)
+        fun reject() = acknowledgements.remove().onError("保存未成功")
         override fun requestStop() {}
         override fun swapDisplayColumns() {}
         override fun close() {}

@@ -22,8 +22,10 @@ P10 已完成本机 MySQL 5.7、PC 局域网 HTTPS 和默认结果 Web 的实体
 伙伴扩展和能力缺失时的行为见
 [`接入手册`](../docs/partner-integration-guide.md)。
 
-截图相关新增实装／算法封装继续暂缓。实体 DOA、HDMI-IN／投屏／外设等跨产品专项
-留待最终统一回归；参考链通过不代表这些条件或 CZUR 私有集成已完成验收。
+P11-1 已接入 SDK 截图黑盒会话，参考端不再处理或编码图片；SDK API 的 Bitmap／File、
+排窗、接受确认、无新图与会话隔离已在现有设备独立探针通过。该证据不代签完整会议
+演示产物／Web 末帧验收。实体 DOA、HDMI-IN／投屏／外设等跨产品专项仍留待最终统一
+回归；参考链通过不代表这些条件或 CZUR 私有集成已完成验收。
 
 ### P6／P7 交付记录（历史）
 
@@ -151,10 +153,16 @@ P7-1a新增可注入的`IdentityProvider`及`MeetingClient.refreshIdentity()`。
 
 参考App的屏幕采集引擎已移到闭源SDK的`ScreenCaptureClient`。App在主线程申请系统
 屏幕投影授权、启动具有`mediaProjection`类型的前台Service，再经`sdk`源集的
-`ScreenCaptureSourceFactory`创建客户端；`main`只保留薄接口和演示图片处理。
-App保持10秒周期、相对本场`elapsedRealtime`起点的偏移、1280长边／JPEG体积约束与上传。
-`beforeStop`异步取得末帧，工作线程缩放／编码，提交后关闭截图客户端再调用continuation，
-不在主线程或串行回调队列中同步等待。Bitmap成功交付归App，JPEG编码的全部出口回收它。
+`ScreenCaptureSourceFactory`创建客户端与`createSession(enableProcessing = true)`单场会话。
+裁剪、限幅、页面过滤、去重、JPEG编码及体积处理全部封装在闭源SDK，参考App不复制算法，
+不读取判断依据。App保持10秒周期、相对本场`elapsedRealtime`起点的偏移、排窗与上传时序。
+SDK没有新图时返回`null`，是正常结果，不显示失败提示，也不阻断末帧／停止。
+
+工厂在IO协程创建临时目录、读取SDK交付的JPEG File，随后在IO中删除临时File；
+字节原样交给现有三参`submitPresentation`。只有真实保存ACK成功才调用
+`confirmAccepted()`；保存失败不确认，后续仍可取得该图。周期帧确认结束后才开始末帧，
+末帧成功、无新图或失败都关闭单场会话和截图客户端，再续接`beforeStop`。
+截图等待、图像计算、编码和文件操作均不阻塞主线程，App不增加另一套截图处理队列。
 
 新固件的`SYSTEM_CAPTURE`路径每次在主线程现取当前已挂载浮窗token，包含字幕／互译／
 Mini和提醒遮罩、卡片。窗口工厂只使用公开`View.getWindowToken()`；隐藏／重新挂载后
@@ -165,10 +173,12 @@ Mini和提醒遮罩、卡片。窗口工厂只使用公开`View.getWindowToken()
 `supportsWindowExclusion()`选择空排除列表，并在会中说明演示图片会包含悬浮窗；不是
 排除失败后默默再截整屏。干净Mock没有截图SDK，演示开关明确禁用且说明不支持，
 不保留另一份采集引擎；字幕、UI和结果的Mock流程保持。
-SDK还可独立输出指定目录PNG File，参考上传采用Bitmap入口以沿用自己的JPEG策略。
-Bitmap／File独立接口、Main／IO与Kotlin挂起接入见SDK随包的`SCREEN-CAPTURE.md`。
-本轮源码／定向测试和APK构建不代签新固件有／无排除、窗口下方内容或真实末帧Web图片，
-实际效果待系统编译／烧写后另验。
+SDK会话可选`enableProcessing = false`保留原图，File输出为PNG；开启内置处理后File
+输出为JPEG。也可直接使用Bitmap输出，交付后的Bitmap／File由调用方回收或保留。
+确认只推进本场内部状态，不回收图片、不删除File、不执行网络请求。旧回调接口保持兼容，
+Bitmap／File、Main／IO与Kotlin挂起接入见SDK随包的`SCREEN-CAPTURE.md`。
+本轮定向测试和APK构建与设备验收分别记录；设备验证使用公开API探针及既有固件截图能力，
+不把本机测试当作真实末帧Web图片验收，也不要求为本轮SDK/App改动重新编译系统固件。
 
 `sdk` 模式把 `starry` 独立 SDK Module 产出的版本化 AAR 从仓外注入。SDK 在有兼容
 共享音频接口的新 Starry 系统读取 Broker；旧 CZUR 系统无服务／接口不兼容，以及
@@ -501,7 +511,7 @@ val session = client.start(setup.toOptions(), object : MeetingListener {
         // SDK 已决定片段配对、源侧和交换；UI 只渲染 final=100%、partial=80%。
     }
     override fun beforeStop(continuation: Runnable) {
-        // 停止周期屏采，在平台队列提交最后有效截图、关闭投影，再调用 continuation。
+        // 停止周期屏采，等周期ACK后请求SDK末帧；成功／空结果／失败均关闭并续接。
         continuation.run() // 没有屏采时直接继续；详细接线见 MeetingService。
     }
     override fun onResult(result: MeetingResult) {
@@ -514,8 +524,9 @@ session.requestStop() // 正常收口；client.close() 仅用于取消/释放，
 
 `start()` 异步创建会议并立即返回句柄；App 保存该句柄，过早的 Stop 不受理。
 
-屏幕授权、周期 JPEG、PDF/MediaStore 和权限申请均在 App；截图通过
-`session.submitPresentation(offsetMs, jpeg)` 交组合层保存。系统单独停止投影只结束
+屏幕授权、周期／末帧时序、PDF/MediaStore 和权限申请均在 App；图片处理和JPEG编码
+封装在SDK。截图通过三参 `session.submitPresentation(offsetMs, jpeg, callback)` 交组合层
+保存，真实成功回执后才确认SDK图片；系统单独停止投影只结束
 屏采，字幕会议继续。`onResult`先于READY状态，后者之后才执行冻结动作；正文或通知失败
 不回退会议READY，结果访问保留到成功或用户结束交互。合作伙伴可更换这些平台/UI
 实现，或在`MeetingAppAssembly`登记自定义Adapter工厂注册表，继续复用同一组合流程。

@@ -22,6 +22,10 @@
 按本场 `retainAudio` 留存策略接入 `audio.original` 公共产物链并由 Web 流式回放，伙伴仍可自行
 开发接收者流程并在开会前读取其已缓存的状态，不必修改模型或会议收口链。
 
+SDK 构建已接入可选的截图黑盒会话，图片处理、编码和去重由闭源 SDK 提供；参考 App
+只负责授权、周期／末帧、窗口排除与业务保存确认。Bitmap／File 和资源归属见
+[`Android 截图说明`](android-reference-app/README.md#独立sdk截图与参考演示帧)。
+
 ## 本机开发验证
 
 使用 IntelliJ IDEA 打开根目录 `pom.xml`，使用 Android Studio 打开
