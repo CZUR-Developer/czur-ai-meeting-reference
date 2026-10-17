@@ -291,7 +291,7 @@ class MeetingDevice:
                 "phase": last(r"组合会议状态 phase=(\w+)"),
                 "audioMode": last(r"本场实际音频来源 mode=(\w+)", same_meeting),
                 "screenCaptureMode": last(r"SDK演示采集已开始 mode=(\w+)", same_meeting),
-                "submittedFrameCountInLogWindow": len(re.findall("演示截图已提交组合会话", latest))}
+                "submittedFrameCountInLogWindow": len(re.findall(r"演示截图已(?:提交组合会话|由业务接受)", latest))}
 
     def approve_permission(self, root):
         """只在 Start 后确认标准录音／整屏采集弹窗；其他弹窗明确交由人工。"""

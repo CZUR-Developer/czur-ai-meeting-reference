@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- SDK Debug 专用接缝；保留普通 Debug 的网络信任与音频诊断入口。 -->
+    <application android:networkSecurityConfig="@xml/reference_debug_network_security">
+        <activity android:name=".AudioDiagnosticActivity" android:exported="true" />
+        <activity android:name=".ScreenCaptureProbeActivity" android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+        <service android:name=".ScreenCaptureProbeService" android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+    </application>
+</manifest>

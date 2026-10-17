@@ -89,6 +89,11 @@ android {
 
     sourceSets.getByName("main").java.srcDir("src/$meetingRuntime/java")
     sourceSets.getByName("test").java.srcDir("src/test/$meetingRuntime/java")
+    if (meetingRuntime == "sdk") {
+        // 公开 API 探针只进 SDK Debug，不进入 Release 或干净 Mock 交付。
+        sourceSets.getByName("debug").java.srcDir("src/sdk-debug/java")
+        sourceSets.getByName("debug").manifest.srcFile("src/sdk-debug/AndroidManifest.xml")
+    }
     // 同名薄工厂互斥编译，不反射加载 UI，不复制会议编排。
     sourceSets.getByName("main").java.srcDir("src/$subtitleUiSource/java")
     sourceSets.getByName("test").java.srcDir("src/test/$subtitleUiSource/java")

@@ -92,7 +92,7 @@ class MeetingDeviceTests(unittest.TestCase):
             "组合会议已启动 meetingId=new mode=LIVE_TRANSCRIPT",
             "本场实际音频来源 mode=MIC meetingId=new",
             "组合会议状态 phase=RUNNING savedEventCount=2",
-            "演示截图已提交组合会话 offsetMs=10000"))]
+            "演示截图已由业务接受 offsetMs=10000"))]
         result = device.MeetingDevice(adb).log_state()
         self.assertEqual(result["meetingId"], "new")
         self.assertEqual(result["phase"], "RUNNING")

@@ -1,5 +1,22 @@
 # Android 参考 App 启动校验工具
 
+## 独立截图 API 回归（SDK Debug）
+
+已安装最新 SDK Debug APK 时，可以单独验证截图，不必登录、启动会议或提供模型 Key：
+
+```bash
+python3 tools/android-device/check-screen-capture-api.py \
+  --serial '<ADB序列号>' --output '/tmp/screen-capture-api-check'
+```
+
+工具打开 Debug 专用测试画面，确认正常系统投影授权，自动核对 Bitmap/File、窗口排除、
+同画面接受前可重试/接受后无新图、变化画面、新会话隔离及关闭一场不关闭底层授权。
+它只读取 SDK 公开返回值，不读取算法中间信息。普通系统不支持排窗时，不签排窗通过。
+输出为 JSON 和固定测试图，不采会议内容；存在运行中会议时拒绝启动。脚本不清数据、
+不关闭真实会议。验后按返回离开测试页即可。此入口和投影前台 Service 均不进入 Release。
+
+## 日常会议流程
+
 用 Python 3 标准库和 ADB 自动完成**打开 App → 填写后端／Web 地址 → 真实账号登录 →
 选择功能 → 开始会议**。工具读取现有页面的 `resource-id`、`checked`、`enabled` 和
 `bounds`，每次使用当前控件位置；不注入 token、不复制 SDK、也不另建会议状态机。
