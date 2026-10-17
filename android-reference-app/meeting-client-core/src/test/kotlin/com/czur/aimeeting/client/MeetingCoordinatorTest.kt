@@ -4,6 +4,7 @@ import org.junit.Assert.*
 import com.czur.aimeeting.client.display.MeetingDisplaySnapshot
 import com.czur.aimeeting.client.provider.TingwuModelAdapter
 import com.czur.aimeeting.client.provider.BailianSummaryAdapter
+import com.czur.aimeeting.client.provider.SampleJsonModelAdapter
 import com.czur.aimeeting.client.identity.IdentityProvider
 import com.czur.aimeeting.client.identity.IdentityResult
 import com.czur.aimeeting.client.identity.IdentitySession
@@ -37,6 +38,7 @@ class MeetingCoordinatorTest {
     companion object {
         private val ALL = setOf(MeetingCapabilityState.TRANSCRIPT,
             MeetingCapabilityState.TRANSLATION, MeetingCapabilityState.SUMMARY, MeetingCapabilityState.SPEAKER)
+        private const val CROSS_MEETING = MeetingCapabilityState.SPEAKER_IDENTITY_CROSS_MEETING
     }
 
     @Test fun optionalSpeakerIsRequestedOnlyWhenDeploymentAndLocalAdapterProvideIt() {
@@ -53,6 +55,81 @@ class MeetingCoordinatorTest {
             f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.WEB, false)
             assertTrue(f.server.requested.requestedCapabilities().contains(MeetingCapabilityState.SPEAKER))
             assertTrue(f.probe.info!!.availableCapabilities().contains(MeetingCapabilityState.SPEAKER))
+            assertFalse("旧部署没有声明时保持原能力", f.server.requested.requestedCapabilities().contains(CROSS_MEETING))
+            assertFalse(f.probe.info!!.availableCapabilities().contains(CROSS_MEETING))
+        }
+    }
+
+    @Test fun serverPostMeetingIdentityIsDiscoveredRequestedAndFrozenWithoutRealtimeDeclaration() {
+        val publisher = Publisher()
+        Fixture(true, ALL + CROSS_MEETING, ReferenceIdentityProvider("fixture-token"), publisher).use { f ->
+            f.server.deploymentCapabilities = ALL + CROSS_MEETING
+            f.runtime.prepareAudio(audio("mtg_test", 32000))
+            val discovery = CompletableFuture<MeetingDiscovery>()
+            f.client.discover(resultCallback(discovery))
+            assertTrue(discovery.get(2, TimeUnit.SECONDS).availableCapabilities().contains(CROSS_MEETING))
+            assertFalse("服务端会后能力不进入实时工厂集合", f.adapters.setupCapabilities().contains(CROSS_MEETING))
+            assertFalse(f.adapters.realtimeCapabilities(TingwuModelAdapter.ID).contains(CROSS_MEETING))
+            f.start(retainedOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT))
+            assertTrue(f.server.requested.requestedCapabilities().contains(CROSS_MEETING))
+            assertTrue(f.probe.info!!.availableCapabilities().contains(CROSS_MEETING))
+            f.session.requestStop()
+            assertNotNull(f.probe.result())
+            assertEquals(1, publisher.contexts.size)
+            assertTrue("已发布同场录音后才请求 Stop", f.server.steps.indexOf("publish") < f.server.steps.indexOf("stop"))
+        }
+    }
+
+    @Test fun serverIdentityIsNotRequestedWhenThisMeetingDoesNotRetainAudio() {
+        Fixture(true, ALL + CROSS_MEETING, ReferenceIdentityProvider("fixture-token"), Publisher()).use { f ->
+            f.server.deploymentCapabilities = ALL + CROSS_MEETING
+            f.runtime.retainedAudioSupported = true
+            f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.WEB, false)
+            assertFalse(f.server.requested.requestedCapabilities().contains(CROSS_MEETING))
+            assertFalse("响应多报能力也不能启用未请求项", f.probe.info!!.availableCapabilities().contains(CROSS_MEETING))
+        }
+    }
+
+    @Test fun serverIdentityRequiresAnAudioPublisherEvenDuringDiscovery() {
+        Fixture(true, ALL + CROSS_MEETING).use { f ->
+            f.server.deploymentCapabilities = ALL + CROSS_MEETING
+            f.runtime.retainedAudioSupported = true
+            val discovery = CompletableFuture<MeetingDiscovery>()
+            f.client.discover(resultCallback(discovery))
+            assertFalse(discovery.get(2, TimeUnit.SECONDS).availableCapabilities().contains(CROSS_MEETING))
+        }
+    }
+
+    @Test fun serverIdentityIsNotRequestedWithoutDeploymentSpeaker() {
+        Fixture(true, ALL + CROSS_MEETING, ReferenceIdentityProvider("fixture-token"), Publisher()).use { f ->
+            f.server.deploymentCapabilities = setOf(MeetingCapabilityState.TRANSCRIPT, CROSS_MEETING)
+            f.runtime.prepareAudio(audio("mtg_test", 32000))
+            f.start(retainedOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT))
+            assertFalse(f.server.requested.requestedCapabilities().contains(CROSS_MEETING))
+            assertFalse(f.probe.info!!.availableCapabilities().contains(CROSS_MEETING))
+        }
+    }
+
+    @Test fun ungrantedServerIdentityDoesNotPreventTheRetainedAudioMeeting() {
+        Fixture(true, ALL, ReferenceIdentityProvider("fixture-token"), Publisher()).use { f ->
+            f.server.deploymentCapabilities = ALL + CROSS_MEETING
+            f.runtime.prepareAudio(audio("mtg_test", 32000))
+            f.start(retainedOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT))
+            assertTrue(f.server.requested.requestedCapabilities().contains(CROSS_MEETING))
+            assertFalse(f.probe.info!!.availableCapabilities().contains(CROSS_MEETING))
+            assertTrue(f.probe.info!!.availableCapabilities().contains(MeetingCapabilityState.SPEAKER))
+        }
+    }
+
+    @Test fun selectedSpeakerlessAdapterDoesNotFreezeServerIdentity() {
+        Fixture(true, ALL + CROSS_MEETING, ReferenceIdentityProvider("fixture-token"), Publisher()).use { f ->
+            f.server.deploymentCapabilities = ALL + CROSS_MEETING
+            f.server.adapterId = SampleJsonModelAdapter.ID
+            f.runtime.prepareAudio(audio("mtg_test", 32000))
+            f.start(retainedOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT))
+            assertTrue("材料在 Create 后选择，请求先按已发现工厂能力协商", f.server.requested.requestedCapabilities().contains(CROSS_MEETING))
+            assertFalse(f.probe.info!!.availableCapabilities().contains(MeetingCapabilityState.SPEAKER))
+            assertFalse(f.probe.info!!.availableCapabilities().contains(CROSS_MEETING))
         }
     }
     @Test fun legacyConfigAndRuntimeDefaultsHaveNoRecordingOrPublication() {

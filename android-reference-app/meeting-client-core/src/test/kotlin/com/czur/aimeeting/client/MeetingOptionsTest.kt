@@ -57,6 +57,38 @@ class MeetingOptionsTest {
             original.requestedCapabilities())
     }
 
+    @Test fun serverPostMeetingIdentityNeedsExplicitDiscoverySpeakerAndRetainedAudio() {
+        val original = MeetingOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT, "zh-CN", "en-US",
+            false, MeetingOptions.ResultDelivery.WEB, "https://result.example.test", emptyList())
+        val available = setOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.SPEAKER,
+            MeetingCapabilityState.SPEAKER_IDENTITY_CROSS_MEETING)
+        assertFalse(original.withAvailableCapabilities(available).requestedCapabilities()
+            .contains(MeetingCapabilityState.SPEAKER_IDENTITY_CROSS_MEETING))
+        val retained = original.withCreateParameters("留音会议", "Asia/Shanghai", true)
+        assertFalse("旧直接调用不因留音自动请求未发现的会后能力", retained.requestedCapabilities()
+            .contains(MeetingCapabilityState.SPEAKER_IDENTITY_CROSS_MEETING))
+        assertEquals(listOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.SPEAKER,
+            MeetingCapabilityState.SPEAKER_IDENTITY_CROSS_MEETING),
+            retained.withAvailableCapabilities(available).requestedCapabilities())
+        assertFalse(retained.withAvailableCapabilities(available - MeetingCapabilityState.SPEAKER)
+            .requestedCapabilities().contains(MeetingCapabilityState.SPEAKER_IDENTITY_CROSS_MEETING))
+    }
+
+    @Test fun disablingRetainedAudioAlsoDropsNegotiatedCrossMeetingIdentity() {
+        val negotiated = MeetingOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT, "zh-CN", "en-US",
+            false, MeetingOptions.ResultDelivery.WEB, "https://result.example.test", emptyList())
+            .withCreateParameters("留音会议", "Asia/Shanghai", true)
+            .withAvailableCapabilities(setOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.SPEAKER,
+                MeetingCapabilityState.SPEAKER_IDENTITY_CROSS_MEETING))
+        val noAudio = negotiated.withCreateParameters("不留音", "Asia/Shanghai", false)
+        assertEquals(listOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.SPEAKER),
+            noAudio.requestedCapabilities())
+        assertFalse(noAudio.withCreateParameters("重新留音", "Asia/Shanghai", true).requestedCapabilities()
+            .contains(MeetingCapabilityState.SPEAKER_IDENTITY_CROSS_MEETING))
+        assertTrue("复制不改变原场快照", negotiated.requestedCapabilities()
+            .contains(MeetingCapabilityState.SPEAKER_IDENTITY_CROSS_MEETING))
+    }
+
     @Test fun publishedTwelveArgumentJvmSignaturesRemainAvailable() {
         // 直接核对 JVM 描述符，避免“默认参数在 Kotlin 中可调用”掩盖已编译消费者的 ABI 变化。
         val parameters = arrayOf(MeetingOptions.Mode::class.java, String::class.java,

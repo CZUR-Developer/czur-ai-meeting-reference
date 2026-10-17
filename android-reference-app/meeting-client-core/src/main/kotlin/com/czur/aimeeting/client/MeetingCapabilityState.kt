@@ -7,17 +7,24 @@ import java.util.Collections
 /** 只按 Create capabilityDecisions 冻结本场可用能力，不从厂商或权益集合推断。 */
 class MeetingCapabilityState private constructor(effectiveCapabilities: Map<String, String>) {
     private val effectiveCapabilities = Collections.unmodifiableMap(HashMap(effectiveCapabilities))
-    /** 降级能力不冒充原能力；实时能力须有 Adapter 实现，纪要另用总结注册表。 */
+    /**
+     * 降级能力不冒充原能力；实时能力仍须有本场 Adapter 实现。
+     * 纪要由独立总结注册表执行，跨会议身份由服务端会后 Provider 执行，两者均不要求
+     * 实时 Adapter 声明；调用方仍需核对部署、本场请求及各自执行前提，不能只凭本方法启用。
+     */
     fun canUse(capability: String, adapterRealtimeCapabilities: Set<String>): Boolean {
         val effective = effectiveCapabilities[capability] ?: return false
         if (capability != effective) return false
-        return capability == SUMMARY || adapterRealtimeCapabilities.contains(capability)
+        return capability == SUMMARY || capability == SPEAKER_IDENTITY_CROSS_MEETING ||
+            adapterRealtimeCapabilities.contains(capability)
     }
     companion object {
         const val TRANSCRIPT = "transcript.realtime"
         const val TRANSLATION = "translation.realtime"
         const val SUMMARY = "summary.structured"
         const val SPEAKER = "speaker.diarization.session"
+        /** 服务端用本场发言人与已发布录音生成持久身份，不属于模型实时解析能力。 */
+        const val SPEAKER_IDENTITY_CROSS_MEETING = "speaker.identity.cross_meeting"
 
         @JvmStatic @Throws(JSONException::class)
         fun fromCreateResponse(response: JSONObject): MeetingCapabilityState {

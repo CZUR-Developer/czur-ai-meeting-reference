@@ -101,6 +101,16 @@ Android SDK每三个完整100ms PCM16LE帧测当次帧，约300ms通知一次；
 互译＋总结同时请求／要求两项能力，缺少用户选择的必需能力不启动模型。
 speaker 可选，未授予时移除字段、不拒绝开场；总结工厂独立参与求交，不误当实时解析能力。
 
+`speaker.identity.cross_meeting` 是明确的**服务端会后能力**，不进入实时 Adapter 白名单。
+能力发现仅在部署已声明该能力、客户端具备本场 speaker 工厂、Runtime 同源录音和实际
+`MeetingArtifactPublisher` 时保留它；Create 还需本场显式 `retainAudio=true` 才请求。
+材料在 Create 后下发，协调器会再次按实际选中的 Adapter 核对本场 speaker，并只把已请求、
+Create 已授予的跨会议身份冻结到 `MeetingStarted`／状态快照；缺任何前提都不启用该项，
+字幕、录音和其余已授权能力仍沿用原流程。旧部署未声明时，原请求与行为保持。
+关闭已协商快照的 `retainAudio` 会同时移除该请求，再开启需重新协商；原构造器和 Kotlin
+`copy`／`copy$default` JVM 签名保持不变。能力已冻结表示允许服务端处理，真实身份仍以
+服务端 `speaker.identity` 产物为准，客户端不把本场 `sessionSpeakerId` 充作跨会议 `personId`。
+
 新构造器在原会前设置最后增加`summaryEnabled`，例如`LIVE_TRANSLATION`加`true`即互译＋纪要。
 旧七参数构造器、`Mode.MEETING_MINUTES`及其能力名称继续可用，保持字幕＋总结的行为。
 总结仍在末尾最终字幕完成、标准事件提交后生成，并在后端Stop前保存；设置拆分不改变

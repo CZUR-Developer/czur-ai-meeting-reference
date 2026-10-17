@@ -69,26 +69,42 @@ data class MeetingOptions(
     fun timezone(): String = timezone
     fun retainAudio(): Boolean = retainAudio
 
-    /** 仅复制建会参数，不改变其他会前选择；title 可为空由 HTTP 省略，不启动或保证录音。 */
+    /**
+     * 仅复制建会参数，不改变其他会前选择；title 可为空由 HTTP 省略，不启动或保证录音。
+     * 若关闭已协商的录音保留，同时移除依赖录音的跨会议身份请求；重新开启录音不会
+     * 自动补回它，仍需经过本场能力发现。主构造器及 Kotlin copy 的 JVM 签名保持不变。
+     */
     fun withCreateParameters(title: String?, timezone: String, retainAudio: Boolean): MeetingOptions =
         MeetingOptions(mode, sourceLanguage, targetLanguage, presentationCapture, resultDelivery,
             resultWebUrl, resultEmails, summaryEnabled, resultOptions, title, timezone, retainAudio).also {
-            it.requestedCapabilitiesOverride = requestedCapabilitiesOverride
+            it.requestedCapabilitiesOverride = requestedCapabilitiesOverride?.let { requested ->
+                java.util.List.copyOf(requested.filter { capability ->
+                    retainAudio || capability != MeetingCapabilityState.SPEAKER_IDENTITY_CROSS_MEETING
+                })
+            }
         }
 
     /**
      * 根据本场能力发现冻结建会请求。
      *
      * 必需能力由模式和会后选择决定，始终保留；发言人识别是可选能力，只有后端已经声明
-     * 且本地注册表存在对应 Adapter 时才加入本场 Create。这样伙伴只提供字幕时不会因为
+     * 且本地注册表存在对应 Adapter 时才加入本场 Create。跨会议身份另由服务端会后处理，
+     * 仅在可用集合明确包含该能力、本场发言人且 retainAudio=true 时请求；可用集合由
+     * Coordinator 先核对实际录音与发布端口，不能用实时 Adapter 的自声明代替部署声明。
+     * 这样伙伴只提供字幕时不会因为
      * SDK 的默认能力集合被后端拒绝，同时不改变旧调用方直接读取 requestedCapabilities() 的
      * 默认兼容结果。
      */
     fun withAvailableCapabilities(availableCapabilities: Set<String>): MeetingOptions =
         MeetingOptions(mode, sourceLanguage, targetLanguage, presentationCapture, resultDelivery,
             resultWebUrl, resultEmails, summaryEnabled, resultOptions, title, timezone, retainAudio).also {
-            it.requestedCapabilitiesOverride = java.util.List.copyOf(
-                requiredCapabilities() + optionalCapabilities().filter(availableCapabilities::contains))
+            it.requestedCapabilitiesOverride = java.util.List.copyOf(buildList {
+                addAll(requiredCapabilities())
+                addAll(optionalCapabilities().filter(availableCapabilities::contains))
+                if (retainAudio && availableCapabilities.contains(MeetingCapabilityState.SPEAKER) &&
+                    availableCapabilities.contains(MeetingCapabilityState.SPEAKER_IDENTITY_CROSS_MEETING))
+                    add(MeetingCapabilityState.SPEAKER_IDENTITY_CROSS_MEETING)
+            })
         }
 
     enum class Mode(private val displayName: String, private val requiredCapability: String) {

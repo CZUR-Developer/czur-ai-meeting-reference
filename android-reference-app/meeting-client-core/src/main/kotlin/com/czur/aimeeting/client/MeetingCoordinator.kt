@@ -52,14 +52,30 @@ class MeetingCoordinator(
 
     private fun setupCapabilities(): Set<String> = if (runtime.usesServerModelMaterials()) adapters.setupCapabilities()
         else java.util.Set.copyOf(runtime.localCapabilities())
+    private fun canPublishRetainedAudio(): Boolean =
+        runtime.supportsRetainedAudio() && config.artifactPublisher().supportsAudioPublication()
+
+    /**
+     * 实时／总结沿用本地工厂交集；跨会议身份由部署端 Provider 处理，不放进实时白名单。
+     * 此处只表示本机具备本场发言人、同源录音与发布条件，尚未取得本场授权。
+     * retainAudio 的用户选择在 Create 请求冻结时再核对，实际模型工厂在领取材料后再核对。
+     */
+    private fun availableDeploymentCapabilities(deployment: DeploymentOptions): Set<String> {
+        val available = HashSet(deployment.capabilities())
+        available.retainAll(setupCapabilities())
+        available.remove(MeetingCapabilityState.SPEAKER_IDENTITY_CROSS_MEETING)
+        if (deployment.capabilities().contains(MeetingCapabilityState.SPEAKER_IDENTITY_CROSS_MEETING) &&
+            available.contains(MeetingCapabilityState.SPEAKER) && canPublishRetainedAudio())
+            available.add(MeetingCapabilityState.SPEAKER_IDENTITY_CROSS_MEETING)
+        return java.util.Set.copyOf(available)
+    }
     override fun discover(callback: MeetingClient.Callback<MeetingDiscovery>) {
         requireOpen()
         io.execute {
             try {
                 LOG.info("部署能力发现开始")
                 val deployment = servers.apply(config).discover()
-                val available = HashSet(deployment.capabilities())
-                available.retainAll(setupCapabilities())
+                val available = availableDeploymentCapabilities(deployment)
                 LOG.info("部署能力发现完成")
                 notifyClient { callback.onSuccess(MeetingDiscovery(deployment, available)) }
             } catch (failure: Exception) {
@@ -253,7 +269,7 @@ class MeetingCoordinator(
         private fun showDisplay() { val snapshot = display.snapshot(); notifyListener { listener.onDisplay(snapshot) } }
         fun begin() {
             if (cancelled || closed) return
-            if (options.retainAudio() && (!runtime.supportsRetainedAudio() || !config.artifactPublisher().supportsAudioPublication())) {
+            if (options.retainAudio() && !canPublishRetainedAudio()) {
                 failStart("本场音频保留需要装配同源录音与产物发布")
                 return
             }
@@ -272,13 +288,12 @@ class MeetingCoordinator(
                     LOG.info("本场身份已确认")
                     step = "能力发现"
                     val deployment = server.discover()
-                    val setup = HashSet(deployment.capabilities())
-                    setup.retainAll(setupCapabilities())
+                    val setup = availableDeploymentCapabilities(deployment)
                     requireCapabilities(setup)
                     LOG.info("本场部署能力已确认")
                     step = "创建会议"
                     // 只把本场实际可用的可选能力交给 Create；必需能力仍由原始设置决定。
-                    // 伙伴没有声纹 Adapter 时，不能因 SDK 默认集合而被后端拒绝。
+                    // 本场发言人来自实时 Adapter，跨会议身份来自服务端会后 Provider，二者分开协商。
                     val createOptions = options.withAvailableCapabilities(setup)
                     val created = server.createMeeting(createOptions)
                     val granted = HashSet<String>()
@@ -291,8 +306,14 @@ class MeetingCoordinator(
                     val local = HashSet(if (runtime.usesServerModelMaterials()) adapters.realtimeCapabilities(grant!!.adapterId()) else runtime.localCapabilities())
                     if (setupCapabilities().contains(MeetingCapabilityState.SUMMARY)) local.add(MeetingCapabilityState.SUMMARY)
                     val enabled = HashSet<String>()
-                    for (capability in options.requestedCapabilities())
-                        if (local.contains(capability) && created.capabilities().canUse(capability, local)) enabled.add(capability)
+                    for (capability in createOptions.requestedCapabilities())
+                        if (capability != MeetingCapabilityState.SPEAKER_IDENTITY_CROSS_MEETING &&
+                            granted.contains(capability) && local.contains(capability) &&
+                            created.capabilities().canUse(capability, local)) enabled.add(capability)
+                    // 服务端身份依赖实际选中 Adapter 的本场 speaker；不从临时 speakerId 推断 personId。
+                    if (granted.contains(MeetingCapabilityState.SPEAKER_IDENTITY_CROSS_MEETING) &&
+                        enabled.contains(MeetingCapabilityState.SPEAKER))
+                        enabled.add(MeetingCapabilityState.SPEAKER_IDENTITY_CROSS_MEETING)
                     requireCapabilities(enabled)
                     val adapter = if (grant == null) null else adapters.create(grant.adapterId())
                     LOG.info("本场模型材料与工厂已准备")
