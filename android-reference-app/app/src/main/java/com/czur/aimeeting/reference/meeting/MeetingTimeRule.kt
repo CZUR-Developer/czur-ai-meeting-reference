@@ -15,7 +15,8 @@ class MeetingTimeRule(private val startedAtMs: Long, private val maxDurationMs: 
         private val limitWarning: Boolean,
         private val noTranscriptWarning: Boolean,
         private val noTranscriptRemainingMs: Long,
-        private val stopCause: StopCause
+        private val stopCause: StopCause,
+        private val clearVisibleText: Boolean
     ) {
         fun elapsedMs() = elapsedMs
         fun remainingMs() = remainingMs
@@ -23,6 +24,8 @@ class MeetingTimeRule(private val startedAtMs: Long, private val maxDurationMs: 
         fun noTranscriptWarning() = noTranscriptWarning
         fun noTranscriptRemainingMs() = noTranscriptRemainingMs
         fun stopCause() = stopCause
+        /** 只用于会中清屏，调用方不得据此删除标准事件或会议结果。 */
+        fun clearVisibleText() = clearVisibleText
     }
 
     private var lastTranscriptAtMs = startedAtMs
@@ -49,12 +52,13 @@ class MeetingTimeRule(private val startedAtMs: Long, private val maxDurationMs: 
         return Snapshot(elapsed, remaining,
             maxDurationMs > LIMIT_WARNING_MS && remaining <= LIMIT_WARNING_MS,
             idle >= NO_TEXT_WARNING_MS && idle < NO_TEXT_STOP_MS,
-            maxOf(0L, NO_TEXT_STOP_MS - idle), stop)
+            maxOf(0L, NO_TEXT_STOP_MS - idle), stop, idle > NO_TEXT_CLEAR_MS)
     }
 
     companion object {
         private const val MINUTE_MS = 60_000L
         private const val LIMIT_WARNING_MS = 20 * MINUTE_MS
+        private const val NO_TEXT_CLEAR_MS = 10_000L
         private const val NO_TEXT_WARNING_MS = 4 * MINUTE_MS
         private const val NO_TEXT_STOP_MS = 5 * MINUTE_MS
 

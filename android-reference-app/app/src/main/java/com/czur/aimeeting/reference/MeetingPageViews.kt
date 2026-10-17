@@ -45,6 +45,12 @@ class MeetingPageViews(@JvmField val root: FrameLayout) {
     @JvmField val account: Button = root.findViewById(R.id.account_button)
     @JvmField val settings: Button = root.findViewById(R.id.settings_button)
     @JvmField val start: Button = root.findViewById(R.id.start_meeting)
+    /** 停止已退窗但 SDK 仍允许确认时使用；点击行为由 Activity 接回原 requestStop。 */
+    @JvmField val stopConfirmation: Button = Button(root.context, null, 0, R.style.ReferenceButton).apply {
+        text = "重新确认停止"
+        contentDescription = "重新确认本场会议停止"
+        visibility = View.GONE
+    }
     @JvmField val stop: Button = root.findViewById(R.id.stop_meeting)
     @JvmField val overlay: Button = root.findViewById(R.id.overlay_button)
     @JvmField val swapColumns: Button = root.findViewById(R.id.swap_columns)
@@ -72,6 +78,9 @@ class MeetingPageViews(@JvmField val root: FrameLayout) {
         SubtitleViewFactory.render(placeholder, "", "记录中…", .8f)
         transcriptList.addView(placeholder)
         setupCard.clipToOutline = true
+        // 与原“开始”占用相同会前槽位，不把已停止的会议页或浮窗重新显示出来。
+        root.findViewById<LinearLayout>(R.id.setup_footer).addView(stopConfirmation, 1,
+            LinearLayout.LayoutParams(start.layoutParams as LinearLayout.LayoutParams))
         scale = ReferenceUiScale.bind(root)
         transcriptModeDesignWidth = transcriptMode.layoutParams.width
         SubtitleViewFactory.setLineHeightPx(placeholder, scale.px(36))
@@ -176,6 +185,16 @@ class MeetingPageViews(@JvmField val root: FrameLayout) {
         setupCard.visibility = if (active) View.GONE else View.VISIBLE
         meetingPanel.visibility = if (active) View.VISIBLE else View.GONE
         status.visibility = if (active) View.GONE else View.VISIBLE
+    }
+    /**
+     * 仅投影 SDK 提供的停止能力，不在 UI 推断会议状态或自动补发停止请求。
+     *
+     * Activity 传入 `!active && canStop`：正常收尾中不出现按钮；服务端尚未确认且
+     * SDK 允许重试时，在会前固定操作区显式再次确认。READY 后恢复原开始入口。
+     */
+    fun showStopConfirmation(visible: Boolean) {
+        stopConfirmation.visibility = if (visible) View.VISIBLE else View.GONE
+        start.visibility = if (visible) View.GONE else View.VISIBLE
     }
     /** 提示独立于常规阶段消息，只在会中显示必要截图限制和失败。 */
     fun showPresentationNotice(active: Boolean, message: String) {

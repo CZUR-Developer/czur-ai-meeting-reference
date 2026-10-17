@@ -139,6 +139,32 @@ class ReferenceMeetingPageTest {
         assertEquals("当前部署未提供实时字幕能力", page.root.findViewById<TextView>(R.id.language_hint).text.toString())
     }
 
+    @Test fun pendingStopOffersConfirmationWithoutRestoringTheMeetingPage() {
+        val activity = Robolectric.buildActivity(Activity::class.java).create().get()
+        val page = MeetingPageViews.DefaultFactory().create(activity)
+        val stops = AtomicInteger()
+        page.stopConfirmation.setOnClickListener { stops.incrementAndGet() }
+
+        page.showMeeting(false)
+        page.showStopConfirmation(true)
+        measure(page.root)
+
+        assertEquals(View.VISIBLE, page.setupCard.visibility)
+        assertEquals(View.GONE, page.meetingPanel.visibility)
+        assertEquals(View.VISIBLE, page.stopConfirmation.visibility)
+        assertEquals(View.GONE, page.start.visibility)
+        assertEquals("重新确认停止", page.stopConfirmation.text.toString())
+        assertFixed(page.stopConfirmation)
+        assertTrue(bounds(page.root, page.stopConfirmation).bottom <= bounds(page.root, page.setupCard).bottom)
+        page.stopConfirmation.performClick()
+        assertEquals(1, stops.get())
+
+        page.showStopConfirmation(false)
+        assertEquals(View.GONE, page.stopConfirmation.visibility)
+        assertEquals(View.VISIBLE, page.start.visibility)
+        assertEquals(View.GONE, page.meetingPanel.visibility)
+    }
+
     @Test fun accountEntryAndConnectionReturnCloseOldClientAndClearOldCapabilities() {
         val activity = Robolectric.buildActivity(MainActivity::class.java).create().get()
         activity.findViewById<View>(R.id.account_button).performClick()

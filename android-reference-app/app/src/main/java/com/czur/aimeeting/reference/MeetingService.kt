@@ -64,6 +64,12 @@ class MeetingService : Service() {
             val currentTiming = timing
             if (active && currentTiming != null) {
                 val now = currentTiming.at(SystemClock.elapsedRealtime())
+                if (now.clearVisibleText() && !visibleTextCleared) {
+                    visibleTextCleared = true
+                    display = withoutVisibleText(display)
+                    transcriptVersion++
+                    Log.d(TAG, "超过10秒无新原文，已清会中可见字幕；标准事件与结果保持 meetingId=$meetingId")
+                }
                 if (now.limitWarning() && !limitReminderLogged) { limitReminderLogged = true; Log.i(TAG, "本场剩余20分钟提醒 meetingId=$meetingId") }
                 if (now.noTranscriptWarning() && !idleReminderLogged) { idleReminderLogged = true; Log.i(TAG, "连续4分钟无转写提醒 meetingId=$meetingId") }
                 if (canStop && now.stopCause() != MeetingTimeRule.StopCause.NONE) {
@@ -107,6 +113,8 @@ class MeetingService : Service() {
     private var actionRunning = false
     private val resultUiAvailable = Runnable(::publish)
     private var transcriptVersion = 0
+    /** 清屏只是本地呈现状态；新原文解除，迟到译文或窗口重绘不会恢复旧字幕。 */
+    private var visibleTextCleared = false
     private var busy = false
     private var active = false
     private var canStop = false
@@ -177,7 +185,7 @@ class MeetingService : Service() {
         }
     }
     fun toggleOverlay() {
-        if (!active) return
+        if (!active || stopRequested) return
         if (overlay.isShowing()) { overlay.dismiss(); Log.i(TAG, "跨应用字幕窗已关闭") }
         else {
             overlay.show(display, Runnable(::openMeetingPage), Runnable(::swapDisplayColumns), Runnable(::confirmReminder), Runnable(::requestStopFromOverlay))
@@ -206,6 +214,7 @@ class MeetingService : Service() {
         preparedMeeting = prepared; setup = requested; busy = true; active = false; canStop = false
         stopRequested = false; presentationStopContinuation = null; returnToMeetingAfterPresentation = false
         presentationNotice = ""; readyResult = null; actionOutcome = null; actionRunning = false
+        visibleTextCleared = false
         timing = null; stoppedClock = null; meetingId = null; audioInputMode = null; audioErrorText = null; audioLevel = null
         display = MeetingDisplaySnapshot(requested.mode() == MeetingSetup.Mode.LIVE_TRANSLATION,
             requested.sourceLanguage(), requested.targetLanguage(), false, emptyList(), null)
@@ -225,26 +234,24 @@ class MeetingService : Service() {
                     Log.i(TAG, "组合会议已启动 meetingId=$meetingId mode=${requested.mode()}")
                 }
                 override fun onState(next: MeetingSessionState) {
-                    active = next.active(); canStop = next.canStop()
+                    active = next.active() && !stopRequested; canStop = next.canStop()
                     if (next.phase() != MeetingSessionState.Phase.RUNNING) audioLevel = null
                     status = next.message()
                     Log.d(TAG, "组合会议状态 phase=${next.phase()} savedEventCount=${next.savedEventCount()}")
                     when (next.phase()) {
+                        MeetingSessionState.Phase.STOPPING, MeetingSessionState.Phase.FINALIZING,
+                        MeetingSessionState.Phase.STOP_PENDING -> {
+                            stopRequested = true
+                            stopMeetingPresentation()
+                            publish()
+                        }
                         MeetingSessionState.Phase.FAILED, MeetingSessionState.Phase.ENDED, MeetingSessionState.Phase.CLOSED -> finishWithStatus(next.message())
                         MeetingSessionState.Phase.READY -> resultReady()
                         else -> publish()
                     }
                 }
-                override fun onDisplay(next: MeetingDisplaySnapshot) {
-                    display = next; transcriptVersion++
-                    Log.d(TAG, "已路由显示快照 rows=${next.rows().size} swapped=${next.swapped()}")
-                    publish()
-                }
-                override fun onTranscriptActivity(nowMs: Long) {
-                    val clock = timing ?: return
-                    clock.onTranscriptActivity(nowMs)
-                    if (idleReminderLogged) { idleReminderLogged = false; Log.i(TAG, "转写恢复，无转写提醒已解除 meetingId=$meetingId") }
-                }
+                override fun onDisplay(next: MeetingDisplaySnapshot) = updateDisplay(next)
+                override fun onTranscriptActivity(nowMs: Long) = recordTranscriptActivity(nowMs)
                 override fun onAudioInputMode(mode: AudioInputMode) {
                     audioInputMode = mode; Log.i(TAG, "本场实际音频来源 mode=$mode meetingId=$meetingId"); publish()
                 }
@@ -271,6 +278,22 @@ class MeetingService : Service() {
             finishWithStatus("打开会议失败，请检查接入配置")
         }
     }
+    /** 只投影 SDK 快照，不修改它的分栏、标准事件或结果历史。 */
+    private fun updateDisplay(next: MeetingDisplaySnapshot) {
+        display = if (visibleTextCleared) withoutVisibleText(next) else next
+        transcriptVersion++
+        Log.d(TAG, "已路由显示快照 rows=${display.rows().size} swapped=${next.swapped()} textCleared=$visibleTextCleared")
+        publish()
+    }
+    private fun recordTranscriptActivity(nowMs: Long) {
+        val clock = timing ?: return
+        clock.onTranscriptActivity(nowMs)
+        if (visibleTextCleared) Log.d(TAG, "新原文已恢复会中字幕显示 meetingId=$meetingId")
+        visibleTextCleared = false
+        if (idleReminderLogged) { idleReminderLogged = false; Log.i(TAG, "转写恢复，无转写提醒已解除 meetingId=$meetingId") }
+    }
+    private fun withoutVisibleText(source: MeetingDisplaySnapshot) = MeetingDisplaySnapshot(
+        source.bilingual(), source.languageA(), source.languageB(), source.swapped(), emptyList(), null)
     private fun startPresentation(startedAtMs: Long) {
         try {
             val source = ScreenCaptureSourceFactory.create(this, projectionResultCode, projectionData, { main.post(it) }, Runnable(::onPresentationStopped))
@@ -339,8 +362,10 @@ class MeetingService : Service() {
     fun requestStop() = requestStop("正在等待模型最终字幕…")
     private fun requestStop(progressText: String) {
         val current = session
-        if (!active || !canStop || current == null) return
-        stopRequested = true; audioLevel = null; canStop = false; status = progressText; publish()
+        if (!canStop || current == null) return
+        stopRequested = true; canStop = false; status = progressText
+        stopMeetingPresentation()
+        publish()
         current.requestStop()
     }
     private fun resultReady() { stopMeetingUi(); status = "本场结果已就绪"; publish(); executeResultAction() }
@@ -372,11 +397,23 @@ class MeetingService : Service() {
         stopSelf(); publish()
     }
     private fun releaseResultAccess() { client?.close(); client = null; session = null }
+    /**
+     * Stop 一经接受就结束会中呈现，不等待模型、上传或服务端 READY。
+     * 这里只退窗和冻结显示计时；会话、前台 Service 与截图末帧仍由原收尾链持有。
+     */
+    private fun stopMeetingPresentation() {
+        if (stoppedClock == null && timing != null) {
+            stoppedClock = timing!!.at(SystemClock.elapsedRealtime())
+            Log.i(TAG, "会中呈现已停止，保留同场会话等待结果 meetingId=$meetingId")
+        }
+        active = false; audioLevel = null
+        main.removeCallbacks(clockTick); main.removeCallbacks(presentationTick)
+        overlay.dismiss()
+    }
     private fun stopMeetingUi() {
-        returnToMeetingAfterPresentation = false; audioLevel = null
-        if (timing != null && stoppedClock == null) stoppedClock = timing!!.at(SystemClock.elapsedRealtime())
-        active = false; canStop = false; main.removeCallbacks(clockTick); main.removeCallbacks(presentationTick)
-        closePresentation(); projectionData = null; overlay.dismiss(); stopForeground(STOP_FOREGROUND_REMOVE)
+        stopMeetingPresentation()
+        returnToMeetingAfterPresentation = false; canStop = false
+        closePresentation(); projectionData = null; stopForeground(STOP_FOREGROUND_REMOVE)
     }
     private fun finishWithStatus(message: String) {
         stopMeetingUi(); busy = false; canStop = false; status = message

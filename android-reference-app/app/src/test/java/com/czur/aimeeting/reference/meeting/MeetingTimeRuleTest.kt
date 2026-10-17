@@ -33,5 +33,18 @@ class MeetingTimeRuleTest {
         assertEquals(MeetingTimeRule.StopCause.TIME_LIMIT, rule.at(3 * MINUTE).stopCause())
         assertEquals(0L, rule.at(3 * MINUTE).remainingMs())
     }
+    @Test fun clearsOnlyVisibleTextAfterTenSecondsAndFreshTranscriptRestartsTheInterval() {
+        val rule = MeetingTimeRule(1000L, 60 * MINUTE)
+        rule.onTranscriptActivity(2000L)
+        assertFalse(rule.at(12_000L).clearVisibleText())
+        assertTrue(rule.at(12_001L).clearVisibleText())
+        assertFalse(rule.at(12_001L).noTranscriptWarning())
+        assertEquals(MeetingTimeRule.StopCause.NONE, rule.at(12_001L).stopCause())
+        rule.onTranscriptActivity(15_000L)
+        assertFalse(rule.at(25_000L).clearVisibleText())
+        assertTrue(rule.at(25_001L).clearVisibleText())
+        assertTrue(rule.at(15_000L + 4 * MINUTE).noTranscriptWarning())
+        assertEquals(MeetingTimeRule.StopCause.NO_TRANSCRIPT, rule.at(15_000L + 5 * MINUTE).stopCause())
+    }
     companion object { private const val MINUTE = 60_000L }
 }
