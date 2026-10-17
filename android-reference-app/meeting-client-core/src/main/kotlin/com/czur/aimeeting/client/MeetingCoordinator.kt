@@ -277,9 +277,12 @@ class MeetingCoordinator(
                     requireCapabilities(setup)
                     LOG.info("本场部署能力已确认")
                     step = "创建会议"
-                    val created = server.createMeeting(options)
+                    // 只把本场实际可用的可选能力交给 Create；必需能力仍由原始设置决定。
+                    // 伙伴没有声纹 Adapter 时，不能因 SDK 默认集合而被后端拒绝。
+                    val createOptions = options.withAvailableCapabilities(setup)
+                    val created = server.createMeeting(createOptions)
                     val granted = HashSet<String>()
-                    for (capability in options.requestedCapabilities())
+                    for (capability in createOptions.requestedCapabilities())
                         if (setup.contains(capability) && created.capabilities().canUse(capability, setup)) granted.add(capability)
                     requireCapabilities(granted)
                     LOG.info("会议创建及必需能力已确认")

@@ -16,6 +16,7 @@ class ModelAdapterRegistryTest {
         assertNotSame(registry.create(TingwuModelAdapter.ID), registry.create(TingwuModelAdapter.ID))
         assertNotSame(registry.create(SampleJsonModelAdapter.ID), registry.create(SampleJsonModelAdapter.ID))
         assertTrue(registry.setupCapabilities().contains(MeetingCapabilityState.SUMMARY))
+        assertTrue(registry.setupCapabilities().contains(MeetingCapabilityState.SPEAKER))
     }
     @Test fun partnerRegistersItsFactoryAndCapabilities() {
         val registry = ModelAdapterRegistry()

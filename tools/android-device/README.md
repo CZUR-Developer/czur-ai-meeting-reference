@@ -40,7 +40,9 @@ python3 tools/android-device/meeting-device.py setup-start \
 默认只启用字幕，`--presentation` 启用演示截图，`--summary` 启用纪要。
 `--mode translation --source-language 中文 --target-language English` 使用互译；语言名称与
 页面显示一致，不写死后端的语言清单。互译与演示截图遵循参考产品现有规则，不能同时选择。
-未声明或未装配的能力保持禁用，工具会说明具体控件，退出码为 1。
+未声明或未装配的可选能力保持关闭；未请求该能力时属于正常降级，工具会在回执中标记
+`summaryAvailable=false` 等事实。只有明确请求一个后端未声明的可选能力时才失败；用户选择的
+必需能力缺失仍会阻止开始会议。
 
 已登录时也会点击“切换账号”，由原页面退出并重新登录本次账号。每次连接配置只在 App
 进程内保存；应用进程重启后重新执行 `setup-start`。工具不清除 App 数据，也不强杀会议。

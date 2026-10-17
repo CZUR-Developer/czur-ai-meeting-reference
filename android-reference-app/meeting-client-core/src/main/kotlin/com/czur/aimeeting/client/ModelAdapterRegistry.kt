@@ -40,6 +40,7 @@ class ModelAdapterRegistry {
         ?: throw IllegalArgumentException("参考 App 未注册模型 Adapter: $adapterId")
     private data class Entry(val factory: ModelAdapterFactory, val capabilities: Set<String>)
     companion object {
-        private val READY_MEETING_CAPABILITIES = setOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.TRANSLATION)
+        private val READY_MEETING_CAPABILITIES = setOf(MeetingCapabilityState.TRANSCRIPT,
+            MeetingCapabilityState.TRANSLATION, MeetingCapabilityState.SPEAKER)
     }
 }

@@ -156,6 +156,13 @@ cd android-reference-app && ./gradlew :app:testDebugUnitTest :app:assembleDebug
 - 本机局域网数据库、Provider 和设备的真实短会；
 - 两场真实会议的跨会议声纹结果（启用该能力时）。
 
+2026-10-17 的参考实现已完成本机 MySQL 5.7 隔离库和“只声明实时字幕”的 Android
+设备短会：登录会话恢复、能力发现、实时字幕、正常停止、`READY` 结果和可选能力
+降级均已通过。该证据记录在
+[`docs/p10-local-lan-validation-20261017.md`](p10-local-lan-validation-20261017.md)。
+这次验证没有声明翻译、总结、录音或跨会议声纹能力，因此这些功能仍需对应 Provider
+和配置到位后单独验收；模块测试通过不能替代这些真实能力验收。
+
 ## 7. 参考仓与 CZUR 产品边界
 
 本仓是可修改的开源参考实现；CZUR 的闭源 SDK、AOSP Broker、旧

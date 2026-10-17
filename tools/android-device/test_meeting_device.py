@@ -93,6 +93,14 @@ class MeetingDeviceTests(unittest.TestCase):
         tool.auto_permissions = False
         self.assertFalse(tool.approve_permission(root))
 
+    def test_unprovided_optional_capability_is_a_normal_downgrade(self):
+        tool = device.MeetingDevice(Mock())
+        tool.dump = Mock(return_value=hierarchy(("transcript_mode", {"checked": "true"}),
+                                                 ("presentation_capture", {"checked": "false"})))
+        self.assertFalse(tool.optional_check("summary_enabled", False))
+        with self.assertRaises(device.ToolError):
+            tool.optional_check("summary_enabled", True)
+
 
 if __name__ == "__main__":
     unittest.main()

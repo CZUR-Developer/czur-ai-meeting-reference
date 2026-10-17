@@ -42,4 +42,18 @@ class MeetingOptionsTest {
         assertEquals(original.summaryEnabled(), copied.summaryEnabled()); assertSame(action, copied.resultOptions())
         assertEquals(original.requestedCapabilities(), copied.requestedCapabilities()); assertEquals(original.targetLanguages(), copied.targetLanguages())
     }
+
+    @Test fun optionalCapabilitiesFollowTheDiscoveredIntersection() {
+        val original = MeetingOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT, "zh-CN", "en-US",
+            false, MeetingOptions.ResultDelivery.WEB, "https://result.example.test", emptyList())
+        val transcriptOnly = original.withAvailableCapabilities(setOf(MeetingCapabilityState.TRANSCRIPT))
+        assertEquals(listOf(MeetingCapabilityState.TRANSCRIPT), transcriptOnly.requestedCapabilities())
+        val withSpeaker = original.withAvailableCapabilities(setOf(MeetingCapabilityState.TRANSCRIPT,
+            MeetingCapabilityState.SPEAKER))
+        assertEquals(listOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.SPEAKER),
+            withSpeaker.requestedCapabilities())
+        // 旧直接调用仍保留默认 speaker 请求，避免破坏已有公开构造与 Server 客户端合同。
+        assertEquals(listOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.SPEAKER),
+            original.requestedCapabilities())
+    }
 }

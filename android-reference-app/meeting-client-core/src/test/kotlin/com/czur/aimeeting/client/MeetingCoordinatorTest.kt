@@ -38,6 +38,23 @@ class MeetingCoordinatorTest {
         private val ALL = setOf(MeetingCapabilityState.TRANSCRIPT,
             MeetingCapabilityState.TRANSLATION, MeetingCapabilityState.SUMMARY, MeetingCapabilityState.SPEAKER)
     }
+
+    @Test fun optionalSpeakerIsRequestedOnlyWhenDeploymentAndLocalAdapterProvideIt() {
+        Fixture(true, setOf(MeetingCapabilityState.TRANSCRIPT)).use { f ->
+            f.server.deploymentCapabilities = setOf(MeetingCapabilityState.TRANSCRIPT)
+            f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.WEB, false)
+            assertEquals(listOf(MeetingCapabilityState.TRANSCRIPT), f.server.requested.requestedCapabilities())
+            assertFalse(f.probe.info!!.availableCapabilities().contains(MeetingCapabilityState.SPEAKER))
+        }
+    }
+
+    @Test fun optionalSpeakerRemainsInCreateWhenDeploymentExposesIt() {
+        Fixture(true, ALL).use { f ->
+            f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.WEB, false)
+            assertTrue(f.server.requested.requestedCapabilities().contains(MeetingCapabilityState.SPEAKER))
+            assertTrue(f.probe.info!!.availableCapabilities().contains(MeetingCapabilityState.SPEAKER))
+        }
+    }
     @Test fun legacyConfigAndRuntimeDefaultsHaveNoRecordingOrPublication() {
         val config = MeetingClientConfig.reference("https://service.example.test", "fixture-token")
         assertFalse(config.artifactPublisher().supportsAudioPublication())
@@ -1811,6 +1828,7 @@ class MeetingCoordinatorTest {
     }
 
     private class Server(private val granted: Set<String>) : MeetingServerClient {
+        @Volatile var deploymentCapabilities: Set<String> = ALL
         val steps: MutableList<String> = Collections.synchronizedList(ArrayList())
         val transcripts: MutableList<TranscriptEvent> = Collections.synchronizedList(ArrayList())
         val genTimes: MutableList<Long> = Collections.synchronizedList(ArrayList())
@@ -1847,7 +1865,7 @@ class MeetingCoordinatorTest {
         lateinit var requested: MeetingOptions
         override fun discover(): DeploymentOptions {
             steps.add("discover")
-            return DeploymentOptions(ALL, 86400000L, true)
+            return DeploymentOptions(deploymentCapabilities, 86400000L, true)
         }
         override fun createMeeting(options: MeetingOptions): CreatedMeeting {
             requested = options

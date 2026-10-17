@@ -12,6 +12,11 @@ Server 协议、模型适配与国内显示规则。Android 控件、权限申�
 - `DeploymentOptions.languages`：透传既有发现协议的语言code清单，供App设置页使用。
 - `client.display`：共享显示状态、句开始方向快照，以及国内 A/B 多语种兜底。
 
+P10 本机联调基线已经验证“只声明 `transcript.realtime`”的部署：参考 App 会隐藏未声明
+的总结／互译入口，仍可完成登录、实时字幕、正常停止和 `READY` 结果。该行为是能力
+协商结果，不代表默认提供翻译、总结、录音或跨会议声纹；这些能力由各自 Provider、
+部署配置和本场授权共同声明后再单独验收。
+
 听悟 Adapter 将 `cn/en/ja/ko/de/fr/ru`（兼容旧 `JP/KR` 别名）归一化为
 `zh-CN/en-US/ja-JP/ko-KR/de-DE/fr-FR/ru-RU`，原文和译文使用同一映射。
 部署语言清单来自后端 `AI_MEETING_MODEL_LANGUAGES`；UI 按发现结果显示，

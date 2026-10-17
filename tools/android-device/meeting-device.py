@@ -211,6 +211,21 @@ class MeetingDevice:
         self.wait(lambda root: (by_id(root, name) is not None and
                   (by_id(root, name).get("checked") == "true") == desired), "选项生效 " + name)
 
+    def optional_check(self, name, desired):
+        """按后端能力声明处理可选开关；未声明且未请求时是正常降级。
+
+        参考 App 会根据服务端能力动态隐藏总结、翻译等开关。自动化工具不能把
+        “控件不存在”当成 UI 超时，否则合作伙伴不提供该能力时无法验证基础会议。
+        请求一个未声明的能力仍然失败，避免把用户意图静默改掉。
+        """
+        node = by_id(self.dump(), name)
+        if node is None:
+            if desired:
+                raise ToolError("服务未声明所请求的可选能力: " + name)
+            return False
+        self.check(name, desired)
+        return True
+
     def language(self, name, label):
         if label is None:
             return
@@ -229,11 +244,12 @@ class MeetingDevice:
         self.language("source_language", source)
         if mode == "translation":
             self.language("target_language", target)
-        self.check("summary_enabled", summary)
+        summary_available = self.optional_check("summary_enabled", summary)
         if mode == "transcript":
             self.check("presentation_capture", presentation)
         self.evidence()
-        self.emit("PASS", mode=mode, presentation=presentation, summary=summary)
+        self.emit("PASS", mode=mode, presentation=presentation, summary=summary,
+                  summaryAvailable=summary_available)
 
     def log_state(self):
         pid = self.adb.run("shell", "pidof", PACKAGE, allow_failure=True).split()
