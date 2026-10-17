@@ -4,12 +4,15 @@
 选择功能 → 开始会议**。工具读取现有页面的 `resource-id`、`checked`、`enabled` 和
 `bounds`，每次使用当前控件位置；不注入 token、不复制 SDK、也不另建会议状态机。
 日常验证在开发机执行，无须 Docker 或测试平台。仅支持当前参考 App 的 UI；伙伴改 UI
-后可调整脚本中的选择器。
+后可调整脚本中的选择器。可见地址／账号字段会读回核对；中文输入法把按键合成为
+全角字符时，工具切换一次现有输入法语言并重填，不安装额外输入法。密码不读回。
 
 ## 准备
 
 1. 安装已构建的参考 App，连接 USB／ADB，后端与 Web 服务已正常启动。
-2. 默认使用局域网地址。设备上的 `127.0.0.1` 指设备自身；PC 服务地址应填 PC 的可达 IP。
+2. 默认使用局域网地址：后端使用已配置 HTTPS、且设备信任证书的 PC 地址，Web 可以使用
+   局域网 HTTP。设备上的 `127.0.0.1` 指设备自身；只有显式创建下文的 ADB reverse 后，
+   才能用 loopback HTTP 访问 PC 后端。
 3. 参考账号为后端已经配置的终端用户账号。密码从环境注入，勿写进命令参数、脚本或证据。
    可在本机用交互式 `read -s` 设置变量，或者使用已有环境注入方式：
 
@@ -26,12 +29,12 @@ export CZUR_MEETING_PASSWORD
 
 ## 一键配置并开始
 
-从仓库根目录执行（把示例地址替换成实际部署地址）：
+从仓库根目录执行（把示例地址和 HTTPS 端口替换成实际部署值）：
 
 ```bash
 python3 tools/android-device/meeting-device.py setup-start \
   --serial '<ADB序列号>' \
-  --backend-url 'http://<PC局域网IP>:8080' \
+  --backend-url 'https://<已配置HTTPS的PC地址>:8443' \
   --web-url 'http://<PC局域网IP>:8090/index.html' \
   --username 'meeting-user' --mode transcript --presentation \
   --output '/tmp/meeting-start-check'
@@ -44,8 +47,9 @@ python3 tools/android-device/meeting-device.py setup-start \
 `summaryAvailable=false` 等事实。只有明确请求一个后端未声明的可选能力时才失败；用户选择的
 必需能力缺失仍会阻止开始会议。
 
-已登录时也会点击“切换账号”，由原页面退出并重新登录本次账号。每次连接配置只在 App
-进程内保存；应用进程重启后重新执行 `setup-start`。工具不清除 App 数据，也不强杀会议。
+已登录时也会点击“切换账号”，由原页面退出并重新登录本次账号。连接地址保存在 App
+私有设置中，仍有效的登录会话在进程重启后恢复；只想重开会议时可直接使用
+`open → options → start`。工具不清除 App 数据，也不强杀会议。
 
 开始阶段会确认已知的系统录音／整屏采集授权按钮，走与人工点击相同的权限流程，不使用
 `pm grant`。加 `--manual-permissions` 可保留弹窗供人工确认；未知弹窗或等待超时会输出
@@ -56,7 +60,7 @@ python3 tools/android-device/meeting-device.py setup-start \
 ```bash
 python3 tools/android-device/meeting-device.py open
 python3 tools/android-device/meeting-device.py configure \
-  --backend-url 'http://<PC局域网IP>:8080' --web-url 'http://<PC局域网IP>:8090/index.html'
+  --backend-url 'https://<已配置HTTPS的PC地址>:8443' --web-url 'http://<PC局域网IP>:8090/index.html'
 python3 tools/android-device/meeting-device.py login --username 'meeting-user'
 python3 tools/android-device/meeting-device.py options --mode transcript --presentation
 python3 tools/android-device/meeting-device.py start
@@ -79,17 +83,20 @@ python3 tools/android-device/meeting-device.py stop --timeout 90
 
 ## 可选 USB 调试映射
 
-只有显式创建 ADB reverse 后，设备的 `127.0.0.1` 才可访问相应 PC 端口：
+本机开发尚未配置 HTTPS 时，可以显式创建 ADB reverse，将设备 loopback HTTP 映射到
+PC 后端。现有登录客户端允许这个开发入口；直接填写 `http://<PC局域网IP>` 会被拒绝。
+以下例子将设备的 `127.0.0.1:8080` 映射到 PC 后端的 `38169` 端口，Web 仍走局域网：
 
 ```bash
 python3 tools/android-device/meeting-device.py reverse --device-port 8080 --host-port 38169
 python3 tools/android-device/meeting-device.py setup-start \
-  --backend-url 'http://127.0.0.1:8080' --web-url 'http://127.0.0.1:8080/index.html' \
+  --backend-url 'http://127.0.0.1:8080' --web-url 'http://<PC局域网IP>:8090/index.html' \
   --username 'meeting-user'
 python3 tools/android-device/meeting-device.py remove-reverse --device-port 8080
 ```
 
-映射要求该 PC 端口确实提供相应后端／Web 路由；工具不启动服务器，不自动覆盖其他端口。
+映射要求该 PC 端口确实提供后端 HTTP 路由，Web 服务也须已启动并可达；工具不启动服务器，
+不自动覆盖其他端口。
 `remove-reverse` 只移除指定端口，测试后由调用方执行。
 
 ## 团队设备 runner 与主机单测

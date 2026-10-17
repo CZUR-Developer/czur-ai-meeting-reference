@@ -154,6 +154,20 @@ class MeetingDevice:
         # 标准 input text 依赖 Android 键盘映射；简单工具明确 ASCII 边界，不装输入法。
         if not value.isascii() or any(c in value for c in "\r\n") or "%s" in value:
             raise ToolError("标准 adb 输入仅支持单行 ASCII，且不能包含字面量 %s；请手动填写 " + name)
+        self.fill_once(name, value)
+        node = by_id(self.dump(), name)
+        # 中文输入法可能把 adb 的按键流合成为全角标点／候选词，即使字段为 textUri。
+        # 密码不读回；其他可见字段先核对，必要时只切换一次现有输入法语言再重填。
+        # 不安装输入法、不写系统语言设置，也不通过私有接口绕过实际登录页面。
+        if node is not None and node.get("password") != "true" and node.get("text") != value:
+            self.adb.run("shell", "input", "keyevent", "KEYCODE_LANGUAGE_SWITCH")
+            self.fill_once(name, value)
+            node = by_id(self.dump(), name)
+            if node is None or node.get("text") != value:
+                raise ToolError("输入未匹配页面，请确认输入法使用英文模式: " + name)
+
+    def fill_once(self, name, value):
+        """通过当前输入控件替换文本；输入值只走 stdin，错误消息不包含字段内容。"""
         self.tap_id(name)
         self.adb.run("shell", "input", "keycombination", "113", "29")  # Ctrl+A，Android 14。
         self.adb.run("shell", "input", "keyevent", "KEYCODE_DEL")
@@ -335,6 +349,8 @@ class MeetingDevice:
         self.stage = "status"
         root = self.dump()
         state = self.log_state()
+        if not state.get("processRunning"):
+            raise ToolError("参考 App 未运行，请先安装并执行 open；当前状态不作为会议验证通过")
         state["ui"] = {name: {key: node.get(key, "") for key in
                              ("text", "enabled", "checked")}
                        for name in ("account_button", "status", "start_meeting", "stop_meeting",

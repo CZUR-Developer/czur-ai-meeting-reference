@@ -52,6 +52,24 @@ class MeetingDeviceTests(unittest.TestCase):
         self.assertIn("[REDACTED]", saved)
         self.assertEqual(device.by_id(root, "login_password").get("text"), "sample-secret!")
 
+    def test_visible_text_retries_once_after_input_method_composes_it(self):
+        adb = Mock()
+        tool = device.MeetingDevice(adb)
+        tool.fill_once = Mock()
+        url = "http://192.0.2.10:8080"
+        tool.dump = Mock(side_effect=[hierarchy(("backend_url", {"text": "HTTP：／／192。0。2。10：8080"})),
+                                      hierarchy(("backend_url", {"text": url}))])
+        tool.fill("backend_url", url)
+        adb.run.assert_called_once_with("shell", "input", "keyevent", "KEYCODE_LANGUAGE_SWITCH")
+        self.assertEqual(tool.fill_once.call_count, 2)
+
+    def test_status_does_not_report_an_absent_process_as_pass(self):
+        tool = device.MeetingDevice(Mock())
+        tool.dump = Mock(return_value=hierarchy())
+        tool.log_state = Mock(return_value={"processRunning": False})
+        with self.assertRaises(device.ToolError):
+            tool.status()
+
     def test_logged_in_switch_still_submits_requested_user(self):
         adb = Mock()
         tool = device.MeetingDevice(adb)
