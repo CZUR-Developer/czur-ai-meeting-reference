@@ -81,7 +81,26 @@ python3 tools/android-device/meeting-device.py stop --timeout 90
 工具不清 logcat；`start-ui.xml` 保留的是进入 RUNNING 前最近一次 UI／授权观察，不能当成
 会中截图。结果内容可按改动范围选择现有脚本或少量视觉验证。
 
-## 可选 USB 调试映射
+## 设备实际 Web 结果与录音
+
+结果页面已经在 App 中打开时，可用 Node.js 22+ 内置 WebSocket 读取该 WebView 的
+实际页面和播放器。先找到本 App 进程 PID，再转发对应的调试 socket：
+
+```bash
+adb -s '<ADB序列号>' shell pidof com.czur.aimeeting.reference
+# 将下方 <PID> 替换为上条返回值；仅 Debug WebView 开放该 socket。
+adb -s '<ADB序列号>' forward tcp:19094 localabstract:webview_devtools_remote_<PID>
+node tools/android-device/check-web-result.mjs --port=19094 \
+  --meeting-id=mtg_当前场次 --expect=transcript,translation,summary,audio --reload --play
+# 后端支持媒体 Range 后可增加 --seek，验证有限时长和实际拖动后继续播放。
+```
+
+`--expect` 只填写当前会议实际提供的模块，可选值为 `transcript`、`translation`、
+`summary`、`audio`、`identity`。工具报告各区可见性和段落数；不会输出会议正文、账号、
+Token 或结果链接。`--play`／`--seek` 会短暂播放后暂停；不传时只读状态。
+该脚本不登录、不创建结果，也不把本场 Speaker 当作跨会议身份。
+
+## 可选 USB 调试映射（仅诊断）
 
 本机开发尚未配置 HTTPS 时，可以显式创建 ADB reverse，将设备 loopback HTTP 映射到
 PC 后端。现有登录客户端允许这个开发入口；直接填写 `http://<PC局域网IP>` 会被拒绝。
