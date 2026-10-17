@@ -74,12 +74,33 @@ class MeetingDeviceTests(unittest.TestCase):
         adb = Mock()
         tool = device.MeetingDevice(adb)
         tool.tap_id, tool.fill = Mock(), Mock()
-        tool.dump = Mock(return_value=hierarchy(("start_meeting", {})))
+        # 故意把退出项放前面：脚本必须依据本次层级里的完整文字点击切换，不能点首项。
+        menu = ET.fromstring('<hierarchy><node resource-id="android:id/text1" text="退出登录" '
+                             'enabled="true" bounds="[20,40][220,100]"/>'
+                             '<node resource-id="android:id/text1" text="切换账号" '
+                             'enabled="true" bounds="[20,120][220,180]"/></hierarchy>')
+        tool.dump = Mock(side_effect=[menu, hierarchy(("login_username", {})),
+                                     hierarchy(("start_meeting", {}))])
         with patch("builtins.print"):
             tool.login("requested-user", "sample-secret!")
+        adb.run.assert_called_once_with("shell", "input", "tap", "120", "150")
         self.assertEqual([call.args for call in tool.tap_id.call_args_list],
                          [("account_button",), ("login_submit",)])
         tool.fill.assert_any_call("login_username", "requested-user")
+        tool.fill.assert_any_call("login_password", "sample-secret!")
+
+    def test_first_login_uses_the_form_without_tapping_an_account_menu(self):
+        adb = Mock()
+        tool = device.MeetingDevice(adb)
+        tool.tap_id, tool.fill = Mock(), Mock()
+        tool.dump = Mock(side_effect=[hierarchy(("login_username", {})),
+                                     hierarchy(("start_meeting", {}))])
+        with patch("builtins.print"):
+            tool.login("first-user", "sample-secret!")
+        adb.run.assert_not_called()
+        self.assertEqual([call.args for call in tool.tap_id.call_args_list],
+                         [("account_button",), ("login_submit",)])
+        tool.fill.assert_any_call("login_username", "first-user")
         tool.fill.assert_any_call("login_password", "sample-secret!")
 
     def test_same_meeting_log_modes_before_started_and_latest_phase(self):

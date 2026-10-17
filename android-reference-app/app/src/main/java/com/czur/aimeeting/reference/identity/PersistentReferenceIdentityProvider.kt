@@ -10,10 +10,10 @@ import java.time.Instant
 /**
  * 参考 App 的默认登录插件。
  *
- * <p>该实现只保存后端发回的访问令牌、显示名称和到期时间，不保存密码，也不把
+ * 该实现只保存后端发回的访问令牌、显示名称和到期时间，不保存密码，也不把
  * 登录协议、账号输入框或 Activity 引入 SDK。SharedPreferences 只是参考实现的
- * 可替换存储；伙伴可以将同一 {@link LoginIdentityProvider} 接口接到 ContentProvider、
- * 系统账号或自己的凭据仓库，而不修改会议编排。</p>
+ * 可替换存储；伙伴可以将同一 [LoginIdentityProvider] 接口接到 ContentProvider、
+ * 系统账号或自己的凭据仓库，而不修改会议编排。
  */
 class PersistentReferenceIdentityProvider(context: Context) : LoginIdentityProvider {
     private val preferences: SharedPreferences = context.applicationContext.getSharedPreferences(

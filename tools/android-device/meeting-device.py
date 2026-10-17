@@ -209,8 +209,23 @@ class MeetingDevice:
 
     def login(self, username, password):
         self.stage = "login"
-        # 已登录时这个同一按钮先退出，再打开空白登录框；每次明确使用本次账号。
         self.tap_id("account_button")
+
+        def account_entry(root):
+            # 未登录时直接显示表单；已登录时，系统 AlertDialog 先展示账号菜单。
+            # 按实际层级的系统 ID 和完整文字匹配切换项，不依赖行序号或点击退出。
+            username_field = by_id(root, "login_username")
+            if username_field is not None:
+                return username_field
+            return next((node for node in root.iter("node")
+                         if node.get("resource-id") == "android:id/text1"
+                         and node.get("text") == "切换账号"), None)
+
+        entry = self.wait(account_entry, "登录表单或账号切换菜单")
+        if entry.get("resource-id") == "android:id/text1":
+            self.tap(entry)
+            self.wait(lambda root: by_id(root, "login_username"), "切换账号登录表单")
+        # 切换成功才由原登录流程替换身份；取消／失败仍保留原会话，工具不提前退出。
         self.fill("login_username", username)
         self.fill("login_password", password)
         self.tap_id("login_submit")

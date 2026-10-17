@@ -125,7 +125,7 @@ class MainActivity : Activity() {
         swapColumnsButton = page.swapColumns; retryActionButton = page.retry; endResultButton = page.endResult
         loginButton.setOnClickListener {
             MeetingAppAssembly.loginEntry().open(this,
-                defaultEntry = { if (displayedIdentity != null) logout(); showLoginDialog() },
+                defaultEntry = { showDefaultAccountEntry() },
                 onIdentityChanged = {
                     runOnUiThread {
                         if (!isFinishing && !isDestroyed) {
@@ -192,12 +192,36 @@ class MainActivity : Activity() {
         setContentView(page.root)
     }
 
-    /** 独立参考账号入口，不依赖系统账号；密码不保存，会话由身份 Provider 管理。 */
+    /**
+     * 默认账号入口：首次登录直接打开表单，已有身份时明确区分切换与退出。
+     *
+     * 打开菜单或表单不改变 Provider；只有用户明确退出才清理本地会话。新账号登录
+     * 成功后，既有 MeetingClient.login 会更新同一个 Provider，无需在 App 备份令牌
+     * 或增加第二份账号状态。伙伴自定义 AppLoginEntry 不会经过本默认菜单。
+     */
+    private fun showDefaultAccountEntry() {
+        if (displayedIdentity == null) {
+            showLoginDialog()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("账号操作")
+            .setItems(arrayOf("切换账号", "退出登录")) { _, which ->
+                if (which == 0) showLoginDialog() else logout()
+            }
+            .show()
+    }
+
+    /**
+     * 独立参考账号表单，不依赖系统账号。取消和登录失败保留原有效身份及能力，
+     * 成功后由客户端替换会话并重新发现部署能力；密码不保存。
+     */
     private fun showLoginDialog() {
         val fields = LayoutInflater.from(this).inflate(R.layout.reference_login_dialog, null)
         ReferenceUiScale.bindDialog(fields)
         usernameView = fields.findViewById(R.id.login_username)
         passwordView = fields.findViewById(R.id.login_password)
+        fields.findViewById<TextView>(R.id.login_title).text = if (displayedIdentity == null) "账号登录" else "切换账号"
         val dialog = AlertDialog.Builder(this).setView(fields).create()
         loginDialog = dialog
         fields.findViewById<View>(R.id.login_close).setOnClickListener { dialog.dismiss() }
