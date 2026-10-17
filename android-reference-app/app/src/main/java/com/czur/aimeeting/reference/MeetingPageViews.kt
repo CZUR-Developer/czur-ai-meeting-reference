@@ -43,6 +43,7 @@ class MeetingPageViews(@JvmField val root: FrameLayout) {
     @JvmField val leftTitle: TextView = root.findViewById(R.id.left_language_title)
     @JvmField val rightTitle: TextView = root.findViewById(R.id.right_language_title)
     @JvmField val account: Button = root.findViewById(R.id.account_button)
+    @JvmField val close: Button = root.findViewById(R.id.setup_close)
     @JvmField val start: Button = root.findViewById(R.id.start_meeting)
     /** 停止已退窗但 SDK 仍允许确认时使用；点击行为由 Activity 接回原 requestStop。 */
     @JvmField val stopConfirmation: Button = Button(root.context, null, 0, R.style.ReferenceButton).apply {
@@ -80,7 +81,8 @@ class MeetingPageViews(@JvmField val root: FrameLayout) {
         // 与原“开始”占用相同会前槽位，不把已停止的会议页或浮窗重新显示出来。
         root.findViewById<LinearLayout>(R.id.setup_footer).addView(stopConfirmation, 1,
             LinearLayout.LayoutParams(start.layoutParams as LinearLayout.LayoutParams))
-        scale = ReferenceUiScale.bind(root)
+        // Dialog 的根布局已经是卡片尺寸，视觉比例继续使用显示尺寸，避免二次缩小。
+        scale = ReferenceUiScale.bindDialog(root)
         transcriptModeDesignWidth = transcriptMode.layoutParams.width
         SubtitleViewFactory.setLineHeightPx(placeholder, scale.px(36))
         icon(stop, R.drawable.czur_ref_stop, 40, 40)

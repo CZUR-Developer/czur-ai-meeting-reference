@@ -3,7 +3,7 @@
      dp/sp数值表示设计单位，ReferenceUiScale局部适配，不依赖Launcher或私有UILib。 -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/reference_screen" android:layout_width="match_parent" android:layout_height="match_parent"
-    android:background="@color/reference_background">
+    android:background="@android:color/transparent">
     <FrameLayout android:layout_width="match_parent" android:layout_height="match_parent">
         <FrameLayout android:layout_width="match_parent" android:layout_height="match_parent">
             <LinearLayout android:id="@+id/setup_card" android:layout_width="988dp" android:layout_height="856dp"
@@ -20,6 +20,9 @@
                     </LinearLayout>
                     <Button android:id="@+id/account_button" style="@style/ReferenceHeaderButton" android:layout_width="100dp" android:layout_height="46dp"
                         android:text="@string/reference_account" />
+                    <Button android:id="@+id/setup_close" style="@style/ReferenceButton" android:layout_width="60dp" android:layout_height="60dp"
+                        android:layout_marginStart="16dp" android:background="@null" android:text="×" android:textSize="48sp"
+                        android:contentDescription="关闭会前设置" />
                 </LinearLayout>
                 <ScrollView android:id="@+id/setup_scroll" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1"
                     android:fillViewport="true" android:overScrollMode="never">
@@ -77,6 +80,16 @@
                     <TextView style="@style/ReferenceLabel" android:layout_width="wrap_content" android:layout_height="wrap_content"
                         android:layout_marginTop="14dp" android:textSize="20sp" android:text="持续5分钟无字幕，自动停止"/>
                 </LinearLayout>
+                <!-- 提示与结果恢复入口归属当前卡片，缩为 Dialog 后仍在可见区域。 -->
+                <TextView android:id="@+id/status" style="@style/ReferenceLabel" android:layout_width="match_parent" android:layout_height="38dp"
+                    android:gravity="center" android:textSize="20sp" android:text="请先登录后开始会议"/>
+                <LinearLayout android:id="@+id/result_retry_bar" android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:orientation="horizontal" android:gravity="center">
+                    <Button android:id="@+id/retry_result" style="@style/ReferenceButton" android:layout_width="200dp" android:layout_height="50dp"
+                        android:visibility="gone" android:text="重新打开结果"/>
+                    <Button android:id="@+id/end_result" style="@style/ReferenceSecondaryButton" android:layout_width="200dp" android:layout_height="50dp"
+                        android:layout_marginStart="24dp" android:visibility="gone" android:text="返回会前设置"/>
+                </LinearLayout>
             </LinearLayout>
             <LinearLayout android:id="@+id/meeting_panel" android:layout_width="1800dp" android:layout_height="1008dp"
                 android:layout_gravity="center" android:orientation="vertical" android:visibility="gone"
@@ -133,14 +146,5 @@
                 <TextView android:id="@+id/capabilities" android:layout_width="0dp" android:layout_height="0dp" android:visibility="gone"/>
             </LinearLayout>
         </FrameLayout>
-        <TextView android:id="@+id/status" style="@style/ReferenceLabel" android:layout_width="match_parent" android:layout_height="38dp"
-            android:layout_gravity="bottom" android:gravity="center" android:textSize="20sp" android:text="请先登录后开始会议"/>
-        <LinearLayout android:id="@+id/result_retry_bar" android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:layout_gravity="bottom" android:orientation="horizontal" android:gravity="center">
-            <Button android:id="@+id/retry_result" style="@style/ReferenceButton" android:layout_width="200dp" android:layout_height="50dp"
-                android:visibility="gone" android:text="重新打开结果"/>
-            <Button android:id="@+id/end_result" style="@style/ReferenceSecondaryButton" android:layout_width="200dp" android:layout_height="50dp"
-                android:layout_marginStart="24dp" android:visibility="gone" android:text="返回会前设置"/>
-        </LinearLayout>
     </FrameLayout>
 </FrameLayout>

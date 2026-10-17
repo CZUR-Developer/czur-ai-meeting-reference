@@ -19,6 +19,7 @@ import android.os.Looper
 import android.provider.Settings
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
+import android.view.Gravity
 import android.view.LayoutInflater
 import android.util.Log
 import android.view.View
@@ -113,6 +114,8 @@ class MainActivity : Activity() {
         setupPreferences = MeetingSetupPreferenceStore(this)
         startCondition = MeetingStartConditions.create(applicationContext)
         page = MeetingAppAssembly.pageFactory().create(this)
+        // 关闭入口只离开设置页，会议的生命周期仍归原 Service 所有。
+        page.close.setOnClickListener { finish() }
         loginButton = page.account; resultGroup = page.results
         transcriptView = page.placeholder; meetingTitle = page.meetingTitle; transcriptList = page.transcriptList
         leftLanguageTitle = page.leftTitle; rightLanguageTitle = page.rightTitle; elapsedView = page.elapsed
@@ -188,6 +191,10 @@ class MainActivity : Activity() {
         reminderPopup = MeetingReminderPopup(this, false, Runnable { meetingService?.confirmReminder() })
         page.root.addView(reminderPopup.view(), FrameLayout.LayoutParams(-1, -1))
         setContentView(page.root)
+        window.decorView.setPadding(0, 0, 0, 0)
+        window.setGravity(Gravity.CENTER)
+        renderWindowSize(false)
+        setFinishOnTouchOutside(true)
         if (MeetingAppAssembly.serverUrl().isEmpty()) statusView.setText(R.string.reference_deployment_not_configured)
     }
 
@@ -546,6 +553,7 @@ class MainActivity : Activity() {
         if (state.status.isNotBlank()) statusView.text = state.status
         capabilityView.text = state.capabilityText
         page.showMeeting(state.active); page.showPresentationNotice(state.active, state.presentationNotice)
+        renderWindowSize(state.active)
         page.showStopConfirmation(!state.active && state.canStop)
         updateStartAvailability()
         setConfigurationEnabled(!state.busy); stopButton.isEnabled = state.canStop
@@ -648,7 +656,22 @@ class MainActivity : Activity() {
     private fun setConfigurationEnabled(enabled: Boolean) {
         val available = enabled && !meetingBusy && pendingPresentationMeeting == null
         loginButton.isEnabled = available
+        page.close.isEnabled = available
+        // 会前允许点击外围退出；创建、授权或收尾中保持当前操作入口。
+        setFinishOnTouchOutside(available)
         loginDialog?.takeIf { it.isShowing }?.findViewById<View>(R.id.login_submit)?.isEnabled = available
+    }
+
+    /**
+     * 同一宿主随既有会中状态切换窗口：会前沿用国内白卡，会中容纳原字幕大面板。
+     *
+     * 不以小窗口的 root 作为设计比例，也不复制会议状态；电平与计时频繁推送时，
+     * 仅在目标宽高真正变化后通知 WindowManager，避免每帧重复触发窗口重排。
+     */
+    private fun renderWindowSize(active: Boolean) {
+        val width = ReferenceUiScale.px(this, if (active) 1800 else 988)
+        val height = ReferenceUiScale.px(this, if (active) 1008 else 856)
+        if (window.attributes.width != width || window.attributes.height != height) window.setLayout(width, height)
     }
     override fun onStart() { super.onStart(); serviceBound = bindService(Intent(this, MeetingService::class.java), serviceConnection, Context.BIND_AUTO_CREATE) }
     override fun onResume() { super.onResume(); resumed = true; meetingService?.observe(observer); refreshIdentity(deploymentCapabilities.isEmpty()) }

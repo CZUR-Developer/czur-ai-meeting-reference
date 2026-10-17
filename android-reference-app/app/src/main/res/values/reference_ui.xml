@@ -13,6 +13,14 @@
     <string name="reference_source">语言</string>
     <string name="reference_target">目标语言</string>
     <string name="reference_result_description">会议结束后自动打开网页，查看本场字幕、译文及已提供的会议产物。</string>
+    <!-- 只给会议入口使用：真实浮动窗口透出后方页面，结果 Activity 保持原有整页呈现。 -->
+    <style name="ReferenceMeetingDialogActivity" parent="android:style/Theme.DeviceDefault.Light.Dialog.NoActionBar">
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowMinWidthMajor">10%</item>
+        <item name="android:windowMinWidthMinor">10%</item>
+    </style>
     <style name="ReferenceLabel">
         <item name="android:textColor">@color/reference_ink</item>
         <item name="android:textSize">24sp</item>

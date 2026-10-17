@@ -91,6 +91,20 @@ class ReferenceMeetingPageTest {
         assertEquals(0, activity.resources.getIdentifier("backend_url", "id", activity.packageName))
         assertEquals(0, activity.resources.getIdentifier("web_url", "id", activity.packageName))
         assertEquals(0, activity.resources.getIdentifier("settings_button", "id", activity.packageName))
+        // 浮动窗口只缩小根布局，卡片／字号仍按显示尺寸映射，不能被重复缩放。
+        repeat(3) {
+            page.root.measure(View.MeasureSpec.makeMeasureSpec(988, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(856, View.MeasureSpec.EXACTLY))
+            page.root.layout(0, 0, 988, 856)
+        }
+        assertEquals(988, page.setupCard.width)
+        assertEquals(856, page.setupCard.height)
+        assertEquals(48f, page.setupTitle.textSize, 0f)
+        val status = bounds(page.root, page.status)
+        assertTrue(status.top >= 0 && status.bottom <= 856)
+        assertSame(page.setupCard, page.status.parent)
+        assertEquals(View.VISIBLE, page.close.visibility)
+        assertFixed(page.start)
         page.showSetupMode(true)
         assertEquals(View.VISIBLE, page.targetContainer.visibility)
         assertEquals(View.VISIBLE, page.swapLanguages.visibility)
