@@ -1,6 +1,24 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFinalTranscript, renderFinalResult, resultLinkExpired } from '../src/result.mjs';
+import { createSpeakerIdentityActions, readFinalTranscript, renderFinalResult,
+  resultLinkExpired } from '../src/result.mjs';
+
+/** 人物注册后会重绘同一页；textContent 赋值像浏览器 DOM 一样清除原有子节点。 */
+function identityTestPage() {
+  const node = tagName => ({ tagName, hidden: true, children: [], value: '',
+    get textContent() { return this.text || ''; },
+    set textContent(value) { this.text = value; this.children = []; },
+    append(...items) { this.children.push(...items); } });
+  const nodes = Object.fromEntries(['#status', '#title', '#transcript', '#transcript-segments',
+    '#result', '#translations', '#translation-result', '#summary-result', '#summary-content',
+    '#presentation-result', '#presentation-frames', '#audio-result', '#audio-player',
+    '#speaker-identity-result', '#speaker-identities', '#speaker-selection']
+    .map(selector => [selector, node()]));
+  return { nodes, querySelector: selector => nodes[selector], createElement: node };
+}
+
+const identityArtifact = speakers => ({ schemaVersion: 'speaker-identity/v1',
+  artifactType: 'speaker.identity', speakers });
 
 test('结果链接按后端同一有效期在边界时刻失效', () => {
   assert.equal(resultLinkExpired('1000', 86400000, 1000 + 86400000 - 1), false);
@@ -242,6 +260,126 @@ test('没有真实发言人 ID 的分段产物仍展示原有纯文字', () => {
   assert.equal(nodes['#transcript'].textContent, '你好。\n继续。');
   assert.equal(nodes['#transcript'].hidden, false);
   assert.equal(nodes['#transcript-segments'].hidden, true);
+});
+
+test('READY 标准人物产物按本场 ID 映射字幕名称，稳定人物 ID 不冒充本场编号', async () => {
+  const requests = [];
+  const transcript = { text: '你好。\n继续。', segments: [
+    { text: '你好。', sessionSpeakerId: 'speaker-2' },
+    { text: '继续。', sessionSpeakerId: 'speaker-1' }
+  ] };
+  const identities = identityArtifact([
+    { sessionSpeakerId: 'speaker-1', personId: null, displayName: null },
+    { sessionSpeakerId: 'speaker-2', personId: 'person_stable', displayName: '陈先生' }
+  ]);
+  const responses = [{ title: '人物会议', artifacts: [
+    { type: 'transcript.final', status: 'READY', artifactId: 'art_transcript' },
+    { type: 'speaker.identity', status: 'READY', artifactId: 'art_identity' }
+  ] }, transcript, identities];
+  const fetcher = async url => {
+    requests.push(url);
+    return { ok: true, status: 200, json: async () => responses.shift() };
+  };
+  const result = await readFinalTranscript('http://api.test/', 'mtg_people', '123', fetcher);
+  assert.deepEqual(requests, ['http://api.test/v1/meetings/mtg_people/manifest?genTime=123',
+    'http://api.test/v1/artifacts/art_transcript?genTime=123',
+    'http://api.test/v1/artifacts/art_identity?genTime=123']);
+  const page = identityTestPage();
+  renderFinalResult(result, page);
+  assert.deepEqual(page.nodes['#transcript-segments'].children.map(row => row.children[0].textContent),
+    ['陈先生 · 本场发言人 ID：speaker-2', '本场发言人 ID：speaker-1']);
+  assert.equal(page.nodes['#speaker-identity-result'].hidden, false);
+  assert.deepEqual(page.nodes['#speaker-identities'].children.map(row => row.children.map(item => item.textContent)), [
+    ['未登记姓名', '本场发言人 ID：speaker-1', '尚无跨会议人物 ID'],
+    ['陈先生', '本场发言人 ID：speaker-2', '跨会议人物 ID：person_stable']
+  ]);
+  assert.deepEqual(page.nodes['#speaker-selection'].children.map(item => item.value), ['speaker-1', 'speaker-2']);
+});
+
+test('无 READY 人物产物时保留本场字幕，不读取身份或显示命名注册区', async () => {
+  const requests = [];
+  const responses = [{ title: '只有本场发言人', artifacts: [
+    { type: 'transcript.final', status: 'READY', artifactId: 'art_transcript' },
+    { type: 'speaker.identity', status: 'PENDING', artifactId: 'art_not_ready' }
+  ] }, { text: '原文', segments: [{ text: '原文', sessionSpeakerId: 'speaker-1' }] }];
+  const result = await readFinalTranscript('http://api.test', 'mtg_read_only', '456', async url => {
+    requests.push(url);
+    return { ok: true, status: 200, json: async () => responses.shift() };
+  });
+  const page = identityTestPage();
+  renderFinalResult(result, page);
+  assert.equal(result.speakerIdentity, undefined);
+  assert.equal(requests.length, 2);
+  assert.equal(page.nodes['#speaker-identity-result'].hidden, true);
+  assert.equal(page.nodes['#speaker-selection'].children.length, 0);
+  assert.equal(page.nodes['#transcript-segments'].children[0].children[0].textContent,
+    '本场发言人 ID：speaker-1');
+});
+
+test('显式登录后才能注册，成功只重读原 genTime 清单且刷新页面不重复字幕', async () => {
+  const requests = [];
+  const transcript = { text: '原文', segments: [{ text: '原文', sessionSpeakerId: 'speaker-1' }] };
+  const actual = identityArtifact([
+    { sessionSpeakerId: 'speaker-1', personId: 'person_accepted', displayName: '实际清单名称' }
+  ]);
+  const responses = [{ accessToken: 'fixture-memory-token', expiresAt: '2030-01-01T00:00:00Z' },
+    { personId: 'person_accepted', displayName: '注册响应名称', manifestRevision: 2 },
+    { title: '原会议', manifestRevision: 2, artifacts: [
+      { type: 'transcript.final', status: 'READY', artifactId: 'art_transcript' },
+      { type: 'speaker.identity', status: 'READY', artifactId: 'art_identity_v2' }
+    ] }, transcript, actual];
+  const actions = createSpeakerIdentityActions('http://api.test/', 'mtg_same', '789', async (url, options) => {
+    requests.push({ url, options });
+    const body = responses.shift();
+    return { ok: true, status: 200, json: async () => body };
+  });
+  assert.equal(actions.isLoggedIn(), false);
+  await assert.rejects(actions.enroll('speaker-1', '名称'), /请先.*登录/);
+  assert.equal(requests.length, 0);
+  await actions.login('参考账号', 'fixture-password');
+  assert.equal(actions.isLoggedIn(), true);
+  const refreshed = await actions.enroll('speaker-1', ' 名称 ');
+  assert.equal(requests[0].url, 'http://api.test/v1/reference/session:login');
+  assert.deepEqual(JSON.parse(requests[0].options.body), { username: '参考账号', password: 'fixture-password' });
+  assert.equal(requests[1].url, 'http://api.test/v1/meetings/mtg_same/speakers/speaker-1:enroll');
+  assert.equal(requests[1].options.method, 'POST');
+  assert.equal(requests[1].options.headers.Authorization, 'Bearer fixture-memory-token');
+  assert.deepEqual(JSON.parse(requests[1].options.body), { displayName: '名称' });
+  assert.deepEqual(requests.slice(2).map(item => item.url), [
+    'http://api.test/v1/meetings/mtg_same/manifest?genTime=789',
+    'http://api.test/v1/artifacts/art_transcript?genTime=789',
+    'http://api.test/v1/artifacts/art_identity_v2?genTime=789'
+  ]);
+  assert.ok(requests.slice(2).every(item => item.options === undefined));
+  assert.ok(requests.every(item => !item.url.includes('fixture-memory-token')));
+  const page = identityTestPage();
+  renderFinalResult({ ...transcript, speakerIdentity: identityArtifact([
+    { sessionSpeakerId: 'speaker-1', personId: null, displayName: null }
+  ]) }, page);
+  renderFinalResult(refreshed, page);
+  assert.equal(page.nodes['#transcript-segments'].children.length, 1);
+  assert.equal(page.nodes['#speaker-identities'].children.length, 1);
+  assert.equal(page.nodes['#speaker-selection'].children.length, 1);
+  assert.equal(page.nodes['#speaker-identities'].children[0].children[0].textContent, '实际清单名称');
+});
+
+test('伙伴登录仅替换 authenticate 回调，不改变人物注册协议', async () => {
+  const logins = [];
+  const requests = [];
+  const actions = createSpeakerIdentityActions('http://partner.test', 'mtg_partner', '987', async (url, options) => {
+    requests.push({ url, options });
+    return { ok: true, status: 200, json: async () => ({ title: '伙伴会议', artifacts: [] }) };
+  }, async (username, password) => {
+    logins.push({ username, password });
+    return { accessToken: 'fixture-partner-token' };
+  });
+  await actions.login('伙伴账号', 'fixture-password');
+  await actions.enroll('speaker-2', '伙伴人物');
+  assert.deepEqual(logins, [{ username: '伙伴账号', password: 'fixture-password' }]);
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].url, 'http://partner.test/v1/meetings/mtg_partner/speakers/speaker-2:enroll');
+  assert.equal(requests[0].options.headers.Authorization, 'Bearer fixture-partner-token');
+  assert.equal(requests[1].url, 'http://partner.test/v1/meetings/mtg_partner/manifest?genTime=987');
 });
 
 test('纯字幕隐藏译文区，双向译文显示两个语言方向', () => {

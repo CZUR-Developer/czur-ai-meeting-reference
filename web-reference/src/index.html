@@ -24,6 +24,16 @@
     .presentation-frame img { display: block; width: 100%; height: auto; }
     .presentation-frame figcaption { margin-top: 6px; color: #5f6368; }
     #audio-player { width: 100%; }
+    #speaker-identities { display: grid; gap: 12px; }
+    .speaker-identity { padding: 10px 12px; background: #f7f8fa; }
+    .speaker-identity h3, .speaker-identity p { margin: 4px 0; }
+    #speaker-identity-result form { display: grid; gap: 12px; margin-top: 12px; }
+    #speaker-identity-result label { display: grid; gap: 5px; }
+    #speaker-identity-result input, #speaker-identity-result select,
+    #speaker-identity-result button { font: inherit; padding: 8px; }
+    #speaker-enrollment-fields { display: grid; gap: 12px; border: 1px solid #dce1e7; }
+    #speaker-login-panel { margin-top: 16px; }
+    #speaker-auth-status, #speaker-enrollment-status { color: #455563; }
   </style>
 </head>
 <body>
@@ -50,6 +60,33 @@
     <section id="audio-result" hidden aria-label="会议录音">
       <h2>会议录音</h2>
       <audio id="audio-player" controls preload="metadata"></audio>
+    </section>
+    <section id="speaker-identity-result" hidden aria-label="跨会议人物">
+      <h2>跨会议人物</h2>
+      <p>人物名称与跨会议人物 ID 来自登记结果；本场发言人 ID 只在当前会议内有效。</p>
+      <div id="speaker-identities"></div>
+      <details id="speaker-login-panel">
+        <summary>登录后命名并注册发言人</summary>
+        <form id="speaker-login-form">
+          <label>本场会议所属账号
+            <input id="speaker-username" name="username" autocomplete="username" required>
+          </label>
+          <label>密码
+            <input id="speaker-password" name="password" type="password" autocomplete="current-password" required>
+          </label>
+          <button id="speaker-login-button" type="submit">登录以编辑人物</button>
+        </form>
+      </details>
+      <p id="speaker-auth-status" role="status">只读查看无需登录；命名注册请先登录本场会议所属账号。</p>
+      <form id="speaker-enrollment-form">
+        <fieldset id="speaker-enrollment-fields" disabled>
+          <legend>命名并注册</legend>
+          <label>本场发言人 <select id="speaker-selection" required></select></label>
+          <label>人物名称 <input id="speaker-display-name" maxlength="128" required></label>
+          <button type="submit">命名并注册</button>
+        </fieldset>
+      </form>
+      <p id="speaker-enrollment-status" role="status"></p>
     </section>
   </main>
   <script type="module" src="./result.mjs"></script>
