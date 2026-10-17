@@ -19,18 +19,22 @@ import com.czur.aimeeting.client.identity.IdentityProvider
 import com.czur.aimeeting.client.identity.LoginIdentityProvider
 import com.czur.aimeeting.client.identity.ReferenceIdentityProvider
 import com.czur.aimeeting.reference.identity.PersistentReferenceIdentityProvider
+import com.czur.aimeeting.reference.identity.AppLoginEntry
+import com.czur.aimeeting.reference.identity.DefaultAppLoginEntry
 import java.util.ArrayDeque
 import java.util.concurrent.Executor
 
 /**
  * 参考 App 集中装配身份、模型、结果动作和页面/窗口工厂；默认只开放 Web。
  * 身份 Provider 由 Activity 和 Service 共用，伙伴替换 Provider 即可，不必改 SDK 编排。
- * 密码和凭据不写磁盘；后端地址只配置当前进程，模型端点继续由后端下发。
+ * 密码不保存，会话保存由身份插件负责；参考默认插件持久化有效会话和连接地址。
+ * 登录交互入口与身份数据来源分开替换，模型端点继续由后端下发。
  */
 object MeetingAppAssembly {
     private var serverUrl = ""
     private var resultWebUrl = ""
     private var identityProvider: IdentityProvider = ReferenceIdentityProvider()
+    private var loginEntry: AppLoginEntry = DefaultAppLoginEntry
     private var preferences: android.content.SharedPreferences? = null
     private var initialized = false
     private var modelAdapters: ModelAdapterRegistry? = null
@@ -79,6 +83,9 @@ object MeetingAppAssembly {
         preferences?.edit()?.putString(KEY_BACKEND_URL, backend)?.apply()
     }
     @JvmStatic @Synchronized fun registerIdentityProvider(provider: IdentityProvider) { identityProvider = provider }
+    /** 由 App 装配登录交互；只保存入口，不保存 Activity 或默认表单回调。 */
+    @JvmStatic @Synchronized fun registerLoginEntry(entry: AppLoginEntry) { loginEntry = entry }
+    @JvmStatic @Synchronized fun loginEntry() = loginEntry
     @JvmStatic @Synchronized fun serverUrl() = serverUrl
     @JvmStatic @Synchronized fun registerResultActions(plugins: List<AppResultActionPlugin>) {
         resultActions = java.util.List.copyOf(plugins)

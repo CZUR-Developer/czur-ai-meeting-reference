@@ -88,6 +88,22 @@ AI_MEETING_MODEL_CAPABILITIES=transcript.realtime,translation.realtime
 Adapter 或结果页。CZUR 的 `ContentProvider/UserHandler` 属于产品侧实现，不是
 参考工程的默认依赖。
 
+登录交互通过 App 的 `AppLoginEntry` 单独替换；默认入口委托参考表单。伙伴在
+`MeetingAppAssembly.initialize(context)` 后、创建会议页面前装配自己的
+`IdentityProvider` 和 `registerLoginEntry(...)`：
+
+```kotlin
+MeetingAppAssembly.registerIdentityProvider(partnerIdentityProvider)
+MeetingAppAssembly.registerLoginEntry(AppLoginEntry { activity, defaultEntry, onIdentityChanged ->
+    // 打开伙伴自己的登录界面；其成功回调更新 partnerIdentityProvider，再通知页面。
+    partnerLogin.open(activity) { onIdentityChanged() }
+    // 如使用参考账号密码流程，可改为 defaultEntry()。
+})
+```
+
+替换入口会完全接管账号切换，不会先执行默认退出。会话保存／恢复由伙伴 Provider
+负责，回调只触发重新读取身份和能力；SDK 不申请账号、不弹登录 UI，也不引用系统账号。
+
 ## 4. 模型和能力扩展
 
 ### 实时模型
@@ -138,6 +154,12 @@ Web 只读取 `READY` Manifest。原文、译文、结构化总结和录音分�
 `ArtifactRef` 决定是否展示；录音使用 `GET /v1/artifacts/{artifactId}?genTime=...`
 流式播放，不把长音频塞进 JSON。伙伴更换结果页面时，仍应复用 Manifest、产物类型和
 有效期规则。
+
+启用跨会议人物身份时，默认参考 Web 还提供登录后的命名注册入口；匿名结果链接仍只读。
+`speaker.identity` 是单独的标准产物，本场 speaker 编号与跨会议 `personId` 分开。
+参考讯飞插件、FFmpeg 依赖和可选环境项见 [后端说明](../backend-reference/README.md#p10-可选跨会议声纹参考插件)
+及 [本机配置模板](../tools/reference-client.env.example)。未注册 Provider 时人物区隐藏，
+字幕／译文／总结和录音照常交付；伙伴可用自己的 `SpeakerIdentityProvider` 替换供应商与人员库。
 
 ## 6. 交付前检查
 

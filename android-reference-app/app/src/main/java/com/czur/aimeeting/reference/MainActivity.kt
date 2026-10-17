@@ -96,11 +96,17 @@ class MainActivity : Activity() {
     private var discovery: MeetingDiscovery? = null
     private var pendingPresentationMeeting: MeetingAppAssembly.PreparedMeeting? = null
     private var hasReadyResult = false
+    private lateinit var setupPreferences: MeetingSetupPreferenceStore
+    /** 页面与开始入口消费同一份选择，程序化重绘不作为用户操作写入偏好。 */
+    private var setupSelection = MeetingSetupSelection()
+    private var bindingSetupViews = false
+    private var availableResultActions: Set<String> = emptySet()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // 先恢复后端地址与默认登录插件，再创建页面和 Service 共用的客户端。
         MeetingAppAssembly.initialize(this)
+        setupPreferences = MeetingSetupPreferenceStore(this)
         startCondition = MeetingStartConditions.create(applicationContext)
         page = MeetingAppAssembly.pageFactory().create(this)
         loginButton = page.account; settingsButton = page.settings; resultGroup = page.results
@@ -112,22 +118,39 @@ class MainActivity : Activity() {
         transcriptModeView = page.transcriptMode; translationModeView = page.translationMode
         startButton = page.start; stopButton = page.stop; overlayButton = page.overlay
         swapColumnsButton = page.swapColumns; retryActionButton = page.retry; endResultButton = page.endResult
-        loginButton.setOnClickListener { if (displayedIdentity != null) logout(); showLoginDialog() }
+        loginButton.setOnClickListener {
+            MeetingAppAssembly.loginEntry().open(this,
+                defaultEntry = { if (displayedIdentity != null) logout(); showLoginDialog() },
+                onIdentityChanged = {
+                    runOnUiThread {
+                        if (!isFinishing && !isDestroyed) {
+                            // 伙伴可连同入口替换 Provider，重建会前客户端以读取新的装配。
+                            preMeetingClient?.close(); preMeetingClient = null
+                            refreshIdentity(true)
+                        }
+                    }
+                })
+        }
         settingsButton.setOnClickListener { startActivityForResult(Intent(this, ConnectionSettingsActivity::class.java), CONNECTION_SETTINGS_REQUEST) }
         page.modes.setOnCheckedChangeListener { _, checkedId ->
-            val translation = checkedId == translationModeView.id
-            targetLanguageView.isEnabled = translation && deploymentLanguages.size >= 2
-            if (translation) presentationCaptureView.isChecked = false
-            presentationCaptureView.isEnabled = !translation && ScreenCaptureSourceFactory.isSupported()
-            page.showSetupMode(translation, summaryCapabilityAvailable(), transcriptCapabilityAvailable())
+            if (bindingSetupViews) return@setOnCheckedChangeListener
+            val mode = if (checkedId == translationModeView.id) MeetingSetup.Mode.LIVE_TRANSLATION else MeetingSetup.Mode.LIVE_TRANSCRIPT
+            setupSelection = setupPreferences.read(mode).availableIn(deploymentLanguages, summaryCapabilityAvailable())
+            saveAndRenderSetupSelection()
         }
-        summaryEnabledView.setOnCheckedChangeListener { _, _ ->
-            page.showSetupMode(translationModeView.isChecked, summaryCapabilityAvailable(), transcriptCapabilityAvailable())
+        summaryEnabledView.setOnCheckedChangeListener { _, checked ->
+            if (!bindingSetupViews) {
+                setupSelection = setupSelection.copy(summaryEnabled = checked)
+                saveAndRenderSetupSelection()
+            }
         }
+        sourceLanguageView.onItemSelectedListener = languageSelectionListener(true)
+        targetLanguageView.onItemSelectedListener = languageSelectionListener(false)
         page.swapLanguages.setOnClickListener {
-            val source = sourceLanguageView.selectedItemPosition
-            val target = targetLanguageView.selectedItemPosition
-            if (source >= 0 && target >= 0) { sourceLanguageView.setSelection(target); targetLanguageView.setSelection(source) }
+            if (setupSelection.mode == MeetingSetup.Mode.LIVE_TRANSLATION && deploymentLanguages.size >= 2) {
+                setupSelection = setupSelection.swapLanguages()
+                saveAndRenderSetupSelection()
+            }
         }
         refreshLanguageOptions(emptyList())
         refreshModeAvailability()
@@ -144,6 +167,7 @@ class MainActivity : Activity() {
         resultGroup.setOnCheckedChangeListener { _, checkedId ->
             val selected = resultActionIds[checkedId]
             resultSettings.forEach { (id, settings) -> settings.view()?.visibility = if (id == selected) View.VISIBLE else View.GONE }
+            updateStartAvailability()
         }
         refreshResultAvailability()
         startButton.setOnClickListener {
@@ -152,6 +176,7 @@ class MainActivity : Activity() {
             else createAndStartMeeting()
         }
         stopButton.setOnClickListener { meetingService?.requestStop() }
+        page.stopConfirmation.setOnClickListener { meetingService?.requestStop() }
         swapColumnsButton.setOnClickListener { meetingService?.swapDisplayColumns() }
         overlayButton.setOnClickListener { toggleOverlay() }
         retryActionButton.setOnClickListener { meetingService?.retryResultAction() }
@@ -162,7 +187,7 @@ class MainActivity : Activity() {
         setContentView(page.root)
     }
 
-    /** 独立参考账号入口，不依赖系统账号；凭据只交给当前进程 Provider。 */
+    /** 独立参考账号入口，不依赖系统账号；密码不保存，会话由身份 Provider 管理。 */
     private fun showLoginDialog() {
         val fields = LayoutInflater.from(this).inflate(R.layout.reference_login_dialog, null)
         ReferenceUiScale.bindDialog(fields)
@@ -222,21 +247,21 @@ class MainActivity : Activity() {
         loginButton.text = if (loggedIn) "切换账号" else "账号登录"
         setConfigurationEnabled(!meetingBusy)
         if (!loggedIn) {
-            deploymentCapabilities = emptySet(); refreshLanguageOptions(emptyList()); discovery = null
+            deploymentCapabilities = emptySet(); discovery = null; refreshLanguageOptions(emptyList())
             if (!meetingBusy && !hasReadyResult) statusView.text = identity.message()
         }
         refreshResultAvailability(); refreshModeAvailability()
-        startButton.isEnabled = loggedIn && !meetingBusy && deploymentCapabilities.contains(MeetingCapabilityState.TRANSCRIPT) && deploymentLanguages.isNotEmpty()
+        updateStartAvailability()
         Log.d(TAG, "页面身份刷新 state=${identity.status()}")
     }
     private fun discoverCapabilities() {
         preMeetingClient!!.discover(object : MeetingClient.Callback<MeetingDiscovery> {
             override fun onSuccess(discovery: MeetingDiscovery) {
                 deploymentCapabilities = discovery.availableCapabilities()
-                refreshLanguageOptions(discovery.deployment().languages())
                 this@MainActivity.discovery = discovery
+                refreshLanguageOptions(discovery.deployment().languages())
                 refreshResultAvailability(); refreshModeAvailability(); setConfigurationEnabled(!meetingBusy)
-                startButton.isEnabled = displayedIdentity != null && !meetingBusy && deploymentCapabilities.contains(MeetingCapabilityState.TRANSCRIPT) && deploymentLanguages.isNotEmpty()
+                updateStartAvailability()
                 if (!meetingBusy && !hasReadyResult) {
                     statusView.text = when {
                         !deploymentCapabilities.contains(MeetingCapabilityState.TRANSCRIPT) ->
@@ -255,7 +280,7 @@ class MainActivity : Activity() {
     private fun logout() {
         preMeetingClient?.close(); preMeetingClient = null
         MeetingAppAssembly.clearReferenceSession(); displayedIdentity = null
-        deploymentCapabilities = emptySet(); refreshLanguageOptions(emptyList()); discovery = null
+        deploymentCapabilities = emptySet(); discovery = null; refreshLanguageOptions(emptyList())
         refreshResultAvailability(); refreshModeAvailability(); loginButton.text = "账号登录"
         startButton.isEnabled = false; statusView.text = "已退出，请重新登录"
         Log.i(TAG, "参考账号已退出")
@@ -263,11 +288,15 @@ class MainActivity : Activity() {
     private fun refreshModeAvailability() {
         val transcript = transcriptCapabilityAvailable()
         val summary = transcript && summaryCapabilityAvailable()
-        val translation = transcript && displayedIdentity != null && deploymentCapabilities.contains(MeetingCapabilityState.TRANSLATION) && deploymentLanguages.size >= 2
+        val translation = transcript && translationCapabilityAvailable()
         summaryEnabledView.text = "生成会议纪要"
         summaryEnabledView.contentDescription = "生成会议纪要"
         translationModeView.text = "AI双语互译"; translationModeView.alpha = 1f
-        page.showCapabilityOptions(summary, translation, transcript)
+        // 页面会在能力不足时取消选项；这种显示回退不能覆盖用户保存的正常选择。
+        val wasBinding = bindingSetupViews
+        bindingSetupViews = true
+        try { page.showCapabilityOptions(summary, translation, transcript) }
+        finally { bindingSetupViews = wasBinding }
         targetLanguageView.isEnabled = translation && translationModeView.isChecked
         val screenCapture = ScreenCaptureSourceFactory.isSupported()
         presentationCaptureView.text = if (screenCapture) "演示文稿" else "演示文稿（Mock不支持截图）"
@@ -281,25 +310,74 @@ class MainActivity : Activity() {
         displayedIdentity == null || discovery == null || deploymentCapabilities.contains(MeetingCapabilityState.TRANSCRIPT)
     private fun summaryCapabilityAvailable(): Boolean =
         displayedIdentity != null && deploymentCapabilities.contains(MeetingCapabilityState.SUMMARY)
-    /** 保留仍可用的选择，初次发现取后端前两项，不硬编码模型语言。 */
+    private fun translationCapabilityAvailable(): Boolean = displayedIdentity != null &&
+        deploymentCapabilities.contains(MeetingCapabilityState.TRANSCRIPT) &&
+        deploymentCapabilities.contains(MeetingCapabilityState.TRANSLATION) && deploymentLanguages.size >= 2
+
+    /** 部署发现后再恢复对应模式的合法偏好；无翻译能力时只临时显示字幕模式。 */
     private fun refreshLanguageOptions(languages: List<String>) {
-        val source = deploymentLanguages.getOrNull(sourceLanguageView.selectedItemPosition)
-        val target = deploymentLanguages.getOrNull(targetLanguageView.selectedItemPosition)
         deploymentLanguages = languages.toList()
-        val labels = deploymentLanguages.map { code ->
-            val label = if (code.startsWith("en")) "English" else Locale.forLanguageTag(code).getDisplayLanguage(Locale.SIMPLIFIED_CHINESE)
-            label.ifEmpty { code }
-        }
-        sourceLanguageView.adapter = languageAdapter(labels, sourceLanguageView)
-        targetLanguageView.adapter = languageAdapter(labels, targetLanguageView)
-        if (deploymentLanguages.isNotEmpty()) {
-            sourceLanguageView.setSelection(maxOf(0, deploymentLanguages.indexOf(source)))
-            val targetIndex = deploymentLanguages.indexOf(target)
-            targetLanguageView.setSelection(if (targetIndex >= 0) targetIndex else minOf(1, deploymentLanguages.size - 1))
-        }
-        sourceLanguageView.isEnabled = deploymentLanguages.isNotEmpty()
+        val preferredMode = setupPreferences.mode()
+        val mode = if (preferredMode == MeetingSetup.Mode.LIVE_TRANSLATION && !translationCapabilityAvailable())
+            MeetingSetup.Mode.LIVE_TRANSCRIPT else preferredMode
+        setupSelection = setupPreferences.read(mode).availableIn(deploymentLanguages, summaryCapabilityAvailable())
+        renderSetupSelection(updateLanguages = true)
         Log.d(TAG, "会议语言选项更新 count=${deploymentLanguages.size}")
     }
+
+    /** 用户操作才持久化，字幕与互译的语言／纪要分别记忆，不保存模型或身份材料。 */
+    private fun saveAndRenderSetupSelection() {
+        setupPreferences.save(setupSelection)
+        renderSetupSelection()
+        Log.d(TAG, "会前选择已保存 mode=${setupSelection.mode} summary=${setupSelection.summaryEnabled}")
+    }
+
+    private fun renderSetupSelection(updateLanguages: Boolean = false) {
+        bindingSetupViews = true
+        try {
+            if (updateLanguages) {
+                val labels = deploymentLanguages.map { code ->
+                    val label = if (code.startsWith("en")) "English" else Locale.forLanguageTag(code).getDisplayLanguage(Locale.SIMPLIFIED_CHINESE)
+                    label.ifEmpty { code }
+                }
+                sourceLanguageView.adapter = languageAdapter(labels, sourceLanguageView)
+                targetLanguageView.adapter = languageAdapter(labels, targetLanguageView)
+            }
+            val translation = setupSelection.mode == MeetingSetup.Mode.LIVE_TRANSLATION
+            page.modes.check(if (translation) translationModeView.id else transcriptModeView.id)
+            summaryEnabledView.isChecked = setupSelection.summaryEnabled
+            if (deploymentLanguages.isNotEmpty()) {
+                sourceLanguageView.setSelection(deploymentLanguages.indexOf(setupSelection.sourceLanguage))
+                targetLanguageView.setSelection(maxOf(0, deploymentLanguages.indexOf(setupSelection.targetLanguage)))
+            }
+            sourceLanguageView.isEnabled = deploymentLanguages.isNotEmpty()
+            if (translation) presentationCaptureView.isChecked = false
+            refreshModeAvailability()
+        } finally { bindingSetupViews = false }
+        updateStartAvailability()
+    }
+
+    private fun languageSelectionListener(sourceSide: Boolean) = object : AdapterView.OnItemSelectedListener {
+        override fun onItemSelected(parent: AdapterView<*>, view: View?, position: Int, id: Long) {
+            // Spinner 的批量 setSelection 可能延后回调；只消费当前可见且真正改变的选择。
+            if (bindingSetupViews || discovery == null || position != parent.selectedItemPosition) return
+            // 字幕模式的目标控件已隐藏，单语部署的默认选中回调不能改写互译偏好。
+            if (!sourceSide && setupSelection.mode != MeetingSetup.Mode.LIVE_TRANSLATION) return
+            val language = deploymentLanguages.getOrNull(position) ?: return
+            val previous = if (sourceSide) setupSelection.sourceLanguage else setupSelection.targetLanguage
+            if (language == previous) return
+            setupSelection = setupSelection.selectLanguage(sourceSide, language)
+            saveAndRenderSetupSelection()
+        }
+        override fun onNothingSelected(parent: AdapterView<*>) = Unit
+    }
+
+    private fun canStartMeeting(): Boolean = setupSelection.canStart(displayedIdentity != null,
+        meetingBusy || pendingPresentationMeeting != null, deploymentCapabilities, deploymentLanguages,
+        discovery != null && resultActionIds[resultGroup.checkedRadioButtonId] in availableResultActions)
+
+    /** 页面恢复、会前改动、Service 状态和实际开始入口共用此规则。 */
+    private fun updateStartAvailability() { startButton.isEnabled = canStartMeeting() }
     private fun languageAdapter(labels: List<String>, owner: Spinner): ArrayAdapter<String> =
         object : ArrayAdapter<String>(this, R.layout.reference_language_selected, labels) {
             override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
@@ -316,6 +394,7 @@ class MainActivity : Activity() {
     private fun refreshResultAvailability() {
         val current = discovery
         val available = if (current == null) emptySet() else MeetingAppAssembly.resultRegistry().available(current).map { it.id() }.toSet()
+        availableResultActions = available
         var first: Int? = null
         for ((id, action) in resultActionIds) {
             val visible = available.contains(action)
@@ -327,6 +406,7 @@ class MainActivity : Activity() {
             if (first == null) { resultGroup.clearCheck(); resultSettings.values.forEach { it.view()?.visibility = View.GONE } }
             else resultGroup.check(first)
         }
+        updateStartAvailability()
     }
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
@@ -339,7 +419,7 @@ class MainActivity : Activity() {
         if (requestCode == CONNECTION_SETTINGS_REQUEST) {
             if (resultCode == RESULT_OK) {
                 preMeetingClient?.close(); preMeetingClient = null; displayedIdentity = null
-                deploymentCapabilities = emptySet(); refreshLanguageOptions(emptyList()); discovery = null
+                deploymentCapabilities = emptySet(); discovery = null; refreshLanguageOptions(emptyList())
                 refreshResultAvailability(); refreshModeAvailability(); startButton.isEnabled = false
             }
             return
@@ -350,7 +430,7 @@ class MainActivity : Activity() {
         if (approved == null) return
         if (resultCode != RESULT_OK || data == null) {
             MeetingAppAssembly.clearPreparedMeeting(); statusView.text = "未授予系统屏幕采集权限，会议未开始"
-            startButton.isEnabled = true; setConfigurationEnabled(true); return
+            updateStartAvailability(); setConfigurationEnabled(true); return
         }
         startMeeting(approved, resultCode, data)
     }
@@ -368,24 +448,27 @@ class MainActivity : Activity() {
     }
     /** 页面检查后 SDK 在真实建会前仍重新读取身份，避免沿用会前过时凭据。 */
     private fun continueStartMeeting() {
-        if (!deploymentCapabilities.contains(MeetingCapabilityState.TRANSCRIPT)) {
-            statusView.text = "当前部署未提供实时字幕能力，暂时无法开始会议"
-            startButton.isEnabled = false; setConfigurationEnabled(true); return
+        if (!canStartMeeting()) {
+            statusView.text = when {
+                displayedIdentity == null -> "请先登录"
+                meetingBusy || pendingPresentationMeeting != null -> "本场会议仍在处理中"
+                MeetingCapabilityState.TRANSCRIPT !in deploymentCapabilities -> "当前部署未提供实时字幕能力，暂时无法开始会议"
+                deploymentLanguages.isEmpty() -> "当前部署尚未声明会议语言"
+                setupSelection.mode == MeetingSetup.Mode.LIVE_TRANSLATION &&
+                    setupSelection.sourceLanguage == setupSelection.targetLanguage -> "请选择两种不同的会议语言"
+                discovery == null || resultActionIds[resultGroup.checkedRadioButtonId] !in availableResultActions ->
+                    "当前部署没有可用的已装配结果动作"
+                else -> "本场选择的字幕／互译或纪要功能当前不可用"
+            }
+            updateStartAvailability(); setConfigurationEnabled(true); return
         }
-        if (deploymentLanguages.isEmpty()) { statusView.text = "当前部署尚未声明会议语言"; return }
-        val currentDiscovery = discovery
-        if (resultGroup.checkedRadioButtonId == -1 || currentDiscovery == null) {
-            statusView.text = "当前部署没有可用的已装配结果动作"; startButton.isEnabled = true; setConfigurationEnabled(true); return
-        }
+        val currentDiscovery = discovery!!
         val setup = selectedSetup()
-        if (!deploymentCapabilities.containsAll(setup.toOptions().requiredCapabilities())) {
-            statusView.text = "本场选择的字幕／互译或纪要功能当前不可用"; return
-        }
         val settings = resultSettings[setup.resultOptions().actionId()]
         val preparation = MeetingStartConditions.prepare(startCondition, setup, currentDiscovery, settings?.freeze()?.get())
         if (!preparation.allowed()) {
             Log.i(TAG, "会前结果动作准备未满足，会议未启动")
-            statusView.text = preparation.message(); startButton.isEnabled = true; setConfigurationEnabled(true); return
+            statusView.text = preparation.message(); updateStartAvailability(); setConfigurationEnabled(true); return
         }
         val prepared = preparation.meeting()!!
         if (setup.presentationCapture()) {
@@ -398,7 +481,7 @@ class MainActivity : Activity() {
                 startActivityForResult(permission, PRESENTATION_PERMISSION_REQUEST)
             } catch (failure: RuntimeException) {
                 pendingPresentationMeeting = null; MeetingAppAssembly.clearPreparedMeeting()
-                startButton.isEnabled = true; setConfigurationEnabled(true); statusView.text = "无法打开系统屏幕采集授权弹窗"
+                updateStartAvailability(); setConfigurationEnabled(true); statusView.text = "无法打开系统屏幕采集授权弹窗"
                 Log.e(TAG, "请求屏幕采集授权失败", failure)
             }
             return
@@ -417,14 +500,13 @@ class MainActivity : Activity() {
         try { startForegroundService(begin) }
         catch (failure: RuntimeException) {
             MeetingAppAssembly.clearPreparedMeeting(); Log.e(TAG, "启动会议服务失败 type=${failure.javaClass.simpleName}")
-            statusView.text = "无法启动会议服务，请检查麦克风权限"; startButton.isEnabled = true; setConfigurationEnabled(true)
+            statusView.text = "无法启动会议服务，请检查麦克风权限"; updateStartAvailability(); setConfigurationEnabled(true)
         }
     }
     private fun selectedSetup(): MeetingSetup {
-        val mode = if (translationModeView.isChecked) MeetingSetup.Mode.LIVE_TRANSLATION else MeetingSetup.Mode.LIVE_TRANSCRIPT
-        return MeetingSetup(mode, deploymentLanguages[sourceLanguageView.selectedItemPosition], deploymentLanguages[targetLanguageView.selectedItemPosition],
-            mode == MeetingSetup.Mode.LIVE_TRANSCRIPT && ScreenCaptureSourceFactory.isSupported() && presentationCaptureView.isChecked,
-            ResultOptions.action(resultActionIds[resultGroup.checkedRadioButtonId]!!), "", emptyList(), summaryEnabledView.isChecked)
+        return MeetingSetup(setupSelection.mode, setupSelection.sourceLanguage, setupSelection.targetLanguage,
+            setupSelection.mode == MeetingSetup.Mode.LIVE_TRANSCRIPT && ScreenCaptureSourceFactory.isSupported() && presentationCaptureView.isChecked,
+            ResultOptions.action(resultActionIds[resultGroup.checkedRadioButtonId]!!), "", emptyList(), setupSelection.summaryEnabled)
     }
 
     /** Service 推送不可变状态，Activity 重建直接重绘整场字幕，不重订模型事件。 */
@@ -435,7 +517,8 @@ class MainActivity : Activity() {
         endResultButton.visibility = if (failedAction) View.VISIBLE else View.GONE
         statusView.text = state.status; capabilityView.text = state.capabilityText
         page.showMeeting(state.active); page.showPresentationNotice(state.active, state.presentationNotice)
-        startButton.isEnabled = displayedIdentity != null && !state.busy && deploymentCapabilities.contains(MeetingCapabilityState.TRANSCRIPT) && deploymentLanguages.isNotEmpty()
+        page.showStopConfirmation(!state.active && state.canStop)
+        updateStartAvailability()
         setConfigurationEnabled(!state.busy); stopButton.isEnabled = state.canStop
         overlayButton.contentDescription = if (state.overlayShowing) "隐藏悬浮字幕" else "显示悬浮字幕"
         elapsedView.text = state.timeText.split(" · ")[0].replace("已进行 ", "")
