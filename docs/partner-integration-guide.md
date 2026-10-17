@@ -45,8 +45,10 @@ bash tools/run-reference-web.sh
 
 参考客户端入口只启动 HTTP 业务接口；Android 通过
 `POST /v1/meetings/{meetingId}:modelSession` 取得短期材料后直连模型，音频不经过
-后端。设备上的后端地址必须填写开发电脑的局域网 IP，例如
-`http://192.168.1.20:8080`，不能填写设备自己的 `127.0.0.1`。
+后端。设备上的登录／后端地址使用开发电脑可达的 HTTPS 地址，不能填写设备自己的
+`127.0.0.1`。开发电脑尚无 HTTPS 入口时，按[本机局域网 HTTPS 联调](local-lan-https.md)
+生成仓外证书、启动 Node 流式 TLS 入口，并通过可选 Gradle 属性让 Debug APK 信任该 CA。
+正式 Release 不携带开发 CA，沿用部署方的正式 HTTPS 证书；`adb reverse` 仅用于诊断。
 
 数据库统一使用 MySQL 5.7。先由部署方创建隔离数据库，再执行仓库中当前唯一的
 `deploy/migrations/V001__initial_schema.sql`（或运行 `deploy/migrate.sh`）。该脚本只新增

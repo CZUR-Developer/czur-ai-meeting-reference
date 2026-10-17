@@ -1,6 +1,54 @@
+import java.io.File
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+}
+
+/**
+ * 只为 Debug 生成可选的本机 CA 信任资源，Release 的 source set 不引用这些文件。
+ *
+ * CA 是构建输入，实际文件留在仓外；未传属性时仍生成系统信任配置，并移除上次
+ * Debug 构建遗留的 CA 资源。保留当前明文调试语义，SDK 自身的 HTTPS 校验不变。
+ */
+abstract class GenerateReferenceDebugTlsResources : DefaultTask() {
+    @get:InputFile
+    @get:Optional
+    abstract val caCertificate: RegularFileProperty
+
+    @get:OutputDirectory
+    abstract val resourceDirectory: DirectoryProperty
+
+    @TaskAction
+    fun generate() {
+        val output = resourceDirectory.get().asFile
+        val caOutput = output.resolve("raw/reference_debug_ca.pem")
+        val caInput = caCertificate.orNull?.asFile
+        if (caInput != null) {
+            caOutput.parentFile.mkdirs()
+            caInput.copyTo(caOutput, overwrite = true)
+        } else {
+            caOutput.delete()
+        }
+        val debugTrust = if (caInput == null) "" else """
+            <debug-overrides>
+                <trust-anchors>
+                    <certificates src="@raw/reference_debug_ca" />
+                </trust-anchors>
+            </debug-overrides>
+        """.trimIndent().prependIndent("    ") + "\n"
+        val configuration = output.resolve("xml/reference_debug_network_security.xml")
+        configuration.parentFile.mkdirs()
+        configuration.writeText("""
+            <?xml version="1.0" encoding="utf-8"?>
+            <network-security-config>
+                <base-config cleartextTrafficPermitted="true">
+                    <trust-anchors>
+                        <certificates src="system" />
+                    </trust-anchors>
+                </base-config>
+        """.trimIndent() + "\n" + debugTrust + "</network-security-config>\n")
+    }
 }
 
 val meetingRuntime = providers.gradleProperty("meetingRuntime").orElse("mock").get()
@@ -45,6 +93,25 @@ android {
     sourceSets.getByName("main").java.srcDir("src/$subtitleUiSource/java")
     sourceSets.getByName("test").java.srcDir("src/test/$subtitleUiSource/java")
     testOptions { unitTests.isIncludeAndroidResources = meetingUiAar != null }
+}
+
+// 使用 AGP 的生成资源接缝让 Debug 资源任务自动加入构建依赖；不写 main/res。
+androidComponents {
+    onVariants(selector().withBuildType("debug")) { variant ->
+        val generateTls = tasks.register<GenerateReferenceDebugTlsResources>(
+            "generateReferenceDebugTlsResources"
+        ) {
+            providers.gradleProperty("referenceDebugCaCertificate").orNull?.let {
+                val certificate = File(it)
+                require(certificate.isAbsolute) { "referenceDebugCaCertificate requires an absolute CA file path" }
+                caCertificate.set(certificate)
+            }
+            resourceDirectory.set(layout.buildDirectory.dir("generated/referenceDebugTls/res"))
+        }
+        variant.sources.res?.addGeneratedSourceDirectory(
+            generateTls, GenerateReferenceDebugTlsResources::resourceDirectory
+        )
+    }
 }
 
 kotlin {
