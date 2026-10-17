@@ -187,6 +187,22 @@ class TingwuModelSessionIssuerTest {
         assertFalse(request.toString().contains("mtg_owned_meeting"));
     }
 
+    @Test void independentTextTranslationKeepsBilingualAsrWithoutNativeTranslations() throws Exception {
+        var sent = new AtomicReference<HttpRequest>();
+        var issuer = new TingwuModelSessionIssuer(CONFIG, request -> {
+            sent.set(request);
+            return new TingwuModelSessionIssuer.ProviderResponse(200,
+                    "{\"Data\":{\"TaskId\":\"task-independent\",\"MeetingJoinUrl\":\"wss://join.example.invalid/meeting\"}}");
+        }, CLOCK);
+        issuer.issue(new ModelSessionIssuer.Request("zh-CN", List.of("ja-JP"), false,
+                "mtg_owned", true));
+        var body = new ObjectMapper().readTree(readBody(sent.get()));
+        assertEquals("multilingual", body.path("Input").path("SourceLanguage").asText());
+        assertEquals(new ObjectMapper().readTree("[\"cn\",\"ja\"]"), body.path("Input").path("LanguageHints"));
+        assertFalse(body.path("Parameters").has("TranslationEnabled"));
+        assertFalse(body.path("Parameters").has("Translation"));
+    }
+
     @Test void remainsDisabledWithoutConfiguredCredentials() {
         assertEquals(null, TingwuModelSessionConfig.fromEnvironment(Map.of()));
         assertThrows(IllegalArgumentException.class, () ->

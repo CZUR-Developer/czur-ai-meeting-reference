@@ -31,8 +31,8 @@ class OpenApiMeetingIdContractTest {
         List<String> parameterBlocks = blocksNamed(lines, "MeetingId:");
 
         // 客户端采音用量响应新增一处，共13处；每项继续沿用同一公开ID边界。
-        assertEquals(13, propertyBlocks.size(),
-                "新增或删除公开 meetingId 属性时必须显式复核统一边界（含用量响应）");
+        assertEquals(14, propertyBlocks.size(),
+                "新增或删除公开 meetingId 属性时必须显式复核统一边界（含用量及翻译材料响应）");
         assertEquals(1, parameterBlocks.size(), "MeetingId path parameter must be unique");
         for (String block : propertyBlocks) {
             assertMeetingIdBoundary(block);

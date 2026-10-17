@@ -133,9 +133,9 @@ public final class TingwuModelSessionIssuer implements ModelSessionIssuer {
     }
 
     /**
-     * 单语字幕沿用原有 CreateTask 请求；仅本场翻译能力 ENABLE 时，以同一个
-     * multilingual 实时任务识别双语并向两种语言翻译。双目标包含原语言，
-     * 因为说话人可以在一场会中任意切换所选的两种语言。
+     * 单语字幕沿用原有 CreateTask 请求；双语识别与原生翻译分别控制。
+     * 独立文本翻译组合仍需识别两侧语言，但听悟不再产生译文。原生互译的双目标
+     * 包含原语言，因为说话人可以在一场会中任意切换所选的两种语言。
      */
     private String createBody(Request request) throws IOException {
         String source = providerLanguage(request.sourceLanguage());
@@ -146,16 +146,18 @@ public final class TingwuModelSessionIssuer implements ModelSessionIssuer {
                 "RealtimeDiarizationEnabled", true, "DiarizationEnabled", true,
                 "Diarization", Map.of("SpeakerCount", 0));
         Map<String, Object> parameters = Map.of("Transcription", transcription);
-        if (request.translationEnabled()) {
+        if (request.multilingualInput()) {
             if (request.targetLanguages().size() != 1) throw new SessionIssueException();
             String other = providerLanguage(request.targetLanguages().get(0));
             if (source.equals(other)) throw new SessionIssueException();
             List<String> pair = List.of(source, other);
             input = Map.of("SourceLanguage", "multilingual", "LanguageHints", pair,
                     "Format", "pcm", "SampleRate", 16000, "EnableWords", true);
-            parameters = Map.of("Transcription", transcription,
-                    "TranslationEnabled", true,
-                    "Translation", Map.of("TargetLanguages", pair, "OutputLevel", 2));
+            if (request.translationEnabled()) {
+                parameters = Map.of("Transcription", transcription,
+                        "TranslationEnabled", true,
+                        "Translation", Map.of("TargetLanguages", pair, "OutputLevel", 2));
+            }
         }
         return JSON.writeValueAsString(Map.of("AppKey", config.appKey(),
                 "Input", input, "Parameters", parameters));

@@ -16,6 +16,12 @@ public interface ModelSessionIssuer {
     Session issue(Request request);
 
     /**
+     * 仅续领独立文本翻译材料，不创建新的 ASR 任务。旧的一体化模型无需实现，返回 null。
+     * 调用方仍须核验本场归属、活动状态以及首次冻结的翻译授权。
+     */
+    default TranslationSessionIssuer.Session issueTranslation(Request request) { return null; }
+
+    /**
      * 模型签发所需的最小本场事实。语言保留公开协议的 IETF 代码；具体厂商代码
      * 由 Adapter 签发器映射。目标语言仅代表 Create 时选择的语言，
      * {@code translationEnabled} 才代表产品、权益、模型和部署限制均已允许翻译。
@@ -24,9 +30,18 @@ public interface ModelSessionIssuer {
      * 仍只消费语言和翻译决策，不因此要求旧调用提供会议ID。
      */
     record Request(String sourceLanguage, List<String> targetLanguages,
-                   boolean translationEnabled, String meetingId) {
+                   boolean translationEnabled, String meetingId, boolean multilingualInput) {
         public Request {
             targetLanguages = List.copyOf(targetLanguages);
+        }
+
+        /**
+         * 保留旧签名和行为：旧互译请求同时启用双语识别，普通字幕仍为单语。
+         * 独立翻译组合可使用五参构造，只关闭 ASR 原生译文并保留双语识别。
+         */
+        public Request(String sourceLanguage, List<String> targetLanguages,
+                boolean translationEnabled, String meetingId) {
+            this(sourceLanguage, targetLanguages, translationEnabled, meetingId, translationEnabled);
         }
 
         /** 保留原调用签名；未知同场ID不伪造为另一个会议。 */
@@ -37,13 +52,21 @@ public interface ModelSessionIssuer {
 
         @Override public String toString() {
             return "ModelSessionIssuer.Request[targetCount=" + targetLanguages.size()
-                    + ", translationEnabled=" + translationEnabled + "]";
+                    + ", translationEnabled=" + translationEnabled
+                    + ", multilingualInput=" + multilingualInput + "]";
         }
     }
 
     /** endpoint 可自带凭据；调用者只在认证响应中返回，绝不写日志或会议事实。 */
     record Session(String adapterId, String endpoint, Instant expiresAt,
-                   Map<String, String> initParams) {
+                   Map<String, String> initParams,
+                   TranslationSessionIssuer.Session translationSession) {
+        /** 保留原发行器的构造签名；没有独立翻译时保持原生实时模型路径。 */
+        public Session(String adapterId, String endpoint, Instant expiresAt,
+                Map<String, String> initParams) {
+            this(adapterId, endpoint, expiresAt, initParams, null);
+        }
+
         /** JoinUrl 与 TaskId 均属于临时材料，避免 record 默认诊断文本泄露。 */
         @Override public String toString() {
             return "ModelSessionIssuer.Session[adapterId=" + adapterId

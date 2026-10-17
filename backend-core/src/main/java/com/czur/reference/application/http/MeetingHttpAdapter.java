@@ -70,6 +70,8 @@ public final class MeetingHttpAdapter {
             "^/v1/meetings/(mtg_[A-Za-z0-9_-]+):startClient$");
     private static final Pattern MODEL_SESSION_PATH = Pattern.compile(
             "^/v1/meetings/(mtg_[A-Za-z0-9_-]+):modelSession$");
+    private static final Pattern TRANSLATION_SESSION_PATH = Pattern.compile(
+            "^/v1/meetings/(mtg_[A-Za-z0-9_-]+):translationSession$");
     private static final Pattern SUMMARY_SESSION_PATH = Pattern.compile(
             "^/v1/meetings/(mtg_[A-Za-z0-9_-]+):summarySession$");
     private static final Pattern CLIENT_APPEND_PATH = Pattern.compile(
@@ -416,6 +418,7 @@ public final class MeetingHttpAdapter {
         }
         if ("POST".equals(request.method())
                 && (MODEL_SESSION_PATH.matcher(request.path()).matches()
+                || TRANSLATION_SESSION_PATH.matcher(request.path()).matches()
                 || SUMMARY_SESSION_PATH.matcher(request.path()).matches())) {
             return AuthenticationRoute.CLIENT_WRITE;
         }
@@ -505,15 +508,18 @@ public final class MeetingHttpAdapter {
 
         Matcher clientStart = CLIENT_START_PATH.matcher(path);
         Matcher modelSession = MODEL_SESSION_PATH.matcher(path);
+        Matcher translationSession = TRANSLATION_SESSION_PATH.matcher(path);
         Matcher summarySession = SUMMARY_SESSION_PATH.matcher(path);
-        if ("POST".equals(method) && modelSession.matches()) {
+        boolean translationOnly = translationSession.matches();
+        if ("POST".equals(method) && (modelSession.matches() || translationOnly)) {
             if (modelSessions == null || modelSessionLanguages == null) return errors.notImplemented();
             if (context == null) return errors.missingContext();
             if (!request.query().isEmpty() || !request.body().isEmpty()) {
                 throw new IllegalArgumentException("model session must have no body or query");
             }
+            String meetingId = translationOnly ? translationSession.group(1) : modelSession.group(1);
             MeetingQueryPort.Result meeting = queryPort.get(new MeetingQueryPort.GetRequest(
-                    context, modelSession.group(1)));
+                    context, meetingId));
             if (!(meeting instanceof MeetingQueryPort.Found found)) {
                 return errors.query(meeting);
             }
@@ -525,9 +531,13 @@ public final class MeetingHttpAdapter {
                 return errors.modelSessionInvalidState();
             }
             try {
-                var sessionRequest = modelSessionLanguages.load(context, modelSession.group(1));
-                return errors.modelSession(modelSession.group(1),
-                        modelSessions.issue(sessionRequest));
+                var sessionRequest = modelSessionLanguages.load(context, meetingId);
+                if (translationOnly) {
+                    if (!sessionRequest.translationEnabled()) return errors.translationNotGranted();
+                    var text = modelSessions.issueTranslation(sessionRequest);
+                    return text == null ? errors.notImplemented() : errors.translationSession(meetingId, text);
+                }
+                return errors.modelSession(meetingId, modelSessions.issue(sessionRequest));
             } catch (TingwuModelSessionIssuer.SessionIssueException | IllegalStateException unavailable) {
                 return errors.modelSessionUnavailable();
             }
@@ -1044,6 +1054,8 @@ public final class MeetingHttpAdapter {
         }
         if ("POST".equals(request.method())
                 && MODEL_SESSION_PATH.matcher(request.path()).matches()) return "modelSession";
+        if ("POST".equals(request.method())
+                && TRANSLATION_SESSION_PATH.matcher(request.path()).matches()) return "translationSession";
         if ("POST".equals(request.method())
                 && SUMMARY_SESSION_PATH.matcher(request.path()).matches()) return "summarySession";
         if ("POST".equals(request.method())

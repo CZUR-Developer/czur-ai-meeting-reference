@@ -7,6 +7,8 @@ import com.czur.reference.application.http.MeetingJdkHttpServer;
 import com.czur.reference.application.http.ReferenceDevSessionLoginEndpoint;
 import com.czur.reference.application.identity.referencedev.ReferenceDevIdentityProvider;
 import com.czur.reference.application.model.ModelSessionIssuer;
+import com.czur.reference.application.model.SampleJsonTranslationSessionIssuer;
+import com.czur.reference.application.model.TextTranslationModelSessionIssuer;
 import com.czur.reference.application.port.artifact.ArtifactStore;
 import com.czur.reference.application.port.artifact.ArtifactStoreException;
 import com.czur.reference.application.speaker.ReferenceSpeakerIdentityConfig;
@@ -77,6 +79,10 @@ public final class ReferenceClientMeetingProcess implements AutoCloseable {
             if (issuer == null) {
                 throw new IllegalArgumentException(
                         "客户端直连参考服务必须配置可用的模型 Adapter");
+            }
+            var textTranslation = SampleJsonTranslationSessionIssuer.fromEnvironment(values, clock);
+            if (textTranslation != null) {
+                issuer = new TextTranslationModelSessionIssuer(issuer, textTranslation);
             }
             var login = config.login().map(value -> new ReferenceDevSessionLoginEndpoint(
                     value, new HttpErrorMapper(), clock)).orElse(null);

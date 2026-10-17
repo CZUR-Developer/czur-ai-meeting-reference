@@ -14,6 +14,7 @@ import com.czur.reference.application.port.ClientMeetingInputPort;
 import com.czur.reference.application.port.speaker.SpeakerIdentityEnrollmentPort;
 import com.czur.reference.application.model.ModelSessionIssuer;
 import com.czur.reference.application.model.SummarySessionIssuer;
+import com.czur.reference.application.model.TranslationSessionIssuer;
 import com.czur.reference.application.port.MeetingManifestPort;
 import com.czur.reference.application.port.MeetingArtifactContentPort;
 import com.czur.reference.application.port.MeetingArtifactMediaPort;
@@ -119,9 +120,39 @@ public final class HttpErrorMapper {
 
     /** 模型材料只在已认证的成功响应中出现，日志和错误 envelope 不含 JoinUrl。 */
     public HttpResponse modelSession(String meetingId, ModelSessionIssuer.Session session) {
-        return success(200, Map.of("meetingId", meetingId, "adapterId", session.adapterId(),
-                "endpoint", session.endpoint(), "expiresAt", session.expiresAt().toString(),
-                "initParams", session.initParams()));
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("meetingId", meetingId);
+        body.put("adapterId", session.adapterId());
+        body.put("endpoint", session.endpoint());
+        body.put("expiresAt", session.expiresAt().toString());
+        body.put("initParams", session.initParams());
+        var translation = session.translationSession();
+        if (translation != null) {
+            body.put("translationSession", translationMaterials(translation));
+        }
+        return success(200, body);
+    }
+
+    /** 独立翻译续领仍返回同一业务会议 ID；不产生 ASR 任务或会议状态变更。 */
+    public HttpResponse translationSession(String meetingId,
+            TranslationSessionIssuer.Session session) {
+        Map<String, Object> body = translationMaterials(session);
+        body.put("meetingId", meetingId);
+        return success(200, body);
+    }
+
+    private static Map<String, Object> translationMaterials(TranslationSessionIssuer.Session session) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("adapterId", session.adapterId());
+        body.put("endpoint", session.endpoint());
+        body.put("expiresAt", session.expiresAt().toString());
+        if (session.token() != null) body.put("token", session.token());
+        body.put("initParams", session.initParams());
+        return body;
+    }
+
+    public HttpResponse translationNotGranted() {
+        return clientInputFailure(ClientMeetingInputPort.Reason.CAPABILITY_NOT_GRANTED);
     }
 
     public HttpResponse modelSessionInvalidState() {
@@ -139,9 +170,14 @@ public final class HttpErrorMapper {
     /** 永久 Key 不进入响应；只把本场短期材料交给已认证 App。 */
     public HttpResponse summarySession(String meetingId,
             SummarySessionIssuer.Session session) {
-        return success(200, Map.of("meetingId", meetingId, "adapterId", session.adapterId(),
-                "endpoint", session.endpoint(), "expiresAt", session.expiresAt().toString(),
-                "token", session.token()));
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("meetingId", meetingId);
+        body.put("adapterId", session.adapterId());
+        body.put("endpoint", session.endpoint());
+        body.put("expiresAt", session.expiresAt().toString());
+        if (session.token() != null) body.put("token", session.token());
+        if (!session.initParams().isEmpty()) body.put("initParams", session.initParams());
+        return success(200, body);
     }
 
     public HttpResponse summaryNotGranted() {

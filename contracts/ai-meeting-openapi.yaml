@@ -234,7 +234,7 @@ paths:
       operationId: issueModelSession
       summary: 为已创建的会议申请本场模型直连材料
       description: |
-        使用用户 Bearer 验证会议归属及创建权限。仅 CREATED/RUNNING 可申请；
+        使用用户 Bearer 验证会议归属及创建权限。仅 CREATED/STARTING/RUNNING 可申请；
         按部署配置签发 adapterId 和模型连接材料。听悟模式每次向部署方账号
         新建实时任务；sample-json-ws 模式返回部署方配置的样例 WebSocket
         地址，不创建真实模型任务。Android App 按 adapterId 选构建期注册的
@@ -242,6 +242,8 @@ paths:
         为自带连接凭据的 MeetingJoinUrl，所以 token 省略；expiresAt 是参考
         后端给出的最迟开始连接时间，不表示模型服务端保证的 URL 过期时间。
         Create v1 的 realtime 字段和旧 WSS 音频路径保持原义。
+        宿主组合独立文本翻译时，响应可附 translationSession；实时模型只产出原文，
+        Android SDK 通过注册的 TranslationAdapter 调用文本模型并提交相同标准译文事件。
       security:
         - bearerAuth: []
       parameters:
@@ -284,12 +286,34 @@ paths:
                 $ref: "#/components/schemas/StartClientMeetingResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/meetings/{meetingId}:translationSession:
+    post:
+      tags: [Meetings]
+      operationId: renewTranslationSession
+      summary: 为本场已授权的独立文本翻译续领短期材料
+      description: |
+        首次翻译材料随 modelSession 返回。SDK 在逐段翻译前发现材料临近到期时调用本接口，
+        只续领文本模型材料，不创建 ASR 任务或改变会议状态。使用同场冻结的语言与翻译授权，
+        会议归属及 CREATED/STARTING/RUNNING 状态沿用模型材料接口；未装配独立翻译返回501。
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/MeetingId"
+      responses:
+        "200":
+          description: 同场独立翻译的短期材料，包含 meetingId
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TranslationSessionGrant"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/meetings/{meetingId}:summarySession:
     post:
       tags: [Meetings]
       operationId: issueSummarySession
-      summary: 为本场获准的结构化纪要签发百炼短期文本材料
-      description: 仅当前用户所属、已调用 startClient 建立客户端输入标记且处于 STARTING 或 RUNNING 的会议可申请；首次 Create 必须请求并获准 summary.structured。后端用永久 DASHSCOPE_API_KEY 向百炼签发临时 API Key，响应只含短期 Key 与应用 completion 地址；Android SDK 直连百炼，后端只接收 App 提交的标准纪要。不记录请求或响应中的密钥。
+      summary: 为本场获准的结构化纪要签发短期文本模型材料
+      description: 仅当前用户所属、已调用 startClient 建立客户端输入标记且处于 STARTING 或 RUNNING 的会议可申请；首次 Create 必须请求并获准 summary.structured。宿主通过 SummarySessionIssuer 签发短期材料，默认实现为百炼；Android SDK 按注册的 Adapter 直连模型，后端只接收标准纪要。token 可由签名地址或 initParams 替代；不记录请求或响应中的密钥。
       security:
         - bearerAuth: []
       parameters:
@@ -1268,10 +1292,41 @@ components:
             taskId:
               type: string
               description: 听悟 StartTranscription/StopTranscription 的 header.task_id。
+        translationSession:
+          $ref: "#/components/schemas/TranslationSessionGrant"
+    TranslationSessionGrant:
+      type: object
+      additionalProperties: false
+      required: [adapterId, endpoint, expiresAt, initParams]
+      properties:
+        meetingId:
+          type: string
+          description: 独立续领响应包含本场ID；嵌套在 modelSession 的首次材料不重复此字段。
+          pattern: "^mtg_[A-Za-z0-9_-]+$"
+          maxLength: 1024
+        adapterId:
+          type: string
+          description: 构建期注册的 TranslationAdapter 标识，样例为 sample-json-translation。
+        endpoint:
+          type: string
+          format: uri
+          description: SDK 直连的文本模型地址，可包含短期签名；不得记录到日志或产物。
+        expiresAt:
+          type: string
+          format: date-time
+          description: 短期翻译材料过期时间；SDK 在实际翻译前按需续领。
+        token:
+          type: string
+          description: 可选短期令牌，禁止使用供应商长期密钥。
+        initParams:
+          type: object
+          additionalProperties:
+            type: string
+          description: 对应供应商 Adapter 解释的短期参数，不进入标准结果。
     SummarySessionGrant:
       type: object
       additionalProperties: false
-      required: [meetingId, adapterId, endpoint, expiresAt, token]
+      required: [meetingId, adapterId, endpoint, expiresAt]
       properties:
         meetingId:
           type: string
@@ -1279,19 +1334,24 @@ components:
           maxLength: 1024
         adapterId:
           type: string
-          const: bailian-summary
+          description: 构建期注册的 SummaryAdapter 标识，默认实现为 bailian-summary。
         endpoint:
           type: string
           format: uri
-          description: 百炼应用 completion 地址；正式部署须为 HTTPS。
+          description: 文本模型地址，默认百炼应用 completion；正式部署须为 HTTPS。
         expiresAt:
           type: string
           format: date-time
-          description: 百炼临时 API Key 的服务端过期时间。
+          description: 模型短期材料的服务端过期时间。
         token:
           type: string
           readOnly: true
-          description: 百炼临时 API Key；仅交给认证 App，不入日志或持久化。
+          description: 可选模型短期材料；仅交给认证 App，不入日志或持久化。
+        initParams:
+          type: object
+          additionalProperties:
+            type: string
+          description: 非空时返回对应 SummaryAdapter 解释的供应商附加短期参数。
     RealtimeTokenGrant:
       type: object
       additionalProperties: false

@@ -193,6 +193,45 @@ class MeetingHttpAdapterContractTest {
     }
 
     @Test
+    void independentTranslationRenewalUsesSameGrantWithoutCreatingAnotherAsrTask() {
+        AtomicInteger asrCalls = new AtomicInteger();
+        AtomicInteger textCalls = new AtomicInteger();
+        var issuer = new com.czur.reference.application.model.TextTranslationModelSessionIssuer(
+                request -> {
+                    asrCalls.incrementAndGet();
+                    assertFalse(request.translationEnabled());
+                    return new ModelSessionIssuer.Session("asr-only", "wss://asr.invalid/stream",
+                            NOW.plusSeconds(300), Map.of());
+                }, request -> {
+                    textCalls.incrementAndGet();
+                    assertEquals("mtg_detail", request.meetingId());
+                    assertEquals(List.of("ja-JP"), request.targetLanguages());
+                    return new com.czur.reference.application.model.TranslationSessionIssuer.Session(
+                            "partner-translation", "https://text.invalid/translate", NOW.plusSeconds(300),
+                            "short-test-material", Map.of("tokenHeader", "x-api-key"));
+                });
+        adapter = new MeetingHttpAdapter(query, deletion, decoder,
+                new HttpErrorMapper(() -> "translation-diagnostic"), stopService(),
+                null, null, false, null, null, null, null, null, issuer,
+                (context, meetingId) -> new ModelSessionIssuer.Request(
+                        "zh-CN", List.of("ja-JP"), true, meetingId));
+        query.getResult = new MeetingQueryPort.Found(status(MeetingState.STARTING));
+        var initial = adapter.handle(new HttpRequest("POST",
+                "/v1/meetings/mtg_detail:modelSession", Map.of(), ""), context());
+        assertEquals(200, initial.status());
+        assertTrue(initial.body().contains("\"translationSession\""));
+        var renewal = new HttpRequest("POST", "/v1/meetings/mtg_detail:translationSession", Map.of(), "");
+        assertEquals(MeetingHttpAdapter.AuthenticationRoute.CLIENT_WRITE,
+                MeetingHttpAdapter.authenticationRoute(renewal));
+        var response = adapter.handle(renewal, context());
+        assertEquals(200, response.status());
+        assertTrue(response.body().contains("\"meetingId\":\"mtg_detail\""));
+        assertTrue(response.body().contains("\"adapterId\":\"partner-translation\""));
+        assertEquals(1, asrCalls.get());
+        assertEquals(2, textCalls.get());
+    }
+
+    @Test
     void summarySessionRequiresFrozenGrantBeforeIssuingTemporaryKey() throws Exception {
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
         AtomicInteger tokenRequests = new AtomicInteger();

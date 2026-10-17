@@ -1,6 +1,7 @@
 package com.czur.reference.application.model;
 
 import java.time.Instant;
+import java.util.Map;
 
 /**
  * 为单场会议签发总结 Adapter 所需的短期材料。
@@ -19,6 +20,8 @@ public interface SummarySessionIssuer {
         String endpoint();
         Instant expiresAt();
         String token();
+        /** 供应商附加短期参数，由对应 Adapter 解释；旧发行器无需实现。 */
+        default Map<String, String> initParams() { return Map.of(); }
     }
 
     /** Provider 暂时不可用；HTTP 层统一映射为可重试的模型错误。 */
