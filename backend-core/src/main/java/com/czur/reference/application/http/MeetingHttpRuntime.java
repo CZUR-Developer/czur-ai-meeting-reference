@@ -346,6 +346,11 @@ public final class MeetingHttpRuntime implements AutoCloseable {
         return !closed.get();
     }
 
+    /** 仅供参考网络入口确认可选登录已装配；探测不执行账号校验。 */
+    boolean hasSessionLoginPath(String path) {
+        return referenceLogin != null && referenceLogin.path().equals(path);
+    }
+
     /**
      * 幂等关闭请求入口。
      *

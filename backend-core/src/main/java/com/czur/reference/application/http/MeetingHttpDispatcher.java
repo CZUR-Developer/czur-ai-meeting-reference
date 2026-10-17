@@ -161,4 +161,13 @@ public final class MeetingHttpDispatcher {
     /** 供 JDK transport 映射媒体错误，不暴露 dispatcher 的 mapper 所有权。 */
     HttpErrorMapper errorMapper() { return errors; }
 
+    /**
+     * 参考 Web 的两个跨源写入口；只读取装配状态，不解析 Bearer 或触发业务。
+     * 伙伴自己的登录路径、建会、Stop、邮件等路由不随此接线开放跨源写入。
+     */
+    boolean supportsReferenceBrowserPost(String path) {
+        return "/v1/reference/session:login".equals(path) && runtime.hasSessionLoginPath(path)
+                || speakerEnrollment != null && SpeakerIdentityEnrollmentEndpoint.matchesPath(path);
+    }
+
 }

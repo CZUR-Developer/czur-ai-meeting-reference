@@ -272,6 +272,20 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
         if (LIVENESS_PATH.equals(request.path()) || READINESS_PATH.equals(request.path())) {
             return health(request);
         }
+        if ("OPTIONS".equals(request.method())
+                && dispatcher.supportsReferenceBrowserPost(request.path())) {
+            // 浏览器在 JSON 登录、Bearer 命名前先预检；不能将它转为一次业务 POST。
+            if (!request.query().isEmpty() || !request.body().isEmpty()
+                    || request.header("origin") == null
+                    || !"POST".equals(request.header("access-control-request-method"))) {
+                return errors.invalidRoute();
+            }
+            return new HttpResponse(204, Map.of(
+                    "access-control-allow-origin", "*",
+                    "access-control-allow-methods", "POST",
+                    "access-control-allow-headers", "Content-Type, Authorization",
+                    "cache-control", "no-store"), "");
+        }
         return dispatcher.handle(request);
     }
 
@@ -461,13 +475,19 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
         return value.chars().allMatch(character -> character >= 0x21 && character <= 0x7e);
     }
 
-    private static void write(HttpExchange exchange, HttpResponse response) throws IOException {
+    private void write(HttpExchange exchange, HttpResponse response) throws IOException {
         // 参考静态结果页可部署在不同源；能力发现提供同一结果链接有效期。
         String resultPath = exchange.getRequestURI().getRawPath();
         if ("GET".equals(exchange.getRequestMethod())
                 && (ReferenceDeploymentCapabilitiesEndpoint.PATH.equals(resultPath)
                 || resultPath.matches("/v1/meetings/mtg_[A-Za-z0-9_-]+/manifest")
                 || resultPath.matches("/v1/artifacts/art_[A-Za-z0-9_-]+"))) {
+            exchange.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
+        }
+        // 成功、账号错误、缺少 Bearer、样本不足等都应让参考页面读到原业务响应。
+        // 只补网络响应头，POST 继续走原 dispatcher 的登录与会议归属检查；不用 Cookie。
+        if ("POST".equals(exchange.getRequestMethod())
+                && dispatcher.supportsReferenceBrowserPost(resultPath)) {
             exchange.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
         }
         for (var header : response.headers().entrySet()) {

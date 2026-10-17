@@ -28,8 +28,11 @@ public final class SpeakerIdentityEnrollmentEndpoint {
     }
 
     public static boolean matches(HttpRequest request) {
-        return "POST".equals(request.method()) && PATH.matcher(request.path()).matches();
+        return "POST".equals(request.method()) && matchesPath(request.path());
     }
+
+    /** 供参考网络预检复用同一路由形状，不执行认证或命名业务。 */
+    static boolean matchesPath(String path) { return PATH.matcher(path).matches(); }
 
     public HttpResponse handle(HttpRequest request, MeetingCommandContext context) {
         try {
