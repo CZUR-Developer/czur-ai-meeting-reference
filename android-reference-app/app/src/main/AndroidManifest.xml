@@ -20,9 +20,6 @@
             </intent-filter>
         </activity>
         <activity
-            android:name=".ConnectionSettingsActivity"
-            android:exported="false" />
-        <activity
             android:name=".ResultActivity"
             android:exported="false" />
         <activity

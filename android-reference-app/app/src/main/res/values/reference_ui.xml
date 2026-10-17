@@ -9,12 +9,10 @@
     <color name="reference_translation">#FFDB10</color>
     <string name="reference_setup_title">AI会议纪要</string>
     <string name="reference_account">账号登录</string>
-    <string name="reference_settings">连接设置</string>
+    <string name="reference_deployment_not_configured">部署尚未配置，请联系应用提供方。</string>
     <string name="reference_source">语言</string>
     <string name="reference_target">目标语言</string>
     <string name="reference_result_description">会议结束后自动打开网页，查看本场字幕、译文及已提供的会议产物。</string>
-    <string name="reference_backend_hint">例如 https://meeting.example.com</string>
-    <string name="reference_web_hint">例如 https://result.example.com/index.html</string>
     <style name="ReferenceLabel">
         <item name="android:textColor">@color/reference_ink</item>
         <item name="android:textSize">24sp</item>

@@ -88,8 +88,9 @@ class ReferenceMeetingPageTest {
             assertEquals(15f, (buttons.getChild(index) as GradientDrawable).cornerRadius, 0.5f)
         }
         assertTrue(start.bottom <= card.bottom && start.top >= card.top)
-        assertNull(page.root.findViewById<View>(R.id.backend_url))
-        assertNull(page.root.findViewById<View>(R.id.web_url))
+        assertEquals(0, activity.resources.getIdentifier("backend_url", "id", activity.packageName))
+        assertEquals(0, activity.resources.getIdentifier("web_url", "id", activity.packageName))
+        assertEquals(0, activity.resources.getIdentifier("settings_button", "id", activity.packageName))
         page.showSetupMode(true)
         assertEquals(View.VISIBLE, page.targetContainer.visibility)
         assertEquals(View.VISIBLE, page.swapLanguages.visibility)
@@ -169,31 +170,17 @@ class ReferenceMeetingPageTest {
         assertEquals(View.GONE, page.meetingPanel.visibility)
     }
 
-    @Test fun accountEntryAndConnectionReturnCloseOldClientAndClearOldCapabilities() {
+    @Test fun accountEntryRemainsWithoutAConnectionConfigurationRoute() {
         val activity = Robolectric.buildActivity(MainActivity::class.java).create().get()
+        // 装配仍可由伙伴开发者／测试替换；终端用户没有填写部署地址的页面。
+        MeetingAppAssembly.configureBackend("https://backend.example.test")
         activity.findViewById<View>(R.id.account_button).performClick()
         val dialog = ShadowAlertDialog.getLatestAlertDialog()
         assertTrue(dialog.isShowing)
         assertEquals("账号登录", dialog.findViewById<TextView>(R.id.login_title).text.toString())
         dialog.dismiss()
-        activity.findViewById<View>(R.id.settings_button).performClick()
-        assertEquals(ConnectionSettingsActivity::class.java.name,
-            shadowOf(activity).nextStartedActivityForResult.intent.component!!.className)
-        val closes = AtomicInteger()
-        val old = Proxy.newProxyInstance(MeetingClient::class.java.classLoader,
-            arrayOf(MeetingClient::class.java)) { _, method, _ ->
-            if (method.name == "close") closes.incrementAndGet() else fail("旧客户端不得继续访问后端")
-            null
-        } as MeetingClient
-        field(activity, "preMeetingClient", old)
-        field(activity, "deploymentCapabilities", setOf(MeetingCapabilityState.TRANSCRIPT))
-        // Kotlin的protected不包含同包访问；仍调用原生命周期入口，不改App的可见性。
-        MainActivity::class.java.getDeclaredMethod("onActivityResult", Int::class.javaPrimitiveType,
-            Int::class.javaPrimitiveType, Intent::class.java).apply { isAccessible = true }
-            .invoke(activity, 1003, Activity.RESULT_OK, null)
-        assertEquals(1, closes.get())
-        assertNull(field(activity, "preMeetingClient"))
-        assertEquals(emptySet<String>(), field(activity, "deploymentCapabilities"))
+        assertNull(shadowOf(activity).nextStartedActivityForResult)
+        assertEquals(0, activity.resources.getIdentifier("settings_button", "id", activity.packageName))
         assertFalse(activity.findViewById<View>(R.id.start_meeting).isEnabled)
     }
 
@@ -231,7 +218,6 @@ class ReferenceMeetingPageTest {
         assertFixed(page.overlay)
         assertTrue(bounds(page.root, page.stop).bottom <= 1080)
         assertFalse(page.account.isEnabled)
-        assertFalse(page.settings.isEnabled)
         val controller = Robolectric.buildService(MeetingService::class.java).create()
         val service = controller.get()
         val stops = AtomicInteger()
@@ -582,15 +568,7 @@ class ReferenceMeetingPageTest {
         companion object { const val WEB = "https://frozen.example.test/index.html?x=1#part" }
     }
 
-    @Test fun independentSettingsSaveAndNativeWebBackRetainOriginalUrl() {
-        val settings = Robolectric.buildActivity(ConnectionSettingsActivity::class.java).create().get()
-        settings.findViewById<EditText>(R.id.backend_url).setText("https://backend.example.test")
-        settings.findViewById<EditText>(R.id.web_url).setText("https://result.example.test/index.html")
-        settings.findViewById<View>(R.id.connection_save).performClick()
-        assertEquals(Activity.RESULT_OK, shadowOf(settings).resultCode)
-        assertTrue(settings.isFinishing)
-        assertEquals("https://backend.example.test", MeetingAppAssembly.serverUrl())
-        assertEquals("https://result.example.test/index.html", MeetingAppAssembly.resultWebUrl())
+    @Test fun nativeWebBackRetainsOriginalUrl() {
         val url = "https://result.example.test/?meetingId=mtg_same&genTime=555"
         val result = Robolectric.buildActivity(ResultActivity::class.java,
             Intent().putExtra(ResultActivity.EXTRA_RESULT_URL, url)).create().get()

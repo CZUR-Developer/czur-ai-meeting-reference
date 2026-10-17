@@ -44,7 +44,7 @@ class PersistentReferenceIdentityProvider(context: Context) : LoginIdentityProvi
             .apply()
     }
 
-    /** 退出时删除令牌和关联的显示信息，保留后端连接设置方便再次登录。 */
+    /** 退出时删除令牌和关联的显示信息，部署地址仍由当前 APK 的编译配置提供。 */
     override fun clearSession() {
         session = null
         preferences.edit()

@@ -12,6 +12,7 @@ import com.czur.aimeeting.client.result.ResultActionPlugin
 import com.czur.aimeeting.client.result.ResultOptions
 import com.czur.aimeeting.reference.AppResultActionPlugin
 import com.czur.aimeeting.reference.WebResultActionPlugin
+import com.czur.aimeeting.reference.BuildConfig
 import com.czur.aimeeting.reference.MeetingPageViews
 import com.czur.aimeeting.reference.ui.MeetingOverlayFactory
 import com.czur.aimeeting.reference.ui.OverlayViewFactory
@@ -27,7 +28,7 @@ import java.util.concurrent.Executor
 /**
  * 参考 App 集中装配身份、模型、结果动作和页面/窗口工厂；默认只开放 Web。
  * 身份 Provider 由 Activity 和 Service 共用，伙伴替换 Provider 即可，不必改 SDK 编排。
- * 密码不保存，会话保存由身份插件负责；参考默认插件持久化有效会话和连接地址。
+ * 密码不保存，会话保存由身份插件负责；默认地址随 APK 编译配置注入。
  * 登录交互入口与身份数据来源分开替换，模型端点继续由后端下发。
  */
 object MeetingAppAssembly {
@@ -47,17 +48,20 @@ object MeetingAppAssembly {
     private var pageFactory: MeetingPageViews.Factory = MeetingPageViews.DefaultFactory()
 
     /**
-     * 由 Application 页面在首次启动时调用一次。连接地址和参考登录插件共用同一份
-     * 应用设置，因此进程重启后仍可自动恢复“后端＋会话”的配对；自定义身份插件仍可
-     * 通过 registerIdentityProvider 替换默认实现。
+     * 页面首次启动时调用一次，以当前 APK 的 BuildConfig 装配后端和结果 Web。
+     *
+     * 旧 backend_url 只用于判断已保存身份属于哪个后端，不能覆盖编译值；同一后端
+     * 保留有效登录，切换后端时清除旧会话。旧的结果页设置完全不参与装配，单独更换
+     * 结果页不会注销账号。伙伴可在初始化后通过 registerIdentityProvider 等开发者
+     * 接口替换装配，终端用户不需要也没有手填 URL 的界面。
      */
     @JvmStatic @Synchronized fun initialize(context: Context) {
         if (initialized) return
         val application = context.applicationContext
         preferences = application.getSharedPreferences("czur_reference_settings", Context.MODE_PRIVATE)
-        serverUrl = preferences?.getString(KEY_BACKEND_URL, "") ?: ""
-        resultWebUrl = preferences?.getString(KEY_RESULT_WEB_URL, "") ?: ""
         identityProvider = PersistentReferenceIdentityProvider(application)
+        applyBackend(BuildConfig.REFERENCE_BACKEND_URL, preferences?.getString(KEY_BACKEND_URL, "").orEmpty())
+        resultWebUrl = BuildConfig.REFERENCE_RESULT_WEB_URL
         initialized = true
     }
 
@@ -66,19 +70,24 @@ object MeetingAppAssembly {
     @JvmStatic @Synchronized fun modelAdapters(): ModelAdapterRegistry = modelAdapters ?: ModelAdapterRegistry().also { modelAdapters = it }
     @JvmStatic @Synchronized fun registerPageFactory(factory: MeetingPageViews.Factory) { pageFactory = factory }
     @JvmStatic @Synchronized fun pageFactory() = pageFactory
-    @JvmStatic @Synchronized fun configureResultWeb(url: String) {
-        resultWebUrl = url
-        preferences?.edit()?.putString(KEY_RESULT_WEB_URL, url)?.apply()
-    }
+    /** 开发者装配／测试接缝；默认 App 使用编译值，本接口不保存终端用户地址偏好。 */
+    @JvmStatic @Synchronized fun configureResultWeb(url: String) { resultWebUrl = url }
     @JvmStatic @Synchronized fun resultWebUrl() = resultWebUrl
 
     /** 只替换显示工厂，不持有 Activity，不重开音源或会议。 */
     @JvmStatic @Synchronized fun registerOverlayFactory(factory: MeetingOverlayFactory) { overlayFactory = factory }
     @JvmStatic @Synchronized fun overlayFactory() = overlayFactory
 
-    /** 默认内存账号切换后端时清除旧会话，自定义 Provider 自行决定账号生命周期。 */
-    @JvmStatic @Synchronized fun configureBackend(backend: String) {
-        if (serverUrl != backend) (identityProvider as? LoginIdentityProvider)?.clearSession()
+    /**
+     * 开发者在创建客户端前替换后端的装配接缝，参考页面没有运行时配置入口。
+     * 默认登录插件切换后端时清旧会话；只读身份插件仍自行负责账号生命周期。
+     */
+    @JvmStatic @Synchronized fun configureBackend(backend: String) { applyBackend(backend, serverUrl) }
+
+    /** 仅比较账号归属时忽略尾斜杠；请求地址和结果页的 path/query/fragment 不作改写。 */
+    private fun applyBackend(backend: String, previousBackend: String) {
+        if (previousBackend.trimEnd('/') != backend.trimEnd('/'))
+            (identityProvider as? LoginIdentityProvider)?.clearSession()
         serverUrl = backend
         preferences?.edit()?.putString(KEY_BACKEND_URL, backend)?.apply()
     }
@@ -149,5 +158,4 @@ object MeetingAppAssembly {
     @JvmStatic @Synchronized fun clearReferenceSession() { (identityProvider as? LoginIdentityProvider)?.clearSession() }
 
     private const val KEY_BACKEND_URL = "backend_url"
-    private const val KEY_RESULT_WEB_URL = "result_web_url"
 }

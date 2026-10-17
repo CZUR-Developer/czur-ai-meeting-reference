@@ -1,9 +1,34 @@
 import java.io.File
+import java.util.Properties
 
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
+
+/**
+ * 部署地址属于合作伙伴的打包输入，不要求终端用户在设备上填写。
+ *
+ * 默认读取 Android 工程根目录下被忽略的 deployment.local.properties；也可用
+ * -PreferenceDeploymentFile 指定仓外文件。单独的同名 -P 地址参数优先于文件，
+ * 未配置时保留空值，由 App 提示联系应用提供方，不回退到历史手输地址或 CZUR 服务。
+ * 文件只放应用端点；模型 Key 和账号密码不属于这个构建配置。
+ */
+val deploymentFileProperty = providers.gradleProperty("referenceDeploymentFile").orNull
+val deploymentFile = rootProject.file(deploymentFileProperty ?: "deployment.local.properties")
+require(deploymentFileProperty == null || deploymentFile.isFile) {
+    "referenceDeploymentFile must point to an existing .properties file"
+}
+val deploymentProperties = Properties().apply {
+    if (deploymentFile.isFile) deploymentFile.inputStream().use { load(it) }
+}
+fun referenceDeploymentValue(key: String): String =
+    (providers.gradleProperty(key).orNull ?: deploymentProperties.getProperty(key).orEmpty()).trim()
+
+/** BuildConfig 的 String 字面量由 AGP 生成 Java 源码；转义只影响源码表示，不修改 URL。 */
+fun buildConfigString(value: String): String = "\"" + value
+    .replace("\\", "\\\\").replace("\"", "\\\"")
+    .replace("\r", "\\r").replace("\n", "\\n") + "\""
 
 /**
  * 只为 Debug 生成可选的本机 CA 信任资源，Release 的 source set 不引用这些文件。
@@ -73,6 +98,7 @@ if (meetingRuntime == "sdk") {
 android {
     namespace = "com.czur.aimeeting.reference"
     compileSdk = 35
+    buildFeatures { buildConfig = true }
 
     defaultConfig {
         applicationId = "com.czur.aimeeting.reference"
@@ -80,6 +106,8 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
+        buildConfigField("String", "REFERENCE_BACKEND_URL", buildConfigString(referenceDeploymentValue("referenceBackendUrl")))
+        buildConfigField("String", "REFERENCE_RESULT_WEB_URL", buildConfigString(referenceDeploymentValue("referenceResultWebUrl")))
     }
 
     compileOptions {

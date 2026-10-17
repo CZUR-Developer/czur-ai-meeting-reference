@@ -22,7 +22,7 @@ class MeetingStartConditionTest {
         val blocked = MeetingStartConditions.prepare({ MeetingStartCondition.Decision.block("请先完成伙伴准备") }, setup, discovery, web)
         assertFalse(blocked.allowed()); assertEquals("请先完成伙伴准备", blocked.message())
         val action = MeetingStartConditions.prepare(MeetingStartConditions.create(null), setup, discovery, web)
-        assertFalse(action.allowed()); assertEquals("请填写有效的网页结果地址", action.message())
+        assertFalse(action.allowed()); assertEquals("网页结果尚未配置，请联系应用提供方", action.message())
         assertNull(MeetingAppAssembly.consumePreparedMeeting())
     }
 }

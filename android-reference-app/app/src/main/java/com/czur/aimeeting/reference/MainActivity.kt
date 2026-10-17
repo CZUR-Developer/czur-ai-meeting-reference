@@ -92,7 +92,6 @@ class MainActivity : Activity() {
     private lateinit var overlayButton: Button
     private lateinit var swapColumnsButton: Button
     private lateinit var loginButton: Button
-    private lateinit var settingsButton: Button
     /** 只用于页面入口，开始会议仍重新读取 Provider 的真实凭据。 */
     private var displayedIdentity: IdentitySession? = null
     private var meetingBusy = false
@@ -109,12 +108,12 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // 先恢复后端地址与默认登录插件，再创建页面和 Service 共用的客户端。
+        // 地址由 APK 编译配置装配；默认登录插件按同后端身份配对恢复会话。
         MeetingAppAssembly.initialize(this)
         setupPreferences = MeetingSetupPreferenceStore(this)
         startCondition = MeetingStartConditions.create(applicationContext)
         page = MeetingAppAssembly.pageFactory().create(this)
-        loginButton = page.account; settingsButton = page.settings; resultGroup = page.results
+        loginButton = page.account; resultGroup = page.results
         transcriptView = page.placeholder; meetingTitle = page.meetingTitle; transcriptList = page.transcriptList
         leftLanguageTitle = page.leftTitle; rightLanguageTitle = page.rightTitle; elapsedView = page.elapsed
         audioLevelBar = page.level; audioLevelView = page.levelText; statusView = page.status
@@ -136,7 +135,6 @@ class MainActivity : Activity() {
                     }
                 })
         }
-        settingsButton.setOnClickListener { startActivityForResult(Intent(this, ConnectionSettingsActivity::class.java), CONNECTION_SETTINGS_REQUEST) }
         page.modes.setOnCheckedChangeListener { _, checkedId ->
             if (bindingSetupViews) return@setOnCheckedChangeListener
             val mode = if (checkedId == translationModeView.id) MeetingSetup.Mode.LIVE_TRANSLATION else MeetingSetup.Mode.LIVE_TRANSCRIPT
@@ -190,6 +188,7 @@ class MainActivity : Activity() {
         reminderPopup = MeetingReminderPopup(this, false, Runnable { meetingService?.confirmReminder() })
         page.root.addView(reminderPopup.view(), FrameLayout.LayoutParams(-1, -1))
         setContentView(page.root)
+        if (MeetingAppAssembly.serverUrl().isEmpty()) statusView.setText(R.string.reference_deployment_not_configured)
     }
 
     /**
@@ -200,6 +199,10 @@ class MainActivity : Activity() {
      * 或增加第二份账号状态。伙伴自定义 AppLoginEntry 不会经过本默认菜单。
      */
     private fun showDefaultAccountEntry() {
+        if (MeetingAppAssembly.serverUrl().isEmpty()) {
+            statusView.setText(R.string.reference_deployment_not_configured)
+            return
+        }
         if (displayedIdentity == null) {
             showLoginDialog()
             return
@@ -238,9 +241,8 @@ class MainActivity : Activity() {
         val baseUrl = MeetingAppAssembly.serverUrl()
         val username = usernameView.text.toString().trim()
         val password = passwordView.text.toString()
-        if (baseUrl.isEmpty() || username.isEmpty() || password.isEmpty()) {
-            loginMessage("请先在连接设置配置后端，并填写账号和密码"); return
-        }
+        if (baseUrl.isEmpty()) { loginMessage(getString(R.string.reference_deployment_not_configured)); return }
+        if (username.isEmpty() || password.isEmpty()) { loginMessage("请填写账号和密码"); return }
         setConfigurationEnabled(false)
         loginMessage("正在登录…")
         preMeetingClient?.close()
@@ -260,7 +262,11 @@ class MainActivity : Activity() {
 
     /** 进入页面或伙伴登录返回时读取身份，页面不直接读取 token 或 Provider 私有字段。 */
     private fun refreshIdentity(reloadCapabilities: Boolean) {
-        if (MeetingAppAssembly.serverUrl().isEmpty()) return
+        if (MeetingAppAssembly.serverUrl().isEmpty()) {
+            statusView.setText(R.string.reference_deployment_not_configured)
+            startButton.isEnabled = false
+            return
+        }
         if (preMeetingClient == null) preMeetingClient = MeetingRuntimeFactory.create(this, MeetingAppAssembly.clientConfig { main.post(it) })
         preMeetingClient!!.refreshIdentity(object : MeetingClient.Callback<IdentityResult> {
             override fun onSuccess(identity: IdentityResult) {
@@ -445,14 +451,6 @@ class MainActivity : Activity() {
     }
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == CONNECTION_SETTINGS_REQUEST) {
-            if (resultCode == RESULT_OK) {
-                preMeetingClient?.close(); preMeetingClient = null; displayedIdentity = null
-                deploymentCapabilities = emptySet(); discovery = null; refreshLanguageOptions(emptyList())
-                refreshResultAvailability(); refreshModeAvailability(); startButton.isEnabled = false
-            }
-            return
-        }
         if (requestCode != PRESENTATION_PERMISSION_REQUEST) return
         val approved = pendingPresentationMeeting
         pendingPresentationMeeting = null
@@ -647,7 +645,7 @@ class MainActivity : Activity() {
     }
     private fun setConfigurationEnabled(enabled: Boolean) {
         val available = enabled && !meetingBusy && pendingPresentationMeeting == null
-        loginButton.isEnabled = available; settingsButton.isEnabled = available
+        loginButton.isEnabled = available
         loginDialog?.takeIf { it.isShowing }?.findViewById<View>(R.id.login_submit)?.isEnabled = available
     }
     override fun onStart() { super.onStart(); serviceBound = bindService(Intent(this, MeetingService::class.java), serviceConnection, Context.BIND_AUTO_CREATE) }
@@ -662,6 +660,5 @@ class MainActivity : Activity() {
         private const val TAG = "AiMeetingReference"
         private const val MIC_PERMISSION_REQUEST = 1001
         private const val PRESENTATION_PERMISSION_REQUEST = 1002
-        private const val CONNECTION_SETTINGS_REQUEST = 1003
     }
 }

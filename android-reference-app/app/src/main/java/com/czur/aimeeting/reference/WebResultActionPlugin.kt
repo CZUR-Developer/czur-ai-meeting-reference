@@ -49,7 +49,7 @@ class WebResultActionPlugin private constructor(
     }
     override fun prepare(options: MeetingOptions): Preparation {
         val url = configuredUrl ?: options.resultWebUrl()
-        if (!validUrl(url)) return Preparation.block("请填写有效的网页结果地址")
+        if (!validUrl(url)) return Preparation.block("网页结果尚未配置，请联系应用提供方")
         return Preparation.allow { context, callback ->
             val link = resultUrl(url, context.result().meetingId(), context.result().genTime())
             // 此执行入口只由原 READY 结果动作调用。先记住原链接，再等待可见页面；

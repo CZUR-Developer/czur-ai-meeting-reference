@@ -30,7 +30,7 @@ class EmailResultActionPlugin @JvmOverloads constructor(
     override fun prepare(options: MeetingOptions): Preparation {
         val url = configuredUrl ?: options.resultWebUrl()
         val emails = configuredEmails ?: options.resultEmails()
-        if (!WebResultActionPlugin.validUrl(url)) return Preparation.block("请填写有效的网页结果地址")
+        if (!WebResultActionPlugin.validUrl(url)) return Preparation.block("网页结果尚未配置，请联系应用提供方")
         if (emails.isEmpty() || emails.size > 10 || emails.distinct().size != emails.size || emails.any { !EMAIL.matches(it) })
             return Preparation.block("请填写1～10个不重复的有效收件邮箱后开始会议")
         val frozen = emails.toList()

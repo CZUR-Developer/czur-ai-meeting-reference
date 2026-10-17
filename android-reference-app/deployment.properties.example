@@ -1,0 +1,6 @@
+# 合作伙伴在打包前配置部署入口。复制为 deployment.local.properties（已被 Git 忽略），
+# 或使用 -PreferenceDeploymentFile=/absolute/path/deployment.properties 指定仓外文件。
+# 同名显式 -PreferenceBackendUrl / -PreferenceResultWebUrl 优先于本文件。
+# 这里仅放后端／结果页地址，不放模型 Key、账号或密码；模型材料继续由后端下发。
+referenceBackendUrl=https://meeting.example.com
+referenceResultWebUrl=https://result.example.com/index.html

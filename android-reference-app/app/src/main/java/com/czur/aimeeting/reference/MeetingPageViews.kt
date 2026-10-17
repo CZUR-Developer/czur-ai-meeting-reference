@@ -43,7 +43,6 @@ class MeetingPageViews(@JvmField val root: FrameLayout) {
     @JvmField val leftTitle: TextView = root.findViewById(R.id.left_language_title)
     @JvmField val rightTitle: TextView = root.findViewById(R.id.right_language_title)
     @JvmField val account: Button = root.findViewById(R.id.account_button)
-    @JvmField val settings: Button = root.findViewById(R.id.settings_button)
     @JvmField val start: Button = root.findViewById(R.id.start_meeting)
     /** 停止已退窗但 SDK 仍允许确认时使用；点击行为由 Activity 接回原 requestStop。 */
     @JvmField val stopConfirmation: Button = Button(root.context, null, 0, R.style.ReferenceButton).apply {
