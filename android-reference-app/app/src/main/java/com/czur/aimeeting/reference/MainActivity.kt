@@ -542,7 +542,9 @@ class MainActivity : Activity() {
         val failedAction = state.actionOutcome?.status() == ResultActionOutcome.Status.FAILED
         retryActionButton.visibility = if (failedAction) View.VISIBLE else View.GONE
         endResultButton.visibility = if (failedAction) View.VISIBLE else View.GONE
-        statusView.text = state.status; capabilityView.text = state.capabilityText
+        // 新的空闲 Service 没有会议消息，不覆盖本页面已有的身份／部署提示。
+        if (state.status.isNotBlank()) statusView.text = state.status
+        capabilityView.text = state.capabilityText
         page.showMeeting(state.active); page.showPresentationNotice(state.active, state.presentationNotice)
         page.showStopConfirmation(!state.active && state.canStop)
         updateStartAvailability()

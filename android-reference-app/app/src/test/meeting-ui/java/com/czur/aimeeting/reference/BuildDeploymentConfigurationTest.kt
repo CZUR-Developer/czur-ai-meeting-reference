@@ -1,6 +1,9 @@
 package com.czur.aimeeting.reference
 
 import android.content.Context
+import android.content.ComponentName
+import android.content.Intent
+import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.view.View
 import android.widget.TextView
@@ -89,6 +92,35 @@ class BuildDeploymentConfigurationTest {
             assertTrue(activities.orEmpty().none { it.name.endsWith(".ConnectionSettingsActivity") })
         } finally {
             controller.destroy()
+        }
+    }
+
+    @Test fun idleServiceBindingKeepsTheActivityLoginAndDeploymentMessages() {
+        val activityController = Robolectric.buildActivity(MainActivity::class.java).create()
+        val serviceController = Robolectric.buildService(MeetingService::class.java).create()
+        try {
+            val activity = activityController.get()
+            val status = activity.findViewById<TextView>(R.id.status)
+            val connection = MainActivity::class.java.getDeclaredField("serviceConnection")
+                .apply { isAccessible = true }.get(activity) as ServiceConnection
+            val service = serviceController.get()
+            fun bindIdleService() = connection.onServiceConnected(
+                ComponentName(activity, MeetingService::class.java), service.onBind(Intent())
+            )
+
+            // 身份交互在 Activity 中完成；此处只验证随后空闲绑定不篡改其已显示的提示。
+            status.text = "登录成功，可开始会议"
+            bindIdleService()
+            assertEquals("登录成功，可开始会议", status.text.toString())
+
+            MeetingAppAssembly.configureBackend("")
+            MainActivity::class.java.getDeclaredMethod("refreshIdentity", Boolean::class.javaPrimitiveType)
+                .apply { isAccessible = true }.invoke(activity, false)
+            bindIdleService()
+            assertEquals("部署尚未配置，请联系应用提供方。", status.text.toString())
+        } finally {
+            activityController.destroy()
+            serviceController.destroy()
         }
     }
 

@@ -114,7 +114,8 @@ class MeetingService : Service() {
     private var presentationNotice = ""
     private var setup: MeetingSetup? = null
     private var meetingId: String? = null
-    private var status = "请先登录，再开始会议"
+    /** 空闲绑定不发布账号／部署提示；实际创建会议后才由 Service 提供会议消息。 */
+    private var status = ""
     private var capabilityText = "本场功能将在创建会议后按后端能力显示"
     private var audioInputMode: AudioInputMode? = null
     private var audioErrorText: String? = null
