@@ -1,5 +1,6 @@
 package com.czur.reference.application.artifact.s3;
 
+import com.czur.reference.application.artifact.AudioArtifactBudget;
 import com.czur.reference.application.port.artifact.ArtifactStore;
 import com.czur.reference.application.port.artifact.ArtifactStoreException;
 import org.junit.jupiter.api.Test;
@@ -20,6 +21,20 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** S3 状态机的本机定向测试：传输替身保存与真实 S3 相同的对象键和值。 */
 class S3ArtifactStoreTest {
+    @Test
+    void s3BudgetAcceptsSameLongestPcmIntentWithoutAllocatingAudio() throws Exception {
+        long budget = AudioArtifactBudget.forMaxDurationMs(3_600_000L);
+        try (var store = new S3ArtifactStore(new InMemoryObjects(), "budget/", budget)) {
+            var spec = new ArtifactStore.WriteIntentSpec("audio-budget", "mtg_budget", "audio.original",
+                    "application/octet-stream", null, 1, budget, "sha256:" + "0".repeat(64));
+            assertEquals(ArtifactStore.PrepareStatus.APPLIED, store.createWriteIntent(spec).status());
+            var excessive = new ArtifactStore.WriteIntentSpec("audio-too-large", "mtg_budget", "audio.original",
+                    "application/octet-stream", null, 1, budget + 1, "sha256:" + "0".repeat(64));
+            assertEquals(ArtifactStoreException.Code.CONTENT_TOO_LARGE,
+                    assertThrows(ArtifactStoreException.class, () -> store.createWriteIntent(excessive)).code());
+        }
+    }
+
     /**
      * 对本机 Moto 等兼容端点运行一次真实 SDK 往返；这能发现把 aws-chunked
      * 传输帧误存为对象正文的问题。仅显式传入测试端点和测试 Bucket 时启用。

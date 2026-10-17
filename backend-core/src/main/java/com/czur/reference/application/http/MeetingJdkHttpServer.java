@@ -62,6 +62,7 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
     private final MeetingHttpDispatcher dispatcher;
     private final HttpErrorMapper errors;
     private final BooleanSupplier readinessCheck;
+    private final long maxBinaryContentBytes;
     private final RequestExecutor requests;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final AtomicBoolean started = new AtomicBoolean();
@@ -127,6 +128,16 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
     }
 
     /**
+     * 为客户端直连会议入口显式指定媒体预算，必须与同一部署的 Artifact Store 一致。
+     * 该参数只影响录音二进制上传；旧构造器和 JSON 网络上限保持原行为。
+     */
+    public MeetingJdkHttpServer(InetSocketAddress address, MeetingHttpDispatcher dispatcher,
+            BooleanSupplier readinessCheck, long maxBinaryContentBytes) throws IOException {
+        this(address, dispatcher, readinessCheck, DEFAULT_WORKERS, DEFAULT_QUEUE_CAPACITY,
+                maxBinaryContentBytes);
+    }
+
+    /**
      * 供小型网络实例和测试夹具配置有界执行器；至少两个 worker，使一个慢
      * readiness 或业务调用不占住唯一 liveness 执行线程。
      */
@@ -149,9 +160,18 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
 
     private MeetingJdkHttpServer(InetSocketAddress address, MeetingHttpDispatcher dispatcher,
             BooleanSupplier readinessCheck, int workers, int queueCapacity) throws IOException {
+        this(address, dispatcher, readinessCheck, workers, queueCapacity,
+                BinaryHttpRequest.MAX_CONTENT_BYTES);
+    }
+
+    private MeetingJdkHttpServer(InetSocketAddress address, MeetingHttpDispatcher dispatcher,
+            BooleanSupplier readinessCheck, int workers, int queueCapacity,
+            long maxBinaryContentBytes) throws IOException {
+        if (maxBinaryContentBytes <= 0) throw new IllegalArgumentException("media budget must be positive");
         this.dispatcher = Objects.requireNonNull(dispatcher, "dispatcher");
         this.errors = dispatcher.errorMapper();
         this.readinessCheck = Objects.requireNonNull(readinessCheck, "readinessCheck");
+        this.maxBinaryContentBytes = maxBinaryContentBytes;
         this.requests = new RequestExecutor(workers, queueCapacity);
         this.bindAddress = Objects.requireNonNull(address, "address");
         HttpServer bound;
@@ -343,7 +363,7 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
      * 只解码媒体上传的元数据并保留请求流；正文长度必须显式声明，避免把未知长度
      * 的网络输入交给 ArtifactStore。关闭责任由 BinaryHttpRequest/dispatcher 负责。
      */
-    private static BinaryHttpRequest decodeBinary(HttpExchange exchange) throws IOException {
+    private BinaryHttpRequest decodeBinary(HttpExchange exchange) throws IOException {
         URI uri = exchange.getRequestURI();
         String path = uri.getRawPath();
         if (uri.isAbsolute() || uri.getRawAuthority() != null || uri.getRawFragment() != null
@@ -368,7 +388,7 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
         var input = exchange.getRequestBody();
         try {
             return new BinaryHttpRequest(exchange.getRequestMethod(), path, headers, query,
-                    contentLength, input);
+                    contentLength, input, maxBinaryContentBytes);
         } catch (RuntimeException failure) {
             input.close();
             throw failure;

@@ -53,6 +53,7 @@ import com.czur.reference.application.port.MeetingManifestPort;
 import com.czur.reference.application.port.MeetingArtifactContentPort;
 import com.czur.reference.application.port.MeetingArtifactMediaPort;
 import com.czur.reference.application.port.artifact.ArtifactStore;
+import com.czur.reference.application.artifact.AudioArtifactBudget;
 import com.czur.reference.application.port.ProductProfileCatalog;
 import com.czur.reference.application.realtime.RealtimeAudioIngress;
 import com.czur.reference.application.realtime.RealtimeTranscriptSessions;
@@ -115,6 +116,7 @@ public class MeetingHttpAssembly implements AutoCloseable {
     private final Clock clock;
     private final MeetingArtifactMediaPort artifactMedia;
     private final EntitlementProvider entitlementProvider;
+    private final long audioArtifactMaxBytes;
     private final AtomicBoolean closed;
 
     private MeetingHttpAssembly(
@@ -130,7 +132,7 @@ public class MeetingHttpAssembly implements AutoCloseable {
             ResultEmailEndpoint resultEmail, MeetingArtifactMediaPort artifactMedia,
             EntitlementProvider entitlementProvider,
             MeetingArtifactHttpEndpoint artifactEndpoint,
-            SpeakerIdentityEnrollmentEndpoint speakerEnrollment) {
+            SpeakerIdentityEnrollmentEndpoint speakerEnrollment, long audioArtifactMaxBytes) {
         this.closed = new AtomicBoolean();
         this.database = database;
         this.databaseContext = Objects.requireNonNull(databaseContext, "databaseContext");
@@ -149,6 +151,7 @@ public class MeetingHttpAssembly implements AutoCloseable {
         this.dispatcher = new MeetingHttpDispatcher(runtime, errors, contextResolver, resultEmail,
                 artifactEndpoint, speakerEnrollment);
         this.entitlementProvider = entitlementProvider;
+        this.audioArtifactMaxBytes = audioArtifactMaxBytes;
     }
 
     /** 薄兼容facade共享同一组资源和关闭标记，不创建第二份运行时或数据库池。 */
@@ -169,6 +172,7 @@ public class MeetingHttpAssembly implements AutoCloseable {
         this.clock = source.clock;
         this.artifactMedia = source.artifactMedia;
         this.entitlementProvider = source.entitlementProvider;
+        this.audioArtifactMaxBytes = source.audioArtifactMaxBytes;
         this.closed = source.closed;
     }
 
@@ -480,7 +484,8 @@ public class MeetingHttpAssembly implements AutoCloseable {
                             : new MeetingArtifactHttpEndpoint(clientInput, artifactMedia, errors),
                     speakerAvailable ? new SpeakerIdentityEnrollmentEndpoint(
                             new JdbcSpeakerIdentityEnrollmentPort(databaseContext, artifactStore,
-                                    speakerIdentity), errors) : null);
+                                    speakerIdentity), errors) : null,
+                    AudioArtifactBudget.forMaxDurationMs(config.runtimeLimits().maxMeetingDurationMs()));
         } catch (RuntimeException | Error failure) {
             try {
                 if (runtime != null) {
@@ -577,7 +582,8 @@ public class MeetingHttpAssembly implements AutoCloseable {
                 () -> (database == null ? databaseContext.checkBaselineReadiness().ready()
                         : database.checkReadiness().ready())
                         && (!realtimeRenewEnabled
-                                || database.checkRealtimeCredentialReadiness().ready()));
+                                || database.checkRealtimeCredentialReadiness().ready()),
+                audioArtifactMaxBytes);
     }
 
     /**

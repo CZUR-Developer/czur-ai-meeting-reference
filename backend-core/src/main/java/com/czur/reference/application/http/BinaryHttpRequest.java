@@ -1,5 +1,6 @@
 package com.czur.reference.application.http;
 
+import com.czur.reference.application.artifact.AudioArtifactBudget;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.Map;
@@ -14,8 +15,8 @@ import java.util.Objects;
  * 摘要和业务路径仍由上层端口核对，本类不解释厂商格式。</p>
  */
 public final class BinaryHttpRequest implements AutoCloseable {
-    /** 参考服务单次媒体上传的传输上限；JSON 正文上限保持不变。 */
-    public static final long MAX_CONTENT_BYTES = 64L * 1024L * 1024L;
+    /** 旧构造入口的兼容上限；真实部署使用按最长会议派生的显式预算。 */
+    public static final long MAX_CONTENT_BYTES = AudioArtifactBudget.LEGACY_MAX_BYTES;
 
     private final HttpRequest metadata;
     private final long contentLength;
@@ -33,8 +34,20 @@ public final class BinaryHttpRequest implements AutoCloseable {
      */
     public BinaryHttpRequest(String method, String path, Map<String, String> headers,
             Map<String, String> query, long contentLength, InputStream content) {
+        this(method, path, headers, query, contentLength, content, MAX_CONTENT_BYTES);
+    }
+
+    /**
+     * 使用可信部署预算接收单次媒体上传。预算由宿主根据最长会议计算，不能取自请求头。
+     * 长度超出预算仍使用原非法传输错误映射；JSON 请求的 1 MiB 限制不受影响。
+     *
+     * @param maxContentBytes 与实际 Artifact Store 一致的媒体字节预算
+     */
+    public BinaryHttpRequest(String method, String path, Map<String, String> headers,
+            Map<String, String> query, long contentLength, InputStream content,
+            long maxContentBytes) {
         this.metadata = new HttpRequest(method, path, headers, query, "");
-        if (contentLength <= 0 || contentLength > MAX_CONTENT_BYTES) {
+        if (maxContentBytes <= 0 || contentLength <= 0 || contentLength > maxContentBytes) {
             throw new IllegalArgumentException("binary content length is invalid");
         }
         this.contentLength = contentLength;

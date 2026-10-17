@@ -81,6 +81,19 @@ class MeetingJdkHttpServerTest {
     }
 
     @Test
+    void explicitMediaBudgetReachesNetworkBoundaryWithoutChangingJsonRequests() throws Exception {
+        // 使用小预算验证实际 socket 接线；长会数值边界在 AudioArtifactBudgetTest 覆盖。
+        try (Fixture fixture = new Fixture(8L)) {
+            assertEquals(501, status(fixture.send(request("POST",
+                    "/v1/meetings/mtg_budget/audio-original", "", "12345678"))));
+            assertEquals(400, status(fixture.send(request("POST",
+                    "/v1/meetings/mtg_budget/audio-original", "", "123456789"))));
+            // JSON 仍走原 1 MiB 路径，不受媒体专用的八字节测试预算影响。
+            assertEquals(501, status(fixture.send(request("POST", "/v1/meetings", "", "123456789"))));
+        }
+    }
+
+    @Test
     void ambiguousUriAndOversizedHeadersNeverReachBusinessPort() throws Exception {
         try (Fixture fixture = new Fixture()) {
             for (String uri : new String[]{"/v1/%6deetings", "/v1//meetings",
@@ -216,6 +229,10 @@ class MeetingJdkHttpServerTest {
         private int queries;
 
         private Fixture() throws Exception {
+            this(null);
+        }
+
+        private Fixture(Long mediaBudget) throws Exception {
             MeetingQueryPort query = new MeetingQueryPort() {
                 @Override
                 public Result get(GetRequest request) {
@@ -244,8 +261,10 @@ class MeetingJdkHttpServerTest {
             HttpErrorMapper errors = new HttpErrorMapper(() -> "network-test-diag");
             runtime = new MeetingHttpRuntime(new MeetingHttpAdapter(
                     query, deletion, decoder, errors), errors);
-            server = new MeetingJdkHttpServer(new InetSocketAddress(
-                    InetAddress.getLoopbackAddress(), 0), runtime, errors);
+            var address = new InetSocketAddress(InetAddress.getLoopbackAddress(), 0);
+            server = mediaBudget == null ? new MeetingJdkHttpServer(address, runtime, errors)
+                    : new MeetingJdkHttpServer(address,
+                            new MeetingHttpDispatcher(runtime, errors, null, null), () -> true, mediaBudget);
             server.start();
         }
 

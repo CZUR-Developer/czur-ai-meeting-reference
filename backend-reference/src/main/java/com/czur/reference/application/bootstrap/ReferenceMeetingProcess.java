@@ -43,8 +43,6 @@ import java.util.logging.Logger;
 public final class ReferenceMeetingProcess implements AutoCloseable {
     private static final Logger LOGGER = Logger.getLogger(ReferenceMeetingProcess.class.getName());
     private static final int SCAN_PAGE_SIZE = 32;
-    /** 参考会议的封口录音可持续数十分钟，和 HTTP 二进制上传上限保持同一量级。 */
-    private static final long MAX_ARTIFACT_BYTES = 64L * 1024L * 1024L;
     private static final long TICK_SECONDS = 1;
 
     public static final String HTTP_BIND = "AI_MEETING_HTTP_BIND";
@@ -183,10 +181,15 @@ public final class ReferenceMeetingProcess implements AutoCloseable {
      */
     static ArtifactStore createArtifactStore(Map<String, String> values)
             throws ArtifactStoreException {
+        // 和共享 HTTP 装配采用同一最长时长及同一函数，PCM 正常回退不会在长会停止时
+        // 被旧 64 MiB 截断。省略时只为独立 Store 选择测试保留参考一小时缺省。
+        long maxArtifactBytes = com.czur.reference.application.artifact.AudioArtifactBudget
+                .forMaxDurationMs(Long.parseLong(values.getOrDefault(
+                        MeetingDeploymentConfig.MAX_MEETING_DURATION_MS, "3600000")));
         String mode = values.getOrDefault(ARTIFACT_STORE, "file").trim();
         return switch (mode) {
             case "file" -> new PersistentFileSystemMockArtifactStore(
-                    Path.of(required(values, ARTIFACT_ROOT)), MAX_ARTIFACT_BYTES);
+                    Path.of(required(values, ARTIFACT_ROOT)), maxArtifactBytes);
             case "s3" -> {
                 String rawEndpoint = values.get(S3_ENDPOINT);
                 URI endpoint = rawEndpoint == null || rawEndpoint.isBlank()
@@ -194,7 +197,7 @@ public final class ReferenceMeetingProcess implements AutoCloseable {
                 yield new S3ArtifactStore(endpoint, required(values, S3_REGION),
                         required(values, S3_BUCKET), values.getOrDefault(S3_PREFIX, "artifacts/"),
                         required(values, S3_ACCESS_KEY_ID),
-                        required(values, S3_SECRET_ACCESS_KEY), MAX_ARTIFACT_BYTES);
+                        required(values, S3_SECRET_ACCESS_KEY), maxArtifactBytes);
             }
             default -> throw new IllegalArgumentException(
                     ARTIFACT_STORE + " must be file or s3");
