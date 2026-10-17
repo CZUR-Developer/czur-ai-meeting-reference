@@ -1,6 +1,7 @@
 package com.czur.aimeeting.reference.ui
 
 import android.content.Context
+import android.annotation.SuppressLint
 import android.graphics.Color
 import android.graphics.ImageDecoder
 import android.graphics.Typeface
@@ -12,6 +13,7 @@ import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -43,7 +45,11 @@ class CzurOverlayViews(context: Context, private val form: String, actions: Acti
         fun toggleSimple() = toggleSimple
     }
     private val scale = designScale(context)
-    private val root = FrameLayout(context).apply { tag = "overlay.panel"; clipChildren = true }
+    private val root = FrameLayout(context).apply {
+        tag = "overlay.panel"; clipChildren = true
+        // 仅可见且挂载的会中窗口阻止自然息屏；SDK hide/release 移除后不继续保亮。
+        keepScreenOn = true
+    }
     private val background = ImageView(context).apply { scaleType = ImageView.ScaleType.FIT_XY }
     private val voice = CzurVoiceLevelView(context).apply { tag = "overlay.level" }
     private val time = label(context, 22, "overlay.open")
@@ -121,6 +127,42 @@ class CzurOverlayViews(context: Context, private val form: String, actions: Acti
         }
     }
     fun view(): View = root
+
+    /**
+     * 只拖动非交互内容所在的面板空白。按钮、时间入口和大窗 ScrollView 先处理
+     * 自己的触摸序列；只有子 View 未消费时，事件才交到根面板，不抢历史滚动。
+     * 使用屏幕原始坐标计算增量，窗口本身移动时不会把局部坐标变化再次叠加。
+     * Mini 保留原来的点击恢复行为，不能拖动。
+     */
+    @SuppressLint("ClickableViewAccessibility")
+    fun enableDragging(onDrag: (deltaX: Int, deltaY: Int) -> Unit) {
+        if (form == "mini") return
+        val slop = ViewConfiguration.get(root.context).scaledTouchSlop
+        var previousX = 0f
+        var previousY = 0f
+        var dragging = false
+        root.setOnTouchListener { view, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    previousX = event.rawX; previousY = event.rawY; dragging = false
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = event.rawX - previousX
+                    val dy = event.rawY - previousY
+                    if (dragging || dx * dx + dy * dy > slop * slop) {
+                        dragging = true
+                        onDrag(Math.round(dx), Math.round(dy))
+                        previousX = event.rawX; previousY = event.rawY
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP -> { if (!dragging) view.performClick(); true }
+                MotionEvent.ACTION_CANCEL -> true
+                else -> false
+            }
+        }
+    }
 
     /** 完整替换已路由输入，不追加事件账本；计时、电平和停止状态来自同一宿主。 */
     fun render(display: MeetingDisplaySnapshot, timeText: String, canStop: Boolean, audioLevel: Int, simpleMode: Boolean) {

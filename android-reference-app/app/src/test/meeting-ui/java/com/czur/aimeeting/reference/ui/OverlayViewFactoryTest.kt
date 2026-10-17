@@ -1,9 +1,13 @@
 package com.czur.aimeeting.reference.ui
 
 import android.graphics.Rect
+import android.app.Application
+import android.content.res.Configuration
 import android.os.Looper
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.widget.TextView
 import com.czur.aimeeting.client.display.DisplayRouter
 import com.czur.aimeeting.client.display.MeetingDisplaySnapshot
 import com.czur.aimeeting.model.TranscriptEvent
@@ -182,7 +186,103 @@ class OverlayViewFactoryTest {
         window.dismiss()
     }
 
+    @Test fun backgroundDragKeepsButtonsAndHistoryScrollIndependentAndMiniFixed() {
+        val stops = AtomicInteger()
+        val window = OverlayViewFactory().create(RuntimeEnvironment.getApplication(), {}, {},
+            { stops.incrementAndGet() }) as OverlayViewFactory.DefaultWindow
+        window.show(single("visible", true))
+        window.render(single("visible", true), MeetingSetup.Mode.LIVE_TRANSCRIPT, false, "00:10", true, 42)
+        val controller = window.overlay.controller()
+        measure(controller)
+        val content = controller.contentView()!!
+        assertTrue(content.keepScreenOn)
+        val original = controller.windowSpec()!!
+        drag(content, 10f, 5f, 40f, -95f)
+        assertEquals(original.xPx + 30, controller.windowSpec()!!.xPx)
+        assertEquals(original.yPx - 100, controller.windowSpec()!!.yPx)
+        visible(controller, "overlay.stop").performClick()
+        assertEquals(1, stops.get())
+        window.overlay.collapse()
+        measure(controller)
+        val mini = controller.windowSpec()!!
+        // Mini 的点击仍交给原 restore 控件，移动和取消不能改变其固定位置。
+        touch(controller.contentView()!!, MotionEvent.ACTION_DOWN, 5f, 5f)
+        touch(controller.contentView()!!, MotionEvent.ACTION_MOVE, 35f, 25f)
+        touch(controller.contentView()!!, MotionEvent.ACTION_CANCEL, 35f, 25f)
+        assertEquals(mini.xPx, controller.windowSpec()!!.xPx)
+        assertEquals(mini.yPx, controller.windowSpec()!!.yPx)
+        window.overlay.restore()
+        assertEquals(original.xPx + 30, controller.windowSpec()!!.xPx)
+        assertEquals(original.yPx - 100, controller.windowSpec()!!.yPx)
+        controller.show(DefaultMeetingOverlay.TRANSLATION_LARGE)
+        window.render(bilingual(false), MeetingSetup.Mode.LIVE_TRANSLATION, false, "00:20", true, 42)
+        measure(controller)
+        val large = controller.windowSpec()!!
+        drag(controller.contentView()!!, 100f, 100f, 140f, 160f)
+        assertEquals(large.xPx, controller.windowSpec()!!.xPx)
+        assertEquals(large.yPx, controller.windowSpec()!!.yPx)
+        window.dismiss()
+    }
+
+    @Test fun resizedMiniRestoresSimpleModeSnapshotAndPositionWithoutRevivingHiddenWindow() {
+        val app = RuntimeEnvironment.getApplication()
+        val window = OverlayViewFactory().create(app, {}, {}, {}) as OverlayViewFactory.DefaultWindow
+        window.show(bilingual(false))
+        window.render(bilingual(false), MeetingSetup.Mode.LIVE_TRANSLATION, false, "00:40", true, 64)
+        val controller = window.overlay.controller()
+        measure(controller)
+        visible(controller, "overlay.simple").performClick()
+        measure(controller)
+        drag(controller.contentView()!!, 10f, 1f, -20f, -119f)
+        window.overlay.collapse()
+        val miniContent = controller.contentView()
+        resize(app, "w1280dp-h720dp-mdpi")
+        assertNotSame(miniContent, controller.contentView())
+        assertEquals(DefaultMeetingOverlay.MINI, controller.currentFormId())
+        assertEquals(84, controller.windowSpec()!!.widthPx)
+        window.overlay.restore()
+        measure(controller)
+        assertEquals(DefaultMeetingOverlay.TRANSLATION_NORMAL, controller.currentFormId())
+        assertEquals(109, controller.windowSpec()!!.heightPx)
+        assertEquals(20, controller.windowSpec()!!.xPx)
+        assertEquals(View.GONE, controller.contentView()!!.findViewWithTag<View>("overlay.open").visibility)
+        assertEquals("source", cell(controller, "overlay.right").getParts()[0].text().toString())
+        assertEquals("译文", cell(controller, "overlay.right-translation").getParts()[0].text().toString())
+        assertEquals(16f, cell(controller, "overlay.right").textSize, .01f)
+        assertEquals(64, controller.contentView()!!.findViewWithTag<CzurVoiceLevelView>("overlay.level").getLevel())
+        assertEquals("00 : 40", controller.contentView()!!.findViewWithTag<TextView>("overlay.open").text.toString())
+        val restored = controller.windowSpec()!!
+        assertTrue(restored.yPx in 0..(720 - restored.heightPx))
+        window.overlay.hide()
+        resize(app, "w960dp-h540dp-mdpi")
+        assertFalse(window.isShowing())
+        window.overlay.show(true)
+        assertEquals(900, controller.windowSpec()!!.widthPx)
+        assertEquals(DefaultMeetingOverlay.TRANSLATION_NORMAL, controller.currentFormId())
+        window.dismiss()
+        resize(app, "w1920dp-h1080dp-mdpi")
+        assertEquals(OverlayController.State.RELEASED, controller.state())
+        assertFalse(window.isShowing())
+    }
+
     companion object {
+        private fun resize(app: Application, qualifiers: String) {
+            RuntimeEnvironment.setQualifiers(qualifiers)
+            app.onConfigurationChanged(Configuration(app.resources.configuration))
+        }
+
+        private fun drag(view: View, fromX: Float, fromY: Float, toX: Float, toY: Float) {
+            touch(view, MotionEvent.ACTION_DOWN, fromX, fromY)
+            touch(view, MotionEvent.ACTION_MOVE, toX, toY)
+            touch(view, MotionEvent.ACTION_UP, toX, toY)
+        }
+
+        private fun touch(view: View, action: Int, x: Float, y: Float) {
+            MotionEvent.obtain(0, 10, action, x, y, 0).also { event ->
+                view.dispatchTouchEvent(event)
+                event.recycle()
+            }
+        }
         @JvmStatic fun single(oldText: String, complete: Boolean) = MeetingDisplaySnapshot(false, "zh-CN", "en-US", false,
             listOf(MeetingDisplaySnapshot.Row("old", TranscriptEvent("old", 2, 0, 100,
                 "zh-CN", oldText, complete), null, MeetingDisplaySnapshot.Side.A, DisplayRouter.Basis.MODEL_LANGUAGE),

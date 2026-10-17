@@ -1,6 +1,8 @@
 package com.czur.aimeeting.reference.ui
 
 import android.content.Context
+import android.content.ComponentCallbacks
+import android.content.res.Configuration
 import android.graphics.PixelFormat
 import android.os.IBinder
 import android.provider.Settings
@@ -19,36 +21,74 @@ class OverlayViewFactory : MeetingOverlayFactory {
         private val manager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
         private var views: CzurOverlayViews? = null
         private var showing = false
+        private var params: WindowManager.LayoutParams? = null
+        private var display: MeetingDisplaySnapshot? = null
+        private var timeText = ""
+        private var canStop = false
+        private var audioLevel = 0
+        private val placement = OverlayWindowPlacement()
+        private var screenWidth = 0
+        private var screenHeight = 0
+        private val configurationCallbacks = object : ComponentCallbacks {
+            override fun onConfigurationChanged(newConfig: Configuration) {
+                val metrics = context.resources.displayMetrics
+                if (!showing || (screenWidth == metrics.widthPixels && screenHeight == metrics.heightPixels)) return
+                // 只重建同一个基础形态的 View，不增加第二套四形态管理器或重启会议。
+                manager.removeViewImmediate(views!!.view())
+                attachLatest()
+            }
+            override fun onLowMemory() = Unit
+        }
         override fun show(initial: MeetingDisplaySnapshot): Boolean {
             if (showing) return true
             if (!Settings.canDrawOverlays(context)) return false
-            val created = CzurOverlayViews(context, if (initial.bilingual()) "translation-normal" else "subtitle",
+            display = initial
+            attachLatest()
+            showing = true
+            context.registerComponentCallbacks(configurationCallbacks)
+            return true
+        }
+        private fun attachLatest() {
+            val latest = display!!
+            val form = if (latest.bilingual()) "translation-normal" else "subtitle"
+            val created = CzurOverlayViews(context, form,
                 CzurOverlayViews.Actions(open, swap, stop, Runnable { dismiss() }, null, null, null, null))
             views = created
             val scale = CzurOverlayViews.designScale(context)
             val width = Math.round(1800 * scale)
-            val height = Math.round((if (initial.bilingual()) 293 else 222) * scale)
+            val height = Math.round((if (latest.bilingual()) 293 else 222) * scale)
             val metrics = context.resources.displayMetrics
-            val params = WindowManager.LayoutParams(width, height, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            screenWidth = metrics.widthPixels; screenHeight = metrics.heightPixels
+            val position = placement.resolve(form, width, height, screenWidth, screenHeight,
+                (screenWidth - width) / 2, screenHeight - height - Math.round(10 * scale))
+            val layout = WindowManager.LayoutParams(width, height, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL, PixelFormat.TRANSLUCENT)
-            params.gravity = Gravity.TOP or Gravity.LEFT
-            params.x = (metrics.widthPixels - width) / 2
-            params.y = metrics.heightPixels - height - Math.round(10 * scale)
-            manager.addView(created.view(), params)
-            showing = true
-            created.render(initial, "", false, 0, false)
-            return true
+            layout.gravity = Gravity.TOP or Gravity.LEFT
+            layout.x = position.x; layout.y = position.y
+            params = layout
+            created.enableDragging { dx, dy ->
+                val current = params!!
+                val moved = placement.move(form, current.x + dx, current.y + dy, current.width, current.height,
+                    screenWidth, screenHeight)
+                current.x = moved.x; current.y = moved.y
+                manager.updateViewLayout(created.view(), current)
+            }
+            manager.addView(created.view(), layout)
+            created.render(latest, timeText, canStop, audioLevel, false)
         }
         override fun isShowing() = showing
         override fun windowToken(): IBinder? = if (showing) views?.view()?.windowToken else null
         override fun render(display: MeetingDisplaySnapshot, mode: MeetingSetup.Mode, summaryEnabled: Boolean,
             timeText: String, canStop: Boolean, audioLevel: Int) {
+            this.display = display; this.timeText = timeText; this.canStop = canStop; this.audioLevel = audioLevel
             views?.render(display, timeText, canStop, audioLevel, false)
         }
         override fun dismiss() {
             if (!showing) return
+            context.unregisterComponentCallbacks(configurationCallbacks)
             manager.removeViewImmediate(views!!.view())
             views = null
+            params = null
             showing = false
         }
     }
