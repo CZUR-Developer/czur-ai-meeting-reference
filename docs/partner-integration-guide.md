@@ -1,9 +1,13 @@
-# 参考方案接入手册
+# 合作伙伴扩展开发手册
 
 本文面向需要二次开发的合作伙伴。它说明如何从本仓库启动一套可替换的
 Android App、Java 21 后端和静态 Web 结果页，并指出各项能力的扩展位置。
 本文只描述参考实现的公开边界；不会把 CZUR 的账号、模型密钥、私有地址或
 系统服务带入参考工程。
+
+首次接触项目请先读[从零接入指南](partner-getting-started.md)，按准备清单完成真实字幕
+闭环。全部第三方平台、资源、能力与缺失行为集中在[模型与能力配置指南](model-and-capability-guide.md)。
+本文重点说明已有参考实现和扩展接口，不要求伙伴了解内部开发阶段或CZUR私有工程。
 
 ## 1. 交付范围
 
@@ -43,8 +47,14 @@ bash tools/run-reference-client-backend.sh
 
 ```bash
 bash tools/check-reference-backend.sh
+REFERENCE_HTTP_BASE_URL='http://192.0.2.10:8080' \
+REFERENCE_WEB_BIND=0.0.0.0 REFERENCE_WEB_PORT=8090 \
 bash tools/run-reference-web.sh
 ```
+
+将文档占位地址 `192.0.2.10` 换为设备可达的PC局域网地址。完整真实模型、HTTPS与
+SDK构建顺序见[从零指南第4节](partner-getting-started.md#4-按步骤完成第一场真实会议)；
+模板默认的JSON模型端点需要另行提供服务，直接复制模板不能取得真实识别能力。
 
 参考客户端入口只启动 HTTP 业务接口；Android 通过
 `POST /v1/meetings/{meetingId}:modelSession` 取得短期材料后直连模型，音频不经过
@@ -94,7 +104,7 @@ Android 注册匹配的 `ModelAdapter`，再声明该实现确实支持的语言
 
 ## 3. 登录和鉴权扩展
 
-登录是 App 层的插件装配，不是会议业务的隐含依赖：
+登录通过 App 层插件装配，会议核心消费已验证身份：
 
 1. App 通过 `IdentityProvider` 读取、保存、恢复和清除登录会话。
 2. 参考实现的 `PersistentReferenceIdentityProvider` 只保存可恢复的会话材料，
@@ -140,8 +150,9 @@ Android 端通过 `ModelAdapter` 接收 Provider 数据，将原文、译文、�
 4. 在部署配置中声明支持的语言和能力；
 5. 用现有 Adapter 契约测试验证 partial/final、修订和停止时序。
 
-模型原始 JSON、厂商短码和永久密钥只能留在 Adapter／Issuer 内部，不能泄漏到
-会议核心或 Web。设备直连模型时，后端仍只接收归一化后的标准事件和用量事实。
+模型原始 JSON 和厂商短码留在对应 Adapter／Issuer 内部；永久密钥只由后端发行器的
+外部配置持有，不放入 Android Adapter、APK 或 Web。设备直连模型时，后端接收
+归一化的标准事件和用量事实，另按本场策略接收留存录音／截图。
 
 `ModelHttpRequest` 是交给 SDK 执行的中性请求描述，支持自定义 `method`、
 `headers`、`contentType` 和文本 `body`；地址来自本场 Server Grant。实时 Adapter
@@ -302,30 +313,17 @@ cd android-reference-app && ./gradlew :app:testDebugUnitTest :app:assembleDebug
 - 本机局域网数据库、Provider 和设备的真实短会；
 - 两场真实会议的跨会议声纹结果（启用该能力时）。
 
-2026-10-17 初次参考验证完成本机 MySQL 5.7 隔离库和“只声明实时字幕”的 Android
-设备短会：登录会话恢复、能力发现、实时字幕、正常停止、`READY` 结果和可选能力
-降级均已通过。该证据记录在
-[`docs/p10-local-lan-validation-20261017.md`](p10-local-lan-validation-20261017.md)。
-初次短会未启用翻译／总结／跨会议身份，且未保留录音，该时点不代签其他功能。
-后续真实 LAN HTTPS 已验证原文、中文到英语互译、总结及录音播放／拖动；Web 真实
-登录和人物命名注册也已通过。真实中文到日语的第二场已匹配首场同一人物，跨会议
-识别通过；该场手工打开 Web 的原译文／总结／身份与 609.02 秒录音播放／拖动已验。
-随后约 9 分半的真实中日长会已验默认 App 自动打开 Web，55 段原文／55 段日语、
-3 个人物、总结及 568.12 秒录音播放／拖动通过。会议结束后强停重开，登录保持，
-实际点击“查看上场结果”回到同一场原链接；另起会议主动息屏后正常停止并到 READY，
-唤醒后自动打开同场 Web，原文、总结和 83.02 秒录音播放／拖动通过。
-最终冻结 Debug 包又完成正常短会：停止退窗、结果成功后一次结束提示、自动 Web，
-以及同场原文、总结、人物和 42.52 秒录音播放／拖动均已验证。
-各次配置、实现版本与证据以该记录为准，模块测试不能代替真实能力验收。
+合作伙伴应使用自己的部署、设备和模型逐项记录上述结果；可选能力未配置时，按实际
+降级行为验收。已在会前选择的互译或总结若未获得本场授权，App会提示且不启动该场，
+不会静默替换所选业务。模型配置和最小验收清单见[从零接入指南](partner-getting-started.md)。
 
 ## 7. 参考仓与 CZUR 产品边界
 
-本仓是可修改的开源参考实现；CZUR 的闭源 SDK、AOSP Broker、旧
-`CloudAsrService`、生产账号体系和云端私有服务不属于本仓交付。合作伙伴可以
-通过公开接口替换实现，但不能把私有密钥或产品代码复制进来。Gitee 是开发主仓，
-开发和回归完成后再按发布流程同步 GitHub；没有发布授权时不推送或打标签。
+本仓是可修改的开源参考实现；闭源 SDK 二进制及其许可由配套交付包提供，
+CZUR系统实现、生产账号体系和云端私有服务不属于本仓交付。合作伙伴通过公开接口
+扩展自己的实现，真实密钥、证书、生产地址和用户数据不随参考源码公开。
 
 公共会议能力只维护一份源码：服务端由 `backend-core` 普通 JAR 提供，Android 由
-公共 core／协议和闭源 SDK 分层提供。后续 CZUR 统一适配时应消费同源构建的 JAR／AAR，
+公共 core／协议和闭源 SDK 分层提供。伙伴宿主消费配套构建的 JAR／AAR，
 在产品装配层接入自己的账号、模型材料、结算和结果发布插件；不复制状态机或依赖整个
-参考应用。本轮先完成参考链，不更新 Cloud 固定 JAR，不将当前兼容保留误写为已完成升级。
+参考应用。新供应商接口由对应 Adapter／Provider 适配，参考默认实现与产品私有实现独立。

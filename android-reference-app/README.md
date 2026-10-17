@@ -5,9 +5,12 @@ application. The app consumes the public audio-source SDK and canonical
 meeting protocols; it does not contain CZUR launcher or production-only UI
 integration.
 
+首次接入请按[从零指南](../docs/partner-getting-started.md)准备资源并跑通真实字幕；
+第三方平台、能力开关与缺省结果集中见[模型与能力指南](../docs/model-and-capability-guide.md)。
+
 Android 自有应用层、会议公共核心、模型契约及其测试统一使用 Kotlin。
-工程使用 Kotlin 2.4.21，App／公共 JAR 的目标 JVM 为 17；Android SDK 与 UI 工具由 Starry
-生成匹配的 Kotlin AAR。接口保留既有回调和 JVM 方法入口，本轮不同时重写业务状态机。
+工程使用 Kotlin 2.4.21，App／公共 JAR 的目标 JVM 为 17；Android SDK 与 UI 工具通过
+配套交付包提供匹配的 Kotlin AAR。接口保留既有回调和 JVM 方法入口。
 Gradle／Android Gradle Plugin 沿用既有版本；Lint 单独使用 9.4.0，以正确解析 Kotlin 2.4
 制品元数据，配置见 `gradle.properties`，不关闭原有 Release 检查。
 
@@ -267,7 +270,7 @@ P5-6历史参考结果方式包含网页、本地PDF、邮箱链接和互译无�
 # 干净检出默认 Mock
 ./gradlew :app:assembleDebug :app:testDebugUnitTest
 
-# 从 starry 构建或交付渠道取得对应版本 AAR 后，在本机注入
+# 从配套SDK交付包取得匹配版本的AAR后在本机注入；无需访问CZUR产品源码仓
 ./gradlew :app:assembleDebug :app:testDebugUnitTest \
   -PmeetingRuntime=sdk \
   -PmeetingSdkAar=/absolute/path/ai-meeting-sdk-0.5.0-release.aar

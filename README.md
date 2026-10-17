@@ -2,6 +2,17 @@
 
 开源参考实现用于演示 AI 字幕纪要的正交插件化架构。合作伙伴需要自行提供并运营 Android 应用、后端、模型、存储、认证和计费；本仓库提供可运行的参考代码、公共协议和测试工具，不包含 CZUR 生产实现或设备签名材料。
 
+## 合作伙伴从这里开始
+
+| 阅读顺序 | 文档 | 解决的问题 |
+| --- | --- | --- |
+| 1 | [从零接入指南](docs/partner-getting-started.md) | 工程组成、SDK交付材料、资源与环境、配置／启动／第一场真实会议、Docker交付 |
+| 2 | [模型与能力配置指南](docs/model-and-capability-guide.md) | 听悟／百炼／讯飞分别做什么、需要哪些资源、是否可缺失、如何替换和组合 |
+| 3 | [扩展开发手册](docs/partner-integration-guide.md) | 登录保持、鉴权、模型Adapter、存储、权益、结果动作和SDK工具的扩展边界 |
+
+首次接入按第1份文档的真实字幕主线推进；默认Mock构建和JSON协议样例只用于模拟／接线，
+不替代真实音源与模型。参考仓不携带闭源SDK AAR，真实运行先取得匹配的SDK交付包。
+
 ## 工程结构
 
 | 目录 | 内容 |
@@ -75,15 +86,15 @@ Docker 或操作设备；部署服务与匹配 TLS 证书需预先准备。随�
 
 交付用的后端 Dockerfile 和 Compose 配置不参与上述开发验证。参考后端的配置与
 启动命令见 [`deploy/README.md`](deploy/README.md)。先由部署方创建 MySQL 5.7
-数据库并执行仓库唯一的 `deploy/migrations/V001__initial_schema.sql`（或运行
-`deploy/migrate.sh`），再使用 `docker compose up --build` 启动单进程后端。
+数据库。在仓库根目录将 `.env.example` 复制为 `deploy/.env` 并填写，再进入 `deploy/`
+执行唯一 V001 初始化和 Compose 启动；完整顺序见[从零指南第6节](docs/partner-getting-started.md#6-docker-交付部署)。
 Compose 不启动数据库容器；本机临时 MySQL 容器只属于测试环境，不作为交付目标。
 
 根目录和 Android 工程都提交可重建的 Gradle Wrapper；首次执行可能需要下载
 Gradle 和 Android 构建插件。Web 按 `web-reference/README.md` 生成静态资源。
 
-后端默认配置只使用占位地址。复制 `.env.example` 为本地 `.env` 后再按需修改，
-不得把真实地址、令牌或证书提交到仓库。
+后端默认配置只使用占位地址。本机JVM路径使用 `tools/reference-client.env`，
+Compose路径使用 `deploy/.env`；两份文件各自从对应模板复制。真实地址、令牌或证书不提交到仓库。
 
 ## 公共仓库边界
 
@@ -91,8 +102,9 @@ Gradle 和 Android 构建插件。Web 按 `web-reference/README.md` 生成静态
 设备签名配置、CZUR 云端代码和闭源 SDK 二进制。所有本地配置放在未跟踪的
 `.env`、已忽略的 `deployment.local.properties` 或外部密钥管理系统中；公开模板仅包含占位值。
 
-合作伙伴接入、能力缺失行为、模型／登录／结果动作扩展和交付边界见
-[`docs/partner-integration-guide.md`](docs/partner-integration-guide.md)。
+合作伙伴的准备清单和实际接入步骤见[从零接入指南](docs/partner-getting-started.md)；
+全部模型及能力缺失行为见[模型与能力配置指南](docs/model-and-capability-guide.md)；
+接口扩展和交付边界见[扩展开发手册](docs/partner-integration-guide.md)。
 
 ## 开源发布
 
