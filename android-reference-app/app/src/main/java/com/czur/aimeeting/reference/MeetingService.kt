@@ -18,6 +18,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
+import android.widget.Toast
 import com.czur.aimeeting.client.*
 import com.czur.aimeeting.client.result.ResultActionContext
 import com.czur.aimeeting.client.result.ResultActionOutcome
@@ -53,6 +54,17 @@ class MeetingService : Service() {
             if (intent.action != ACTION_DEBUG_STOP) return
             Log.d(TAG, "收到调试正常停止命令 active=$active canStop=$canStop")
             requestStop()
+        }
+    }
+    /**
+     * 息屏属于 App 的会议使用规则；SDK 只提供同场正常停止能力，不监听产品电源策略。
+     * 用户主动关闭屏幕后仍走 requestStop，让音源释放、末帧和结果沿原收尾流程完成。
+     */
+    private val screenOffReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action != Intent.ACTION_SCREEN_OFF || !active) return
+            Log.i(TAG, "设备已息屏，正常停止当前会议 meetingId=$meetingId")
+            requestStop("屏幕已关闭，正在等待模型最终字幕…")
         }
     }
     /** 原平台队列只运行 JPEG/PDF，不在这里放置网络或模型收口。 */
@@ -111,6 +123,8 @@ class MeetingService : Service() {
     private var readyResult: MeetingResult? = null
     private var actionOutcome: ResultActionOutcome? = null
     private var actionRunning = false
+    /** 只在本场结果动作已成功执行后提示一次；READY 本身不代表结果页面已打开。 */
+    private var resultHintShown = false
     private val resultUiAvailable = Runnable(::publish)
     private var transcriptVersion = 0
     /** 清屏只是本地呈现状态；新原文解除，迟到译文或窗口重绘不会恢复旧字幕。 */
@@ -131,6 +145,9 @@ class MeetingService : Service() {
         overlay = MeetingOverlay(this)
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CHANNEL, "AI 会议进行中", NotificationManager.IMPORTANCE_LOW))
+        val screenFilter = IntentFilter(Intent.ACTION_SCREEN_OFF)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) registerReceiver(screenOffReceiver, screenFilter, Context.RECEIVER_NOT_EXPORTED)
+        else registerReceiver(screenOffReceiver, screenFilter)
         if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
             val filter = IntentFilter(ACTION_DEBUG_STOP)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) registerReceiver(debugStopReceiver, filter, Context.RECEIVER_EXPORTED)
@@ -213,7 +230,7 @@ class MeetingService : Service() {
         val requested = prepared.setup()
         preparedMeeting = prepared; setup = requested; busy = true; active = false; canStop = false
         stopRequested = false; presentationStopContinuation = null; returnToMeetingAfterPresentation = false
-        presentationNotice = ""; readyResult = null; actionOutcome = null; actionRunning = false
+        presentationNotice = ""; readyResult = null; actionOutcome = null; actionRunning = false; resultHintShown = false
         visibleTextCleared = false
         timing = null; stoppedClock = null; meetingId = null; audioInputMode = null; audioErrorText = null; audioLevel = null
         display = MeetingDisplaySnapshot(requested.mode() == MeetingSetup.Mode.LIVE_TRANSLATION,
@@ -385,7 +402,15 @@ class MeetingService : Service() {
                 actionRunning = false; busy = false; actionOutcome = outcome
                 status = "本场结果已就绪；${outcome.message()}"
                 if (outcome.status() == ResultActionOutcome.Status.FAILED) Log.w(TAG, "结果动作失败，会议READY保持 id=${outcome.actionId()}")
-                if (outcome.status() == ResultActionOutcome.Status.SUCCEEDED) { releaseResultAccess(); stopSelf() }
+                if (outcome.status() == ResultActionOutcome.Status.SUCCEEDED) {
+                    if (!resultHintShown) {
+                        resultHintShown = true
+                        // 动作可替换，提示不推断邮件／扫码等渠道，也不声称已送达外部收件人。
+                        Toast.makeText(applicationContext, "会议已结束，可查看本场结果", Toast.LENGTH_LONG).show()
+                        Log.i(TAG, "已显示本场结果提示 meetingId=$meetingId action=${outcome.actionId()}")
+                    }
+                    releaseResultAccess(); stopSelf()
+                }
                 publish()
             }
             override fun onError(message: String) = onSuccess(ResultActionOutcome.failure(action.id(), message))
@@ -438,6 +463,7 @@ class MeetingService : Service() {
         if (debugStopReceiverRegistered) {
             unregisterReceiver(debugStopReceiver); debugStopReceiverRegistered = false; Log.d(TAG, "调试正常停止命令已注销")
         }
+        unregisterReceiver(screenOffReceiver)
         main.removeCallbacks(clockTick); main.removeCallbacks(presentationTick); closePresentation()
         overlay.dismiss(); releaseResultAccess(); platformWork.shutdownNow(); super.onDestroy()
     }

@@ -182,6 +182,8 @@ class MeetingPageViews(@JvmField val root: FrameLayout) {
             setPadding(0, 0, 0, scale.px(if (translated) 16 else 4))
         }
     fun showMeeting(active: Boolean) {
+        // 页面可见的会中阶段才保亮屏；Stop 即退会中后解除，不延续至模型／Web收尾。
+        root.keepScreenOn = active
         setupCard.visibility = if (active) View.GONE else View.VISIBLE
         meetingPanel.visibility = if (active) View.VISIBLE else View.GONE
         status.visibility = if (active) View.GONE else View.VISIBLE

@@ -1,5 +1,6 @@
 package com.czur.aimeeting.reference
 
+import android.content.Intent
 import android.os.Looper
 import android.os.SystemClock
 import com.czur.aimeeting.client.MeetingClient
@@ -110,6 +111,37 @@ class MeetingServicePresentationTest {
             assertEquals("新原文", state!!.display.rows()[0].transcript()!!.text())
             assertTrue(state!!.overlayShowing)
             assertEquals("原文", original.rows()[0].transcript()!!.text())
+        } finally { host.destroy() }
+    }
+
+    @Test fun screenOffUsesNormalStopOnceAndPreservesTheSameCompletionSession() {
+        val host = Robolectric.buildService(MeetingService::class.java).create()
+        val service = host.get()
+        val stops = AtomicInteger()
+        val session = Proxy.newProxyInstance(MeetingSession::class.java.classLoader,
+            arrayOf(MeetingSession::class.java)) { _, method, _ ->
+            if (method.name == "requestStop") stops.incrementAndGet()
+            null
+        } as MeetingSession
+        set(service, "session", session)
+        set(service, "busy", true)
+        set(service, "active", true)
+        set(service, "canStop", true)
+        var state: MeetingService.State? = null
+        service.observe { state = it }
+        try {
+            service.sendBroadcast(Intent(Intent.ACTION_SCREEN_OFF))
+            shadowOf(Looper.getMainLooper()).idle()
+            assertEquals(1, stops.get())
+            assertFalse(state!!.active)
+            assertFalse(state!!.canStop)
+            assertTrue(state!!.busy)
+            assertSame(session, get(service, "session"))
+            assertEquals("屏幕已关闭，正在等待模型最终字幕…", state!!.status)
+
+            service.sendBroadcast(Intent(Intent.ACTION_SCREEN_OFF))
+            shadowOf(Looper.getMainLooper()).idle()
+            assertEquals("已停止的本场不因重复息屏广播再次停止", 1, stops.get())
         } finally { host.destroy() }
     }
 

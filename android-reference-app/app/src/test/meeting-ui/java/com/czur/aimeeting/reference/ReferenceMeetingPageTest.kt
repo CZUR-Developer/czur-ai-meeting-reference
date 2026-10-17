@@ -41,6 +41,7 @@ import org.robolectric.android.controller.ServiceController
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import org.robolectric.shadows.ShadowAlertDialog
+import org.robolectric.shadows.ShadowToast
 
 /** 实际原生布局与正常接线；不建会、不联网、不启动音源或操作实体设备。 */
 @RunWith(RobolectricTestRunner::class)
@@ -145,7 +146,10 @@ class ReferenceMeetingPageTest {
         val stops = AtomicInteger()
         page.stopConfirmation.setOnClickListener { stops.incrementAndGet() }
 
+        page.showMeeting(true)
+        assertTrue("会中页面保持亮屏", page.root.keepScreenOn)
         page.showMeeting(false)
+        assertFalse("退会中即解除保亮屏，不延续到后台收尾", page.root.keepScreenOn)
         page.showStopConfirmation(true)
         measure(page.root)
 
@@ -367,6 +371,7 @@ class ReferenceMeetingPageTest {
 
     @Test fun visibleWebFailureKeepsOriginalSessionForExplicitRetryThenReleasesOnce() {
         ResultUiFixture(true).use { fixture ->
+            ShadowToast.reset()
             fixture.returnToVisibleActivity(fixture.old)
             fixture.ready()
             idleMain()
@@ -375,15 +380,19 @@ class ReferenceMeetingPageTest {
             assertEquals(ResultActionOutcome.Status.FAILED, (field(fixture.old, "actionOutcome") as ResultActionOutcome).status())
             assertNotNull(field(fixture.old, "session"))
             assertEquals(0, fixture.closes.get())
+            assertEquals("READY和首次打开失败不提示结果已可查看", 0, ShadowToast.shownToastCount())
             fixture.old.retryResultAction()
             idleMain()
             fixture.assertOpenedOnce()
             assertEquals(2, fixture.accesses.get())
             assertNull(field(fixture.old, "session"))
             assertEquals(1, fixture.closes.get())
+            assertEquals("会议已结束，可查看本场结果", ShadowToast.getTextOfLatestToast())
+            assertEquals(1, ShadowToast.shownToastCount())
             fixture.old.retryResultAction()
             idleMain()
             fixture.assertNoFurtherOpen()
+            assertEquals("同场结果提示只出现一次", 1, ShadowToast.shownToastCount())
         }
     }
 
