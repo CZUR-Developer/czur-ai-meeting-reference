@@ -18,6 +18,12 @@ RUN mvn -B -f pom.xml -Dmaven.test.skip=true install \
 
 FROM eclipse-temurin:21-jre-jammy
 
+# 可选的跨会议声纹插件需要会后解码／切片。运行依赖随应用镜像提供，
+# 无须合作伙伴另行挂载宿主机可执行文件；模型 Key 仍只由部署配置注入。
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY --from=build /build/backend-reference/target/backend-reference-0.1.0-SNAPSHOT.jar backend-reference.jar
 COPY --from=build /build/backend-reference/target/runtime-libs/ lib/

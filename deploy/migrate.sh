@@ -7,6 +7,20 @@ set -Eeuo pipefail
 # MySQL DDL 隐式提交，因此只有整份 SQL 成功后才能写入基线登记；
 # 启动应用仅检查基线，不应调用本脚本自动改变结构。
 
+# 显式指定时加载与应用 Compose 相同的本机配置。无参数入口继续只读取已导出的环境，
+# 不因当前目录存在另一个 .env 而悄悄切换数据库。配置文件由部署方维护，不能提交凭据。
+if (( $# > 0 )); then
+  [[ $# == 2 && "$1" == "--env-file" ]] || {
+    printf '[ERROR] 用法：migrate.sh [--env-file 配置文件]\n' >&2
+    exit 1
+  }
+  [[ -f "$2" ]] || { printf '[ERROR] 指定的配置文件不存在\n' >&2; exit 1; }
+  set -a
+  # shellcheck disable=SC1090
+  source "$2"
+  set +a
+fi
+
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 MIGRATION_DIR="${MIGRATION_DIR:-${SCRIPT_DIR}/migrations}"
 DATABASE_URL="${DATABASE_URL:-}"

@@ -56,6 +56,9 @@ CA 私钥只用于本机签证；代理只读取 `server.key`。Debug APK 只打
 ## 2. 启动已有 HTTP 后端和临时 HTTPS 入口
 
 先按[接入手册](partner-integration-guide.md)初始化 MySQL，并启动参考 HTTP 后端。
+使用交付容器时，先按[部署说明](../deploy/README.md)加载 `.env`、执行唯一 V001，
+再运行 Compose；下面的上游仍填写宿主机映射端口（默认 `8080`），不填写应用容器
+内部地址，也不把这个 HTTP 上游作为 Android 登录地址。
 本工具不会创建数据库，也不会修改、重启已有后端。另开终端，在参考仓运行：
 
 ```bash
@@ -114,7 +117,9 @@ cleartext 调试设置保留，SDK 登录地址仍只接受 HTTPS 或诊断用 l
 `adb reverse`。登录插件和会议业务继续使用同一地址，无须额外修改 App 或 SDK。
 
 Web 仍沿用已有静态 Web 启动脚本；`REFERENCE_HTTP_BASE_URL` 可使用 PC 的局域网
-HTTP 后端地址，结果页无需与 Android 入口采用相同协议。若浏览器结果页也指向该
+HTTP 后端地址，App 的 Web 结果地址填写设备可达的静态站点（例如
+`http://<PC_LAN_IP>:8090`），不要填作后端 API 地址。结果页无需与 Android 入口采用
+相同协议。生产 HTTPS 页面应连接 HTTPS API，避免混合内容。若浏览器结果页也指向该
 开发 HTTPS 入口，浏览器需要自行信任这份本机 CA；Android Debug 的信任不影响浏览器。
 
 正常验收记录应包含真实局域网地址连接、登录、能力发现、会议正常停止和同场 Artifact

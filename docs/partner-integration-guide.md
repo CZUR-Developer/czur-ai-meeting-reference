@@ -28,6 +28,8 @@ Android App、Java 21 后端和静态 Web 结果页，并指出各项能力的�
 开发验证直接使用本机 Java 21、Maven、Python 3、Node.js/npm 和 Android SDK，
 不使用 Docker 作为检查工具。Dockerfile 和 Compose 只用于交付部署；本机没有
 隔离数据库时，可以临时运行 `mysql:5.7`，但容器、数据卷和账号不属于交付物。
+使用交付 Docker 镜像时，按[部署说明](../deploy/README.md)显式加载配置、初始化
+外部 MySQL 并启动应用；同页说明容器上游、Android HTTPS 与静态 Web 的连接关系。
 
 ```bash
 cd czur-ai-meeting-reference
@@ -74,8 +76,9 @@ AI_MEETING_MODEL_CAPABILITIES=transcript.realtime,translation.realtime
 按该声明返回，参考界面不固定厂商清单。当前听悟实现已有中文、英语、日语、韩语、
 德语、法语、俄语七种标准语言映射，部署只声明实际开放的子集。
 
-默认命令行入口只装配已有的听悟和 `sample-json-ws` 发行器。更换已有实现的端点和
-声明可改配置；接入新模型时，需要在自己的后端宿主注入 `ModelSessionIssuer`，并在
+默认命令行入口的 ASR 发行器支持听悟和 `sample-json-ws`，并可选择组合下文的
+独立文本翻译样例。更换已有实现的端点和声明可改配置；接入新模型时，需要在
+自己的后端宿主注入 `ModelSessionIssuer`，并在
 Android 注册匹配的 `ModelAdapter`，再声明该实现确实支持的语言／能力。仅把
 `AI_MEETING_MODEL_ADAPTER` 改成任意字符串不会自动生成供应商实现，会议状态机无须修改。
 实际第三方密钥不得写入源码、模板、APK、日志或本手册。
@@ -95,7 +98,9 @@ Android 注册匹配的 `ModelAdapter`，再声明该实现确实支持的语言
 Adapter 或结果页。CZUR 的 `ContentProvider/UserHandler` 属于产品侧实现，不是
 参考工程的默认依赖。
 
-登录交互通过 App 的 `AppLoginEntry` 单独替换；默认入口委托参考表单。伙伴在
+登录交互通过 App 的 `AppLoginEntry` 单独替换；默认入口未登录时打开参考表单，
+已登录时提供“切换账号／退出登录”。取消或登录失败保留原会话，新登录成功才替换，
+明确退出才清除。伙伴在
 `MeetingAppAssembly.initialize(context)` 后、创建会议页面前装配自己的
 `IdentityProvider` 和 `registerLoginEntry(...)`：
 
@@ -127,16 +132,48 @@ Android 端通过 `ModelAdapter` 接收 Provider 数据，将原文、译文、�
 模型原始 JSON、厂商短码和永久密钥只能留在 Adapter／Issuer 内部，不能泄漏到
 会议核心或 Web。设备直连模型时，后端仍只接收归一化后的标准事件和用量事实。
 
+`ModelHttpRequest` 是交给 SDK 执行的中性请求描述，支持自定义 `method`、
+`headers`、`contentType` 和文本 `body`；地址来自本场 Server Grant。实时 Adapter
+通过 `connectionRequest(grant)` 描述握手，总结／文本翻译 Adapter 通过 `request(...)`
+描述请求。例如伙伴可以使用 `x-api-key` 或已签名 URL，SDK 不再额外追加 Bearer。
+原默认实时 GET、总结 POST/JSON 和非空 token 的 Bearer 行为保持。
+线程、时间及扩展接口见 [公共 Android core 说明](../android-reference-app/meeting-client-core/README.md#模型请求描述与独立文本翻译)。
+
+### 可选独立文本翻译
+
+仅提供 ASR 时，可在服务端把 `ModelSessionIssuer` 与 `TranslationSessionIssuer`
+通过 `TextTranslationModelSessionIssuer` 组合，Android 注册匹配的 `TranslationAdapter`。
+参考命令行入口已有可选 JSON 样例，外部配置如下：
+
+```dotenv
+AI_MEETING_SAMPLE_JSON_TRANSLATION_ENDPOINT=https://translation.example.invalid/translate
+AI_MEETING_PROFILE_OPTIONAL_CAPABILITIES=translation.realtime
+AI_MEETING_ENTITLEMENT_SUPPORTED_CAPABILITIES=transcript.realtime,translation.realtime
+AI_MEETING_MODEL_CAPABILITIES=transcript.realtime,translation.realtime
+```
+
+部署方须提供该 HTTP 服务，并声明 ASR 与翻译实际支持的语言。样例 Adapter ID 为
+`sample-json-translation`，请求包含 `sourceSegmentId/sourceRevision/sourceLanguage/targetLanguage/text`，
+响应为 `{"text":"译文","sourceLanguage":"实际源语种（可省略）"}`。参考发行器不带 token，
+五分钟有效；它用于协议接线，不包含真实翻译模型，不能凭样例通过宣称模型质量已验。
+正式供应商自行实现发行器和 Adapter；长期 Key 不交给 App。
+
+首次材料随同场 `:modelSession` 的可选 `translationSession` 返回；SDK 对已确认原文逐段
+调用，按实际源语种选择会前两语中的目标语。下一段请求前距离过期不超过 30 秒时，
+仅调用同场 `POST /v1/meetings/{meetingId}:translationSession` 续领，不重建 ASR 或音源，
+也不后台轮询。组合后关闭 ASR 原生译文并保留双语识别；未配置时听悟一体原译文路径保持。
+停止先停源，已接纳的译文仍沿原标准事件和确认流程收口，不另建会议状态机。
+
 ### 可选能力
 
 能力缺失时保持剩余链路可用，不生成空产物或假入口：
 
-| 能力 | 缺失时的参考行为 |
-| --- | --- |
-| `translation.realtime` | 隐藏互译入口，只保留原文 |
-| `summary.structured` | 不显示纪要开关，不请求总结材料，Stop 后仍可回看文字 |
-| `speaker.diarization.session` | 不显示发言人列表，不把空 ID 当作发言人 |
-| `speaker.identity.cross_meeting` | 不显示跨会议身份；本场临时 Speaker 不冒充跨场身份 |
+| 能力 | 缺失时的 App 行为 | 缺失时的 Web 行为 |
+| --- | --- | --- |
+| `translation.realtime` | 隐藏互译入口，只保留原文 | 无译文产物时隐藏译文区 |
+| `summary.structured` | 不显示纪要开关，不请求总结材料，Stop 后仍可回看文字 | 无总结产物时隐藏总结区 |
+| `speaker.diarization.session` | 不显示发言人列表，不把空 ID 当作发言人 | 原文按实际数据展示，不虚构分人结果 |
+| `speaker.identity.cross_meeting` | 不请求跨会议身份；本场临时 Speaker 不冒充跨场身份 | 无身份产物时隐藏人物区和命名注册入口 |
 
 `transcript.realtime` 是参考会议的必选能力；未声明时 App 保持开始按钮禁用，
 后端拒绝 Create。上述行为由能力声明和本场 Create 决定共同驱动，不能靠固定的
@@ -223,6 +260,12 @@ Web 只读取 `READY` Manifest。原文、译文、结构化总结和录音分�
 流式播放，不把长音频塞进 JSON。伙伴更换结果页面时，仍应复用 Manifest、产物类型和
 有效期规则。
 
+保留录音时，默认 HTTP 上传与 file／S3 Store 使用同一预算函数：
+`max(64 MiB, AI_MEETING_MAX_MEETING_DURATION_MS × 32 + 1 MiB)`。
+它按标准 16 kHz／mono／PCM16 正常回退计算，不要求设备一定具有 Opus 编码能力；
+实际时长仍使用冻结采音事实，容量余量不计费用量。伙伴自建 HTTP transport、
+Artifact Store 或反向代理时，应对齐该最长会议预算，避免录音上传失败阻塞后台收尾。
+
 启用跨会议人物身份时，默认参考 Web 还提供登录后的命名注册入口；匿名结果链接仍只读。
 `speaker.identity` 是单独的标准产物，本场 speaker 编号与跨会议 `personId` 分开。
 参考讯飞插件、FFmpeg 依赖和可选环境项见 [后端说明](../backend-reference/README.md#p10-可选跨会议声纹参考插件)
@@ -270,3 +313,8 @@ cd android-reference-app && ./gradlew :app:testDebugUnitTest :app:assembleDebug
 `CloudAsrService`、生产账号体系和云端私有服务不属于本仓交付。合作伙伴可以
 通过公开接口替换实现，但不能把私有密钥或产品代码复制进来。Gitee 是开发主仓，
 开发和回归完成后再按发布流程同步 GitHub；没有发布授权时不推送或打标签。
+
+公共会议能力只维护一份源码：服务端由 `backend-core` 普通 JAR 提供，Android 由
+公共 core／协议和闭源 SDK 分层提供。后续 CZUR 统一适配时应消费同源构建的 JAR／AAR，
+在产品装配层接入自己的账号、模型材料、结算和结果发布插件；不复制状态机或依赖整个
+参考应用。本轮先完成参考链，不更新 Cloud 固定 JAR，不将当前兼容保留误写为已完成升级。

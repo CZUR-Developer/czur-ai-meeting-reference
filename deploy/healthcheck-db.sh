@@ -3,6 +3,19 @@ set -Eeuo pipefail
 
 # 只读 MySQL 健康检查；只执行 SELECT 1，不修改数据库，
 # 不输出连接串、账号或密码。目标库必须是已初始化的参考库。
+# 和初始化脚本共用显式配置文件入口；无参数调用继续使用已有环境。
+if (( $# > 0 )); then
+  [[ $# == 2 && "$1" == "--env-file" ]] || {
+    printf '[ERROR] 用法：healthcheck-db.sh [--env-file 配置文件]\n' >&2
+    exit 1
+  }
+  [[ -f "$2" ]] || { printf '[ERROR] 指定的配置文件不存在\n' >&2; exit 1; }
+  set -a
+  # shellcheck disable=SC1090
+  source "$2"
+  set +a
+fi
+
 DATABASE_URL="${DATABASE_URL:-}"
 DATABASE_USER="${DATABASE_USER:-}"
 DATABASE_PASSWORD="${DATABASE_PASSWORD:-}"

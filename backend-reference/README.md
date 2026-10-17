@@ -6,6 +6,10 @@
 现有测试保留在本模块 `src/test/java/`，通过普通核心依赖同时验证公共与参考行为。
 IntelliJ IDEA 打开仓库根 `pom.xml`，即可导入两个 Module。
 
+`backend-core` 是参考和 CZUR 后续统一消费的唯一核心源码；宿主通过普通 JAR
+依赖并在装配层注入私有账号、模型、结算和发布插件，不依赖整个参考应用或复制状态机。
+本轮先完成参考链，Cloud 当前固定 JAR 暂不更新；同源制品升级和 CZUR 插件联调另行验收。
+
 ## 本机局域网客户端直连入口
 
 `ReferenceClientMeetingMain`／`ReferenceClientMeetingProcess` 是 P10 的本机参考入口。
@@ -28,9 +32,11 @@ bash tools/run-reference-web.sh
 
 数据库必须先执行仓库内唯一的 `deploy/migrations/V001__initial_schema.sql`；应用启动
 只做只读 readiness，不自动建表或修补结构。`AI_MEETING_HTTP_BIND` 可以使用
-`0.0.0.0:8080`，Android 的后端地址要填开发 PC 的局域网 IP，例如
-`http://192.168.1.20:8080`，不能填设备自己的 `127.0.0.1`。`AI_MEETING_WSS_ORIGIN`
-在该入口仅保留公开 Create 的兼容字段，不代表本进程启动了 WSS。
+`0.0.0.0:8080`，它是 HTTP 上游。Android 的登录／后端地址须填设备可达的 HTTPS
+入口，例如 `https://192.168.1.20:8443`；可按[局域网 HTTPS 联调](../docs/local-lan-https.md)
+为开发 PC 配置入口和 Debug CA。不能填设备自己的 `127.0.0.1`；显式 `adb reverse`
+的 loopback HTTP 只用于诊断。`AI_MEETING_WSS_ORIGIN` 在该入口仅保留公开 Create
+的兼容字段，不代表本进程启动了 WSS。
 
 最小模板使用本机 `sample-json-ws-model.py`，用于先验证路由和 Adapter 装配；真实
 听悟／总结验证时将 Adapter、语言和能力声明改为已获准的外部配置，长期 Key 只留在
@@ -134,6 +140,35 @@ AI_MEETING_MODEL_CAPABILITIES=transcript.realtime
 `initParams`。这个接口只提供模型连接材料；部署方须另行提供遵循样例 JSON
 格式的 WebSocket 模型服务。参考 App 按 `adapterId` 选择已注册 Adapter，
 Create v1 的旧 `realtime` 字段与 P2 音频链路不变。
+
+### 可选独立文本翻译
+
+`ReferenceClientMeetingProcess` 读取可选
+`AI_MEETING_SAMPLE_JSON_TRANSLATION_ENDPOINT`，有值时用
+`TextTranslationModelSessionIssuer` 组合当前 ASR 与 `SampleJsonTranslationSessionIssuer`。
+未配置地址时保持原有听悟原生译文／仅 ASR 路径。部署方仍须在 Profile、权益与模型
+能力中声明 `translation.realtime`，并声明组合实际支持的语言；配置地址不会绕过本场授权。
+
+此发行器返回 `adapterId=sample-json-translation`、配置地址、五分钟有效期及空 token／
+参数，仅演示自有 HTTP JSON 服务接线，不连接翻译供应商、不代签真实模型效果。
+正式供应商实现公共 `TranslationSessionIssuer`，在自己的宿主组合，并由 Android
+注册对应 `TranslationAdapter`；样例请求／响应和配置见
+[接入手册](../docs/partner-integration-guide.md#可选独立文本翻译)。
+
+首次 `:modelSession` 附可选 `translationSession`；SDK 在逐段翻译前发现距离过期
+不超过 30 秒时，只调用同场 `:translationSession` 续领。后端复用原归属、活动状态和
+首次冻结的翻译授权，只领取新翻译材料，不创建 ASR 任务、不另建会议或后台续领器。
+组合只关闭 ASR 原生译文，保留会前所选两语的识别；SDK 保存最终原译文后沿原流程 Stop。
+
+Android Adapter 通过中性 `ModelHttpRequest` 描述 `method/headers/contentType/body`，
+SDK 负责网络执行，支持 `x-api-key`、已签名 URL 等差异；默认实时 GET 和总结 POST/JSON
+保持。实时 WebSocket 握手仍为 GET／无正文，可变 method／body 用于文本 HTTP 请求。
+详细请求与线程契约见
+[公共 Android core 说明](../android-reference-app/meeting-client-core/README.md#模型请求描述与独立文本翻译)。
+
+未声明或未装配可选翻译、总结、跨会议身份时，App 不开放相应入口，Web 按最终 Manifest
+隐藏对应产物区；本场 `sessionSpeakerId` 不冒充跨会议身份。只 ASR 仍可正常停止、进入
+READY 并回看原文，能力缺失矩阵见 [接入手册](../docs/partner-integration-guide.md#可选能力)。
 
 ## P5-5 百炼文本总结临时材料
 
@@ -240,7 +275,7 @@ Connector/J 传毫秒。MySQL 连接固定使用 UTF-8／`utf8mb4_bin`、UTC 时
 | `AI_MEETING_XFYUN_VOICEPRINT_GROUP_PREFIX` | 默认 `reference_`；测试使用独立前缀，分组按原部署与主体归属生成 |
 | `AI_MEETING_XFYUN_VOICEPRINT_MATCH_THRESHOLD` | 默认 `0.6`；使用供应商分数范围 0～1 |
 | `AI_MEETING_XFYUN_VOICEPRINT_TIMEOUT_MS` | 单次 HTTP 超时，默认 `10000` 毫秒 |
-| `AI_MEETING_FFMPEG` | 默认 `ffmpeg`；会后样本转换需要本机可执行程序 |
+| `AI_MEETING_FFMPEG` | 默认 `ffmpeg`；产品镜像已提供，直接运行 JVM 时须在本机安装并加入 PATH |
 | `AI_MEETING_SPEAKER_PCM_SAMPLE_RATE`、`AI_MEETING_SPEAKER_PCM_CHANNELS` | 裸 PCM 原录音格式，默认 16000／1；Ogg 等容器按自身头部解码 |
 
 Product Profile 的 optional 能力及权益支持列表同时声明
