@@ -19,6 +19,7 @@ import com.czur.aimeeting.model.SealedAudioArtifact
 import com.sun.net.httpserver.HttpServer
 import java.io.IOException
 import java.net.InetSocketAddress
+import java.net.SocketTimeoutException
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.util.Base64
@@ -114,6 +115,30 @@ class HttpMeetingServerClientTest {
             assertEquals("partner-format", grant.adapterId())
             assertEquals("task-1", grant.initParams().get("taskId"))
             assertEquals("/v1/meetings/mtg_model:modelSession", fixture.request().path())
+        }
+    }
+
+    @Test(timeout = 35_000) fun modelGrantWaitsForIssuerWhileOrdinaryPostsKeepTheirReadBudget() {
+        Fixture().use { fixture ->
+            // 真实socket等11秒后才收到响应头：覆盖后端20秒发行预算内的正常慢响应，
+            // 旧10秒预算会先失败；不通过替换连接工厂或测试专用生产接口模拟。
+            fixture.reply(200, "{\"meetingId\":\"mtg_slow_model\",\"adapterId\":\"sample-json-ws\","
+                + "\"endpoint\":\"wss://model.example.test/slow\",\"expiresAt\":\"2030-01-01T00:00:00Z\","
+                + "\"initParams\":{}}", delayMs = 11_000)
+            val startedAt = System.nanoTime()
+            val grant = fixture.client().requestModelSession("mtg_slow_model")
+            assertEquals("sample-json-ws", grant.adapterId())
+            assertTrue("模型材料应确实等到超过原10秒预算", TimeUnit.NANOSECONDS.toMillis(
+                System.nanoTime() - startedAt) >= 10_000)
+            assertEquals("/v1/meetings/mtg_slow_model:modelSession", fixture.request().path())
+
+            // 同一个延迟不应放宽普通JSON请求；开始等旧路径继续10秒超时且不自动重试。
+            fixture.reply(200, "{}", delayMs = 11_000)
+            assertThrows(SocketTimeoutException::class.java) {
+                fixture.client().startClient("mtg_ordinary")
+            }
+            assertEquals("/v1/meetings/mtg_ordinary:startClient", fixture.request().path())
+            assertTrue("超时不应自动发起第二次请求", fixture.requests.isEmpty())
         }
     }
 
@@ -385,7 +410,7 @@ class HttpMeetingServerClientTest {
 
     private fun options(): MeetingOptions = MeetingOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT, "en-US", "zh-CN", false,
         MeetingOptions.ResultDelivery.WEB, "https://result.example.test/index.html", emptyList())
-    private data class Reply(val status: Int, val body: String)
+    private data class Reply(val status: Int, val body: String, val delayMs: Long = 0)
     private data class Request(private val path: String, private val body: String, private val authorization: String?, private val stopKey: String?,
         private val contentType: String?, private val contentLength: String?, private val checksum: String?, private val bytes: ByteArray) {
         fun path(): String = path
@@ -409,6 +434,7 @@ class HttpMeetingServerClientTest {
                     exchange.requestHeaders.getFirst("Content-Type"), exchange.requestHeaders.getFirst("Content-Length"),
                     exchange.requestHeaders.getFirst("X-Content-SHA256"), bytes))
                 val reply = replies.poll()
+                if (reply != null && reply.delayMs > 0) Thread.sleep(reply.delayMs)
                 val body = (reply?.body ?: "{}").toByteArray(StandardCharsets.UTF_8)
                 exchange.sendResponseHeaders(reply?.status ?: 500, body.size.toLong())
                 exchange.responseBody.use { it.write(body) }
@@ -418,7 +444,7 @@ class HttpMeetingServerClientTest {
         }
         fun url(): String = "http://127.0.0.1:" + server.address.port
         fun client(): HttpMeetingServerClient = HttpMeetingServerClient(MeetingClientConfig.reference(url(), "test-token"))
-        fun reply(status: Int, body: String) { replies.add(Reply(status, body)) }
+        fun reply(status: Int, body: String, delayMs: Long = 0) { replies.add(Reply(status, body, delayMs)) }
         fun request(): Request {
             val request = requests.poll(3, TimeUnit.SECONDS)
             assertNotNull("正常HTTP请求应到达", request)

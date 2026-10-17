@@ -52,7 +52,8 @@ class HttpMeetingServerClient(config: MeetingClientConfig) : MeetingServerClient
     @Throws(IOException::class)
     override fun requestModelSession(meetingId: String): ModelSessionGrant {
         try {
-            val model = JSONObject(post("/v1/meetings/$meetingId:modelSession", null, null, 200).body)
+            val model = JSONObject(post("/v1/meetings/$meetingId:modelSession", null, null, 200,
+                readTimeoutMs = 30_000).body)
             val initParams = HashMap<String, String>()
             val params = model.getJSONObject("initParams")
             val keys = params.keys()
@@ -73,7 +74,8 @@ class HttpMeetingServerClient(config: MeetingClientConfig) : MeetingServerClient
     @Throws(IOException::class)
     override fun requestSummarySession(meetingId: String): SummarySessionGrant {
         try {
-            val body = JSONObject(post("/v1/meetings/$meetingId:summarySession", null, null, 200).body)
+            val body = JSONObject(post("/v1/meetings/$meetingId:summarySession", null, null, 200,
+                readTimeoutMs = 30_000).body)
             if (meetingId != body.getString("meetingId")) throw IOException("文本模型材料与会议 ID 不一致")
             return SummarySessionGrant(body.getString("adapterId"), body.getString("endpoint"),
                 body.getString("expiresAt"), body.optString("token", null), modelParams(body.optJSONObject("initParams")))
@@ -82,7 +84,8 @@ class HttpMeetingServerClient(config: MeetingClientConfig) : MeetingServerClient
     @Throws(IOException::class)
     override fun requestTranslationSession(meetingId: String): TranslationSessionGrant {
         try {
-            val body = JSONObject(post("/v1/meetings/$meetingId:translationSession", null, null, 200).body)
+            val body = JSONObject(post("/v1/meetings/$meetingId:translationSession", null, null, 200,
+                readTimeoutMs = 30_000).body)
             if (meetingId != body.getString("meetingId")) throw IOException("翻译材料与会议 ID 不一致")
             return TranslationSessionGrant(body.getString("adapterId"), body.getString("endpoint"),
                 body.getString("expiresAt"), body.optString("token", null), modelParams(body.optJSONObject("initParams")))
@@ -290,12 +293,14 @@ class HttpMeetingServerClient(config: MeetingClientConfig) : MeetingServerClient
             throw IOException("读取本场结果失败，HTTP $status")
         } finally { connection.disconnect() }
     }
-    private fun post(path: String, jsonBody: String?, idempotencyKey: String?, vararg accepted: Int): Response {
+    /** 模型材料发行允许等待厂商20秒，调用处单独留30秒；普通JSON请求保持原10秒。 */
+    private fun post(path: String, jsonBody: String?, idempotencyKey: String?, vararg accepted: Int,
+        readTimeoutMs: Int = 10_000): Response {
         val connection = URL(baseUrl + path).openConnection() as HttpURLConnection
         try {
             connection.requestMethod = "POST"
             connection.connectTimeout = 10_000
-            connection.readTimeout = 10_000
+            connection.readTimeout = readTimeoutMs
             connection.setRequestProperty("Authorization", "Bearer $bearerToken")
             connection.setRequestProperty("Accept", "application/json")
             if (idempotencyKey != null) connection.setRequestProperty("Idempotency-Key", idempotencyKey)

@@ -34,6 +34,11 @@ Mock 注入窄端口 `MeetingRuntimePort`；二者使用唯一 `MeetingCoordinat
 冻结采音用量提交 → 按能力总结 → Stop 输入受理 → 实际 READY清单 → App显式动作。后端仍负责身份、模型选择、计费和存储。
 模型完整地址、短期材料及本场授权只取 Server，配置不接收模型地址或凭据。
 
+Server HTTP 的连接等待保持10秒；普通JSON POST与GET读取保持10秒。模型、总结及独立翻译
+材料发行可能等待厂商20秒，这三类材料POST单独使用30秒读取预算，避免后端成功前客户端
+先超时；封口录音上传仍使用60秒读取预算。以上为socket读取等待，不是整场会议或完整调用
+的总时限；本次调整不引入自动重试，也不改变停止时先退窗、释放音源的流程。
+
 `MeetingClientConfig` 接受 Server URL、`IdentityProvider`、`ClientIdentity`、`MeetingProfile` 和
 **串行** `callbackExecutor`。Android 通常用主线程 Executor；不能用无序线程池让结果和状态重排。
 旧访问令牌构造器保留，将固定token包装为参考内存身份。`discover()`仍为匿名能力发现，
