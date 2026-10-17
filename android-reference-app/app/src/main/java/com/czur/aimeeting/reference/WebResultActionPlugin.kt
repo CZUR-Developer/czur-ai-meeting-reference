@@ -2,6 +2,11 @@ package com.czur.aimeeting.reference
 
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
+import android.util.Log
+import android.util.TypedValue
+import android.widget.Button
+import android.widget.LinearLayout
 import com.czur.aimeeting.reference.meeting.MeetingAppAssembly
 import com.czur.aimeeting.client.MeetingOptions
 import com.czur.aimeeting.client.result.ResultActionPlugin.Preparation
@@ -14,20 +19,32 @@ import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.util.function.Consumer
 
-/** 默认 Web 动作：会前冻结地址，READY 后只生成同场链接，不读取正文或发送邮件。 */
-class WebResultActionPlugin @JvmOverloads constructor(
-    private val configuredUrl: String? = null, private val openPage: Consumer<String>? = null
+/**
+ * 默认 Web 动作：会前冻结地址，READY 后记住并打开同场链接，不读取正文或发送邮件。
+ * 最近链接属于此插件的普通查看偏好，不恢复会议／Session，也不复制任何结果状态。
+ */
+class WebResultActionPlugin private constructor(
+    private val configuredUrl: String?, private val openPage: Consumer<String>?,
+    private val recentResults: SharedPreferences?
 ) : AppResultActionPlugin {
+    /** 无 Android 存储的构建期装配仍可使用原构造入口，由宿主提供打开动作。 */
+    @JvmOverloads constructor(configuredUrl: String? = null, openPage: Consumer<String>? = null) :
+        this(configuredUrl, openPage, null)
+
     override fun id() = "web"
     override fun displayName() = "网页查看"
     override fun requiredServiceCapabilities() = setOf(ResultActionRegistry.RESULT_LINK)
     override fun createSettings(pageContext: Context): Settings {
         val app = pageContext.applicationContext
-        return Settings(null) {
-            WebResultActionPlugin(MeetingAppAssembly.resultWebUrl()) { url ->
-                app.startActivity(Intent(app, ResultActivity::class.java)
-                    .putExtra(ResultActivity.EXTRA_RESULT_URL, url).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            }
+        val preferences = app.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+        val opener = Consumer<String> { url ->
+            app.startActivity(Intent(app, ResultActivity::class.java)
+                .putExtra(ResultActivity.EXTRA_RESULT_URL, url).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }
+        val previousResult = PreviousResultButton(pageContext, preferences, opener)
+        // freeze 只引用应用 Context 对应的 opener、普通偏好和地址，不引用按钮／Activity。
+        return Settings(previousResult) {
+            WebResultActionPlugin(MeetingAppAssembly.resultWebUrl(), opener, preferences)
         }
     }
     override fun prepare(options: MeetingOptions): Preparation {
@@ -35,6 +52,13 @@ class WebResultActionPlugin @JvmOverloads constructor(
         if (!validUrl(url)) return Preparation.block("请填写有效的网页结果地址")
         return Preparation.allow { context, callback ->
             val link = resultUrl(url, context.result().meetingId(), context.result().genTime())
+            // 此执行入口只由原 READY 结果动作调用。先记住原链接，再等待可见页面；
+            // 即使后台队列尚未消费、Service 正常退出或页面重建，也能手动查看本场。
+            // 仅写一条链接，不保存正文、不改 genTime、不声称 UI 动作已经完成。
+            recentResults?.let { preferences ->
+                preferences.edit().putString(KEY_LAST_READY_LINK, link).apply()
+                Log.d(TAG, "已记住本场网页结果 meetingId=${context.result().meetingId()}")
+            }
             context.uiExecutor().execute(UiOperation {
                 try {
                     openPage!!.accept(link)
@@ -43,7 +67,43 @@ class WebResultActionPlugin @JvmOverloads constructor(
             })
         }
     }
+
+    /**
+     * 会前显示由 Web 插件自己维护。只在挂载期间监听偏好，离开时解除监听；
+     * 重新挂载时重读链接，因此同一个设置页和新建页面都能看到刚结束的会议。
+     * 点击时使用保存的完整原链接，不用当前连接地址重拼，避免指向另一部署或场次。
+     */
+    private class PreviousResultButton(context: Context, private val preferences: SharedPreferences,
+        private val opener: Consumer<String>) : Button(context, null, 0, R.style.ReferenceSecondaryButton) {
+        private val changed = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key == KEY_LAST_READY_LINK) refreshAvailability()
+        }
+        init {
+            id = R.id.view_previous_web_result
+            text = "查看上场结果"; contentDescription = text
+            layoutParams = LinearLayout.LayoutParams(ReferenceUiScale.px(context, 240), ReferenceUiScale.px(context, 46)).apply {
+                topMargin = ReferenceUiScale.px(context, 8)
+            }
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, ReferenceUiScale.px(context, 22).toFloat())
+            setOnClickListener { preferences.getString(KEY_LAST_READY_LINK, null)?.let(opener::accept) }
+            refreshAvailability()
+        }
+        private fun refreshAvailability() { isEnabled = !preferences.getString(KEY_LAST_READY_LINK, null).isNullOrBlank() }
+        override fun onAttachedToWindow() {
+            super.onAttachedToWindow()
+            preferences.registerOnSharedPreferenceChangeListener(changed)
+            refreshAvailability()
+        }
+        override fun onDetachedFromWindow() {
+            preferences.unregisterOnSharedPreferenceChangeListener(changed)
+            super.onDetachedFromWindow()
+        }
+    }
+
     companion object {
+        private const val TAG = "AiMeetingReference"
+        private const val PREFERENCES = "czur_reference_web_results"
+        private const val KEY_LAST_READY_LINK = "last_ready_link"
         @JvmStatic fun validUrl(url: String?): Boolean = try {
             val uri = URI.create(url)
             ("https".equals(uri.scheme, true) || "http".equals(uri.scheme, true)) && uri.host != null

@@ -260,7 +260,7 @@ class ReferenceMeetingPageTest {
         val app = RuntimeEnvironment.getApplication()
         MeetingAppAssembly.configureResultWeb("https://before.example.test/")
         val settings = WebResultActionPlugin().createSettings(app)
-        assertNull(settings.view())
+        assertEquals(R.id.view_previous_web_result, settings.view()!!.id)
         MeetingAppAssembly.configureResultWeb("https://start.example.test/index.html?x=1#part")
         val prepared = settings.freeze().get().prepare(MeetingSetup(MeetingSetup.Mode.LIVE_TRANSCRIPT,
             "zh-CN", "en-US", false, ResultOptions.action("web"), "", emptyList(), false).toOptions())

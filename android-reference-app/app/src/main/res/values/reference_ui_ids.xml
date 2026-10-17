@@ -5,4 +5,6 @@
     <item name="reminder_title" type="id"/>
     <item name="reminder_message" type="id"/>
     <item name="reminder_confirm" type="id"/>
+    <!-- 默认 Web 结果插件自己的会前回看入口，不参与会议状态。 -->
+    <item name="view_previous_web_result" type="id"/>
 </resources>
