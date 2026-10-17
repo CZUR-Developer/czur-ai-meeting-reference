@@ -91,7 +91,9 @@ public final class MeetingArtifactHttpEndpoint {
     public MeetingArtifactMediaPort.Result openDownload(HttpRequest request) {
         Objects.requireNonNull(request, "request");
         var matcher = ARTIFACT_PATH.matcher(request.path());
-        if (!matchesDownload(request) || !request.body().isEmpty() || request.query().size() != 1
+        // 匹配与取组必须使用同一个 Matcher，路由预判不会初始化这里的匹配状态。
+        if (!matchesDownload(request) || !matcher.matches()
+                || !request.body().isEmpty() || request.query().size() != 1
                 || !request.query().containsKey("genTime")) {
             throw new IllegalArgumentException("media request is invalid");
         }

@@ -5,7 +5,7 @@ set -Eeuo pipefail
 BASE_URL="${REFERENCE_HTTP_BASE_URL:-http://127.0.0.1:8080}"
 command -v curl >/dev/null 2>&1 || { printf '[ERROR] 未找到 curl\n' >&2; exit 1; }
 for path in /internal/health/liveness /internal/health/readiness; do
-  body="$(curl --fail-with-body --silent --show-error --max-time 5 \
+  body="$(curl --fail --silent --show-error --max-time 5 \
     "${BASE_URL%/}${path}")" || {
       printf '[ERROR] 健康检查失败 path=%s\n' "${path}" >&2
       exit 1
