@@ -100,6 +100,25 @@ class MeetingDeviceTests(unittest.TestCase):
         self.assertEqual(result["screenCaptureMode"], "SYSTEM_CAPTURE")
         self.assertEqual(result["submittedFrameCountInLogWindow"], 1)
 
+    def test_start_no_xml_snapshot_then_real_running_log_does_not_tap_again(self):
+        adb = Mock()
+        adb.run.return_value = "ERROR: could not get idle state."
+        tool = device.MeetingDevice(adb)
+        tool.tap_id = Mock()
+        running = {"processRunning": True, "meetingId": "new-meeting",
+                   "phase": "RUNNING", "audioMode": "CZUR_BROKER"}
+        tool.log_state = Mock(side_effect=[{"meetingId": "old-meeting", "phase": "READY"},
+                                           {"meetingId": None, "phase": None}, running])
+        tool.dump = Mock(wraps=tool.dump)
+        tool.emit = Mock()
+        with patch.object(device.time, "sleep") as pause:
+            tool.start()
+        tool.tap_id.assert_called_once_with("start_meeting")
+        tool.dump.assert_called_once()
+        self.assertEqual(tool.log_state.call_count, 3)
+        pause.assert_called_once_with(0.4)
+        tool.emit.assert_called_once_with("PASS", confirmedBy="App RUNNING log", **running)
+
     def test_standard_projection_confirmation_and_manual_mode(self):
         root = ET.fromstring('<hierarchy><node resource-id="android:id/alertTitle" '
                              'text="要开始录制或投放内容吗？"/><node resource-id="android:id/button1" '

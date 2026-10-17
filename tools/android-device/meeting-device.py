@@ -24,6 +24,10 @@ class ToolError(RuntimeError):
     """当前流程未完成；命令行返回非零，并保留可定位的阶段信息。"""
 
 
+class UiSnapshotUnavailable(ToolError):
+    """uiautomator 暂未给出 XML；不代表已点击的会议按钮执行失败。"""
+
+
 def by_id(root, name):
     """匹配公开页面 ID，返回实际 UI 节点；系统 ID 可传完整名称。"""
     resource_id = name if ":id/" in name else PACKAGE + ":id/" + name
@@ -108,6 +112,8 @@ class MeetingDevice:
         try:
             self.adb.run("shell", "uiautomator", "dump", "--compressed", remote)
             xml = self.adb.run("exec-out", "cat", remote)
+            if "<hierarchy" not in xml and "<?xml" not in xml:
+                raise UiSnapshotUnavailable("uiautomator 暂未返回 UI XML")
             self.last_ui = ET.fromstring(xml[xml.index("<?xml"):] if "<?xml" in xml else xml)
             return self.last_ui
         finally:
@@ -323,7 +329,14 @@ class MeetingDevice:
                 self.evidence()
                 self.emit("PASS", confirmedBy="App RUNNING log", **state)
                 return
-            root = self.dump()
+            try:
+                root = self.dump()
+            except UiSnapshotUnavailable:
+                # 开始已点击一次。连续字幕／音量动画期间可能暂时没有层级快照，
+                # 沿原 deadline 回到下一轮优先读取真实 RUNNING 日志，不重新点击。
+                # 其他 ADB 错误、已有 XML 标记但结构损坏和业务失败仍走原失败出口。
+                time.sleep(0.4)
+                continue
             if self.approve_permission(root):
                 continue
             time.sleep(0.4)
