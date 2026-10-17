@@ -68,10 +68,16 @@ AI_MEETING_MODEL_LANGUAGES=zh-CN,en-US,ja-JP
 AI_MEETING_MODEL_CAPABILITIES=transcript.realtime,translation.realtime
 ```
 
-语言不是听悟或任何厂商的固定清单。服务端把 Provider、Product Profile、权益和
-部署声明求交后通过 `/v1/capabilities` 返回；更换 Adapter 时只需替换 Adapter、
-端点和声明，不改会议状态机。实际第三方密钥不得写入源码、模板、APK、日志或
-本手册。
+服务端将 Provider、Product Profile、权益和部署限制求交，得到可用能力；支持语言
+则由部署方按实际 Provider 填写 `AI_MEETING_MODEL_LANGUAGES`，`/v1/capabilities`
+按该声明返回，参考界面不固定厂商清单。当前听悟实现已有中文、英语、日语、韩语、
+德语、法语、俄语七种标准语言映射，部署只声明实际开放的子集。
+
+默认命令行入口只装配已有的听悟和 `sample-json-ws` 发行器。更换已有实现的端点和
+声明可改配置；接入新模型时，需要在自己的后端宿主注入 `ModelSessionIssuer`，并在
+Android 注册匹配的 `ModelAdapter`，再声明该实现确实支持的语言／能力。仅把
+`AI_MEETING_MODEL_ADAPTER` 改成任意字符串不会自动生成供应商实现，会议状态机无须修改。
+实际第三方密钥不得写入源码、模板、APK、日志或本手册。
 
 ## 3. 登录和鉴权扩展
 
@@ -130,18 +136,43 @@ Android 端通过 `ModelAdapter` 接收 Provider 数据，将原文、译文、�
 | `summary.structured` | 不显示纪要开关，不请求总结材料，Stop 后仍可回看文字 |
 | `speaker.diarization.session` | 不显示发言人列表，不把空 ID 当作发言人 |
 | `speaker.identity.cross_meeting` | 不显示跨会议身份；本场临时 Speaker 不冒充跨场身份 |
-| `audio.original` | 不生成录音引用，文字结果仍可完成 |
-| `presentation.capture` | 不显示演示结果区 |
 
 `transcript.realtime` 是参考会议的必选能力；未声明时 App 保持开始按钮禁用，
 后端拒绝 Create。上述行为由能力声明和本场 Create 决定共同驱动，不能靠固定的
 “中文／英文”或“听悟已配置”推断能力。
+
+### 录音留存策略
+
+`audio.original` 是结果产物类型；是否保留录音使用既有 Create 字段
+`artifactPolicy.retainAudio`，不放入模型能力清单。默认参考 App 在 SDK 运行时保留
+录音，Mock 运行时不保留。伙伴可在自己的会前装配中复用已有 API 关闭：
+
+```kotlin
+val withoutRecording = options.withCreateParameters(
+    title = options.title(),
+    timezone = options.timezone(),
+    retainAudio = false,
+)
+// 将 withoutRecording 交给原有会议启动流程，仍使用同一个 SDK 和结果链。
+```
+
+此选项不关闭实时采音或字幕／互译，只控制本场录音留存及上传；停止后的 Manifest
+不含音频时，Web 隐藏播放器，已有文字／总结仍正常交付。跨会议身份参考实现依赖
+会后录音，关闭留存时也不请求该可选能力。参考页面当前不额外增加录音开关，伙伴
+可按自己的产品流程决定该参数；不需要增加新的 Server capability 或结果状态机。
+
+演示采集同样使用既有 Create `artifactPolicy.presentationCapture`；
+`presentation.capture` 是其结果产物类型，不作为模型能力配置。未启用时不启动
+采集、Web 不显示演示区。截图新增实装与算法封装仍按本期决定暂缓。
 
 ## 5. 结果动作和 Web 扩展
 
 结果交付通过 `ResultActionPlugin` 注册。默认 `WebResultActionPlugin` 生成统一
 结果链接；插件只负责准备、执行和展示自己的动作，不复制会议状态机，也不修改
 Manifest。
+
+默认 Web 插件仅保存最近一场的完整原链接，并提供“查看上场结果”入口；回看沿用
+原 `genTime` 和有效期，这个入口不提供账号会议列表，也不恢复已结束的会议。
 
 伙伴可以新增：
 
@@ -180,12 +211,21 @@ cd android-reference-app && ./gradlew :app:testDebugUnitTest :app:assembleDebug
 - 本机局域网数据库、Provider 和设备的真实短会；
 - 两场真实会议的跨会议声纹结果（启用该能力时）。
 
-2026-10-17 的参考实现已完成本机 MySQL 5.7 隔离库和“只声明实时字幕”的 Android
+2026-10-17 初次参考验证完成本机 MySQL 5.7 隔离库和“只声明实时字幕”的 Android
 设备短会：登录会话恢复、能力发现、实时字幕、正常停止、`READY` 结果和可选能力
 降级均已通过。该证据记录在
 [`docs/p10-local-lan-validation-20261017.md`](p10-local-lan-validation-20261017.md)。
-这次验证没有声明翻译、总结、录音或跨会议声纹能力，因此这些功能仍需对应 Provider
-和配置到位后单独验收；模块测试通过不能替代这些真实能力验收。
+初次短会未启用翻译／总结／跨会议身份，且未保留录音，该时点不代签其他功能。
+后续真实 LAN HTTPS 已验证原文、中文到英语互译、总结及录音播放／拖动；Web 真实
+登录和人物命名注册也已通过。真实中文到日语的第二场已匹配首场同一人物，跨会议
+识别通过；该场手工打开 Web 的原译文／总结／身份与 609.02 秒录音播放／拖动已验。
+随后约 9 分半的真实中日长会已验默认 App 自动打开 Web，55 段原文／55 段日语、
+3 个人物、总结及 568.12 秒录音播放／拖动通过。会议结束后强停重开，登录保持，
+实际点击“查看上场结果”回到同一场原链接；另起会议主动息屏后正常停止并到 READY，
+唤醒后自动打开同场 Web，原文、总结和 83.02 秒录音播放／拖动通过。
+最终冻结 Debug 包又完成正常短会：停止退窗、结果成功后一次结束提示、自动 Web，
+以及同场原文、总结、人物和 42.52 秒录音播放／拖动均已验证。
+各次配置、实现版本与证据以该记录为准，模块测试不能代替真实能力验收。
 
 ## 7. 参考仓与 CZUR 产品边界
 

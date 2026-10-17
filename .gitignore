@@ -67,6 +67,9 @@ docker-compose.local.yml
 .env
 .env.*
 !.env.example
+# 参考启动手册使用的本机运行配置与默认产物目录；模板继续交付。
+/tools/reference-client.env
+/.local/
 
 # Secrets, credentials and local certificates
 *.pem

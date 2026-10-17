@@ -19,7 +19,7 @@
 
 合作伙伴扩展开会条件时，按 [`android-reference-app/README.md`](android-reference-app/README.md#合作伙伴会前开会条件-hook)
 替换参考 App 的默认放行检查。参考工程默认不包含扫码接收和小程序接收端；录音已
-按可选 `audio.original` 能力接入公共产物链并由 Web 流式回放，伙伴仍可自行
+按本场 `retainAudio` 留存策略接入 `audio.original` 公共产物链并由 Web 流式回放，伙伴仍可自行
 开发接收者流程并在开会前读取其已缓存的状态，不必修改模型或会议收口链。
 
 ## 本机开发验证
