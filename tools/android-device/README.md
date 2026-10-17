@@ -1,5 +1,39 @@
 # Android 参考 App 启动校验工具
 
+## 开发者先构建带部署地址的 APK
+
+后端和结果页地址由合作伙伴开发者在 PC 上配置，随 APK 构建确定。终端用户只需登录和
+选择会议功能，设备端没有连接设置或填写 IP 的步骤。正式部署可使用
+[`deployment.properties.example`](../../android-reference-app/deployment.properties.example)
+提供的键：复制为同目录已忽略的 `deployment.local.properties` 后填写实际值，或用
+`-PreferenceDeploymentFile=/absolute/path/deployment.properties` 选择仓外文件。
+显式 `-PreferenceBackendUrl=...`／`-PreferenceResultWebUrl=...` 优先于文件中的同名键。
+
+局域网联调提供轻量构建入口，从仓库根目录执行：
+
+```bash
+python3 tools/android-device/build-lan-apk.py \
+  --host '192.0.2.10' --backend-port 8443 --web-port 8090 \
+  --sdk-aar /absolute/path/ai-meeting-sdk-0.5.0-release.aar \
+  --ui-aar /absolute/path/ai-meeting-ui-0.2.0-release.aar \
+  --debug-ca /absolute/path/ca.pem
+```
+
+`192.0.2.10` 为文档占位值，替换为设备可达的 PC 地址。省略 `--host` 时，仅根据本机
+路由选取出口 IPv4，不向远端发请求；多网卡或网络隔离时请显式指定，并核对它与已准备的
+TLS 证书 IP SAN 一致。默认生成后端 `https://<host>:8443` 和结果页
+`http://<host>:8090/index.html`；端口独立可配，例如已有 Web 运行在 8091 时传
+`--web-port 8091`。已有域名／路径可直接传 `--backend-url` 和 `--web-url`，完整 URL
+原样交给 Gradle，保留 query／fragment；两者都提供时不探测主机地址。
+工具始终把最终两个地址作为显式 `-P` 传入，覆盖本地部署文件；若要完全采用文件原值，
+请直接在 Android 工程目录运行 Gradle，无需经过此 LAN helper。
+
+`--dry-run` 只打印构建目录与实际参数，不运行 Gradle。默认 `--runtime sdk`，必须提供
+匹配的主 SDK 和 UI AAR；不会因材料缺失退回 Mock。显式 `--runtime mock` 可验证基础
+构建且无须 AAR，也可额外传 UI AAR。本工具只构建 Debug，不安装 APK、启动服务、运行
+Docker、生成证书或修改 SDK；CA 只转发既有 Debug 构建参数。TLS 准备见
+[`本机 HTTPS 指南`](../../docs/local-lan-https.md)。
+
 ## 独立截图 API 回归（SDK Debug）
 
 已安装最新 SDK Debug APK 时，可以单独验证截图，不必登录、启动会议或提供模型 Key：
@@ -17,19 +51,18 @@ python3 tools/android-device/check-screen-capture-api.py \
 
 ## 日常会议流程
 
-用 Python 3 标准库和 ADB 自动完成**打开 App → 填写后端／Web 地址 → 真实账号登录 →
-选择功能 → 开始会议**。工具读取现有页面的 `resource-id`、`checked`、`enabled` 和
+用 Python 3 标准库和 ADB 自动完成**打开 App → 真实账号登录 → 选择功能 → 开始会议**。
+地址已经在构建时注入，工具读取现有页面的 `resource-id`、`checked`、`enabled` 和
 `bounds`，每次使用当前控件位置；不注入 token、不复制 SDK、也不另建会议状态机。
 日常验证在开发机执行，无须 Docker 或测试平台。仅支持当前参考 App 的 UI；伙伴改 UI
-后可调整脚本中的选择器。可见地址／账号字段会读回核对；中文输入法把按键合成为
+后可调整脚本中的选择器。可见账号字段会读回核对；中文输入法把按键合成为
 全角字符时，工具切换一次现有输入法语言并重填，不安装额外输入法。密码不读回。
 
 ## 准备
 
-1. 安装已构建的参考 App，连接 USB／ADB，后端与 Web 服务已正常启动。
-2. 默认使用局域网地址：后端使用已配置 HTTPS、且设备信任证书的 PC 地址，Web 可以使用
-   局域网 HTTP。设备上的 `127.0.0.1` 指设备自身；只有显式创建下文的 ADB reverse 后，
-   才能用 loopback HTTP 访问 PC 后端。
+1. 安装上述已注入部署地址的参考 App，连接 USB／ADB，后端与 Web 服务已正常启动。
+2. 后端构建地址使用已配置 HTTPS、且设备信任证书的 PC 地址，Web 可以使用局域网 HTTP。
+   设备上的 `127.0.0.1` 指设备自身；loopback 构建地址仅用于显式创建 ADB reverse 的诊断。
 3. 参考账号为后端已经配置的终端用户账号。密码从环境注入，勿写进命令参数、脚本或证据。
    可在本机用交互式 `read -s` 设置变量，或者使用已有环境注入方式：
 
@@ -40,19 +73,17 @@ export CZUR_MEETING_PASSWORD
 
 以上 `read` 为 zsh 示例。Bash 可用 `read -r -s -p '测试账号密码：' CZUR_MEETING_PASSWORD`。
 密码实际经 ADB shell 的标准输入送入原生输入控件，不放进子进程 argv。
-标准 Android `input text` 使用键盘映射，本工具支持单行 ASCII 账号／密码／地址，
+标准 Android `input text` 使用键盘映射，本工具支持单行 ASCII 账号／密码，
 字面量 `%s` 和非 ASCII 输入请在页面手动填写。Ctrl+A 清空字段使用 Android 14
 `input keycombination`；不安装额外输入法。
 
-## 一键配置并开始
+## 一键登录并开始
 
-从仓库根目录执行（把示例地址和 HTTPS 端口替换成实际部署值）：
+从仓库根目录执行，设备侧不再传后端／Web 地址：
 
 ```bash
 python3 tools/android-device/meeting-device.py setup-start \
   --serial '<ADB序列号>' \
-  --backend-url 'https://<已配置HTTPS的PC地址>:8443' \
-  --web-url 'http://<PC局域网IP>:8090/index.html' \
   --username 'meeting-user' --mode transcript --presentation \
   --output '/tmp/meeting-start-check'
 ```
@@ -66,8 +97,8 @@ python3 tools/android-device/meeting-device.py setup-start \
 
 未登录时直接填写账号表单；已登录时读取实际 UI 层级，在账号菜单中按完整文字选择
 “切换账号”，再提交本次账号，不按菜单序号点击，也不选择“退出登录”。登录成功后由
-原页面替换会话，取消或登录失败保留原有效身份。连接地址保存在 App 私有设置中，
-仍有效的登录会话在进程重启后恢复；只想重开会议时可直接使用
+原页面替换会话，取消或登录失败保留原有效身份。同一编译后端下有效登录会话在进程重启
+后恢复；换后端重新打包后不会误用原身份。只想重开会议时可直接使用
 `open → options → start`。工具不清除 App 数据，也不强杀会议。
 
 开始阶段会确认已知的系统录音／整屏采集授权按钮，走与人工点击相同的权限流程，不使用
@@ -78,8 +109,6 @@ python3 tools/android-device/meeting-device.py setup-start \
 
 ```bash
 python3 tools/android-device/meeting-device.py open
-python3 tools/android-device/meeting-device.py configure \
-  --backend-url 'https://<已配置HTTPS的PC地址>:8443' --web-url 'http://<PC局域网IP>:8090/index.html'
 python3 tools/android-device/meeting-device.py login --username 'meeting-user'
 python3 tools/android-device/meeting-device.py options --mode transcript --presentation
 python3 tools/android-device/meeting-device.py start
@@ -90,6 +119,8 @@ python3 tools/android-device/meeting-device.py stop --timeout 90
 多设备时给各命令传 `--serial`，或先设置 `ANDROID_SERIAL`。`stop` 复用 App 已有
 `DEBUG_STOP`，经正常 `requestStop()` 完成末帧和会议收口，等待同场 READY；仅 Debug APK
 支持，Release 请使用正常停止按钮。它不负责校验 Web 图片／字幕内容或模拟完整会议。
+`open` 通过正常 Activity 导航回到会前／会中页；结果页仍在前台时使用其返回入口，
+不等待已删除的连接按钮，不清数据或重置登录，也不强停当前会议。
 
 每个阶段输出一行 JSON：`stage`、`status`（PASS／PROGRESS／FAIL）和必要回执。
 登录 PASS 确认真实登录与能力加载后开始按钮可用；开始 PASS 确认**本场 App RUNNING
@@ -122,14 +153,18 @@ Token 或结果链接。`--play`／`--seek` 会短暂播放后暂停；不传时
 ## 可选 USB 调试映射（仅诊断）
 
 本机开发尚未配置 HTTPS 时，可以显式创建 ADB reverse，将设备 loopback HTTP 映射到
-PC 后端。现有登录客户端允许这个开发入口；直接填写 `http://<PC局域网IP>` 会被拒绝。
+PC 后端。现有登录客户端允许这个开发入口；直接构建 `http://<PC局域网IP>` 会被拒绝。
 以下例子将设备的 `127.0.0.1:8080` 映射到 PC 后端的 `38169` 端口，Web 仍走局域网：
 
 ```bash
+# 开发者先构建并安装这个诊断APK；真实LAN验收仍使用HTTPS入口。
+python3 tools/android-device/build-lan-apk.py \
+  --backend-url 'http://127.0.0.1:8080' \
+  --web-url 'http://192.0.2.10:8090/index.html' \
+  --sdk-aar /absolute/path/ai-meeting-sdk-0.5.0-release.aar \
+  --ui-aar /absolute/path/ai-meeting-ui-0.2.0-release.aar
 python3 tools/android-device/meeting-device.py reverse --device-port 8080 --host-port 38169
-python3 tools/android-device/meeting-device.py setup-start \
-  --backend-url 'http://127.0.0.1:8080' --web-url 'http://<PC局域网IP>:8090/index.html' \
-  --username 'meeting-user'
+python3 tools/android-device/meeting-device.py setup-start --username 'meeting-user'
 python3 tools/android-device/meeting-device.py remove-reverse --device-port 8080
 ```
 

@@ -55,6 +55,22 @@ MySQL 5.7 的独立能力探针见 [`tools/mysql57-compatibility/`](tools/mysql5
 两模块从根目录执行 `mvn -B clean test`；单独构建参考应用使用
 `mvn -B -pl backend-reference -am package`，无需预先安装核心。
 
+## Android 部署地址随构建注入
+
+合作伙伴开发者在 PC 上配置后端与结果页地址，打包后交给终端用户；App 不提供填写 IP／
+网址的入口。复制 `android-reference-app/deployment.properties.example` 为同目录的
+`deployment.local.properties` 后填写实际地址，该本地文件已被 Git 忽略。也可通过
+`-PreferenceDeploymentFile` 选择仓外 `.properties`，或用显式
+`-PreferenceBackendUrl`／`-PreferenceResultWebUrl` 覆盖文件同名键。默认未配置时仍可构建，
+App 提示联系应用提供方；不会转而读取旧手输地址。
+
+局域网测试使用 [`build-lan-apk.py`](tools/android-device/build-lan-apk.py) 检测 PC 地址或
+显式传入主机、后端／Web 端口及配套 AAR／Debug CA。它只组合已有 Gradle 输入，不启动
+Docker 或操作设备；部署服务与匹配 TLS 证书需预先准备。随后设备工具只负责正常
+`open → login → options → start`。配置优先级和命令见
+[`Android 说明`](android-reference-app/README.md#构建期部署地址)及
+[`构建与启动工具`](tools/android-device/README.md)。
+
 ## 交付部署
 
 交付用的后端 Dockerfile 和 Compose 配置不参与上述开发验证。参考后端的配置与
@@ -66,14 +82,14 @@ Compose 不启动数据库容器；本机临时 MySQL 容器只属于测试环�
 根目录和 Android 工程都提交可重建的 Gradle Wrapper；首次执行可能需要下载
 Gradle 和 Android 构建插件。Web 按 `web-reference/README.md` 生成静态资源。
 
-默认配置只使用占位地址。复制 `.env.example` 为本地 `.env` 后再按需修改，
+后端默认配置只使用占位地址。复制 `.env.example` 为本地 `.env` 后再按需修改，
 不得把真实地址、令牌或证书提交到仓库。
 
 ## 公共仓库边界
 
 禁止提交生产地址、密钥、证书、用户数据、AOSP Framework/vendor/HAL、
 设备签名配置、CZUR 云端代码和闭源 SDK 二进制。所有本地配置放在未跟踪的
-`.env` 或外部密钥管理系统中；`.env.example` 仅包含占位值。
+`.env`、已忽略的 `deployment.local.properties` 或外部密钥管理系统中；公开模板仅包含占位值。
 
 合作伙伴接入、能力缺失行为、模型／登录／结果动作扩展和交付边界见
 [`docs/partner-integration-guide.md`](docs/partner-integration-guide.md)。

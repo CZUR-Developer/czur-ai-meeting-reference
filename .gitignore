@@ -26,6 +26,8 @@ target/
 
 # Android
 local.properties
+# 部署地址由开发者在构建前配置，实际域名／本机IP不进入公开仓库。
+/android-reference-app/deployment.local.properties
 *.apk
 *.aar
 *.aab

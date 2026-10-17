@@ -11,6 +11,47 @@ Android 自有应用层、会议公共核心、模型契约及其测试统一使
 Gradle／Android Gradle Plugin 沿用既有版本；Lint 单独使用 9.4.0，以正确解析 Kotlin 2.4
 制品元数据，配置见 `gradle.properties`，不关闭原有 Release 检查。
 
+## 构建期部署地址
+
+后端和默认 Web 结果页地址由合作伙伴开发者在 PC 上配置，编译为 App 的 `BuildConfig`。
+终端用户只登录、选择会议功能并使用，不提供连接设置页，也不要求填写 IP 或网址。
+模型端点和临时材料仍由后端下发，构建配置不包含模型 Key 或账号密码。
+
+默认读取本工程根目录的 `deployment.local.properties`。在 Android Studio 打开本目录后，
+可复制公开模板再填写本机值；实际文件已在根 `.gitignore` 中忽略：
+
+```bash
+cp deployment.properties.example deployment.local.properties
+# 只在本机修改 referenceBackendUrl、referenceResultWebUrl 两个地址。
+./gradlew :app:assembleDebug
+```
+
+每个地址按以下优先级取值：显式 Gradle `-PreferenceBackendUrl`／
+`-PreferenceResultWebUrl` → 选定 `.properties` 中的同名键 → 空值。
+文件默认名为 `deployment.local.properties`；可用
+`-PreferenceDeploymentFile=/absolute/path/deployment.properties` 指定仓外文件，相对路径
+按 Android Gradle 根目录解析。配置缺失时可以构建，但 App 会提示联系应用提供方，
+不会显示输入地址 UI，也不使用旧 SharedPreferences 中的手输地址作为回退。
+
+```bash
+# 直接注入部署方域名；与其他SDK／UI构建参数可同时使用。
+./gradlew :app:assembleDebug \
+  -PreferenceBackendUrl=https://api.example.invalid \
+  -PreferenceResultWebUrl=https://results.example.invalid/index.html
+```
+
+后端地址相同的升级保留原有效登录；地址变化时默认身份插件清除原后端的登录，
+避免把旧会话发给新后端。其持久化地址只用于身份配对，不决定实际连接目标。合作伙伴
+自有 `IdentityProvider` 同样应把凭据与其所属服务配对；可替换登录入口和结果插件保持不变。
+
+本机 LAN Debug 可从仓库根使用
+[`build-lan-apk.py`](../tools/android-device/build-lan-apk.py)，默认检测路由出口 IPv4，
+也可指定 `--host`、独立端口或完整 URL，复用配套 SDK／UI AAR 和公开 Debug CA。
+此工具将两个地址作为显式 `-P` 传入并覆盖部署文件；使用文件原值时直接执行 Gradle。
+工具不配置设备、启动服务或生成证书；命令见
+[`构建／启动工具`](../tools/android-device/README.md)和
+[`局域网 HTTPS 指南`](../docs/local-lan-https.md)。安装后只需正常登录。
+
 ## 当前交付状态（2026-10-17）
 
 P10 已完成本机 MySQL 5.7、PC 局域网 HTTPS 和默认结果 Web 的实体链验证：持久登录、
@@ -63,8 +104,8 @@ View自身alpha保持1。3b已独立验收并本地提交；本步3c在同一UI 
 “会后生成会议纪要”独立于呈现模式，未提供总结能力时保持关闭；演示文稿只在字幕模式开放。
 “账号登录”打开参考账号密码弹窗；已有有效登录时，账号入口提供“切换账号／退出登录”菜单。
 切换只打开新表单，取消或登录失败保留原账号；成功后由同一身份插件替换会话并重新读取能力。
-明确选择“退出登录”才清理当前参考身份。“连接设置”独立配置后端与Web结果地址。
-参考默认插件把后端地址、短期访问令牌、显示名和到期时间保存到应用私有设置，进程重启后
+明确选择“退出登录”才清理当前参考身份。后端与Web结果地址由开发者在构建时注入。
+参考默认插件把登录所属后端、短期访问令牌、显示名和到期时间保存到应用私有设置，进程重启后
 恢复有效身份；密码从不保存。变更后端会清除旧会话，退出也只清除参考会话，不影响系统账号，
 随后页面重新刷新身份／能力。伙伴可在`MeetingAppAssembly.initialize`后替换身份插件。
 更换后端清除默认参考会话；不写入凭据，不接CZUR个人中心、会员、充值或Launcher。
@@ -73,7 +114,7 @@ View自身alpha保持1。3b已独立验收并本地提交；本步3c在同一UI 
 双语原文白色、译文黄色（`#FFDB10`），同一发言方的原译在同侧上下排列；字幕24设计字号、
 36设计行高。原文／译文消费同一SDK已路由快照和`SubtitleViewFactory`，不复制分栏、修订或模型逻辑。
 停止后沿原准备动作自动打开同场Web，原生容器提供“本场会议结果”及返回入口。
-默认Web没有主页面地址输入；`Settings.freeze()`在点击开始时读取连接配置，
+默认Web没有地址输入；会前动作准备在点击开始时冻结构建配置中的结果页地址，
 系统屏采授权返回继续消费同一准备对象。自定义结果插件仍可在`result_settings_host`放自己的View。
 
 App侧`MeetingPageViews.Factory`只创建／绑定View；默认XML中的dp／sp记录设计数值，
@@ -365,7 +406,7 @@ Mini 期间会议仍继续采音、收模型结果和提交标准事件，恢复
 国内版字幕收起的清空文字／暂停ASR入口属于P9产品规则，本步不迁移；
 参考版只实现窗口收起，不声称Mini暂停识别或计费。
 
-当前会前先在独立连接设置填写设备可达的后端与Web地址，再从账号入口填写部署者预置的账号和密码。
+当前后端与Web地址在构建时确定；会前只从账号入口填写部署者预置的账号和密码。
 App调用`MeetingClient.login`更新集中装配的参考登录插件，默认实现把短期会话及到期时间保存到
 应用私有设置；Service用同一Provider创建独立会议客户端，进程重启后可恢复有效身份。
 组合层封装 `POST /v1/reference/session:login`、建会、标准字幕/译文提交及结束会议。
@@ -378,8 +419,9 @@ App调用`MeetingClient.login`更新集中装配的参考登录插件，默认�
 更换后端才清除旧会话。伙伴自定义登录入口同样不应在打开界面时提前清理旧身份。
 账号密码从不写入 APK、日志或持久化配置，默认插件只保存
 服务端返回的短期令牌、显示名和到期时间。登录地址须使用设备可访问的 HTTPS；本机调试
-可以通过 `adb reverse tcp:8080 tcp:8080`，在设备上填写 `http://127.0.0.1:8080`
-访问开发机。未做端口转发时，设备上的 `localhost` 不是开发机。参考账号与 CZUR
+可以通过 `adb reverse tcp:8080 tcp:8080`，构建时将后端注入为 `http://127.0.0.1:8080`
+以访问开发机；这是另一个诊断构建，不改变设备运行时设置。未做端口转发时，设备上的
+`localhost` 指设备自身。参考账号与 CZUR
 系统账号相互独立。
 会前选择的两种会议语言分别进入 `languages.source` 和 `languages.targets`；现场互译
 只在 SDK 构建中开放，且仍须本场后端能力决策和听悟 Adapter 同时允许。模型只有字幕
@@ -428,7 +470,7 @@ Debug `AudioDiagnosticActivity` 同时显示模式、方向状态、帧数和峰
 ### 可注册结果动作：默认只Web
 
 `MeetingAppAssembly`是构建期唯一清单，默认`List.of(new WebResultActionPlugin())`。
-后端链接服务可用时页面显示网页查看，地址来自独立连接设置；没有未装配邮件／PDF／小程序／无痕选项，
+后端链接服务可用时页面显示网页查看，地址来自构建配置；没有未装配邮件／PDF／小程序／无痕选项，
 也没有最近PDF按钮。后端邮件能力声明不会自动添加入口。模型音频仍直连模型，
 标准事件、用量、总结和屏采顺序不因动作变化而改变。
 

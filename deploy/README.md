@@ -69,8 +69,9 @@ Compose 中的 `DATABASE_URL` 必须从应用容器可达；宿主机初始化�
 正式部署由部署方已有反向代理／域名证书将 HTTPS 转到映射端口。开发 PC 没有 HTTPS
 入口时，按[本机局域网 HTTPS 联调](../docs/local-lan-https.md)生成仓外证书、
 启动现有 Node TLS 入口并构建信任该公开 CA 的 Debug APK；上游使用
-`http://127.0.0.1:<API_PORT>`，设备连接 `https://<PC_LAN_IP>:8443`。
-不要把设备自己的 `127.0.0.1` 或上游 HTTP 地址填入设备登录框。
+`http://127.0.0.1:<API_PORT>`，App 后端构建地址为 `https://<PC_LAN_IP>:8443`。
+部署地址由开发者在 PC 上配置并注入 APK，终端用户只输入账号／密码。不要把设备自己的
+`127.0.0.1` 或上游 HTTP 地址当作 LAN 登录入口。
 
 静态 Web 源码随仓库交付，部署方可放在自己的静态站点。本机预览可另开终端执行：
 
@@ -81,11 +82,18 @@ REFERENCE_WEB_BIND=0.0.0.0 REFERENCE_WEB_PORT=8090 \
 bash ../tools/run-reference-web.sh
 ```
 
-App“连接设置”的 Web 结果地址填写 `http://<PC_LAN_IP>:8090`；Web 的
+App Web 结果构建地址使用 `http://<PC_LAN_IP>:8090/index.html`；Web 的
 `config.json` 中 `apiBaseUrl` 必须从设备浏览器可达。Web 使用开发 HTTPS 上游时，
 浏览器也要信任该 CA，Debug APK 的信任配置不会替浏览器安装证书。生产 HTTPS 页面
 应使用同样可达的 HTTPS API，避免混合内容。仓库只交付后端应用镜像，不新增 Web
 或数据库镜像。
+
+Android 默认读取已忽略的 `android-reference-app/deployment.local.properties`；可通过
+`-PreferenceDeploymentFile` 指向仓外 `.properties`。显式 `-PreferenceBackendUrl`／
+`-PreferenceResultWebUrl` 优先于文件同名键；模板只含示例域名。局域网构建入口
+[`build-lan-apk.py`](../tools/android-device/build-lan-apk.py) 可自动选址或显式传主机及
+独立后端／Web 端口，复用配套 AAR 和公开 Debug CA；它不启动任何服务或 Docker。
+完整命令见 [Android 构建／启动工具](../tools/android-device/README.md)。
 
 ## 模型、身份和结果
 

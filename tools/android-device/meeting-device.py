@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """参考 App 的真实 UI 启动工具：仅用 Python 标准库和可替换的 adb runner。
 
-配置、登录、开会和系统授权均操作页面现有控件；不注入 token、不创建旁路会议。
+部署地址随 APK 构建注入；登录、开会和系统授权操作现有控件，不注入 token 或旁路会议。
 坐标只从当前层级中的 resource-id 对应 bounds 计算，不依赖设备分辨率。
 """
 
@@ -183,29 +183,30 @@ class MeetingDevice:
         self.hide_keyboard()
 
     def open(self):
+        """回到已有会前／会中页；结果页只通过正常 Activity 导航退出。
+
+        CLEAR_TOP/SINGLE_TOP 把现有主页面带到前台，不清 App 数据、不重置登录，
+        也不停止后台会议。若结果页仍在展示，使用其公开返回按钮继续导航。
+        """
         self.stage = "open"
         self.adb.run("shell", "input", "keyevent", "KEYCODE_WAKEUP")
-        self.adb.run("shell", "am", "start", "-n", PACKAGE + "/.MainActivity")
-        self.wait(lambda root: by_id(root, "settings_button")
-                  if by_id(root, "settings_button") is not None else by_id(root, "stop_meeting"),
-                  "参考 App 页面")
+        self.adb.run("shell", "am", "start", "--activity-clear-top", "--activity-single-top",
+                     "-n", PACKAGE + "/.MainActivity")
+
+        def main_page(root):
+            start = by_id(root, "start_meeting")
+            return start if start is not None else by_id(root, "stop_meeting")
+
+        def navigation_target(root):
+            page = main_page(root)
+            return page if page is not None else by_id(root, "result_back")
+
+        target = self.wait(navigation_target, "参考 App 会前／会中页或结果返回入口")
+        if target.get("resource-id") == PACKAGE + ":id/result_back":
+            self.tap(target)
+            self.wait(main_page, "返回参考 App 会前／会中页")
         self.evidence()
         self.emit("PASS")
-
-    def configure(self, backend, web):
-        self.stage = "configure"
-        self.tap_id("settings_button")
-        self.fill("backend_url", backend)
-        self.fill("web_url", web)
-        root = self.dump()
-        for name, expected in (("backend_url", backend), ("web_url", web)):
-            node = by_id(root, name)
-            if node is None or node.get("text") != expected:
-                raise ToolError("输入未匹配页面: " + name)
-        self.tap_id("connection_save")
-        self.wait(lambda ui: by_id(ui, "settings_button"), "连接配置保存返回")
-        self.evidence()
-        self.emit("PASS", backendUrl=backend, webUrl=web)
 
     def login(self, username, password):
         self.stage = "login"
@@ -390,12 +391,10 @@ class MeetingDevice:
 
 def parser():
     cli = argparse.ArgumentParser(description=__doc__)
-    cli.add_argument("command", choices=("open", "configure", "login", "options", "start",
+    cli.add_argument("command", choices=("open", "login", "options", "start",
                                          "setup-start", "stop", "status", "reverse", "remove-reverse"))
     cli.add_argument("--serial", default=os.environ.get("ANDROID_SERIAL"))
     cli.add_argument("--adb-command", default=os.environ.get("CZUR_ADB_COMMAND", "adb"))
-    cli.add_argument("--backend-url")
-    cli.add_argument("--web-url")
     cli.add_argument("--username", default=os.environ.get("CZUR_MEETING_USERNAME"))
     cli.add_argument("--password-env", default="CZUR_MEETING_PASSWORD")
     cli.add_argument("--mode", choices=("transcript", "translation"), default="transcript")
@@ -411,12 +410,10 @@ def parser():
     return cli
 
 
-def main():
+def main(argv=None):
     cli = parser()
-    args = cli.parse_args()
+    args = cli.parse_args(argv)
     password = os.environ.get(args.password_env, "")
-    if args.command in ("configure", "setup-start") and not (args.backend_url and args.web_url):
-        cli.error("该命令需要 --backend-url 和 --web-url")
     if args.command in ("login", "setup-start") and not (args.username and password):
         cli.error("请提供 --username 或 CZUR_MEETING_USERNAME，并设置密码环境变量 " + args.password_env)
     tool = MeetingDevice(Adb(args.adb_command, args.serial, (password,)), args.timeout,
@@ -424,12 +421,9 @@ def main():
     try:
         if args.command == "setup-start":
             tool.open()
-            tool.configure(args.backend_url, args.web_url)
             tool.login(args.username, password)
             tool.options(args.mode, args.presentation, args.summary, args.source_language, args.target_language)
             tool.start()
-        elif args.command == "configure":
-            tool.configure(args.backend_url, args.web_url)
         elif args.command == "login":
             tool.login(args.username, password)
         elif args.command == "options":

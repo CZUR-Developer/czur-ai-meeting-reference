@@ -12,7 +12,7 @@ SDK 的实时模型音频／WSS 仍直连所配置的模型，本工具不提供
 
 以下命令使用 OpenSSL 1.1.1 或更新版本。把 `PC_LAN_IP` 改成设备能访问的开发电脑
 局域网 IP；证书的 IP Subject Alternative Name（SAN，主体备用名称）必须与 App
-填写的 IP 一致。证书、私钥和本机实际地址都不提交到仓库。
+构建时注入的 IP 一致。证书、私钥和本机实际地址都不提交到仓库。
 
 ```bash
 # 选择仓库以外的本机目录；示例使用随机临时目录。
@@ -84,22 +84,42 @@ curl --cacert "$REFERENCE_TLS_DIR/ca.pem" "https://$PC_LAN_IP:8443/v1/capabiliti
 不使用 `curl -k` 或绕过证书校验。生产部署使用部署方自己的 HTTPS 域名／证书和
 正式反向代理；本脚本不属于必须交付的产品镜像。
 
-## 3. 仅 Debug 构建信任该 CA
+## 3. 构建时注入部署地址，仅 Debug 信任该 CA
 
-在原有 Mock 或 SDK＋UI 构建参数上增加一个可选 Gradle 属性：
+在参考仓根目录使用轻量构建入口，地址与 CA 都由开发者在 PC 上准备：
+
+```bash
+python3 tools/android-device/build-lan-apk.py \
+  --host "$PC_LAN_IP" --backend-port 8443 --web-port 8090 \
+  --sdk-aar /absolute/path/ai-meeting-sdk-0.5.0-release.aar \
+  --ui-aar /absolute/path/ai-meeting-ui-0.2.0-release.aar \
+  --debug-ca "$REFERENCE_TLS_DIR/ca.pem"
+```
+
+两份 AAR 必须版本匹配。省略 `--host` 时工具根据本机路由选址；证书仍须与最终主机
+匹配，多网卡时应显式指定。已有 Web 在其他端口时传 `--web-port`，后端使用独立的
+`--backend-port`；已有完整地址时可传 `--backend-url`／`--web-url` 原样覆盖。增加
+`--dry-run` 可只查看 Gradle 参数，不执行构建。工具不启动服务、生成证书或安装 APK。
+
+也可在 Android 工程目录直接配置：默认复制 `deployment.properties.example` 为已忽略的
+`deployment.local.properties`，或传 `-PreferenceDeploymentFile=/absolute/path/deployment.properties`。
+显式 `-PreferenceBackendUrl`／`-PreferenceResultWebUrl` 优先于文件中的同名键；公开模板
+只包含示例域名。等价的 SDK＋UI 手动构建命令为：
 
 ```bash
 cd android-reference-app
 ./gradlew :app:assembleDebug \
-  -PreferenceDebugCaCertificate="$REFERENCE_TLS_DIR/ca.pem"
-
-# SDK＋UI 组合沿用已有 AAR 注入，再增加相同 CA 属性。
-./gradlew :app:assembleDebug \
   -PmeetingRuntime=sdk \
   -PmeetingSdkAar=/absolute/path/ai-meeting-sdk-0.5.0-release.aar \
   -PmeetingUiAar=/absolute/path/ai-meeting-ui-0.2.0-release.aar \
+  -PreferenceBackendUrl="https://$PC_LAN_IP:8443" \
+  -PreferenceResultWebUrl="http://$PC_LAN_IP:8090/index.html" \
   -PreferenceDebugCaCertificate="$REFERENCE_TLS_DIR/ca.pem"
 ```
+
+Mock 基础构建须显式选择 `-PmeetingRuntime=mock`，或在工具上加 `--runtime mock`，
+不要求闭源 AAR；它不代签真实采音／模型。无配置仍可构建，页面提示联系应用提供方，
+不让终端用户补填地址。配置来源与身份保存边界见 [Android 说明](../android-reference-app/README.md#构建期部署地址)。
 
 构建在 `app/build/generated/referenceDebugTls/res/` 生成 CA raw 资源和网络安全配置，
 Debug Manifest 引用该配置；Release 不引用配置、不打包 CA，SDK 也没有改动。
@@ -110,17 +130,23 @@ Debug Manifest 引用该配置；Release 不引用配置、不打包 CA，SDK �
 cleartext 调试设置保留，SDK 登录地址仍只接受 HTTPS 或诊断用 loopback。
 可直接运行 `:app:generateReferenceDebugTlsResources` 检查生成结果，无须安装设备。
 
-## 4. 设备与 Web 配置
+## 4. 安装后正常登录与 Web 配置
 
-将 Debug APK 安装到与 PC 可互通的设备后，在“连接设置”填写
-`https://<PC_LAN_IP>:8443`。不要用设备自己的 `127.0.0.1`，真实局域网验收也不要依赖
-`adb reverse`。登录插件和会议业务继续使用同一地址，无须额外修改 App 或 SDK。
+将 Debug APK 安装到与 PC 可互通的设备后，直接打开 App 并正常登录；无需输入后端或
+结果页地址，设备工具也不再接收这些参数。实际连接只使用上述构建配置，已有手输值不
+覆盖编译值。同一后端升级保留有效登录，更换后端重新构建后不复用原后端会话。
+不要把设备自己的 `127.0.0.1` 当作 PC，真实局域网验收也不依赖 `adb reverse`。
 
 Web 仍沿用已有静态 Web 启动脚本；`REFERENCE_HTTP_BASE_URL` 可使用 PC 的局域网
-HTTP 后端地址，App 的 Web 结果地址填写设备可达的静态站点（例如
-`http://<PC_LAN_IP>:8090`），不要填作后端 API 地址。结果页无需与 Android 入口采用
+HTTP 后端地址，App 的 Web 结果构建地址指向设备可达的静态站点（例如
+`http://<PC_LAN_IP>:8090/index.html`），与后端 API 地址分开配置。结果页无需与 Android 入口采用
 相同协议。生产 HTTPS 页面应连接 HTTPS API，避免混合内容。若浏览器结果页也指向该
 开发 HTTPS 入口，浏览器需要自行信任这份本机 CA；Android Debug 的信任不影响浏览器。
+
+正常启动可用 [`meeting-device.py`](../tools/android-device/README.md) 的
+`setup-start --username '<部署账号>'`，密码沿用环境注入；此时只执行
+`open → 正常UI登录 → options → start`。诊断用 reverse 也需要先在 PC 上构建 loopback
+地址的专用包并安装，再显式建立端口映射；没有运行时填写地址的步骤，不作为 LAN 验收。
 
 正常验收记录应包含真实局域网地址连接、登录、能力发现、会议正常停止和同场 Artifact
 结果；TLS 工具检查、APK 构建或 loopback 诊断不代签设备会议和真实模型验证。

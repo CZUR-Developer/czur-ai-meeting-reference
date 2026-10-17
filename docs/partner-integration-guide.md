@@ -48,10 +48,19 @@ bash tools/run-reference-web.sh
 
 参考客户端入口只启动 HTTP 业务接口；Android 通过
 `POST /v1/meetings/{meetingId}:modelSession` 取得短期材料后直连模型，音频不经过
-后端。设备上的登录／后端地址使用开发电脑可达的 HTTPS 地址，不能填写设备自己的
-`127.0.0.1`。开发电脑尚无 HTTPS 入口时，按[本机局域网 HTTPS 联调](local-lan-https.md)
+后端。开发者在 PC 上为 App 构建注入设备可达的 HTTPS 后端地址和独立结果页地址，
+终端用户只需正常登录，不配置 IP／网址。设备自己的 `127.0.0.1` 不表示开发电脑。
+开发电脑尚无 HTTPS 入口时，按[本机局域网 HTTPS 联调](local-lan-https.md)
 生成仓外证书、启动 Node 流式 TLS 入口，并通过可选 Gradle 属性让 Debug APK 信任该 CA。
 正式 Release 不携带开发 CA，沿用部署方的正式 HTTPS 证书；`adb reverse` 仅用于诊断。
+
+Android 默认读取 `android-reference-app/deployment.local.properties`，公开模板为同目录的
+`deployment.properties.example`，真实本地文件已忽略。也可用 `-PreferenceDeploymentFile`
+选择仓外 `.properties`；显式 `-PreferenceBackendUrl`／`-PreferenceResultWebUrl` 优先于
+文件中的同名键。未配置时 App 提示联系应用提供方，不重新打开地址输入界面，也不从旧
+手输设置回退。局域网开发可用 [`build-lan-apk.py`](../tools/android-device/build-lan-apk.py)
+自动选择 PC 地址或显式传主机、独立端口／完整 URL 及配套 AAR／公开 Debug CA。
+构建与无地址步骤的设备启动命令见 [工具说明](../tools/android-device/README.md)。
 
 数据库统一使用 MySQL 5.7。先由部署方创建隔离数据库，再执行仓库中当前唯一的
 `deploy/migrations/V001__initial_schema.sql`（或运行 `deploy/migrate.sh`）。该脚本只新增
@@ -115,6 +124,8 @@ MeetingAppAssembly.registerLoginEntry(AppLoginEntry { activity, defaultEntry, on
 
 替换入口会完全接管账号切换，不会先执行默认退出。会话保存／恢复由伙伴 Provider
 负责，回调只触发重新读取身份和能力；SDK 不申请账号、不弹登录 UI，也不引用系统账号。
+默认插件将会话与构建后端配对：同一后端升级／重启恢复有效登录，更换后端的 APK 不复用
+原后端会话。伙伴自定义身份插件应保持这种归属；它不提供运行时切换部署地址的入口。
 
 ## 4. 模型和能力扩展
 

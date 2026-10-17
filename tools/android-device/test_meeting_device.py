@@ -3,7 +3,7 @@
 import importlib.util
 from pathlib import Path
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 import xml.etree.ElementTree as ET
 
 spec = importlib.util.spec_from_file_location("meeting_device", Path(__file__).with_name("meeting-device.py"))
@@ -28,10 +28,45 @@ class MeetingDeviceTests(unittest.TestCase):
     def test_open_accepts_leaf_button(self):
         adb = Mock()
         tool = device.MeetingDevice(adb)
-        tool.dump = Mock(return_value=hierarchy(("settings_button", {})))
+        tool.dump = Mock(return_value=hierarchy(("start_meeting", {})))
         with patch("builtins.print"):
             tool.open()
-        adb.run.assert_any_call("shell", "am", "start", "-n", device.PACKAGE + "/.MainActivity")
+        adb.run.assert_any_call("shell", "am", "start", "--activity-clear-top", "--activity-single-top",
+                                "-n", device.PACKAGE + "/.MainActivity")
+
+    def test_open_returns_from_result_page_through_its_normal_back_button(self):
+        adb = Mock()
+        tool = device.MeetingDevice(adb)
+        tool.dump = Mock(side_effect=[hierarchy(("result_back", {})),
+                                     hierarchy(("start_meeting", {}))])
+        with patch("builtins.print"):
+            tool.open()
+        adb.run.assert_any_call("shell", "input", "tap", "120", "70")
+        self.assertEqual(tool.dump.call_count, 2)
+
+    def test_open_accepts_the_current_meeting_without_resetting_it(self):
+        adb = Mock()
+        tool = device.MeetingDevice(adb)
+        tool.dump = Mock(return_value=hierarchy(("stop_meeting", {})))
+        with patch("builtins.print"):
+            tool.open()
+        self.assertEqual(adb.run.call_count, 2)
+
+    def test_setup_start_uses_the_built_apk_without_a_configuration_step(self):
+        with patch.object(device, "MeetingDevice") as factory, \
+                patch.dict(device.os.environ, {"CZUR_MEETING_PASSWORD": "test-password"}):
+            self.assertEqual(device.main(["setup-start", "--username", "meeting-user"]), 0)
+        self.assertEqual(factory.return_value.method_calls, [
+            call.open(), call.login("meeting-user", "test-password"),
+            call.options("transcript", False, False, None, None), call.start(),
+        ])
+
+    def test_device_tool_has_no_address_configuration_command_or_flags(self):
+        with patch("sys.stderr"):
+            for arguments in (["configure"], ["open", "--backend-url", "https://example.invalid"],
+                              ["open", "--web-url", "https://example.invalid/index.html"]):
+                with self.assertRaises(SystemExit):
+                    device.parser().parse_args(arguments)
 
     def test_password_input_uses_stdin_and_replaces_existing_field(self):
         adb = Mock()
@@ -56,10 +91,10 @@ class MeetingDeviceTests(unittest.TestCase):
         adb = Mock()
         tool = device.MeetingDevice(adb)
         tool.fill_once = Mock()
-        url = "http://192.0.2.10:8080"
-        tool.dump = Mock(side_effect=[hierarchy(("backend_url", {"text": "HTTP：／／192。0。2。10：8080"})),
-                                      hierarchy(("backend_url", {"text": url}))])
-        tool.fill("backend_url", url)
+        account = "meeting.user@example.invalid"
+        tool.dump = Mock(side_effect=[hierarchy(("login_username", {"text": "meeting。user＠example。invalid"})),
+                                      hierarchy(("login_username", {"text": account}))])
+        tool.fill("login_username", account)
         adb.run.assert_called_once_with("shell", "input", "keyevent", "KEYCODE_LANGUAGE_SWITCH")
         self.assertEqual(tool.fill_once.call_count, 2)
 
