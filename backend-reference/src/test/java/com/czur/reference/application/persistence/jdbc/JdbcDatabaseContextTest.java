@@ -42,9 +42,10 @@ class JdbcDatabaseContextTest {
     @Test
     void mapsOnlyCurrentBaselineTablesToFixedMysqlPrefix() {
         Set<String> postgres = Arrays.stream(JdbcDatabaseTable.values())
-                .filter(table -> table.requiredFor(JdbcDatabaseEngine.POSTGRESQL))
+                .filter(table -> table.requiredForBaseline(JdbcDatabaseEngine.POSTGRESQL))
                 .map(table -> table.physicalName(JdbcDatabaseEngine.POSTGRESQL)).collect(Collectors.toSet());
         Set<String> mysql = Arrays.stream(JdbcDatabaseTable.values())
+                .filter(table -> table.requiredForBaseline(JdbcDatabaseEngine.MYSQL))
                 .map(table -> table.physicalName(JdbcDatabaseEngine.MYSQL)).collect(Collectors.toSet());
 
         assertEquals(25, postgres.size());
@@ -55,6 +56,10 @@ class JdbcDatabaseContextTest {
         assertEquals("schema_migrations", JdbcDatabaseTable.SCHEMA_MIGRATIONS.physicalName(JdbcDatabaseEngine.POSTGRESQL));
         assertEquals("ai_trans_schema_migrations", JdbcDatabaseTable.SCHEMA_MIGRATIONS.physicalName(JdbcDatabaseEngine.MYSQL));
         assertEquals("ai_trans_meeting_client_event", JdbcDatabaseTable.MEETING_CLIENT_EVENT.physicalName(JdbcDatabaseEngine.MYSQL));
+        assertEquals("ai_trans_speaker_identity_person",
+                JdbcDatabaseTable.SPEAKER_IDENTITY_PERSON.physicalName(JdbcDatabaseEngine.MYSQL));
+        assertFalse(JdbcDatabaseTable.SPEAKER_IDENTITY_PERSON.requiredForBaseline(JdbcDatabaseEngine.MYSQL));
+        assertFalse(JdbcDatabaseTable.SPEAKER_IDENTITY_PERSON.requiredForBaseline(JdbcDatabaseEngine.POSTGRESQL));
     }
 
     private static DatabaseRuntimeConfig config(String url) {

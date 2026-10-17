@@ -106,8 +106,18 @@ public final class ReferenceMeetingHttpAssembly extends MeetingHttpAssembly {
             ModelSessionIssuer issuer, UnaryOperator<EntitlementProvider> decorator,
             com.czur.reference.application.http.SessionLoginEndpoint login,
             SummarySessionIssuer summaryIssuer) {
+        return startClientModel(config, clock, artifacts, identity, policy, issuer, decorator,
+                login, summaryIssuer, null);
+    }
+
+    /** 默认关闭的会后人物扩展；Factory 复用公共装配的唯一 Context 与 Store。 */
+    public static ReferenceMeetingHttpAssembly startClientModel(ReferenceMeetingDeploymentConfig config,
+            Clock clock, ArtifactStore artifacts, IdentityProvider identity, EntitlementPolicy policy,
+            ModelSessionIssuer issuer, UnaryOperator<EntitlementProvider> decorator,
+            com.czur.reference.application.http.SessionLoginEndpoint login,
+            SummarySessionIssuer summaryIssuer, SpeakerIdentityFactory speakerFactory) {
         return new ReferenceMeetingHttpAssembly(MeetingHttpAssembly.startClientModel(config, clock,
-                artifacts, identity, policy, issuer, decorator, login, summaryIssuer));
+                artifacts, identity, policy, issuer, decorator, login, summaryIssuer, speakerFactory));
     }
 
     /**

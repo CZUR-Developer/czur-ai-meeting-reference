@@ -9,6 +9,7 @@ import com.czur.reference.application.identity.referencedev.ReferenceDevIdentity
 import com.czur.reference.application.model.ModelSessionIssuer;
 import com.czur.reference.application.port.artifact.ArtifactStore;
 import com.czur.reference.application.port.artifact.ArtifactStoreException;
+import com.czur.reference.application.speaker.ReferenceSpeakerIdentityConfig;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -23,8 +24,9 @@ import java.util.logging.Logger;
  * 参考 App 的本机客户端直连模型进程。
  *
  * <p>这个进程只启动 HTTP 业务入口：Android 通过 {@code :modelSession} 取得
- * 临时模型材料后直连模型，音频不会经过本进程，也不会启动旧 WSS 音频链、
- * 旧音频 Worker 或第二套会议状态。身份、权益、模型 Adapter、总结发行器和
+ * 临时模型材料后直连模型，实时音频不经本进程转发；会后可上传封口录音，
+ * 用于统一结果回放和可选人物处理。不启动旧 WSS 音频链、旧音频 Worker 或
+ * 第二套会议状态。身份、权益、模型 Adapter、总结发行器和
  * Artifact Store 仍由同一参考装配注入，因而本机链路与合作伙伴替换边界保持一致。</p>
  *
  * <p>数据库必须先由部署方用唯一 V001 初始化；启动只做同一 JDBC Context 的
@@ -80,7 +82,7 @@ public final class ReferenceClientMeetingProcess implements AutoCloseable {
                     value, new HttpErrorMapper(), clock)).orElse(null);
             assembly = ReferenceMeetingHttpAssembly.startClientModel(config, clock, artifacts,
                     identity, policy, issuer, java.util.function.UnaryOperator.identity(),
-                    login, null);
+                    login, null, ReferenceSpeakerIdentityConfig.factory(values, clock));
             http = assembly.newJdkHttpServer(httpBind);
             http.start();
             LOGGER.log(Level.INFO, "参考客户端直连后端已启动 httpPort={0} modelAdapter={1}",

@@ -22,6 +22,9 @@ import com.czur.reference.application.port.identity.IdentityProviderResult;
 import com.czur.reference.application.port.identity.Subject;
 import com.czur.reference.application.port.identity.VerifiedIdentity;
 import com.czur.reference.application.model.ModelSessionIssuer;
+import com.czur.reference.application.port.speaker.SpeakerIdentityProvider;
+import com.czur.reference.application.speaker.JdbcReferenceSpeakerPersons;
+import com.czur.reference.domain.capability.CapabilityDescriptor;
 import com.czur.reference.protocol.json.MeetingManifestJson;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -126,6 +129,10 @@ class ReferenceMeetingMysqlClientHttpAssemblyIntegrationTest {
 
     @Test
     void actualHttpNormalClientMeetingReplaysAndPublishesReadyResults() throws Exception {
+        // 本例自己创建的随机库移除可选空表，证明旧默认装配不被人物插件表阻断。
+        try (var connection = fixture(); var statement = connection.createStatement()) {
+            statement.execute("DROP TABLE ai_trans_speaker_identity_person");
+        }
         var config = config();
         IdentityProvider identity = request -> {
             assertEquals("m2-c-audience", request.audience());
@@ -356,7 +363,139 @@ class ReferenceMeetingMysqlClientHttpAssemblyIntegrationTest {
         }
     }
 
-    private ReferenceMeetingDeploymentConfig config() {
+    @Test
+    void optionalSpeakerProviderPersistsRegistrationAndRecognizesTheNextMeeting() throws Exception {
+        var config = config(true);
+        IdentityProvider identity = request -> IdentityProviderResult.success(verifiedIdentity());
+        var policy = new ReferenceDevEntitlementPolicy(config.entitlement(), CLOCK,
+                new EntitlementIdGenerator() {
+                    @Override public String newGrantId() { return "grant_" + UUID.randomUUID(); }
+                    @Override public String newReservationId() { return "reservation_" + UUID.randomUUID(); }
+                    @Override public String newLeaseToken() { return "lease_" + UUID.randomUUID(); }
+                });
+        ModelSessionIssuer issuer = request -> new ModelSessionIssuer.Session("sample-json-ws",
+                "ws://model.example.invalid/speaker", NOW.plusSeconds(300), Map.of("taskId", "synthetic-speaker"));
+        var store = new PersistentFileSystemMockArtifactStore(artifactRoot, 1024 * 1024);
+        AtomicInteger identifies = new AtomicInteger();
+        AtomicInteger enrollments = new AtomicInteger();
+        try (var assembly = ReferenceMeetingHttpAssembly.startClientModel(config, CLOCK, store,
+                identity, policy, issuer, java.util.function.UnaryOperator.identity(), null, null,
+                (database, artifacts) -> {
+                    var persons = new JdbcReferenceSpeakerPersons(database);
+                    // 确定性 Provider 只验证标准链和 MySQL 映射；不冒充真实声学识别。
+                    // 池仅1连接：Provider若被放进会议连接／行锁事务，本例正常链会超时。
+                    return new SpeakerIdentityProvider() {
+                        @Override public CapabilityDescriptor descriptor() {
+                            return new CapabilityDescriptor("test-speaker", Set.of("speaker.identity.cross_meeting"));
+                        }
+                        @Override public Identification identify(MeetingSpeakers request) throws Exception {
+                            identifies.incrementAndGet();
+                            var entries = persons.list(request.deploymentScope(), request.subjectScope(), "test-speaker");
+                            return new Identification(entries.isEmpty() ? Map.of()
+                                    : Map.of(request.speakers().getFirst().sessionSpeakerId(), entries.getFirst().person()));
+                        }
+                        @Override public Person enroll(Enrollment request) throws Exception {
+                            enrollments.incrementAndGet();
+                            Person person = new Person("person_reference_test", request.displayName());
+                            persons.save(request.meeting().deploymentScope(), request.meeting().subjectScope(),
+                                    new JdbcReferenceSpeakerPersons.Entry(person, "test-speaker", "private_group", "private_feature"));
+                            return person;
+                        }
+                    };
+                });
+             var network = assembly.newJdkHttpServer(new InetSocketAddress("127.0.0.1", 0));
+             var client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build()) {
+            network.start();
+            int port = network.address().getPort();
+            assertTrue(json(exchange(client, port, "GET", "/v1/capabilities", "", null, false))
+                    .path("capabilities").toString().contains("speaker.identity.cross_meeting"));
+            String first = completeSpeakerMeeting(client, port, "first");
+            String generation = "?genTime=" + NOW.toEpochMilli();
+            var original = MeetingManifestJson.decode(exchange(client, port, "GET",
+                    "/v1/meetings/" + first + "/manifest" + generation, "", null, false).body());
+            assertEquals(1, original.manifestRevision());
+            var identityRef = original.artifacts().stream().filter(ref -> ref.type().equals("speaker.identity"))
+                    .findFirst().orElseThrow();
+            JsonNode unknown = json(exchange(client, port, "GET", "/v1/artifacts/"
+                    + identityRef.artifactId() + generation, "", null, false));
+            assertTrue(unknown.path("speakers").get(0).path("personId").isNull());
+
+            String enrollPath = "/v1/meetings/" + first + "/speakers/speaker-1:enroll";
+            String name = "{\"displayName\":\"参考人物😀\"}";
+            assertEquals(401, exchange(client, port, "POST", enrollPath, name, null, false).statusCode());
+            var enrolled = exchange(client, port, "POST", enrollPath, name, null, true);
+            assertEquals(200, enrolled.statusCode());
+            assertEquals("person_reference_test", json(enrolled).path("personId").asText());
+            assertEquals(2, json(enrolled).path("manifestRevision").asInt());
+            assertEquals(enrolled.body(), exchange(client, port, "POST", enrollPath, name, null, true).body());
+            assertEquals(1, enrollments.get(), "同名注册重放不重复调用供应商");
+            assertEquals(1, count("ai_trans_speaker_identity_person"));
+            var revised = MeetingManifestJson.decode(exchange(client, port, "GET",
+                    "/v1/meetings/" + first + "/manifest" + generation, "", null, false).body());
+            assertEquals(2, revised.manifestRevision());
+            assertEquals(original.startedAt(), revised.startedAt());
+            assertEquals(original.endedAt(), revised.endedAt());
+            assertEquals(original.artifacts().stream().filter(ref -> !ref.type().equals("speaker.identity")).toList(),
+                    revised.artifacts().stream().filter(ref -> !ref.type().equals("speaker.identity")).toList());
+            assertEquals(0, count("ai_trans_meeting_manifest_revision"), "不混用旧Worker清单链");
+
+            String second = completeSpeakerMeeting(client, port, "second");
+            var next = MeetingManifestJson.decode(exchange(client, port, "GET",
+                    "/v1/meetings/" + second + "/manifest" + generation, "", null, false).body());
+            var nextIdentity = next.artifacts().stream().filter(ref -> ref.type().equals("speaker.identity"))
+                    .findFirst().orElseThrow();
+            var matched = json(exchange(client, port, "GET", "/v1/artifacts/"
+                    + nextIdentity.artifactId() + generation, "", null, false));
+            assertEquals("person_reference_test", matched.path("speakers").get(0).path("personId").asText());
+            assertEquals("参考人物😀", matched.path("speakers").get(0).path("displayName").asText());
+            assertEquals(2, identifies.get());
+            assertSentinelUnchanged();
+        }
+    }
+
+    private String completeSpeakerMeeting(HttpClient client, int port, String suffix) throws Exception {
+        String body = """
+                {"clientSessionId":"speaker-%s","profile":{"id":"m2-c-profile","revision":1},
+                 "client":{"appId":"speaker-app","appVersion":"1","contractVersion":"v1","deviceId":"test-device"},
+                 "timezone":"Asia/Shanghai","languages":{"source":"zh-CN","targets":[]},
+                 "audioProfile":{"encoding":"PCM_S16LE","sampleRateHz":16000,"channelCount":1,"frameDurationMs":100},
+                 "requestedCapabilities":["transcript.realtime","speaker.diarization.session","speaker.identity.cross_meeting"],
+                 "artifactPolicy":{"retainAudio":true,"presentationCapture":false}}
+                """.formatted(suffix);
+        var created = exchange(client, port, "POST", "/v1/meetings", body,
+                "speaker-create-" + suffix + "-123456789", true);
+        assertEquals(201, created.statusCode());
+        String id = json(created).path("meetingId").asText();
+        String path = "/v1/meetings/" + id;
+        assertEquals(200, exchange(client, port, "POST", path + ":startClient", "", null, true).statusCode());
+        String event = """
+                {"clientEventId":"speaker-event","clientSequence":1,"transcriptUpsert":{
+                 "segmentId":"speaker-segment","revision":1,"operation":"UPSERT_OPERATION_UPSERT",
+                 "startMs":0,"endMs":6000,"language":"zh-CN","text":"同一位参考发言人",
+                 "speaker":{"sessionSpeakerId":"speaker-1"},"final":true}}
+                """;
+        append(client, port, path + "/events:append", event);
+        byte[] audio = new byte[16000 * 2 * 6];
+        var upload = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path + "/audio-original"))
+                .timeout(Duration.ofSeconds(5)).header("Authorization", "Bearer " + TOKEN)
+                .header("Content-Type", "application/octet-stream")
+                .header("X-Content-SHA256", "sha256:" + java.util.HexFormat.of().formatHex(
+                        MessageDigest.getInstance("SHA-256").digest(audio)))
+                .POST(HttpRequest.BodyPublishers.ofByteArray(audio)).build();
+        var uploaded = client.send(upload, HttpResponse.BodyHandlers.ofString());
+        assertEquals(201, uploaded.statusCode());
+        assertEquals(201, exchange(client, port, "POST", path + "/usage:submit",
+                "{\"audioDurationMs\":6000}", null, true).statusCode());
+        var stopped = exchange(client, port, "POST", path + ":stop", "",
+                "speaker-stop-" + suffix + "-123456789", true);
+        assertEquals(200, stopped.statusCode());
+        assertEquals("READY", json(stopped).path("state").asText());
+        return id;
+    }
+
+    private ReferenceMeetingDeploymentConfig config() { return config(false); }
+
+    private ReferenceMeetingDeploymentConfig config(boolean speakerIdentity) {
         Map<String, String> values = new HashMap<>();
         values.put(DatabaseRuntimeConfig.DATABASE_URL, scopedUrl());
         values.put(DatabaseRuntimeConfig.DATABASE_USER, required("REFERENCE_TEST_MYSQL_DATABASE_USER"));
@@ -386,6 +525,15 @@ class ReferenceMeetingMysqlClientHttpAssemblyIntegrationTest {
         values.put(ReferenceMeetingDeploymentConfig.WSS_TOKEN_TTL_MS, "300000");
         values.put(ReferenceMeetingDeploymentConfig.CREATE_ENABLED, "true");
         values.put(ReferenceMeetingDeploymentConfig.RESULT_LINK_TTL_MS, "60000");
+        if (speakerIdentity) {
+            values.put(DatabaseRuntimeConfig.DATABASE_MAX_POOL_SIZE, "1");
+            values.put(ReferenceMeetingDeploymentConfig.PROFILE_OPTIONAL_CAPABILITIES,
+                    "speaker.diarization.session,speaker.identity.cross_meeting");
+            values.put(ReferenceMeetingDeploymentConfig.ENTITLEMENT_SUPPORTED_CAPABILITIES,
+                    "transcript.realtime,speaker.diarization.session,speaker.identity.cross_meeting");
+            values.put(ReferenceMeetingDeploymentConfig.MOCK_CAPABILITIES,
+                    "transcript.realtime,speaker.diarization.session");
+        }
         return ReferenceMeetingDeploymentConfig.fromEnvironmentWithExternalIdentity(values,
                 "m2-c-audience", "m2-c-client");
     }

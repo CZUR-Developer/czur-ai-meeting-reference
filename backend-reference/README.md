@@ -218,11 +218,50 @@ Connector/J 传毫秒。MySQL 连接固定使用 UTF-8／`utf8mb4_bin`、UTC 时
 及 [初始化入口](../deploy/migrate.sh)，再调用
 `JdbcDatabaseContext.start(config)`。上下文拥有唯一 HikariCP 池；
 `engine()` 和 `table(JdbcDatabaseTable)` 提供封闭固定映射：PostgreSQL 原表名
-保留，MySQL 当前共 26 张基线表（25 张基础表加 1 张作用域锁表），全部为 `ai_trans_*`，包含
+保留，MySQL 当前包含 26 张必需基线表（25 张基础表加 1 张作用域锁表），另有可选
+`ai_trans_speaker_identity_person` 人物映射表，全部为 `ai_trans_*`，包含
 `ai_trans_schema_migrations`。启动只读检查连接、`V001__initial_schema` 登记及
 必要表存在／InnoDB，不读取旧业务表，不自动建表、登记或修补结构。
 `checkBaselineReadiness()` 的 READY 只签连接与最小初始化基线，不签会议业务。
 装配者统一关闭上下文，调用者关闭借出的连接；重复 `close()` 安全。
+
+### P10 可选跨会议声纹参考插件
+
+实时 ASR 只负责本场 `sessionSpeakerId`；跨会议识别由可替换会后
+`SpeakerIdentityProvider` 承担。参考客户端进程默认不装配该能力。选择讯飞示例时，
+外部环境配置如下；模板不携带真实 Key，不自动使用 CZUR 云端服务或既有人物库：
+
+| 配置项 | 意义与默认值 |
+| --- | --- |
+| `AI_MEETING_SPEAKER_IDENTITY_PROVIDER` | 空或 `none` 关闭；`xfyun` 显式选择参考实现 |
+| `AI_MEETING_XFYUN_VOICEPRINT_APP_ID`、`API_KEY`、`API_SECRET` | 三个名称均使用完整 `AI_MEETING_XFYUN_VOICEPRINT_` 前缀；启用时必填，只在仓外注入 |
+| `AI_MEETING_XFYUN_VOICEPRINT_ENDPOINT` | 可配置供应商 HTTPS 端点；默认讯飞公开声纹端点 |
+| `AI_MEETING_XFYUN_VOICEPRINT_SERVICE_ID` | 默认 `s1aa729d0`；必须与供应商接口对应 |
+| `AI_MEETING_XFYUN_VOICEPRINT_GROUP_PREFIX` | 默认 `reference_`；测试使用独立前缀，分组按原部署与主体归属生成 |
+| `AI_MEETING_XFYUN_VOICEPRINT_MATCH_THRESHOLD` | 默认 `0.6`；使用供应商分数范围 0～1 |
+| `AI_MEETING_XFYUN_VOICEPRINT_TIMEOUT_MS` | 单次 HTTP 超时，默认 `10000` 毫秒 |
+| `AI_MEETING_FFMPEG` | 默认 `ffmpeg`；会后样本转换需要本机可执行程序 |
+| `AI_MEETING_SPEAKER_PCM_SAMPLE_RATE`、`AI_MEETING_SPEAKER_PCM_CHANNELS` | 裸 PCM 原录音格式，默认 16000／1；Ogg 等容器按自身头部解码 |
+
+Product Profile 的 optional 能力及权益支持列表同时声明
+`speaker.diarization.session,speaker.identity.cross_meeting`；实时模型能力只声明真实
+分人能力，跨会议能力来自已装配的后处理 Provider。每场需请求该能力并选择保留录音。
+App／Web 依据实际能力和最终 Manifest 展示，不提供声纹时只保留真实本场分人。
+
+唯一 MySQL V001 已包含可选人员映射。启动该插件时只读核对自己的表，默认会议
+readiness 不依赖它。标准 `person_id` 与私有 `group_id/feature_id` 分列保存，不将
+供应商编号返回 Web。会后按同一 speaker 的最终时间窗提取 3～5 秒 PCM 样本；短句
+先合并或连接，样本不足保留未识别。供应商故障不阻断其余产物 READY。
+
+用户在 Web 登录后可调用
+`POST /v1/meetings/{meetingId}/speakers/{sessionSpeakerId}:enroll`，正文仅
+`{"displayName":"人物名称"}`，返回 `personId`、`displayName`、`manifestRevision`。
+注册成功再读取原 `genTime` 结果链接，身份产物与清单已更新，原文／录音／时间保留。
+匿名结果链接没有注册写权限。替换供应商只改此插件和工厂，公共状态机与 HTTP 协议不变。
+
+定向测试 `XfyunSpeakerClientTest` 验证签名、供应商请求与真实本机 FFmpeg 样本转换；
+`ReferenceMeetingMysqlClientHttpAssemblyIntegrationTest` 使用随机新库和确定性插件验证
+两场识别／命名及人员映射，只代表协议／MySQL 正常路径，不代表真实模型准确率。
 
 ### P8 M2：显式客户端正常会议 HTTP 装配
 

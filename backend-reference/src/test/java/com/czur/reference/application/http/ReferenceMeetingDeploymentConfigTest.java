@@ -63,6 +63,42 @@ class ReferenceMeetingDeploymentConfigTest {
     }
 
     @Test
+    void crossMeetingIdentityIsOnlyAdvertisedByAnActuallyRegisteredPostProcessor() throws Exception {
+        Map<String, String> values = valid();
+        values.put(ReferenceMeetingDeploymentConfig.CREATE_ENABLED, "true");
+        values.put(ReferenceMeetingDeploymentConfig.PROFILE_OPTIONAL_CAPABILITIES,
+                "speaker.diarization.session,speaker.identity.cross_meeting");
+        values.put(ReferenceMeetingDeploymentConfig.ENTITLEMENT_SUPPORTED_CAPABILITIES,
+                "transcript.realtime,speaker.diarization.session,speaker.identity.cross_meeting");
+        values.put(ReferenceMeetingDeploymentConfig.MODEL_CAPABILITIES,
+                "transcript.realtime,speaker.diarization.session,speaker.identity.cross_meeting");
+        var config = ReferenceMeetingDeploymentConfig.fromEnvironment(values);
+        var request = new HttpRequest("GET", "/v1/capabilities", Map.of(), "");
+        assertFalse(new ReferenceDeploymentCapabilitiesEndpoint(config, new HttpErrorMapper())
+                .handle(request).body().contains("speaker.identity.cross_meeting"));
+        assertTrue(new ReferenceDeploymentCapabilitiesEndpoint(config, new HttpErrorMapper(), false, true)
+                .handle(request).body().contains("speaker.identity.cross_meeting"));
+        assertEquals(Set.of(CapabilityIds.SPEAKER_DIARIZATION_SESSION),
+                config.profile().dependenciesOf(CapabilityIds.SPEAKER_IDENTITY_CROSS_MEETING));
+
+        values.put(ReferenceMeetingDeploymentConfig.MODEL_CAPABILITIES,
+                CapabilityIds.TRANSCRIPT_REALTIME);
+        var withoutDiarization = ReferenceMeetingDeploymentConfig.fromEnvironment(values);
+        assertFalse(new ReferenceDeploymentCapabilitiesEndpoint(
+                withoutDiarization, new HttpErrorMapper(), false, true)
+                .handle(request).body().contains(CapabilityIds.SPEAKER_IDENTITY_CROSS_MEETING));
+
+        values.put(ReferenceMeetingDeploymentConfig.MODEL_CAPABILITIES,
+                "transcript.realtime,speaker.diarization.session");
+        values.put(ReferenceMeetingDeploymentConfig.DISABLED_CAPABILITIES,
+                CapabilityIds.SPEAKER_DIARIZATION_SESSION);
+        var disabledDiarization = ReferenceMeetingDeploymentConfig.fromEnvironment(values);
+        assertFalse(new ReferenceDeploymentCapabilitiesEndpoint(
+                disabledDiarization, new HttpErrorMapper(), false, true)
+                .handle(request).body().contains(CapabilityIds.SPEAKER_IDENTITY_CROSS_MEETING));
+    }
+
+    @Test
     void externalIdentityUsesTrustedInputsWithoutAnyDevCredentialOrLogin() {
         Map<String, String> values = valid();
         values.keySet().removeIf(key -> key.startsWith("REFERENCE_DEV_"));
