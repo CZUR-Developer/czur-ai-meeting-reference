@@ -131,7 +131,9 @@ public class JdbcArtifactContentQueryPort
                         || (request.artifactId().startsWith("art_client_translation_")
                             && "translation.final".equals(reference.type()))
                         || (request.artifactId().startsWith("art_client_summary_")
-                            && "summary.structured".equals(reference.type())))) {
+                            && "summary.structured".equals(reference.type()))
+                        || (request.artifactId().startsWith("art_client_speaker_")
+                            && "speaker.identity".equals(reference.type())))) {
                 return new MeetingArtifactContentPort.NotFound();
             }
             Optional<ReadyMetadata> metadata = findMetadata(request.artifactId());

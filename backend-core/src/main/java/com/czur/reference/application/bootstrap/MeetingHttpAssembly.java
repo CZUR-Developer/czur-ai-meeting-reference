@@ -33,6 +33,11 @@ import com.czur.reference.application.persistence.jdbc.JdbcMeetingEventLogPort;
 import com.czur.reference.application.persistence.jdbc.JdbcModelSessionLanguageLookup;
 import com.czur.reference.application.persistence.jdbc.JdbcClientMeetingInputPort;
 import com.czur.reference.application.persistence.jdbc.JdbcClientMeetingResultFinalizer;
+import com.czur.reference.application.persistence.jdbc.JdbcSpeakerIdentityEnrollmentPort;
+import com.czur.reference.application.port.speaker.SpeakerIdentityProvider;
+import com.czur.reference.application.http.SpeakerIdentityEnrollmentEndpoint;
+import com.czur.reference.domain.capability.CapabilityDescriptor;
+import com.czur.reference.domain.capability.CapabilityIds;
 import com.czur.reference.application.persistence.jdbc.JdbcOwnedMeetingStopUnitOfWork;
 import com.czur.reference.application.persistence.jdbc.JdbcRenewRealtimeTokenUnitOfWork;
 import com.czur.reference.application.persistence.jdbc.JdbcRealtimeCredentialVerifier;
@@ -124,7 +129,8 @@ public class MeetingHttpAssembly implements AutoCloseable {
             JdbcMeetingEventLogPort eventLog, Clock clock,
             ResultEmailEndpoint resultEmail, MeetingArtifactMediaPort artifactMedia,
             EntitlementProvider entitlementProvider,
-            MeetingArtifactHttpEndpoint artifactEndpoint) {
+            MeetingArtifactHttpEndpoint artifactEndpoint,
+            SpeakerIdentityEnrollmentEndpoint speakerEnrollment) {
         this.closed = new AtomicBoolean();
         this.database = database;
         this.databaseContext = Objects.requireNonNull(databaseContext, "databaseContext");
@@ -141,7 +147,7 @@ public class MeetingHttpAssembly implements AutoCloseable {
         this.clock = clock;
         this.artifactMedia = artifactMedia;
         this.dispatcher = new MeetingHttpDispatcher(runtime, errors, contextResolver, resultEmail,
-                artifactEndpoint);
+                artifactEndpoint, speakerEnrollment);
         this.entitlementProvider = entitlementProvider;
     }
 
@@ -184,6 +190,16 @@ public class MeetingHttpAssembly implements AutoCloseable {
             MeetingInputReconciler inputReconciler, RealtimeAudioIngress audioIngress,
             RealtimeTranscriptSessions transcripts,
             JdbcArtifactContentQueryPort.LegacyArtifactValidator artifactValidator) { }
+
+    /**
+     * 可选会后人物插件工厂；仅在唯一数据库就绪后调用一次。实现可复用给定
+     * Context 和 Store 创建自己的人员映射适配器，不得另建会议池／状态机。
+     * 关闭前宿主先停止请求；工厂创建的插件不持有本次 JDBC 连接。
+     */
+    @FunctionalInterface
+    public interface SpeakerIdentityFactory {
+        SpeakerIdentityProvider create(JdbcDatabaseContext database, ArtifactStore artifacts);
+    }
 
     /**
      * 参考部署显式接入旧WSS/Mock能力。共享核心不会选择或构造这些实现。
@@ -251,6 +267,19 @@ public class MeetingHttpAssembly implements AutoCloseable {
             UnaryOperator<EntitlementProvider> entitlementProviderDecorator,
             com.czur.reference.application.http.SessionLoginEndpoint login,
             SummarySessionIssuer summarySessionIssuer) {
+        return startClientModel(config, clock, artifactStore, identityProvider,
+                entitlementPolicy, modelSessionIssuer, entitlementProviderDecorator,
+                login, summarySessionIssuer, null);
+    }
+
+    /** 显式启用会后人物扩展；既有重载继续不访问人员库、不虚报跨会议能力。 */
+    public static MeetingHttpAssembly startClientModel(
+            MeetingDeploymentConfig config, Clock clock, ArtifactStore artifactStore,
+            IdentityProvider identityProvider, EntitlementPolicy entitlementPolicy,
+            ModelSessionIssuer modelSessionIssuer,
+            UnaryOperator<EntitlementProvider> entitlementProviderDecorator,
+            com.czur.reference.application.http.SessionLoginEndpoint login,
+            SummarySessionIssuer summarySessionIssuer, SpeakerIdentityFactory speakerFactory) {
         Objects.requireNonNull(artifactStore, "artifactStore");
         Objects.requireNonNull(identityProvider, "identityProvider");
         Objects.requireNonNull(entitlementPolicy, "entitlementPolicy");
@@ -258,7 +287,7 @@ public class MeetingHttpAssembly implements AutoCloseable {
         Objects.requireNonNull(entitlementProviderDecorator, "entitlementProviderDecorator");
         return start(config, clock, artifactStore, identityProvider, entitlementPolicy,
                 modelSessionIssuer, entitlementProviderDecorator, login, null, true,
-                summarySessionIssuer);
+                summarySessionIssuer, speakerFactory);
     }
 
     private static MeetingHttpAssembly start(
@@ -281,6 +310,19 @@ public class MeetingHttpAssembly implements AutoCloseable {
             com.czur.reference.application.http.SessionLoginEndpoint login,
             LegacyAudioFactory legacyFactory, boolean clientModel,
             SummarySessionIssuer suppliedSummarySessionIssuer) {
+        return start(config, clock, artifactStore, identityProvider, entitlementPolicy,
+                modelSessionIssuer, entitlementProviderDecorator, login, legacyFactory,
+                clientModel, suppliedSummarySessionIssuer, null);
+    }
+
+    private static MeetingHttpAssembly start(
+            MeetingDeploymentConfig config, Clock clock,
+            ArtifactStore artifactStore, IdentityProvider identityProvider,
+            EntitlementPolicy entitlementPolicy, ModelSessionIssuer modelSessionIssuer,
+            UnaryOperator<EntitlementProvider> entitlementProviderDecorator,
+            com.czur.reference.application.http.SessionLoginEndpoint login,
+            LegacyAudioFactory legacyFactory, boolean clientModel,
+            SummarySessionIssuer suppliedSummarySessionIssuer, SpeakerIdentityFactory speakerFactory) {
         Objects.requireNonNull(config, "config");
         Objects.requireNonNull(clock, "clock");
         JdbcDatabaseRuntime database = clientModel ? null : JdbcDatabaseRuntime.start(config.database());
@@ -296,6 +338,20 @@ public class MeetingHttpAssembly implements AutoCloseable {
                 }
             }
             DataSource dataSource = databaseContext.dataSource();
+            SpeakerIdentityProvider speakerIdentity = speakerFactory == null ? null
+                    : Objects.requireNonNull(speakerFactory.create(databaseContext, artifactStore),
+                            "speaker identity provider");
+            boolean speakerAvailable = speakerIdentity != null && speakerIdentity.descriptor()
+                    .supports(CapabilityIds.SPEAKER_IDENTITY_CROSS_MEETING);
+            if (speakerIdentity != null && !speakerAvailable) {
+                throw new IllegalArgumentException("speaker provider must declare cross-meeting identity");
+            }
+            var registered = new java.util.TreeSet<>(config.mockCapabilities().capabilities());
+            registered.remove(CapabilityIds.SPEAKER_IDENTITY_CROSS_MEETING);
+            if (speakerAvailable) registered.add(CapabilityIds.SPEAKER_IDENTITY_CROSS_MEETING);
+            CapabilityDescriptor registeredCapabilities = new CapabilityDescriptor(
+                    config.mockCapabilities().providerId(), config.mockCapabilities().providerVersion(),
+                    config.mockCapabilities().spiVersion(), registered);
             SecureRandom random = new SecureRandom();
             RandomIds ids = new RandomIds(random);
             byte[] pageSecret = config.pageTokenSecretCopy();
@@ -330,7 +386,7 @@ public class MeetingHttpAssembly implements AutoCloseable {
                             ? Optional.of(config.profile()) : Optional.empty();
             var startCoordinator = new RealtimeMeetingStartCoordinator(
                     config.deploymentScope(), new JdbcRealtimeStartFactsLookup(databaseContext),
-                    profiles, config.mockCapabilities(), config.capabilityLimits(), clock,
+                    profiles, registeredCapabilities, config.capabilityLimits(), clock,
                     new JdbcMeetingStartExecutionUnitOfWork(
                             databaseContext, new CapabilityPlanner()));
             LegacyAudioComponents legacy = clientModel ? null : Objects.requireNonNull(
@@ -343,7 +399,7 @@ public class MeetingHttpAssembly implements AutoCloseable {
             var stopService = new AuthenticatedMeetingStopApplicationService(
                     config.deploymentScope(), identity, stop, query, inputReconciler,
                     new JdbcClientMeetingResultFinalizer(databaseContext, ids::newReceipt,
-                            clock, artifactStore, entitlement));
+                            clock, artifactStore, entitlement, speakerIdentity));
             var renewService = realtimeRenewEnabled
                     ? new AuthenticatedRealtimeTokenRenewApplicationService(
                             config.deploymentScope(), identity,
@@ -379,7 +435,7 @@ public class MeetingHttpAssembly implements AutoCloseable {
                             .orElse(null);
             // 能力发现必须依据最终装配结果；不能仅依据百炼配置隐藏宿主自定义总结 Provider。
             var capabilities = new ReferenceDeploymentCapabilitiesEndpoint(
-                    config, errors, summarySessions != null);
+                    config, errors, summarySessions != null, speakerAvailable);
             var modelSessionLanguages = modelSessions == null && summarySessions == null ? null
                     : new JdbcModelSessionLanguageLookup(databaseContext);
             if (config.createEnabled()) {
@@ -394,7 +450,7 @@ public class MeetingHttpAssembly implements AutoCloseable {
                         new CompleteMeetingResponseAssembler(new CapabilityPlanner(),
                                 sessions, config.runtimeLimits()),
                         new JdbcCompleteMeetingCreationUnitOfWork(databaseContext, clock),
-                        config.trustedEstimate(), profiles, config.mockCapabilities(),
+                        config.trustedEstimate(), profiles, registeredCapabilities,
                         config.capabilityLimits());
                 runtime = new MeetingHttpRuntime(query, deletion, decoder, errors, stopService,
                         create, new CreateMeetingHttpRequestDecoder(
@@ -421,7 +477,10 @@ public class MeetingHttpAssembly implements AutoCloseable {
                             new SmtpResultEmailSender(email), errors)).orElse(null),
                     artifactMedia, entitlement,
                     artifactMedia == null ? null
-                            : new MeetingArtifactHttpEndpoint(clientInput, artifactMedia, errors));
+                            : new MeetingArtifactHttpEndpoint(clientInput, artifactMedia, errors),
+                    speakerAvailable ? new SpeakerIdentityEnrollmentEndpoint(
+                            new JdbcSpeakerIdentityEnrollmentPort(databaseContext, artifactStore,
+                                    speakerIdentity), errors) : null);
         } catch (RuntimeException | Error failure) {
             try {
                 if (runtime != null) {

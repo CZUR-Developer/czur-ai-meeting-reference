@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.example.com/ai-meeting/v0.1/speaker-identity.schema.json",
+  "title": "Meeting speaker identities",
+  "description": "可选会后人物插件输出的标准映射；供应商特征编号和匹配细节不进入该产物。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "artifactType", "speakers"],
+  "properties": {
+    "schemaVersion": {"const": "speaker-identity/v1"},
+    "artifactType": {"const": "speaker.identity"},
+    "speakers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sessionSpeakerId", "personId", "displayName"],
+        "properties": {
+          "sessionSpeakerId": {"type": "string", "minLength": 1},
+          "personId": {"type": ["string", "null"], "minLength": 1},
+          "displayName": {"type": ["string", "null"], "minLength": 1}
+        },
+        "oneOf": [
+          {"properties": {"personId": {"type": "null"}, "displayName": {"type": "null"}}},
+          {"properties": {"personId": {"type": "string"}, "displayName": {"type": "string"}}}
+        ]
+      }
+    }
+  }
+}

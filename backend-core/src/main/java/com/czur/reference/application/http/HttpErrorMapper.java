@@ -11,6 +11,7 @@ import com.czur.reference.application.port.DeleteResult;
 import com.czur.reference.application.port.MeetingQueryPort;
 import com.czur.reference.application.port.MeetingEventLogPort;
 import com.czur.reference.application.port.ClientMeetingInputPort;
+import com.czur.reference.application.port.speaker.SpeakerIdentityEnrollmentPort;
 import com.czur.reference.application.model.ModelSessionIssuer;
 import com.czur.reference.application.model.SummarySessionIssuer;
 import com.czur.reference.application.port.MeetingManifestPort;
@@ -82,6 +83,26 @@ public final class HttpErrorMapper {
                     "QUERY_" + unavailable.reason().name(), unavailable.retryable(),
                     HttpErrorEnvelope.UserAction.RETRY,
                     "ai_meeting.storage.query_unavailable");
+        };
+    }
+
+    /** 会后人物注册使用独立业务码，不借用模型会话错误提示。 */
+    public HttpResponse speakerEnrollmentFailure(SpeakerIdentityEnrollmentPort.Reason reason) {
+        return switch (reason) {
+            case NOT_FOUND -> query(new MeetingQueryPort.NotFound());
+            case ACCESS_DENIED -> query(new MeetingQueryPort.AccessDenied());
+            case INVALID_STATE -> error(409, HttpErrorEnvelope.Domain.CONTRACT,
+                    "SPEAKER_ENROLLMENT_INVALID_STATE", false, HttpErrorEnvelope.UserAction.NONE,
+                    "ai_meeting.contract.speaker_enrollment_invalid_state");
+            case NOT_GRANTED -> error(422, HttpErrorEnvelope.Domain.ENTITLEMENT,
+                    "SPEAKER_IDENTITY_NOT_GRANTED", false, HttpErrorEnvelope.UserAction.NONE,
+                    "ai_meeting.entitlement.speaker_identity_not_granted");
+            case SAMPLE_UNAVAILABLE -> error(422, HttpErrorEnvelope.Domain.CONTRACT,
+                    "SPEAKER_SAMPLE_UNAVAILABLE", false, HttpErrorEnvelope.UserAction.NONE,
+                    "ai_meeting.contract.speaker_sample_unavailable");
+            case UNAVAILABLE -> error(503, HttpErrorEnvelope.Domain.MODEL,
+                    "SPEAKER_ENROLLMENT_UNAVAILABLE", true, HttpErrorEnvelope.UserAction.RETRY,
+                    "ai_meeting.model.speaker_enrollment_unavailable");
         };
     }
 

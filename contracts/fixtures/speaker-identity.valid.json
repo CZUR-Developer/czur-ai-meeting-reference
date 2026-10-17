@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "speaker-identity/v1",
+  "artifactType": "speaker.identity",
+  "speakers": [
+    {"sessionSpeakerId": "speaker-1", "personId": null, "displayName": null},
+    {"sessionSpeakerId": "speaker-2", "personId": "person_reference_example", "displayName": "参考人物"}
+  ]
+}

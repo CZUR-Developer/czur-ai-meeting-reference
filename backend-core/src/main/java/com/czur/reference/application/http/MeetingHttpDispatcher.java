@@ -20,6 +20,7 @@ public final class MeetingHttpDispatcher {
     private final AuthenticatedMeetingHttpContextResolver contextResolver;
     private final ResultEmailEndpoint resultEmail;
     private final MeetingArtifactHttpEndpoint artifactEndpoint;
+    private final SpeakerIdentityEnrollmentEndpoint speakerEnrollment;
 
     /** 无外层身份解析器；保留旧JDK构造器的空上下文及邮件关闭行为。 */
     public MeetingHttpDispatcher(MeetingHttpRuntime runtime, HttpErrorMapper errors) {
@@ -52,6 +53,14 @@ public final class MeetingHttpDispatcher {
     public MeetingHttpDispatcher(MeetingHttpRuntime runtime, HttpErrorMapper errors,
             AuthenticatedMeetingHttpContextResolver contextResolver,
             ResultEmailEndpoint resultEmail, MeetingArtifactHttpEndpoint artifactEndpoint) {
+        this(runtime, errors, contextResolver, resultEmail, artifactEndpoint, null);
+    }
+
+    /** 显式接入可选会后人物注册；旧装配不开放该写入口。 */
+    public MeetingHttpDispatcher(MeetingHttpRuntime runtime, HttpErrorMapper errors,
+            AuthenticatedMeetingHttpContextResolver contextResolver,
+            ResultEmailEndpoint resultEmail, MeetingArtifactHttpEndpoint artifactEndpoint,
+            SpeakerIdentityEnrollmentEndpoint speakerEnrollment) {
         this.runtime = Objects.requireNonNull(runtime, "runtime");
         this.errors = Objects.requireNonNull(errors, "errors");
         if (contextResolver != null && contextResolver.errorMapper() != errors) {
@@ -60,6 +69,7 @@ public final class MeetingHttpDispatcher {
         this.contextResolver = contextResolver;
         this.resultEmail = resultEmail;
         this.artifactEndpoint = artifactEndpoint;
+        this.speakerEnrollment = speakerEnrollment;
     }
 
     /**
@@ -68,6 +78,16 @@ public final class MeetingHttpDispatcher {
      */
     public HttpResponse handle(HttpRequest request) {
         Objects.requireNonNull(request, "request");
+        if (SpeakerIdentityEnrollmentEndpoint.matches(request)) {
+            if (speakerEnrollment == null) return errors.notImplemented();
+            if (contextResolver == null) return errors.missingContext();
+            var resolution = contextResolver.forClientWrite(request);
+            if (resolution instanceof AuthenticatedMeetingHttpContextResolver.Rejected rejected) {
+                return rejected.response();
+            }
+            return speakerEnrollment.handle(request,
+                    ((AuthenticatedMeetingHttpContextResolver.Ready) resolution).context());
+        }
         if (ResultEmailEndpoint.matches(request)) {
             if (resultEmail == null) return errors.notImplemented();
             if (contextResolver == null) return errors.missingContext();

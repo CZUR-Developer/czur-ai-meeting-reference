@@ -230,6 +230,21 @@ CREATE TABLE ai_trans_meeting_client_result (
     CONSTRAINT ai_trans_meeting_client_result_artifact_id_uq UNIQUE (artifact_id)
 ) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
+-- 可选跨会议人物插件的私有人员映射。标准 person_id 与供应商 feature_id 分开；
+-- 会议默认不依赖此表，只有显式启用参考声纹 Provider 时才访问。
+CREATE TABLE ai_trans_speaker_identity_person (
+    deployment_scope VARBINARY(1024) NOT NULL,
+    subject_scope VARBINARY(1024) NOT NULL,
+    person_id VARBINARY(96) NOT NULL,
+    display_name VARCHAR(128) NOT NULL,
+    provider_id VARBINARY(64) NOT NULL,
+    group_id VARBINARY(64) NOT NULL,
+    feature_id VARBINARY(64) NOT NULL,
+    PRIMARY KEY (deployment_scope, subject_scope, person_id),
+    CONSTRAINT ai_trans_speaker_identity_person_feature_uq
+        UNIQUE (deployment_scope, subject_scope, provider_id, feature_id)
+) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+
 CREATE TABLE ai_trans_meeting_manifest_revision (
     meeting_id VARBINARY(1024) NOT NULL,
     manifest_revision INT NOT NULL,

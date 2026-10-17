@@ -29,16 +29,32 @@ public final class ReferenceDeploymentCapabilitiesEndpoint {
      */
     public ReferenceDeploymentCapabilitiesEndpoint(MeetingDeploymentConfig config,
             HttpErrorMapper errors, boolean summarySessionAvailable) {
+        this(config, errors, summarySessionAvailable, false);
+    }
+
+    /** 后处理人物能力以实际注册的 Provider 为准；不能由实时模型配置冒充。 */
+    public ReferenceDeploymentCapabilitiesEndpoint(MeetingDeploymentConfig config,
+            HttpErrorMapper errors, boolean summarySessionAvailable, boolean speakerIdentityAvailable) {
         this.errors = errors;
         TreeSet<String> available = new TreeSet<>();
         if (config.createEnabled()) {
             available.addAll(config.profile().allCapabilities());
             available.retainAll(config.entitlement().supportedCapabilities());
-            available.retainAll(config.mockCapabilities().capabilities());
+            var registered = new TreeSet<>(config.mockCapabilities().capabilities());
+            registered.remove(CapabilityIds.SPEAKER_IDENTITY_CROSS_MEETING);
+            if (speakerIdentityAvailable) registered.add(CapabilityIds.SPEAKER_IDENTITY_CROSS_MEETING);
+            available.retainAll(registered);
             available.removeIf(capability -> !config.capabilityLimits().permits(capability));
             if (!summarySessionAvailable) {
                 available.remove(CapabilityIds.SUMMARY_STRUCTURED);
             }
+            // 与 Create 使用同一 Profile 依赖；移除缺失依赖的能力，直到集合稳定。
+            // 例如人物 Provider 已注册，但部署未提供本场发言人时，不能宣传跨场识别。
+            boolean removed;
+            do {
+                removed = available.removeIf(capability -> !available.containsAll(
+                        config.profile().dependenciesOf(capability)));
+            } while (removed);
         }
         var limits = config.runtimeLimits();
         Map<String, Object> publicLimits = new LinkedHashMap<>();

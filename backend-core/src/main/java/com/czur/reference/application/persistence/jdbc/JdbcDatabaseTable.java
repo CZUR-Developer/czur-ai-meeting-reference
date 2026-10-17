@@ -35,7 +35,9 @@ public enum JdbcDatabaseTable {
     PLUGIN_EXECUTION("plugin_execution"),
     USAGE_OPERATION("usage_operation"),
     USAGE_RESERVATION("usage_reservation"),
-    WORKFLOW_STEP("workflow_step");
+    WORKFLOW_STEP("workflow_step"),
+    /** 可选参考人物插件使用；默认会议 readiness 不要求这张表。 */
+    SPEAKER_IDENTITY_PERSON("speaker_identity_person");
 
     private final String postgresName;
 
@@ -56,5 +58,10 @@ public enum JdbcDatabaseTable {
     public boolean requiredFor(JdbcDatabaseEngine engine) {
         Objects.requireNonNull(engine, "engine");
         return this != IDEMPOTENCY_LOCK || engine == JdbcDatabaseEngine.MYSQL;
+    }
+
+    /** 可选插件只在显式装配时核对自己的表，不能阻断未启用它的 CZUR／伙伴宿主。 */
+    public boolean requiredForBaseline(JdbcDatabaseEngine engine) {
+        return this != SPEAKER_IDENTITY_PERSON && requiredFor(engine);
     }
 }

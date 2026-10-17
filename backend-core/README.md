@@ -44,6 +44,31 @@ CZUR 模型。`transcript.realtime`／`transcript.final` 是参考产品档位�
 
 ## 构建与接入
 
+### 可选会后人物身份
+
+`application/port/speaker/SpeakerIdentityProvider` 将跨会议人物识别／注册与实时 ASR
+分开。宿主在新增 `startClientModel(..., login, summaryIssuer, speakerFactory)` 重载
+显式传入 Factory，复用给定的唯一 `JdbcDatabaseContext` 和 `ArtifactStore`。原重载
+继续关闭该扩展；未装配 Provider 时，发现与 Create 均不声明跨会议能力、不访问可选
+人物表，原 `readFinalSnapshot`、字幕／翻译／总结／音频及 CZUR 既有接缝保持。
+
+会后识别复用首次 Create 的能力、最终原文时间窗和同场 `audio.original`。Provider
+读取录音、FFmpeg 切片、访问供应商均在会议连接释放后执行；核心再通过原 Finalizer
+和 READY metadata 发布标准 [`speaker.identity`](../contracts/speaker-identity.schema.json)。
+没有匹配时 `personId/displayName` 为空，不用本场 speaker 编号冒充人物；识别失败
+不阻断其余产物 READY。本场分人编号／人物编号／供应商特征引用属于不同概念。
+
+命名注册走 `POST /v1/meetings/{meetingId}/speakers/{sessionSpeakerId}:enroll`，需要
+同场归属的用户 Bearer，正文仅 `displayName`；匿名 `genTime` 链接只读。注册先在
+事务外调用 Provider，再短事务发布新身份产物并增加原客户端 Manifest revision，
+不另写旧 Worker 的 `meeting_manifest_revision`。原录音、原文、起止时间和原链接不变。
+
+未来 CZUR 应实现该中性 Provider 并包装原 Speech 的识别／注册及已有人员库，不重复
+建立供应商特征。本期遵循用户“参考先完成，Cloud 后统一适配”的决定，未修改 Cloud
+或其固定 JAR；正式统一消费时须从唯一参考源码生成同源制品并验证 CZUR 发布插件。
+
+### 常规构建
+
 在仓库根执行：
 
 ```bash

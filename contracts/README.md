@@ -4,6 +4,25 @@ Versioned OpenAPI, JSON Schema, and realtime event definitions belong here.
 Every contract change must include positive and negative fixtures plus a
 backward-compatibility note.
 
+## Optional post-meeting speaker identity
+
+`speaker-identity.schema.json` defines the optional `speaker.identity` JSON
+Artifact. Each row references a real final transcript `sessionSpeakerId` and
+contains either a stable cross-meeting `personId` plus `displayName`, or two
+null values for an unmatched speaker. Provider feature IDs never substitute
+for standard person IDs. See the valid and incomplete-person invalid fixtures.
+
+`POST /v1/meetings/{meetingId}/speakers/{sessionSpeakerId}:enroll` accepts
+`{"displayName":"..."}` with the existing user Bearer authentication and
+returns `personId`, `displayName`, and `manifestRevision`. It applies only to
+owned READY client meetings with the capability and retained recording.
+Registration publishes a new immutable identity Artifact and updates the
+existing client Manifest revision, keeping original timing, other Artifacts,
+and the original read-only genTime link. Anonymous result links do not grant
+write access. Existing assembly overloads leave this extension disabled;
+without a registered Provider there is no cross-meeting capability or identity
+Artifact, and existing transcript/translation/summary/audio behavior remains.
+
 ## Model session compatibility
 
 `POST /v1/meetings/{meetingId}:modelSession` is a separate authenticated

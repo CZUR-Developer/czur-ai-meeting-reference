@@ -8,6 +8,12 @@ import com.czur.reference.application.port.ClientMeetingInputPort.Reason;
 import com.czur.reference.application.port.ClientMeetingResultFinalizer;
 import com.czur.reference.application.port.FinalizationReceiptGenerator;
 import com.czur.reference.application.port.IdempotencyScopeCodec;
+import com.czur.reference.application.port.speaker.SpeakerIdentityProvider;
+import com.czur.reference.application.port.speaker.SpeakerIdentityProvider.MeetingSpeakers;
+import com.czur.reference.application.port.speaker.SpeakerIdentityProvider.SpeakerSample;
+import com.czur.reference.application.port.speaker.SpeakerIdentityProvider.AudioWindow;
+import com.czur.reference.domain.capability.CapabilityIds;
+import com.czur.reference.domain.capability.CapabilityDecision;
 import com.czur.reference.application.port.entitlement.CommitUsageRequest;
 import com.czur.reference.application.port.entitlement.EntitlementProvider;
 import com.czur.reference.application.port.entitlement.UsageActual;
@@ -78,6 +84,7 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
     private final Clock clock;
     private final ArtifactStore artifactStore;
     private final EntitlementProvider entitlementProvider;
+    private final SpeakerIdentityProvider speakerIdentity;
 
     public JdbcClientMeetingResultFinalizer(DataSource dataSource,
             FinalizationReceiptGenerator receipts, Clock clock, ArtifactStore artifactStore) {
@@ -107,12 +114,29 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
             FinalizationReceiptGenerator receipts, Clock clock, ArtifactStore artifactStore,
             EntitlementProvider entitlementProvider) {
         this(database.dataSource(), database.engine(), receipts, clock, artifactStore,
-                entitlementProvider);
+                entitlementProvider, null);
+    }
+
+    /**
+     * 显式装配可选会后人物插件；旧构造器保持关闭。识别在会议事务及行锁之外
+     * 执行，结果仍与原文、录音一起纳入唯一客户端 Manifest。
+     */
+    public JdbcClientMeetingResultFinalizer(JdbcDatabaseContext database,
+            FinalizationReceiptGenerator receipts, Clock clock, ArtifactStore artifactStore,
+            EntitlementProvider entitlementProvider, SpeakerIdentityProvider speakerIdentity) {
+        this(database.dataSource(), database.engine(), receipts, clock, artifactStore,
+                entitlementProvider, speakerIdentity);
     }
 
     private JdbcClientMeetingResultFinalizer(DataSource dataSource, JdbcDatabaseEngine engine,
             FinalizationReceiptGenerator receipts, Clock clock, ArtifactStore artifactStore,
             EntitlementProvider entitlementProvider) {
+        this(dataSource, engine, receipts, clock, artifactStore, entitlementProvider, null);
+    }
+
+    private JdbcClientMeetingResultFinalizer(DataSource dataSource, JdbcDatabaseEngine engine,
+            FinalizationReceiptGenerator receipts, Clock clock, ArtifactStore artifactStore,
+            EntitlementProvider entitlementProvider, SpeakerIdentityProvider speakerIdentity) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
         this.engine = Objects.requireNonNull(engine, "engine");
         this.receipts = Objects.requireNonNull(receipts, "receipts");
@@ -120,6 +144,7 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
         // 无 Store 的旧装配仍可服务旧音频会议；客户端会议必须由完整进程装配提供 Store。
         this.artifactStore = artifactStore;
         this.entitlementProvider = entitlementProvider;
+        this.speakerIdentity = speakerIdentity;
     }
 
     /**
@@ -329,6 +354,8 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
         // 先释放读取冻结事实的连接，再调用Provider，避免结果事务占用连接等待第二个池位。
         // 本入口每次均经过账本，包括下方resultExists早返的正常Stop重放。
         Long capturedDurationMs = commitClientUsage(meetingId);
+        // 可选供应商网络和音频切片只在连接释放后运行，不能放进下面的会议行锁事务。
+        ObjectNode speakerArtifact = identifySpeakers(meetingId);
         try (Connection connection = dataSource.getConnection()) {
             connection.setAutoCommit(false);
             try {
@@ -411,6 +438,12 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
                     artifactRefs.add(publishReady(connection, summaryId, meetingId,
                             "summary.structured", projection.summary().path("language").asText(),
                             artifact));
+                }
+                if (speakerArtifact != null) {
+                    String speakerId = "art_client_speaker_" + sha256(
+                            meetingId.getBytes(StandardCharsets.UTF_8)) + "_1";
+                    artifactRefs.add(publishReady(connection, speakerId, meetingId,
+                            "speaker.identity", null, speakerArtifact));
                 }
                 for (var capture : presentationCaptures(connection, engine, meetingId)) {
                     WriteIntentSpec spec = capture.artifact().intent().spec();
@@ -552,35 +585,105 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
     private record FrozenClientUsage(String deploymentScope, String subjectScope,
             String reservationId, long audioDurationMs, Instant submittedAt, long expectedVersion) { }
 
-    /** 稳定 artifactId 使 Stop 重试可以复用已发布内容，不依赖数据库与存储的跨资源事务。 */
-    private ArtifactDescriptor publish(WriteIntentSpec spec, byte[] content)
-            throws ArtifactStoreException {
-        var prepared = artifactStore.createWriteIntent(spec);
-        if (prepared.status() == ArtifactStore.PrepareStatus.CONFLICT) {
-            throw new IllegalStateException("client result artifact intent conflict");
-        }
-        WriteIntent intent = prepared.intent();
-        ContentClaim claim = new ContentClaim(content.length, spec.expectedChecksum());
-        artifactStore.writeContent(intent, new ByteArrayInputStream(content));
-        return artifactStore.completeWrite(intent, claim).artifact();
-    }
-
     private MeetingManifest.ArtifactRef publishReady(Connection connection, String artifactId,
             String meetingId, String type, String language, ObjectNode body)
             throws ArtifactStoreException, SQLException {
-        byte[] content = body.toString().getBytes(StandardCharsets.UTF_8);
-        String checksum = "sha256:" + sha256(content);
-        WriteIntentSpec spec = new WriteIntentSpec(artifactId, meetingId, type,
-                "application/json", language, 1, content.length, checksum);
-        ArtifactDescriptor descriptor = publish(spec, content);
-        ArtifactReadyMetadataStore.PersistResult persisted =
-                new JdbcArtifactReadyMetadataStore(connection, engine).persistReady(descriptor);
-        if (persisted.status() == ArtifactReadyMetadataStore.PersistStatus.CONFLICT) {
-            throw new IllegalStateException("client result artifact metadata conflict");
+        return new JdbcClientResultArtifacts(artifactStore, engine).publishReady(connection,
+                artifactId, meetingId, type, language, 1, body);
+    }
+
+    /** 本场输入已在 Stop 冻结；读取完释放连接后再执行可选后处理。 */
+    private ObjectNode identifySpeakers(String meetingId) {
+        if (speakerIdentity == null) return null;
+        MeetingSpeakers input;
+        try (Connection connection = dataSource.getConnection()) {
+            connection.setReadOnly(true);
+            connection.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+            connection.setAutoCommit(false);
+            try (var statement = connection.prepareStatement("SELECT state FROM "
+                    + table(JdbcDatabaseTable.MEETING) + " m WHERE meeting_id=? AND NOT EXISTS (SELECT 1 FROM "
+                    + table(JdbcDatabaseTable.MEETING_CLIENT_RESULT) + " r WHERE r.meeting_id=m.meeting_id)")) {
+                JdbcValues.setText(statement, 1, engine, meetingId);
+                try (var rows = statement.executeQuery()) {
+                    if (!rows.next() || !"STOPPING".equals(JdbcValues.text(rows, "state"))) return null;
+                }
+            }
+            input = speakerInput(connection, engine, meetingId);
+            connection.rollback();
+        } catch (SQLException failure) {
+            throw new IllegalStateException("speaker input database unavailable");
         }
-        return new MeetingManifest.ArtifactRef(artifactId, type, "application/json",
-                language, 1, content.length, checksum, MeetingManifest.ArtifactStatus.READY,
-                persisted.metadata().recordedAt(), null, null);
+        if (input == null || input.speakers().isEmpty()) return null;
+        Map<String, SpeakerIdentityProvider.Person> matches = Map.of();
+        try {
+            matches = speakerIdentity.identify(input).matches();
+            LOGGER.log(Level.INFO, "会后人物识别完成 speakers={0} matched={1}",
+                    new Object[]{input.speakers().size(), matches.size()});
+        } catch (Exception failure) {
+            if (failure instanceof InterruptedException) Thread.currentThread().interrupt();
+            LOGGER.log(Level.WARNING, "会后人物识别暂未完成，保留本场分人 reason={0}",
+                    failure.getClass().getSimpleName());
+        }
+        return identityArtifact(input, matches);
+    }
+
+    /** 注册与首次收口共用同一份最终事件投影，不复制本场 speaker／时间窗规则。 */
+    static MeetingSpeakers speakerInput(Connection connection, JdbcDatabaseEngine engine,
+            String meetingId) throws SQLException {
+        var first = new JdbcCreateMeetingFactStore(connection, engine)
+                .findByMeetingIdReadOnly(meetingId).orElse(null);
+        if (first == null || !first.request().requestSnapshot().artifactPolicy().retainAudio()
+                || !first.request().requestSnapshot().requestedCapabilities()
+                        .contains(CapabilityIds.SPEAKER_IDENTITY_CROSS_MEETING)
+                || first.response().capabilityDecisions().stream().noneMatch(decision ->
+                        CapabilityIds.SPEAKER_IDENTITY_CROSS_MEETING.equals(decision.capability())
+                                && decision.action() == CapabilityDecision.Action.ENABLE)) return null;
+        ArtifactDescriptor audio = audioOriginal(connection, engine, meetingId);
+        if (audio == null) return null;
+        String deployment;
+        String subject;
+        try (var statement = connection.prepareStatement("SELECT deployment_scope, subject_scope FROM "
+                + JdbcDatabaseTable.MEETING.physicalName(engine) + " WHERE meeting_id=?")) {
+            JdbcValues.setText(statement, 1, engine, meetingId);
+            try (var rows = statement.executeQuery()) {
+                if (!rows.next()) return null;
+                deployment = JdbcValues.text(rows, "deployment_scope");
+                subject = JdbcValues.text(rows, "subject_scope");
+            }
+        }
+        Map<String, List<AudioWindow>> windows = new java.util.LinkedHashMap<>();
+        for (var segment : project(connection, engine, meetingId).transcripts()) {
+            if (segment.hasSpeaker() && !segment.getSpeaker().getSessionSpeakerId().isBlank()
+                    && segment.getEndMs() > segment.getStartMs()) {
+                windows.computeIfAbsent(segment.getSpeaker().getSessionSpeakerId(),
+                        ignored -> new ArrayList<>()).add(
+                                new AudioWindow(segment.getStartMs(), segment.getEndMs()));
+            }
+        }
+        return new MeetingSpeakers(deployment, subject, meetingId, audio,
+                windows.entrySet().stream().map(entry ->
+                        new SpeakerSample(entry.getKey(), entry.getValue())).toList());
+    }
+
+    static ObjectNode identityArtifact(MeetingSpeakers input,
+            Map<String, SpeakerIdentityProvider.Person> matches) {
+        ObjectNode artifact = JSON.createObjectNode();
+        artifact.put("schemaVersion", "speaker-identity/v1");
+        artifact.put("artifactType", "speaker.identity");
+        ArrayNode speakers = artifact.putArray("speakers");
+        for (var speaker : input.speakers()) {
+            ObjectNode item = speakers.addObject();
+            item.put("sessionSpeakerId", speaker.sessionSpeakerId());
+            var person = matches.get(speaker.sessionSpeakerId());
+            if (person == null) {
+                item.putNull("personId");
+                item.putNull("displayName");
+            } else {
+                item.put("personId", person.personId());
+                item.put("displayName", person.displayName());
+            }
+        }
+        return artifact;
     }
 
     private Instant clientStartedAt(Connection connection, String meetingId)

@@ -1,0 +1,7 @@
+{
+  "schemaVersion": "speaker-identity/v1",
+  "artifactType": "speaker.identity",
+  "speakers": [
+    {"sessionSpeakerId": "speaker-1", "personId": null, "displayName": "不能凭显示名称冒充已注册人物"}
+  ]
+}

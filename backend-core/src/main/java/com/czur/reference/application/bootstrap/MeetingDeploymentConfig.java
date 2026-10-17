@@ -225,8 +225,21 @@ public class MeetingDeploymentConfig {
                     List.of(MODEL_SPEAKER_WORKFLOW));
             artifacts.put(CapabilityIds.SPEAKER_DIARIZATION_SESSION,
                     List.of(MOCK_TRANSCRIPT_ARTIFACT));
+            if (optional.contains(CapabilityIds.SPEAKER_IDENTITY_CROSS_MEETING)
+                    || required.contains(CapabilityIds.SPEAKER_IDENTITY_CROSS_MEETING)) {
+                workflows.put(CapabilityIds.SPEAKER_IDENTITY_CROSS_MEETING,
+                        List.of("speaker.identity.postprocess"));
+                artifacts.put(CapabilityIds.SPEAKER_IDENTITY_CROSS_MEETING,
+                        List.of("speaker.identity"));
+            }
+            Map<String, Set<String>> dependencies = new HashMap<>();
+            if (optional.contains(CapabilityIds.SPEAKER_IDENTITY_CROSS_MEETING)
+                    || required.contains(CapabilityIds.SPEAKER_IDENTITY_CROSS_MEETING)) {
+                dependencies.put(CapabilityIds.SPEAKER_IDENTITY_CROSS_MEETING,
+                        Set.of(CapabilityIds.SPEAKER_DIARIZATION_SESSION));
+            }
             profile = new ProductProfile(profileId, revision, required, optional,
-                    Map.of(), Map.of(), Map.of(), workflows, artifacts);
+                    dependencies, Map.of(), Map.of(), workflows, artifacts);
             // Start 与最终收口依赖持久快照中的完整执行映射，不能只校验 Profile ID。
             ProductProfileSnapshot.from(profile);
         } catch (RuntimeException malformed) {

@@ -429,6 +429,57 @@ paths:
                 $ref: "#/components/schemas/SubmitClientSummaryResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/meetings/{meetingId}/speakers/{sessionSpeakerId}:enroll:
+    post:
+      tags: [Meetings]
+      operationId: enrollMeetingSpeakerIdentity
+      summary: 为本场发言人命名并注册跨会议人物
+      description: |
+        可选会后人物插件入口，默认关闭。沿用参考或伙伴登录取得的 Bearer 身份，
+        不接收 genTime 写权限。仅允许归属匹配、已启用跨会议身份且保留录音的 READY
+        客户端会议。成功后发布新版 speaker.identity 并增加原客户端 Manifest revision；
+        原文、录音、时间和原结果链接保留。供应商请求在会议行锁事务外完成。
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/MeetingId"
+        - name: sessionSpeakerId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [displayName]
+              properties:
+                displayName:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+      responses:
+        "200":
+          description: 标准人物与已更新的 Manifest revision；调用方重新读取原结果链接
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [personId, displayName, manifestRevision]
+                properties:
+                  personId:
+                    type: string
+                  displayName:
+                    type: string
+                  manifestRevision:
+                    type: integer
+                    minimum: 1
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/meetings/{meetingId}:renewRealtimeToken:
     post:
       tags: [Meetings]
