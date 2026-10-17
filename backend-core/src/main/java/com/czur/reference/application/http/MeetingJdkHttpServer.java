@@ -480,7 +480,13 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
         }
     }
 
-    /** 将 READY 媒体按 Manifest 长度流式写出；不把长录音读成 byte[]。 */
+    /**
+     * 将 READY 媒体按 Manifest 长度流式写出，支持播放器使用的单段字节 Range。
+     *
+     * <p>浏览器会先请求文件头，再请求文件尾读取 OGG 时长，拖动播放时也会请求新的
+     * 字节区间。这里只改变 HTTP 传输，不改变 Artifact 的归属、有效期或 READY 规则；
+     * 完整和分段读取都关闭同一个 Store 句柄，不把长录音读成 byte[]。</p>
+     */
     private void writeMedia(HttpExchange exchange,
             com.czur.reference.application.port.MeetingArtifactMediaPort.Result result)
             throws IOException {
@@ -488,19 +494,36 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
             write(exchange, dispatcher.errorMapper().artifactMedia(result));
             return;
         }
-        var reference = found.reference();
-        exchange.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
-        exchange.getResponseHeaders().set("Content-Type", reference.mediaType());
-        exchange.getResponseHeaders().set("Cache-Control", "no-store");
-        exchange.getResponseHeaders().set("Content-Disposition", "inline");
-        exchange.sendResponseHeaders(200, reference.size());
         try (found) {
-            copyExactly(found.content(), exchange.getResponseBody(), reference.size());
+            var reference = found.reference();
+            // 当前产物没有 HTTP 缓存校验器；带 If-Range 时返回完整实体，不能猜测版本匹配。
+            String requestedRange = exchange.getRequestHeaders().getFirst("If-Range") == null
+                    ? exchange.getRequestHeaders().getFirst("Range") : null;
+            MediaRange range = MediaRange.select(requestedRange, reference.size());
+            var headers = exchange.getResponseHeaders();
+            headers.set("Access-Control-Allow-Origin", "*");
+            headers.set("Content-Type", reference.mediaType());
+            headers.set("Cache-Control", "no-store");
+            headers.set("Content-Disposition", "inline");
+            headers.set("Accept-Ranges", "bytes");
+            if (range.status() == 416) {
+                headers.set("Content-Range", "bytes */" + reference.size());
+                exchange.sendResponseHeaders(416, -1);
+                return;
+            }
+            if (range.status() == 206) {
+                headers.set("Content-Range", "bytes " + range.first() + "-"
+                        + (range.first() + range.length() - 1) + "/" + reference.size());
+            }
+            exchange.sendResponseHeaders(range.status(), range.length() == 0 ? -1 : range.length());
+            found.content().skipNBytes(range.first());
+            copyExactly(found.content(), exchange.getResponseBody(), range.length(),
+                    range.status() == 200);
         }
     }
 
     private static void copyExactly(java.io.InputStream input, java.io.OutputStream output,
-            long expected) throws IOException {
+            long expected, boolean completeEntity) throws IOException {
         byte[] buffer = new byte[16 * 1024];
         long copied = 0;
         while (copied < expected) {
@@ -511,7 +534,42 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
             output.write(buffer, 0, count);
             copied += count;
         }
-        if (input.read() >= 0) throw new IOException("media stream exceeds declared length");
+        if (completeEntity && input.read() >= 0) {
+            throw new IOException("media stream exceeds declared length");
+        }
+    }
+
+    /** 包内 HTTP 字节区间值；不进入公共媒体端口，也不改变共享客户端协议。 */
+    record MediaRange(long first, long length, int status) {
+        /**
+         * 支持固定区间、从某处至文件尾、末尾 N 字节三种播放器请求。
+         * 多段或不认识的格式直接按完整实体返回；本机宿主不生成 multipart 正文。
+         * 可解析但完全超出文件的区间返回标准 416，避免伪造空的 206。
+         */
+        static MediaRange select(String value, long size) {
+            var full = new MediaRange(0, size, 200);
+            if (value == null) return full;
+            var match = java.util.regex.Pattern.compile("bytes=(\\d*)-(\\d*)")
+                    .matcher(value.trim());
+            if (!match.matches() || match.group(1).isEmpty() && match.group(2).isEmpty()) {
+                return full;
+            }
+            try {
+                if (match.group(1).isEmpty()) {
+                    long suffix = Long.parseLong(match.group(2));
+                    if (suffix == 0 || size == 0) return new MediaRange(0, 0, 416);
+                    long length = Math.min(suffix, size);
+                    return new MediaRange(size - length, length, 206);
+                }
+                long first = Long.parseLong(match.group(1));
+                long last = match.group(2).isEmpty() ? size - 1 : Long.parseLong(match.group(2));
+                if (first >= size || last < first) return new MediaRange(0, 0, 416);
+                last = Math.min(last, size - 1);
+                return new MediaRange(first, last - first + 1, 206);
+            } catch (NumberFormatException unsupportedRange) {
+                return full;
+            }
+        }
     }
 
     /**
