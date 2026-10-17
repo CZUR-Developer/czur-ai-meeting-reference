@@ -21,12 +21,32 @@ required_files=(
   tools/run-reference-client-backend.sh
   tools/migrate-reference-client.sh
   tools/check-reference-backend.sh
+  deploy/migrate.sh
+  deploy/healthcheck-db.sh
+  deploy/migrations/README.md
   deploy/migrations/V001__initial_schema.sql
 )
 
 for file in "${required_files[@]}"; do
   [[ -f "${file}" ]] || { printf '[FAIL] 缺少交付文件: %s\n' "${file}" >&2; exit 1; }
 done
+
+# 数据库交付边界：参考方案只交付一份 MySQL 5.7 当前基线；数据库容器和第二份
+# SQL 不得进入公开库存。PostgreSQL 兼容代码可以保留在公共 core，但不能被部署
+# 入口或 Compose 误当成本期数据库方案。
+mapfile -t migration_files < <(find deploy/migrations -type f -name '*.sql' -print | sort)
+[[ "${#migration_files[@]}" -eq 1 && "${migration_files[0]}" == "deploy/migrations/V001__initial_schema.sql" ]] \
+  || { printf '[FAIL] 交付必须只有 deploy/migrations/V001__initial_schema.sql\n' >&2; exit 1; }
+grep -q '^-- MySQL 5\.7' deploy/migrations/V001__initial_schema.sql \
+  || { printf '[FAIL] V001 未声明 MySQL 5.7 基线\n' >&2; exit 1; }
+grep -q 'ENGINE=InnoDB' deploy/migrations/V001__initial_schema.sql \
+  || { printf '[FAIL] V001 未包含 InnoDB 表定义\n' >&2; exit 1; }
+if grep -qiE 'postgres|pg_isready|jdbc:postgresql' deploy/docker-compose.yml; then
+  printf '[FAIL] Compose 仍包含 PostgreSQL 数据库方案\n' >&2
+  exit 1
+fi
+grep -q 'jdbc:mysql://' .env.example \
+  || { printf '[FAIL] 默认配置未指向 MySQL\n' >&2; exit 1; }
 
 while IFS= read -r script; do
   bash -n "${script}"

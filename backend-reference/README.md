@@ -40,9 +40,10 @@ JoinUrl 或请求正文。参考宿主也可通过 `ReferenceMeetingHttpAssembly
 不改核心会议流程。
 
 这是公开仓中的 Java 21 参考后端，用于展示会议领域状态、能力计划、可替换的
-Model Driver 端口和 PostgreSQL 事实源边界。领域、命令和应用端口保持与 HTTP
+Model Driver 端口和 MySQL 5.7 事实源边界。领域、命令和应用端口保持与 HTTP
 框架、数据库实现、厂商 SDK 和生产服务解耦；Provider 特有的响应转换只能位于
-Driver 实现中。
+Driver 实现中。公共核心仍保留 PostgreSQL 兼容适配，供旧宿主或显式兼容测试使用，
+不改变本参考客户端默认使用 MySQL 的边界。
 
 ## 当前公开范围
 
@@ -50,14 +51,15 @@ Driver 实现中。
   并保留原有文件与测试。
 - `application/command/`：创建/停止命令、请求校验、幂等预占和会议仓库调用。
 - `application/port/`：`MeetingRepository`、`IdempotencyStore`、`OutboxStore` 等替换
-  边界；生产实现可接入 PostgreSQL 或其他持久化系统。
+  边界；参考实现使用 MySQL 5.7，生产宿主也可接入 PostgreSQL 或其他持久化系统。
 - `application/identity/referencedev/`：默认禁用的固定 Bearer Token 身份示例，
   只用于本地演示和契约测试，不是合作伙伴或 CZUR 生产账号实现。
 - `application/persistence/`：线程安全的内存适配器，仅用于参考和测试，不是生产事实源。
-- `application/persistence/jdbc/`：基于标准 JDBC `DataSource` 的 PostgreSQL 适配器，
-  覆盖会议快照、幂等记录、Outbox、跨端口工作单元，以及 P2-T11 的配置、连接池、
-  readiness/liveness 和关闭生命周期。运行时不自动建表，必须先执行并登记仓库
-  唯一的 `deploy/migrations/V001__initial_schema.sql` 当前基线。
+- `application/persistence/jdbc/`：基于标准 JDBC `DataSource` 的 MySQL 5.7 参考适配器，
+  覆盖会议快照、幂等记录、Outbox、跨端口工作单元，以及配置、连接池、readiness/liveness
+  和关闭生命周期。运行时不自动建表，必须先执行并登记仓库唯一的
+  `deploy/migrations/V001__initial_schema.sql` 当前基线；同目录中的 PostgreSQL 适配只供
+  旧兼容宿主和显式夹具使用。
 - `domain/capability/`：P3-T01 已验收的能力描述、产品 Profile、依赖/回退规则和不可变能力计划。
 - `application/port/model/`：P3-T02 已验收的 Model Driver SPI、规范化会话/音频/事件对象、无网络 `MockModelDriver`，以及 P3-T04 的 `AlternativeTextModelDriver`。
 - 对应 `src/test/java/`：能力计划、Model Driver 生命周期、幂等、顺序、取消、超时及资源边界测试；`ModelDriverContractTestKit` 为任意 Driver 复用的测试作用域契约工具包。
@@ -165,26 +167,27 @@ Android SDK 调用应用 completion，App 归一化后在 Stop 前提交标准�
 会议应用切片同步自 `czur-cloud` 固定提交
 `23726454ebb893ae1402cff59b0f226b041daa04`。创建和停止命令通过端口访问会议事实源、
 幂等记录和 Outbox；`deploymentScope + clientSessionId` 是创建唯一性范围，旧调用
-默认使用 `default`。内存适配器只用于示例和测试；PostgreSQL 适配器提供持久化端口，
+默认使用 `default`。内存适配器只用于示例和测试；MySQL 5.7 适配器提供本期参考持久化
+端口，PostgreSQL 适配器保留旧兼容端口，
 HTTP API、认证、计费、Worker 和完整运行时编排不在本切片内。
 
-### PostgreSQL 适配器
+### JDBC 适配器与旧 PostgreSQL 兼容边界
 
 `JdbcMeetingRepository`、`JdbcIdempotencyStore` 和 `JdbcOutboxStore` 只依赖
-`javax.sql.DataSource`。参考运行时可以由应用启动 PostgreSQL JDBC 驱动（Maven
-依赖使用 `runtime` 作用域），也可以由容器运行时提供驱动；核心领域和单元测试不
-要求数据库可用。适配器不会打印响应正文、Outbox 载荷或连接凭据。
+`javax.sql.DataSource`。参考客户端默认由应用使用 MySQL Connector/J 连接 MySQL 5.7；
+公共核心仍保留 PostgreSQL JDBC 驱动及旧 SQL 适配，供显式兼容宿主使用。核心领域和
+单元测试不要求数据库可用。适配器不会打印响应正文、Outbox 载荷或连接凭据。
 
 `MeetingCommandService` 保留旧的双端口构造器，供既有内存示例兼容使用；JDBC
 运行时应使用 `MeetingUnitOfWork` 构造器。`JdbcMeetingUnitOfWork` 在一个
 `Connection` 中提交会议快照、幂等记录和命令 Outbox，任何一步失败都会整体回滚。
-事务内读取会议时使用 PostgreSQL 行锁，使多个后端实例并发 Stop 也只能由首次
+事务内读取会议时使用对应引擎的行锁，使多个后端实例并发 Stop 也只能由首次
 状态转换写入一条 `MeetingStopRequested`；后到事务复用已提交的停止状态。
 Outbox 的领取、发布和失败重试继续由提交后的 Worker 使用独立短事务执行，不能放入
-会议命令事务，更不能在 Gateway 中拼接业务事务。数据库容器是否由 Compose 启动不
-改变这个边界。
+会议命令事务，更不能在 Gateway 中拼接业务事务。参考交付 Compose 不启动数据库
+容器，数据库是否由本机临时容器提供不改变这个边界。
 
-### PostgreSQL 运行时
+### 旧 PostgreSQL 运行时（兼容边界）
 
 `JdbcDatabaseRuntime` 是完整 PostgreSQL 会议的生产候选 JDBC 装配入口。它从
 `DATABASE_URL`、`DATABASE_USER`、`DATABASE_PASSWORD` 以及连接池参数创建一个
@@ -198,8 +201,8 @@ Outbox 的领取、发布和失败重试继续由提交后的 Worker 使用独�
 `SCHEMA_INVALID`。`isLive()` 只表达运行时尚未关闭。因此数据库暂时中断时 readiness
 会失败而 liveness 保持正常，连接池可在数据库恢复后重新建连。`close()` 可重复调用，
 关闭后禁止继续取得业务组件。
-Compose 数据库和外部 PostgreSQL 使用完全相同的配置入口，不根据 hostname 或
-Profile 切换实现。
+该运行时只接受 PostgreSQL URL，不根据 hostname 或 Profile 静默切换实现。参考客户端
+不使用此旧完整运行时；局域网入口使用下一节的 MySQL `JdbcDatabaseContext`。
 
 ### P8 M1：MySQL 5.7 初始化与连接
 
@@ -211,8 +214,8 @@ Profile 切换实现。
 Connector/J 传毫秒。MySQL 连接固定使用 UTF-8／`utf8mb4_bin`、UTC 时区及
 `forceConnectionTimeZoneToSession=true`，URL 不得覆盖这些运行时参数。
 
-先对选定库执行 [MySQL 当前 V001](../deploy/migrations/mysql/V001__initial_schema.sql)
-及 [独立初始化入口](../deploy/migrate-mysql.sh)，再调用
+先对选定库执行仓库唯一的 [MySQL 当前 V001](../deploy/migrations/V001__initial_schema.sql)
+及 [初始化入口](../deploy/migrate.sh)，再调用
 `JdbcDatabaseContext.start(config)`。上下文拥有唯一 HikariCP 池；
 `engine()` 和 `table(JdbcDatabaseTable)` 提供封闭固定映射：PostgreSQL 原表名
 保留，MySQL 当前共 26 张基线表（25 张基础表加 1 张作用域锁表），全部为 `ai_trans_*`，包含
@@ -225,7 +228,7 @@ Connector/J 传毫秒。MySQL 连接固定使用 UTF-8／`utf8mb4_bin`、UTC 时
 
 `ReferenceMeetingHttpAssembly.startClientModel(config, clock, artifactStore,
 identityProvider, entitlementPolicy, modelSessionIssuer, entitlementProviderDecorator)`
-从已初始化的 PG／MySQL5.7 创建唯一 `JdbcDatabaseContext` 池，显式要求部署方
+从已初始化的 MySQL 5.7 创建唯一 `JdbcDatabaseContext` 池，显式要求部署方
 提供身份、资格、模型会话材料和持久产物 Store，不自动回退演示身份、模型或存储。
 它与旧入口共用唯一装配核心、创建／Stop 应用服务、领域状态机和持久权益账本。
 装饰器只调用一次，Create、客户端 Stop 及 `entitlementProvider()` 共用其返回实例。
@@ -244,9 +247,10 @@ Create 原 `realtime` 字段仅保留协议兼容，实际模型材料由显式�
 `newInputReconciliationScan()`、`newRealtimeWssServer()` 明确拒绝访问旧组件。
 健康探针只读取同一 Context 的初始化基线，不把 READY 探针当作完整业务验收。
 原 `ReferenceMeetingHttpAssembly.start(...)` 和 `JdbcDatabaseRuntime.start/open`
-完整 PG 入口及 catalog 契约门保持；旧完整运行时仍在建池前拒绝 MySQL
+完整 PG 兼容入口及 catalog 契约门保持；旧完整运行时仍在建池前拒绝 MySQL
 `INVALID_CONFIGURATION`，不能把未经适配的 PG 音频／Worker SQL 装到 MySQL。
-CZUR Cloud 服务装配留 M3。每种引擎只交付一份当前 V001，不把两份基线连续执行。
+CZUR Cloud 服务装配留 M3。参考仓只交付一份当前 MySQL V001，不把历史兼容实现的
+SQL 与本期基线连续执行。
 
 本机定向真实连接测试使用 `REFERENCE_TEST_MYSQL_DATABASE_URL`、
 `REFERENCE_TEST_MYSQL_DATABASE_USER`、`REFERENCE_TEST_MYSQL_DATABASE_PASSWORD`，
@@ -297,8 +301,9 @@ try (var assembly = ReferenceMeetingHttpAssembly.start(
   `REFERENCE_DEV_*`凭据或预置账号，且不开放演示登录；登录入口由部署方提供。
 - 新`EntitlementPolicy`只提供`authorizeStart`与`prepareReservation`。前者读取
   当前开会资格，后者生成首次预占候选；两个方法不写会议记录、不扣费。现有JDBC
-  Provider继续把预占和用量操作保存在同一会议PostgreSQL库，供Create工作单元
-  绑定，不能仅用外部授权成功代替PG预占记录。
+  Provider 继续把预占和用量操作保存在同一会议 JDBC 库，供 Create 工作单元绑定；
+  参考客户端使用 MySQL 5.7，旧兼容宿主可选择 PostgreSQL，不能仅用外部授权成功
+  代替持久化预占记录。
 - 同一能力配置、会议协议与V001基线继续使用。原`fromEnvironment`、`start`和
   JDBC Provider的默认策略构造器保留；参考Process的Worker与Create复用同一个
   权益Provider。身份／策略需要支持并发调用，其外部服务资源由部署方关闭。
@@ -319,7 +324,7 @@ Dispatcher仅提取原JDK业务分发顺序：可选`ResultEmailEndpoint`未装�
 `authenticationRoute`及可信上下文解析器；Create／Stop仍由自身应用服务认证。
 原JDK内部健康路径、原始网络字节检查、有界执行器和关闭门留在JDK listener，
 不进入公共业务dispatcher。其他transport负责自身的网络边界与健康入口；应先
-停止请求接收，再关闭Assembly及其唯一PG池。此扩展不新增路由、鉴权规则、
+停止请求接收，再关闭 Assembly 及其唯一 JDBC 池。此扩展不新增路由、鉴权规则、
 会议状态机或部署事实，不修改V001、模型和权益行为。
 
 ### 装配部署方结算装饰器
@@ -337,12 +342,12 @@ try (var assembly = ReferenceMeetingHttpAssembly.start(
 }
 ```
 
-工厂在PG readiness通过后仅调用一次；`issuer`仍可为`null`以保留默认模型选择。
+工厂在数据库 readiness 通过后仅调用一次；`issuer`仍可为`null`以保留默认模型选择。
 旧`start`重载使用identity工厂，默认参考链和原外部身份／模型接线保持不变。
-工厂及其返回值不可为`null`；工厂失败时启动失败并关闭已创建的PG池。
+工厂及其返回值不可为`null`；工厂失败时启动失败并关闭已创建的 JDBC 池。
 
-装饰器不取代PG预占绑定、版本检查或稳定操作重放：`authorizeStart`保持只读，
-其余用量方法须委托输入Provider。需要外部结算时，`commitUsage`可在PG委托
+装饰器不取代数据库预占绑定、版本检查或稳定操作重放：`authorizeStart`保持只读，
+其余用量方法须委托输入 Provider。需要外部结算时，`commitUsage`可在数据库委托
 成功后确认同场外部幂等操作；外部未确认须返回失败，原Stop保留待收口状态，
 重复Stop使用同一冻结请求重试。PG成功或重放不表示外部已结算，不能因此跳过
 未确认操作，也不能提前发布READY。装饰器的外部资源由部署方负责关闭。
@@ -416,7 +421,7 @@ try (var assembly = ReferenceMeetingHttpAssembly.start(
 ```
 
 非null发行器优先于配置中的sample／听悟默认实现，无需再配置参考听悟凭据。
-身份、PG会议事实、公开`:modelSession`响应及唯一V001基线保持不变；可信能力
+身份、会议事实、公开`:modelSession`响应及唯一 V001 基线保持不变；可信能力
 配置仍参与首次Create交集，不能仅凭注入实现启用翻译或总结。
 
 `ModelSessionIssuer.Request`新增`meetingId()`：原Lookup从已经验证归属的同一
@@ -483,12 +488,13 @@ Maven 会从仓库根的 `contracts/realtime.proto` 用固定版本的 protoc �
 该命令从源码顺序构建两个 Module，不需要预先安装公共核心；不启动数据库或外部服务。
 Fixture、公开边界和依赖检查由仓库根目录的工具脚本执行。
 
-真实 PostgreSQL 事务和运行时门禁需显式传入一次性测试库连接；集成用例在随机
-schema 中自行装载 V001，不要指向已有环境。正式部署则先执行 `deploy/migrate.sh`：
+真实 MySQL 5.7 事务和运行时门禁需显式传入一次性测试库连接；先创建并初始化
+`ai_trans_m1_*` 隔离库，M2 用例再通过该账号创建自己的随机 `ai_trans_m2_c_*` 库，
+不要指向已有环境。正式部署则先执行 `deploy/migrate.sh`：
 
 ```bash
-REFERENCE_TEST_DATABASE_URL='jdbc:postgresql://127.0.0.1:5432/meeting' \
-REFERENCE_TEST_DATABASE_USER='meeting' \
-REFERENCE_TEST_DATABASE_PASSWORD='<从测试 Secret 注入>' \
+REFERENCE_TEST_MYSQL_DATABASE_URL='jdbc:mysql://127.0.0.1:3306/ai_trans_m1_local?useSSL=false&allowPublicKeyRetrieval=true' \
+REFERENCE_TEST_MYSQL_DATABASE_USER='meeting' \
+REFERENCE_TEST_MYSQL_DATABASE_PASSWORD='<从测试 Secret 注入>' \
 mvn -B -f pom.xml clean test
 ```

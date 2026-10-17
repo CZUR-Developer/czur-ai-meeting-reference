@@ -42,8 +42,18 @@ public final class MeetingArtifactHttpEndpoint {
 
     /** JDK transport 在 JSON 适配器前用此方法选择媒体流回放入口。 */
     public boolean matchesDownload(HttpRequest request) {
-        return request != null && "GET".equals(request.method())
-                && ARTIFACT_PATH.matcher(request.path()).matches();
+        if (request == null || !"GET".equals(request.method())) {
+            return false;
+        }
+        var matcher = ARTIFACT_PATH.matcher(request.path());
+        if (!matcher.matches()) {
+            return false;
+        }
+        // JSON 产物（原文、译文、总结和演示内容）必须继续走 MeetingHttpAdapter；
+        // 只有录音产物交给流式媒体端口。当前参考客户端的录音 ID 由
+        // JdbcClientMeetingInputPort 统一使用 art_client_audio_ 前缀生成。
+        // 这样不会把 JSON 产物误当成音频并在 JDK transport 层返回 500。
+        return matcher.group(1).startsWith("art_client_audio_");
     }
 
     /** 当前二进制上传是否属于本端点。 */

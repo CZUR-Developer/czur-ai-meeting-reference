@@ -1,97 +1,65 @@
-# 参考后端 Docker 部署
+# 参考后端部署
 
-产品 Dockerfile 从根 Maven 聚合入口同时构建 `backend-core` 与 `backend-reference`，
-再将参考进程 JAR、核心 JAR 和运行时依赖打入交付镜像。无需预装核心或检出其他仓库。
-开发验证仍使用本机 `bash tools/verify-local.sh`，不执行 Docker 构建。
+参考后端的本机局域网入口是 `ReferenceClientMeetingMain`。它只提供 HTTP 业务服务，
+Android 通过服务端签发的临时材料直连已配置的模型 Adapter；音频不经过后端。
+镜像和 Compose 只编排这个应用进程，不携带数据库容器。
 
-本目录部署参考后端：一个应用进程同时提供 HTTP、旧 WSS 音频链路和周期收口 Worker。PostgreSQL 是必需的；可使用 Compose 演示数据库或部署方已有的 PostgreSQL。两种模式都运行 `migrate.sh` 与唯一的 `migrations/V001__initial_schema.sql`，应用不会自动建表。P5 新增听悟临时会话签发；后端不转发模型音频，也不包含后台管理或 Web 容器。
+## 数据库
 
-## 准备配置
-
-在本目录执行 `cp ../.env.example .env`，然后编辑 `.env`。至少填写：
-
-| 配置 | 应填写什么 |
-| --- | --- |
-| `REFERENCE_DEV_IDENTITY_ENABLED`、`AI_MEETING_CREATE_ENABLED` | 演示时都设为 `true`。 |
-| `REFERENCE_DEV_IDENTITY_BEARER_TOKEN` | 自行指定不少于 32 字节的演示登录 Token；调用会议接口时作为 Bearer Token。 |
-| `REFERENCE_DEV_LOGIN_USERNAME`、`REFERENCE_DEV_LOGIN_PASSWORD` | 同时填写一个部署者预置的终端用户账号，参考 App 登录成功后取得上述 Token；不提供自助注册。 |
-| `AI_MEETING_PAGE_TOKEN_SECRET` | 自行指定不少于 32 字节的分页密钥。 |
-| `AI_MEETING_TLS_KEYSTORE_FILE`、`AI_MEETING_TLS_KEYSTORE_PASSWORD` | 可读取的 PKCS#12 文件路径及其密码；Compose 将文件只读挂载给 WSS。 |
-| `AI_MEETING_WSS_ORIGIN` | App 可访问的 `wss://主机:端口`；端口须与 `WSS_PORT` 一致。 |
-| `AI_MEETING_ARTIFACT_STORE` | `file`（默认）或 `s3`，决定结果正文的存放位置。 |
-
-示例已经给出 24 小时的结果链接有效期；如需调整，修改 `AI_MEETING_RESULT_LINK_TTL_MS`。保持该项为正数，才能读取结果页使用的 Manifest。
-
-参考 App 调用 `POST /v1/reference/session:login`，发送
-`{"username":"meeting-user","password":"..."}`，成功响应中的 `accessToken`
-用于后续会议 API，`expiresAt` 取自同一 reference-dev 身份配置。这个单账号入口
-仅供开源参考部署演示；合作伙伴自行实现其终端用户身份体系。
-设备跨网络访问该登录接口时，应在参考后端前使用 HTTPS 反向代理；本机调试可用
-`adb reverse` 将设备端 loopback 端口映射到开发机，再用 loopback HTTP。参考后端
-本身仍只监听 HTTP，不在此阶段增加 TLS 服务或账号管理框架。
-
-本地演示证书可用 `keytool -genkeypair -alias meeting -keyalg RSA -storetype PKCS12 -keystore local-meeting.p12 -validity 30 -dname CN=localhost -ext SAN=dns:localhost,ip:127.0.0.1` 生成，按提示输入密码，再填入 `.env`。使用自签名证书的客户端需要信任该证书。`.env` 和证书不入库。
-
-## Compose 演示数据库
-
-在 `deploy/` 目录执行：
+参考方案统一使用 MySQL 5.7 兼容模式。部署方先创建一个专用数据库，再执行仓库唯一
+初始化脚本：
 
 ```bash
-docker compose --profile database up --build
+export DATABASE_URL='jdbc:mysql://127.0.0.1:3306/meeting_reference?useSSL=false&allowPublicKeyRetrieval=true'
+export DATABASE_USER='meeting'
+export DATABASE_PASSWORD='从部署方 Secret 注入'
+bash ./migrate.sh
+bash ./healthcheck-db.sh
 ```
 
-Compose 先等待 PostgreSQL 健康，再运行一次迁移；迁移成功后启动应用。验证 `curl http://localhost:8080/internal/health/readiness` 返回成功。Artifact 使用 `meeting-artifacts` 卷，数据库使用 `meeting-db` 卷；`docker compose --profile database down` 停止服务但保留数据卷。
+脚本只新增 `ai_trans_*` 会议专用表，不创建数据库／账号，不读写旧业务表。应用启动
+只做只读 readiness；未登记 V001 时启动失败。正式部署使用部署方已有 MySQL 实例，
+不要求安装本项目提供的数据库镜像。
 
-## 外部 PostgreSQL
+本机可以临时运行 `mysql:5.7` 容器来验证脚本和局域网链，但容器、数据卷和账号均不
+属于参考代码交付物。容器只绑定 loopback，并使用随机名称／测试数据库；测试结束后由
+操作者清理该临时依赖。不要把现有 CZUR 业务库或其他测试实例填入模板。
 
-仍在同一个 `.env` 中把 `DATABASE_URL`、`DATABASE_USER`、`DATABASE_PASSWORD` 改成容器可访问的外部数据库地址和凭据，例如 `jdbc:postgresql://db.example.invalid:5432/meeting`。然后在 `deploy/` 执行：
+## 应用配置和启动
+
+复制根目录占位配置后，仅在本机填写：
 
 ```bash
+cp ../.env.example .env
+# 至少填写 DATABASE_URL、DATABASE_USER、DATABASE_PASSWORD、身份、分页密钥、
+# AI_MEETING_CREATE_ENABLED=true 和模型 Adapter 端点；不要提交 .env。
+bash ./migrate.sh
 docker compose up --build
 ```
 
-此命令不启动 `db`，但仍由同一个 `migrate` 服务执行 `migrate.sh`，成功后才启动应用。外部数据库必须已创建目标空库且可连接；迁移用户需有建表权限。App 与迁移使用 `.env` 中相同的数据库地址和凭据。
+不使用容器做开发检查时，直接运行：
 
-## P5-3 结果存储切换
+```bash
+bash ../tools/migrate-reference-client.sh
+bash ../tools/run-reference-client-backend.sh
+```
 
-默认 `AI_MEETING_ARTIFACT_STORE=file` 使用已有参考文件 Store，正文写入
-`AI_MEETING_ARTIFACT_ROOT`。Compose 将 `/var/lib/meeting/artifacts` 挂到持久卷；
-本机运行需自行设置可写目录。这个实现原本是无网络测试替身，现用于**单进程参考部署**，
-不代表已交付生产级文件存储能力。
+Compose 中的 `DATABASE_URL` 是应用容器看到的地址；不能把容器内的
+`127.0.0.1` 当作宿主机或数据库容器地址。局域网 Android 地址应填写开发机可达的
+PC 局域网 IP，例如 `http://192.168.1.20:8080`，不能填写设备自己的
+`127.0.0.1`。
 
-改为 `AI_MEETING_ARTIFACT_STORE=s3` 时，在 `.env` 填写
-`AI_MEETING_S3_REGION`、`AI_MEETING_S3_BUCKET`、
-`AI_MEETING_S3_ACCESS_KEY_ID`、`AI_MEETING_S3_SECRET_ACCESS_KEY`。
-自建 S3 兼容服务再填写 `AI_MEETING_S3_ENDPOINT`（例如
-`http://minio.example.invalid:9000`）；留空则使用指定 Region 的标准 S3。
-可用 `AI_MEETING_S3_PREFIX` 隔离同 Bucket 中的参考数据，默认 `artifacts/`。
-此模式需要服务端能够向对象存储发出带 `If-None-Match: *` 的条件写请求；
-应先用自己的 S3 兼容服务验证这一能力。Compose 的文件卷在 s3 模式下不保存结果正文。
+## 模型、身份和结果
 
-切换存储**不迁移既有结果**：同一部署应在无待处理会议时确定模式，已有会议须继续
-使用原 Store 读取。两种实现共用 `ArtifactStore` 两段发布、读取和删除端口，
-后端 Manifest/Artifact GET 与参考 Web 均不按存储类型分支；模型音频仍由 App
-直连模型，不经过后端。
+`REFERENCE_DEV_*` 仅是单账号示例登录；合作伙伴可替换 Identity／Login Provider，
+保存登录状态的逻辑在 App 装配层，不进入会议状态机。实时模型、翻译、总结、声纹和
+语言列表都由部署配置与 Provider 能力声明共同决定，真实厂商 Key 只留在后端本机或
+外部 Secret 注入，不写入模板、日志或仓库。
 
-`API_PORT`、`WSS_PORT` 控制宿主机映射端口；容器内固定监听 8080/8443。后端运行失败时先检查迁移服务退出状态、readiness 和应用日志。结果读取仍遵循本仓的统一 HTTP 协议；旧 WSS 音频链路继续产生 Mock 字幕，P5 直连模型链路由 App 提交标准事件。
+默认结果展示是 Web；本地 HTML、邮件、扫码／小程序等通过结果动作或渲染器扩展，
+不复制会议状态机。截图新增去重算法按当前计划暂缓。
 
-## P5 听悟模型会话材料
+## 镜像边界
 
-后端可通过 `.env` 中的 `AI_MEETING_TINGWU_ENABLED=true` 开放已认证的
-`POST /v1/meetings/{meetingId}:modelSession`。另需由部署方注入
-`TINGWU_APP_KEY`、`ALIYUN_ACCESS_KEY_ID`、
-`ALIYUN_ACCESS_KEY_SECRET`；参考后端也接受 `.env.example` 中的
-`AI_MEETING_TINGWU_*` 同义配置，前者有值时优先使用。Compose 会把宿主环境
-已注入的三个标准变量传给应用容器。
-听悟识别语言取自每场会议 Create 请求的 `languages.source`：`zh-CN` 映射为听悟 `cn`，`en-US` 映射为 `en`；不再使用部署级固定语言配置。
-`AI_MEETING_TINGWU_CREATE_TASK_URL` 缺省为阿里云北京听悟 OpenAPI 地址。
-这些值属于部署方自己的听悟账号，不依赖 CZUR 云账号。
-
-接口只为同一主体拥有的 CREATED/RUNNING 会议签发临时材料。服务端调用
-听悟实时 `CreateTask`，将 `Data.MeetingJoinUrl` 放在 `endpoint`，将
-`Data.TaskId` 放在 `initParams.taskId`。JoinUrl 自带连接凭据，本协议的可选
-`token` 字段因此省略。参考 App 使用 `endpoint` 直连听悟并发送音频；后端仍只
-接收 `startClient` 和 `events:append` 的标准事件。每次请求会创建新听悟任务，
-客户端应只在准备开始本场连接时请求，并在 `expiresAt` 前启动连接。此时间是
-本后端的客户端启用窗口，不是听悟承诺的 URL 失效时间。旧 Create v1 的
-`realtime` 和 WSS 音频路径不受此配置影响。
+根目录 `Dockerfile` 只构建参考应用镜像。数据库初始化脚本、外部 MySQL 实例和
+测试容器由部署方负责；本仓不发布 MySQL 镜像或数据库数据卷。

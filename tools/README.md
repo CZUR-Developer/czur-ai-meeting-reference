@@ -5,17 +5,19 @@ Maven、Python 3 和 npm，检查工程结构、Java 测试、公开协议 Fixtu
 不启动 Docker，也不连接未显式指定的数据库。Android App 的构建与测试需在
 `android-reference-app/` 使用本机 Android SDK 单独执行。
 
-需要验证 JDBC 和会议持久化时，先准备**隔离的 PostgreSQL 16 测试库**，再按
-`backend-reference/README.md` 设置 `REFERENCE_TEST_DATABASE_URL`、
-`REFERENCE_TEST_DATABASE_USER` 和 `REFERENCE_TEST_DATABASE_PASSWORD`，运行同一条
-`bash tools/verify-local.sh`。集成测试在随机 schema 中建表，不能使用承载用户数据的库。
+需要验证参考客户端的 JDBC 和会议持久化时，先准备**隔离的 MySQL 5.7 测试库**，再按
+`backend-reference/README.md` 设置 `REFERENCE_TEST_MYSQL_DATABASE_URL`、
+`REFERENCE_TEST_MYSQL_DATABASE_USER` 和 `REFERENCE_TEST_MYSQL_DATABASE_PASSWORD`，运行
+同一条 `bash tools/verify-local.sh`。M1 测试使用调用方预先创建的隔离库，M2 测试才会
+创建并清理自己的随机 `ai_trans_*` 隔离库，任何测试都不能使用承载用户数据的库。
 没有测试库时，数据库集成测试会跳过；这不等于数据库验收通过。
 
 `test-t13-*`～`test-t16-*` 是早期 P2 验收留下的 Docker 临时数据库脚本，
 **不再作为当前开发验证入口，也不应在日常开发中执行**。对应历史测试结论见
 AITransRepos 的 P2 验收记录。上述本机 Maven 测试不能自动代替旧脚本的跨进程、
 数据库重启验收；若后续改动涉及这些语义，应另用本机进程与隔离 PostgreSQL
-编排定向复验，完成前明确标记“未复验”。交付后端的 Dockerfile 和 Compose 用法只见
+编排定向复验，完成前明确标记“未复验”。这些历史脚本保留用于旧兼容宿主，不改变本期
+参考链使用 MySQL 的边界。交付后端的 Dockerfile 和 Compose 用法只见
 `deploy/README.md`，与开发验证分开。
 
 公开发布前单独运行 `python3 tools/check-public-boundary.py`；它是发布内容检查，
@@ -24,7 +26,8 @@ AITransRepos 的 P2 验收记录。上述本机 Maven 测试不能自动代替�
 MySQL 5.7 的小型数据库能力实验见
 [`mysql57-compatibility/`](mysql57-compatibility/README.md)。仅连接显式指定的本机隔离库，
 不执行正式 V001；此入口仅为能力探针。共享核心的正常客户端会议链支持 MySQL 5.7，
-参考默认进程的旧 WSS／Mock 链仍使用 PostgreSQL。
+参考默认进程的旧 WSS／Mock 链仍可在显式 PostgreSQL 兼容夹具中运行；它不是本期
+局域网参考方案的默认数据库。
 
 ## Android 设备启动校验
 

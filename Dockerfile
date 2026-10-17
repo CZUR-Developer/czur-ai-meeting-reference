@@ -22,11 +22,11 @@ WORKDIR /app
 COPY --from=build /build/backend-reference/target/backend-reference-0.1.0-SNAPSHOT.jar backend-reference.jar
 COPY --from=build /build/backend-reference/target/runtime-libs/ lib/
 
+# 本镜像用于参考客户端直连模型的 HTTP 服务；模型音频不经过后端。
 # file 模式的 Artifact 使用持久卷；s3 模式由部署环境提供对象存储配置。
 ENV AI_MEETING_HTTP_BIND=0.0.0.0:8080 \
-    AI_MEETING_WSS_BIND=0.0.0.0:8443 \
     AI_MEETING_ARTIFACT_ROOT=/var/lib/meeting/artifacts
 VOLUME ["/var/lib/meeting/artifacts"]
-EXPOSE 8080 8443
+EXPOSE 8080
 
-ENTRYPOINT ["java", "-cp", "/app/backend-reference.jar:/app/lib/*", "com.czur.reference.application.bootstrap.ReferenceMeetingMain"]
+ENTRYPOINT ["java", "-cp", "/app/backend-reference.jar:/app/lib/*", "com.czur.reference.application.bootstrap.ReferenceClientMeetingMain"]

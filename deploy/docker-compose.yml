@@ -1,3 +1,6 @@
+# 仅编排参考后端应用；数据库不是本文件交付内容。
+# DATABASE_URL 必须指向部署方已经创建并执行唯一 V001 的 MySQL 5.7。
+# 本文件不启动数据库容器；mysql:5.7 仅可由本机测试者临时运行。
 services:
   app:
     build:
@@ -7,52 +10,11 @@ services:
     env_file: .env
     environment:
       AI_MEETING_HTTP_BIND: 0.0.0.0:8080
-      AI_MEETING_WSS_BIND: 0.0.0.0:8443
-      AI_MEETING_TLS_KEYSTORE_PATH: /run/meeting/tls.p12
       AI_MEETING_ARTIFACT_ROOT: /var/lib/meeting/artifacts
-      TINGWU_APP_KEY: ${TINGWU_APP_KEY:-}
-      ALIYUN_ACCESS_KEY_ID: ${ALIYUN_ACCESS_KEY_ID:-}
-      ALIYUN_ACCESS_KEY_SECRET: ${ALIYUN_ACCESS_KEY_SECRET:-}
     ports:
       - "${API_PORT:-8080}:8080"
-      - "${WSS_PORT:-8443}:8443"
     volumes:
       - meeting-artifacts:/var/lib/meeting/artifacts
-      - ${AI_MEETING_TLS_KEYSTORE_FILE:-./local-meeting.p12}:/run/meeting/tls.p12:ro
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-
-  migrate:
-    image: postgres:16
-    environment:
-      DATABASE_URL: ${DATABASE_URL:-jdbc:postgresql://db:5432/meeting}
-      DATABASE_USER: ${DATABASE_USER:-meeting}
-      DATABASE_PASSWORD: ${DATABASE_PASSWORD:-change-me-locally}
-    volumes:
-      - ./migrate.sh:/migrations/migrate.sh:ro
-      - ./migrations:/migrations/migrations:ro
-    entrypoint: ["/bin/bash", "/migrations/migrate.sh"]
-    depends_on:
-      db:
-        condition: service_healthy
-        required: false
-
-  db:
-    profiles: [database]
-    image: postgres:16
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-meeting}
-      POSTGRES_USER: ${POSTGRES_USER:-meeting}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-locally}
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
-      interval: 5s
-      timeout: 5s
-      retries: 12
-    volumes:
-      - meeting-db:/var/lib/postgresql/data
 
 volumes:
   meeting-artifacts:
-  meeting-db:

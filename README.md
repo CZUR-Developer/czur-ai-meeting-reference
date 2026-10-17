@@ -15,7 +15,7 @@
 | `system-audio-contract/` | 音频源 SDK 的公开接口、Stub 和 Mock |
 | `tools/` | 契约校验和验收脚本 |
 | `docs/` | 接入、开发和部署说明 |
-| `deploy/` | 后端 Docker Compose 示例 |
+| `deploy/` | 后端 Docker Compose 示例（连接外部 MySQL） |
 
 合作伙伴扩展开会条件时，按 [`android-reference-app/README.md`](android-reference-app/README.md#合作伙伴会前开会条件-hook)
 替换参考 App 的默认放行检查。参考工程默认不包含扫码接收和小程序接收端；录音已
@@ -36,13 +36,16 @@ cd android-reference-app && ./gradlew :app:assembleDebug
 ```
 
 前一条命令检查工程结构、Java 测试、协议 Fixture 和 Web 静态构建；Android
-构建需要本机 Android SDK。数据库集成测试仅在显式提供隔离 PostgreSQL 连接时运行，
-配置方式见 [`backend-reference/README.md`](backend-reference/README.md)。日常开发验证
-不启动 Docker。公开发布前再单独执行 `python3 tools/check-public-boundary.py`。
+构建需要本机 Android SDK。参考链路的数据库集成测试在显式提供隔离 MySQL 5.7
+连接时运行，配置方式见 [`backend-reference/README.md`](backend-reference/README.md)。
+日常开发验证不启动 Docker；本机若没有 MySQL，可临时使用 `mysql:5.7` 容器，但
+容器、数据卷和账号不属于交付物。公开发布前再单独执行
+`python3 tools/check-public-boundary.py`。
 
 MySQL 5.7 的独立能力探针见 [`tools/mysql57-compatibility/`](tools/mysql57-compatibility/README.md)；
-此入口仅做本机隔离能力探针。共享核心的正常 SDK 直连会议链支持 PostgreSQL 和
-MySQL 5.7；参考进程默认 PostgreSQL，旧 WSS／Mock 链仍限 PostgreSQL。
+此入口仅做本机隔离能力探针。共享核心保留 PostgreSQL 兼容适配，参考客户端直连
+会议链默认使用 MySQL 5.7；旧 WSS／Mock 兼容链仍可在显式 PostgreSQL 测试夹具中运行，
+不改变本期参考方案的 MySQL 交付边界。
 
 公共后端核心的边界和消费方式见 [`backend-core/README.md`](backend-core/README.md)。
 两模块从根目录执行 `mvn -B clean test`；单独构建参考应用使用
@@ -51,10 +54,10 @@ MySQL 5.7；参考进程默认 PostgreSQL，旧 WSS／Mock 链仍限 PostgreSQL�
 ## 交付部署
 
 交付用的后端 Dockerfile 和 Compose 配置不参与上述开发验证。参考后端的配置与
-启动命令见 [`deploy/README.md`](deploy/README.md)。在
-`deploy/` 准备 `.env` 和 WSS 证书后，使用 `docker compose --profile database up --build`
-启动演示数据库；`docker compose up --build` 连接 `.env` 指定的外部
-PostgreSQL。两种模式复用同一迁移脚本，再启动单进程后端。
+启动命令见 [`deploy/README.md`](deploy/README.md)。先由部署方创建 MySQL 5.7
+数据库并执行仓库唯一的 `deploy/migrations/V001__initial_schema.sql`（或运行
+`deploy/migrate.sh`），再使用 `docker compose up --build` 启动单进程后端。
+Compose 不启动数据库容器；本机临时 MySQL 容器只属于测试环境，不作为交付目标。
 
 根目录和 Android 工程都提交可重建的 Gradle Wrapper；首次执行可能需要下载
 Gradle 和 Android 构建插件。Web 按 `web-reference/README.md` 生成静态资源。

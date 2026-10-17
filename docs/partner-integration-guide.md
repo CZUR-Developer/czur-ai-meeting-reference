@@ -25,7 +25,8 @@ Android App、Java 21 后端和静态 Web 结果页，并指出各项能力的�
 ## 2. 本机开发和局域网短会
 
 开发验证直接使用本机 Java 21、Maven、Python 3、Node.js/npm 和 Android SDK，
-不使用 Docker 作为检查工具。Dockerfile 和 Compose 只用于交付部署。
+不使用 Docker 作为检查工具。Dockerfile 和 Compose 只用于交付部署；本机没有
+隔离数据库时，可以临时运行 `mysql:5.7`，但容器、数据卷和账号不属于交付物。
 
 ```bash
 cd czur-ai-meeting-reference
@@ -47,9 +48,10 @@ bash tools/run-reference-web.sh
 后端。设备上的后端地址必须填写开发电脑的局域网 IP，例如
 `http://192.168.1.20:8080`，不能填写设备自己的 `127.0.0.1`。
 
-数据库先执行仓库中当前唯一的
-`deploy/migrations/V001__initial_schema.sql`。应用启动只做 readiness 检查，
-不会自动建表或修改表结构。开发机没有隔离数据库时，只能执行 Mock／模块测试，
+数据库统一使用 MySQL 5.7。先由部署方创建隔离数据库，再执行仓库中当前唯一的
+`deploy/migrations/V001__initial_schema.sql`（或运行 `deploy/migrate.sh`）。该脚本只新增
+`ai_trans_*` 专用表，不创建数据库／账号，也不修改旧业务表。应用启动只做 readiness
+检查，不会自动建表或修改表结构。开发机没有隔离数据库时，只能执行 Mock／模块测试，
 不能把它写成真实局域网会议验收。
 
 ### 模型配置

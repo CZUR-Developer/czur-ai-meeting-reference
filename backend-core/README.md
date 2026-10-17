@@ -13,7 +13,9 @@ JSON 树在进入和离开快照时复制，原仅字幕构造器保持兼容。
 
 - `domain/`：会议状态、归属及能力决策。
 - `application/command/`、`application/port/`：Create、Stop、用量、结果及可替换端口。
-- `application/persistence/jdbc/`：共享 PostgreSQL／MySQL 5.7 正常客户端会议实现。
+- `application/persistence/jdbc/`：共享 PostgreSQL 兼容适配和 MySQL 5.7 正常客户端会议实现。
+  本参考方案的局域网默认链路选择 MySQL 5.7；PostgreSQL 只由旧兼容宿主或显式测试夹具
+  选择，不能据此把两种数据库都当作本期部署默认。
 - `application/model/`：模型材料发行端口和可替换的总结材料发行端口；模型音频由 Android SDK 直连。`SummarySessionIssuer` 只描述“为本场总结 Adapter 签发短期材料”的中性边界，百炼是参考宿主的默认实现，公共核心不绑定供应商。
 - `protocol/`：统一结果和实时消息编解码；唯一 Protobuf 源为根 `contracts/realtime.proto`。
 - `application/bootstrap/MeetingDeploymentConfig`、`MeetingHttpAssembly`：中性配置和装配。
