@@ -1,129 +1,132 @@
-# Android reference application
+# Android 参考应用
 
-Open this directory in Android Studio when developing the reference meeting
-application. The app consumes the public audio-source SDK and canonical
-meeting protocols; it does not contain CZUR launcher or production-only UI
-integration.
+本工程提供可编辑的会议 App 源码，配合 Android SDK、后端和结果 Web 完成登录、
+实时字幕、双语互译、会后总结及结果回看。合作伙伴可替换身份、模型、结果动作和页面，
+继续复用同一套会议编排。
 
-首次接入请按[从零指南](../docs/partner-getting-started.md)准备资源并跑通真实字幕；
-第三方平台、能力开关与缺省结果集中见[模型与能力指南](../docs/model-and-capability-guide.md)。
+首次接入请阅读[从零指南](../docs/partner-getting-started.md)；第三方平台、所需资源、
+能力开关与缺少能力时的表现见[模型与能力指南](../docs/model-and-capability-guide.md)。
+接口扩展见[接入手册](../docs/partner-integration-guide.md)。
 
-Android 自有应用层、会议公共核心、模型契约及其测试统一使用 Kotlin。
-工程使用 Kotlin 2.4.21，App／公共 JAR 的目标 JVM 为 17；Android SDK 与 UI 工具通过
-配套交付包提供匹配的 Kotlin AAR。接口保留既有回调和 JVM 方法入口。
-Gradle／Android Gradle Plugin 沿用既有版本；Lint 单独使用 9.4.0，以正确解析 Kotlin 2.4
-制品元数据，配置见 `gradle.properties`，不关闭原有 Release 检查。
+## 支持环境与模块
+
+最低支持 **Android 14（API 34）**。工程使用 compile／target SDK 35、Kotlin 2.4.21、
+Gradle 8.7 和 Android Gradle Plugin 8.5.2，目标 JVM 为 17。Android 自有应用层、
+公共会议核心、模型契约和测试使用 Kotlin。Lint 使用 9.4.0，配置见 `gradle.properties`。
+
+| 模块或交付物 | 职责 |
+| --- | --- |
+| `app/` | 可编辑的页面、身份与结果插件、权限、前台 Service、计时和截图时序 |
+| `model-runtime-contract/` | 模型 Adapter、会话材料、音源状态和标准事件契约 |
+| `meeting-client-core/` | 共享 Server 协议、会议编排、Adapter 注册和显示规则 |
+| 配套主 SDK AAR | 系统／标准 MIC 音源、模型直连、同源录音及截图能力；内带同源 core |
+| 配套 UI AAR | 可选字幕控件、窗口基础管理及默认窗口实现 |
+
+主 SDK 和 UI 工具由配套交付包提供。无需访问 CZUR 产品源码仓；AAR、模型 Key、
+真实会话材料和本地配置均不提交到本公开源码仓。具体功能、版本配套与供应商账户
+准备方式见[从零指南](../docs/partner-getting-started.md)。
 
 ## 构建期部署地址
 
-后端和默认 Web 结果页地址由合作伙伴开发者在 PC 上配置，编译为 App 的 `BuildConfig`。
-终端用户只登录、选择会议功能并使用，不提供连接设置页，也不要求填写 IP 或网址。
-模型端点和临时材料仍由后端下发，构建配置不包含模型 Key 或账号密码。
+后端和默认 Web 结果页地址由开发者在 PC 上配置，编译为 App 的 `BuildConfig`。
+终端用户只需登录和使用会议功能，无需填写 IP 或网址。模型地址和短期材料由后端下发，
+这份构建配置不包含模型 Key 或账号密码。
 
-默认读取本工程根目录的 `deployment.local.properties`。在 Android Studio 打开本目录后，
-可复制公开模板再填写本机值；实际文件已在根 `.gitignore` 中忽略：
+在 Android Studio 打开本目录后，复制模板并填写两个地址。实际文件已被 Git 忽略：
 
 ```bash
 cp deployment.properties.example deployment.local.properties
-# 只在本机修改 referenceBackendUrl、referenceResultWebUrl 两个地址。
-./gradlew :app:assembleDebug
+# 编辑 referenceBackendUrl 和 referenceResultWebUrl。
 ```
 
-每个地址按以下优先级取值：显式 Gradle `-PreferenceBackendUrl`／
-`-PreferenceResultWebUrl` → 选定 `.properties` 中的同名键 → 空值。
-文件默认名为 `deployment.local.properties`；可用
-`-PreferenceDeploymentFile=/absolute/path/deployment.properties` 指定仓外文件，相对路径
-按 Android Gradle 根目录解析。配置缺失时可以构建，但 App 会提示联系应用提供方，
-不会显示输入地址 UI，也不使用旧 SharedPreferences 中的手输地址作为回退。
+取值优先级为显式 Gradle `-PreferenceBackendUrl`／`-PreferenceResultWebUrl`、选定
+`.properties` 文件中的同名键、空值。默认文件为本工程根目录下的
+`deployment.local.properties`；可用 `-PreferenceDeploymentFile=/absolute/path/deployment.properties`
+选择仓外文件，相对路径按 Android Gradle 根目录解析。地址缺失时 App 会提示联系应用提供方。
 
 ```bash
-# 直接注入部署方域名；与其他SDK／UI构建参数可同时使用。
 ./gradlew :app:assembleDebug \
   -PreferenceBackendUrl=https://api.example.invalid \
   -PreferenceResultWebUrl=https://results.example.invalid/index.html
 ```
 
-后端地址相同的升级保留原有效登录；地址变化时默认身份插件清除原后端的登录，
-避免把旧会话发给新后端。其持久化地址只用于身份配对，不决定实际连接目标。合作伙伴
-自有 `IdentityProvider` 同样应把凭据与其所属服务配对；可替换登录入口和结果插件保持不变。
+以上默认构建为 Mock；真实会议还需下节的 SDK 参数。局域网可从仓库根使用
+[`build-lan-apk.py`](../tools/android-device/build-lan-apk.py)，显式注入可达的 PC 地址和
+配套 AAR。工具不会启动服务或生成证书；命令及 HTTPS 准备见
+[构建／启动工具](../tools/android-device/README.md)和[局域网 HTTPS 指南](../docs/local-lan-https.md)。
+设备上的 `127.0.0.1` 指设备自身；局域网运行应填写设备可达的服务地址。
 
-本机 LAN Debug 可从仓库根使用
-[`build-lan-apk.py`](../tools/android-device/build-lan-apk.py)，默认检测路由出口 IPv4，
-也可指定 `--host`、独立端口或完整 URL，复用配套 SDK／UI AAR 和公开 Debug CA。
-此工具将两个地址作为显式 `-P` 传入并覆盖部署文件；使用文件原值时直接执行 Gradle。
-工具不配置设备、启动服务或生成证书；命令见
-[`构建／启动工具`](../tools/android-device/README.md)和
-[`局域网 HTTPS 指南`](../docs/local-lan-https.md)。安装后只需正常登录。
+## 选择运行模式并构建
 
-## 当前交付状态（2026-10-17）
+所有命令在本目录执行。默认 `mock` 可在干净检出后构建，提供固定字幕修订和结果演示，
+不占用 MIC、不领取真实模型材料、不验证真实模型协议。Mock 中的演示截图入口禁用。
 
-P10 已完成本机 MySQL 5.7、PC 局域网 HTTPS 和默认结果 Web 的实体链验证：持久登录、
-字幕／中英及中日互译、真实总结、录音播放／拖动、人物注册和两场跨会议识别均有证据。
-约 9 分半长会、普通／大／Mini窗口、拖动／重排、及时停止、自动打开 Web、重开后
-最近结果及主动息屏后的同场结果回看已验；最终包正常短会的结束提示也已实际捕捉。
-各轮构建、配置与设备证据见
-[`本机局域网验证记录`](../docs/p10-local-lan-validation-20261017.md)，
-伙伴扩展和能力缺失时的行为见
-[`接入手册`](../docs/partner-integration-guide.md)。
+```bash
+./gradlew :app:assembleDebug :app:testDebugUnitTest
+```
 
-P11-1 已接入 SDK 截图黑盒会话，参考端不再处理或编码图片；SDK API 的 Bitmap／File、
-排窗、接受确认、无新图与会话隔离已在现有设备独立探针通过。该证据不代签完整会议
-演示产物／Web 末帧验收。实体 DOA、HDMI-IN／投屏／外设等跨产品专项仍留待最终统一
-回归；参考链通过不代表这些条件或 CZUR 私有集成已完成验收。
+真实会议使用 `sdk`，完整默认窗口和字幕控件同时注入匹配的 UI AAR：
 
-### P6／P7 交付记录（历史）
+```bash
+./gradlew :app:assembleDebug :app:testDebugUnitTest \
+  -PmeetingRuntime=sdk \
+  -PmeetingSdkAar=/absolute/path/ai-meeting-sdk-0.5.0-release.aar \
+  -PmeetingUiAar=/absolute/path/ai-meeting-ui-0.2.0-release.aar
+```
 
-P6核心音频底座和分层SDK已于2026-10-07完成对应新固件验收。真实Broker MIC字幕、
-单向互译及正常Stop／同场Web已有设备证据；新固件生命周期收尾再次验证了字幕正常链。
-实体左右方向准确性、物理旧系统降级、HDMI-IN／投屏／外设音源、真实百炼总结等具体范围
-仍按原记录补验。下文P5／P6接入过程中的验证时点属于历史，不能当成全部场景已通过。
+`sdk` 缺少主 AAR 时配置失败。主 AAR 内带同一公共 core，App 不再依赖
+`:meeting-client-core`，避免重复类；`model-runtime-contract` 由本工程打包唯一一份。
+裸 AAR 不传递依赖元数据，App 已显式补齐 OkHttp 和截图挂起接口所需的协程运行依赖。
 
-参考App已提供国内版形态的会前设置、字幕／互译会中页、普通／大／Mini及简洁窗口，
-默认使用自身登录入口，停止后自动打开同场Web结果。正式参考组合同时注入匹配版本的
-主SDK和UI AAR，构建方式见下文；窗口交换、Mini恢复及正常停止／结果链已有验证证据。
-受控录音的UI／真实模型验证与实体MIC／DOA验证分开，未配置的能力保持关闭；
-CZUR系统账号、会员和Launcher等私有联动不包含在参考交付中。
-参考产品包含身份来源、可组合设置、结果动作与可选UI工具。当前新增设置将字幕／
-互译与“会后生成会议纪要”分别选择；语言直接消费后端发现协议的`languages`，没有固定中英文列表。
-P7-2a源码已切换为默认仅Web与Manifest-only收口；PDF／邮件作为显式可选插件保留。
-该接线已通过独立249项组件测试及两模式构建，并已本地提交；44记录通过默认Web正常设备链。
-下文P5／P6其他交付方式是历史证据，不代签P7的新接线。
+UI AAR 独立选择，也可用于 Mock：
 
-P7-3a在基础音频与完整会议入口增加同流输入电平：`AudioInputLevel.level()`为0～100，
-`sampledAtElapsedRealtimeMs()`是单调测量毫秒时刻。SDK沿用旧RMS公式，每三个100ms帧
-测当次帧，约300ms通知一次；参考页和悬浮窗读取Service的同一值，正常停止立即复位。
-正式会议不另开Monitor／MIC；Mock没有实际PCM，不代签实采。国内形态主界面用声音图显示
-电平，音源枚举、能力说明和电平数值不占用主显示区，仍可通过日志／独立诊断查看。本项源码与
-主机构建、独立验收及设备演示分别记录，不把Mock或APK构建当成实采电平证明。
+```bash
+./gradlew :app:assembleDebug :app:testDebugUnitTest \
+  -PmeetingUiAar=/absolute/path/ai-meeting-ui-0.2.0-release.aar
+```
 
-P7-3b通过独立可选UI AAR装配字幕控件。页面历史单元、字幕浮窗及互译两栏共用
-`SubtitleViewFactory`，消费同一已路由快照；每次完整替换文字，partial为80%、final为100%，
-View自身alpha保持1。3b已独立验收并本地提交；本步3c在同一UI AAR增加基础／默认
-窗口和单形态可编辑例，3c已独立签收提交；真实设备效果与3d组合验证。
+不提供 UI AAR 时编译 `basic-ui` 工厂，提供基本文字和单一窗口，供最小构建／开发使用；
+它不包含完整窗口形态和最近文字裁切。提供 UI AAR 时编译 `meeting-ui` 工厂。
+两者互斥，无反射加载，也不在源码仓保存 AAR。
 
-### 国内形态的参考页面与App装配
+## 默认参考功能与接入边界
 
-参考App采用居中白色会前卡、蓝色标题栏、字幕／双语模式和能力驱动的语言选择。
-“会后生成会议纪要”独立于呈现模式，未提供总结能力时保持关闭；演示文稿只在字幕模式开放。
-“账号登录”打开参考账号密码弹窗；已有有效登录时，账号入口提供“切换账号／退出登录”菜单。
-切换只打开新表单，取消或登录失败保留原账号；成功后由同一身份插件替换会话并重新读取能力。
-明确选择“退出登录”才清理当前参考身份。后端与Web结果地址由开发者在构建时注入。
-参考默认插件把登录所属后端、短期访问令牌、显示名和到期时间保存到应用私有设置，进程重启后
-恢复有效身份；密码从不保存。变更后端会清除旧会话，退出也只清除参考会话，不影响系统账号，
-随后页面重新刷新身份／能力。伙伴可在`MeetingAppAssembly.initialize`后替换身份插件。
-更换后端清除默认参考会话；不写入凭据，不接CZUR个人中心、会员、充值或Launcher。
+默认页面包括会前登录和设置、实时字幕／双语互译、独立的“生成会议纪要”开关、
+按能力开放的语言与演示截图设置，以及正常停止后的同场 Web 结果。
+后端只声明 `transcript.realtime` 时，页面隐藏未装配的总结和互译入口，仍可完成字幕会议。
+界面语言列表直接使用后端发现的 `languages`；部署者须配置实际模型支持的语种子集。
 
-会中直接复用国内字幕／互译背景和控制图标，时长、声音图、窗口入口和Stop固定在滚动区之外。
-双语原文白色、译文黄色（`#FFDB10`），同一发言方的原译在同侧上下排列；字幕24设计字号、
-36设计行高。原文／译文消费同一SDK已路由快照和`SubtitleViewFactory`，不复制分栏、修订或模型逻辑。
-停止后沿原准备动作自动打开同场Web，原生容器提供“本场会议结果”及返回入口。
-默认Web没有地址输入；会前动作准备在点击开始时冻结构建配置中的结果页地址，
-系统屏采授权返回继续消费同一准备对象。自定义结果插件仍可在`result_settings_host`放自己的View。
+SDK 模式默认装配同源录音和 `HttpMeetingArtifactPublisher`，并设置 `retainAudio=true`；
+Mock 无真实音源，设置为 `false`。录音在停止后上传到参考后端，实时音频仍由设备直达模型。
+是否生成总结、翻译、演示产物和跨会议身份，取决于实际装配、声明、用户选择及本场授权。
+用户已选的互译／总结能力无法授予时，该场不会启动。
 
-App侧`MeetingPageViews.Factory`只创建／绑定View；默认XML中的dp／sp记录设计数值，
-`ReferenceUiScale`局部映射1920×1080基准，不改系统DisplayMetrics。大屏会前卡为988×856、
-蓝标题86高、40圆角，语言／开关／开始按钮复用国内比例与样式；小窗内容可滚动，Start／Stop不随文本滚走。
-伙伴可编辑公开XML，或在首次创建Activity前登记自己的薄工厂：
+参考账号与 CZUR 系统账号独立。会员、充值、Launcher、小程序和系统个人中心不在参考包中。
+默认只注册 Web 结果动作，邮件、PDF 和伙伴自有通知须显式装配；部署声明邮件能力不会
+自动生成 App 入口。离线 HTML 等结果方式可使用同一结果插件接口扩展。
+
+当前功能的验证范围和硬件专项边界见[验证范围](../docs/validation-scope.md)。合作伙伴
+更换模型、账户、语言、存储或设备后，应按[从零指南](../docs/partner-getting-started.md)
+验证自己的部署。Mock、构建和 SDK 截图 API 的验证分别说明其范围，不替代实际模型／
+硬件场景及完整演示会议产物验证。
+
+## 页面、登录与集中装配
+
+`MeetingAppAssembly` 是身份、登录入口、模型、结果动作和页面／窗口工厂的集中装配点。
+默认身份插件 `PersistentReferenceIdentityProvider` 将短期访问令牌、显示名、到期时间和
+后端归属保存在应用私有设置，不保存密码。进程重启恢复有效登录；过期、退出或切换后端
+清除对应身份。同一后端升级保留有效登录，只更换结果 Web 地址不会注销账号。
+
+“切换账号”打开登录表单；取消或登录失败保留原会话，成功才替换。App 进入页面、
+登录返回时刷新身份；开始时 SDK 再读取并冻结本场凭据。会中切换全局账号不会改变已开始
+会议的归属。伙伴可在 `MeetingAppAssembly.initialize` 后通过 `registerIdentityProvider`
+和 `registerLoginEntry` 替换身份与登录 UI，接口见
+[公共核心的身份接入](meeting-client-core/README.md#可替换身份与默认登录)。
+
+`MeetingPageViews.Factory` 只创建／绑定 View，页面继续使用相同的会议状态。
+默认白色会前卡、蓝色标题栏和会中控制支持大屏比例缩放；`ReferenceUiScale` 在局部
+映射 1920×1080 设计尺度，不修改系统 `DisplayMetrics`。Start／Stop 固定在滚动文字之外。
+可编辑公开 XML，或在首次创建 Activity 前注册薄工厂：
 
 ```kotlin
 MeetingAppAssembly.registerPageFactory { activity ->
@@ -131,466 +134,192 @@ MeetingAppAssembly.registerPageFactory { activity ->
 }
 ```
 
-自定义布局提供相同的控件ID即可由原Activity接线，不创建另一份会议状态；页面不放入SDK。
-构建组合共用同一App布局，正式国内形态交付使用SDK＋UI：同时注入主SDK和UI AAR。
-无UI AAR的基础版是有限开发fallback，不作为完整四形态交付；Mock＋UI用于正常显示回归。
-复制图片和纯显示代码的来源见[页面资源清单](app/UI-RESOURCE-SOURCES.md)及
-[窗口资源清单](docs/czur-overlay-resources.md)。参考版使用自己的登录、默认仅Web结果；
-CZUR会员、个人中心、Launcher和小程序等私有联动不在本包复制。
-源码、主机布局／组件测试、APK构建、独立验收和实体截图／真实模型链分别留证，构建不代签设备效果。
+自定义布局提供相同控件 ID 即可复用 Activity 接线。原文白色、译文黄色，同一发言方
+原译同侧；页面与窗口共用已路由快照，不自行重做模型解析、方向路由或片段修订。
+资源来源见[页面资源清单](app/UI-RESOURCE-SOURCES.md)和[窗口资源清单](docs/czur-overlay-resources.md)。
 
-P7-1c的SDK会议入口复用正在使用的唯一音源累计完整标准PCM帧，停流及完整尾帧交付后
-一次冻结时长。组合层按“最终字幕／译文保存→冻结用量提交→按需总结→原Stop”执行；
-App不计数、不额外采音。时长沿用16kHz／mono／PCM16字节数除以32的整数毫秒口径，
-静音和模型连接前采音计入，网络重发及会后等待不计入。默认Mock仍未提供实采用量，
-其会话返回empty，保留原演示链；不能以Mock结果代签真实PCM计数或CZUR会员扣费。
+## 完整会议入口与平台扩展点
 
-### 可选同源 sealed 音频与正常收尾发布
+`src/sdk/.../MeetingRuntimeFactory` 创建 `AiMeetingClient` 和同源录音输出；Mock 为同一
+`MeetingCoordinator` 注入固定运行端口。Activity 的会前客户端和 Service 的会议客户端
+分别创建，共享身份与装配。每个客户端同时持有一场未完成会议，关闭后不可重用。
 
-公共接口现提供 `ModelRuntime`／`MeetingRuntimePort.supportsRetainedAudio()` 和兼容的
-`open(..., boolean retainAudio)`，以及 `ModelSession.sealedAudioArtifact()`。旧四参入口和
-既有实现保留，默认不支持录音、getter 返回 empty；参考默认 `retainAudio=false`，
-不产生录音或发布副作用。显式选择 true 时，Coordinator 在 Create 前检查同源录音及发布器
-均已装配，不会静默忽略选择。公共核心只定义接口与收尾编排，具体 SDK 录音实现和
-CZUR 发布器由私有模块装配；接口装配、真实上传与旧消费者读回分别验收，不互相代签。
-
-`SealedAudioArtifact` 只描述本场停止并严格封口后的本地文件：真实 meetingId、明确的
-Opus/OGG 或 PCM16 格式／MIME、文件字节长、实交 PCM 字节数及其派生时长。
-标准流固定16kHz／mono／PCM16，编码 padding 不计用量；已确认零帧、empty 和封口失败
-分别是不同事实。运行时须在音源停流、尾帧排完、编码EOS／容器停止和文件同步成功后提供
-不可变快照；取消和已知媒体 I/O 失败不能伪造 sealed 成功。App 不接裸 PCM、不另开音源。
-
-部署方通过不可变 `MeetingClientConfig.withArtifactPublisher(...)` 装配窄发布器。
-唯一 IO 队列按“最终标准事件保存→冻结用量→原选定总结→本场发布确认→后端 Stop”执行；
-模型会话异常与录音封口分开处理：运行时在 `onError` 前停流并完成已采音频封口，
-Coordinator 仍按实际 sealed 快照、本场 ID 和冻结用量发布。音频输入失败或取消不走正常
-音频发布；已请求保留音频却没有 sealed 事实或封口失败时进入 `STOP_PENDING`，不伪造完成。
-听悟 Adapter 在已匹配的失败事件处仅记录事件名和数字 `header.status`，缺失或无效值记为
-`-1`；诊断不改变原失败行为，不输出模型原文或 `status_text`。
-发布器 Context 只读本场 sealed、冻结时长及
-`config.forSession` 已冻结的 serverUrl／accessToken／clientIdentity；即使全局身份已退出或
-更换也不在发布器中重新登录、交换Token或读取 UserHandler。同账号停止续签只能由部署显式
-实现公共身份扩展，协调器同步新 Context 后再发布。Context 和产物的默认字符串不输出凭据
-或本地路径，部署方不得将这些字段写入日志或公共结果。
-
-发布正常返回须表示上传及必要同场资源登记已确认；失败进入原 `STOP_PENDING`。
-用户再次确认复用同一 sealed 快照及原场归属，按可选同账号身份扩展更新访问材料，
-不重开录音、不重新封口、不建第二场；
-发布已确认而后端 Stop 未受理时不再次发布。响应丢失后的外部同场幂等由具体发布器负责。
-Coordinator 不删除文件或引入自动恢复／重试平台；删除须遵守真实上传及资源登记的确认。
-旧 JSONL 可由后端已保存标准事件导出，本片不复制旧 writer 或启用总结／翻译业务。
-
-工程采用 Android Studio 结构：`app/` 是参考 APK，`model-runtime-contract/`
-是模型 Adapter、会话材料、生命周期和标准字幕事件的唯一公共源码。
-`meeting-client-core/` 保存共享 Adapter 工厂、默认解析和显示规则，详见其
-[接入说明](meeting-client-core/README.md)。Mock 直接依赖 core；SDK 模式使用 AAR
-内带的同一 core，App 不重复打包。参考 App 已接入完整 `MeetingClient` 组合入口；
-主机构建与迁移后设备验证的状态见 P6-7 过程记录，源码接线不代签设备验收。
-
-P7-1a新增可注入的`IdentityProvider`及`MeetingClient.refreshIdentity()`。
-默认账号密码登录更新`MeetingAppAssembly`持有的参考登录插件，Activity与Service共用；
-进入页面／登录返回刷新状态，每次开始时SDK再次读取当前凭据并冻结为本场快照。
-伙伴替换身份来源和App登录入口即可，SDK不引用CZUR个人中心、不退出设备系统账号。
-接口及例子见[公共核心的身份接入](meeting-client-core/README.md#可替换身份与默认登录)。
-默认 `mock` 模式不需要私有 AAR，可干净构建并演示同一片段的初稿、修订稿、最终稿；
-未完成文字以 80% 透明度显示，最终文字以 100% 显示。
-
-### 独立SDK截图与参考演示帧
-
-参考App的屏幕采集引擎已移到闭源SDK的`ScreenCaptureClient`。App在主线程申请系统
-屏幕投影授权、启动具有`mediaProjection`类型的前台Service，再经`sdk`源集的
-`ScreenCaptureSourceFactory`创建客户端与`createSession(enableProcessing = true)`单场会话。
-裁剪、限幅、页面过滤、去重、JPEG编码及体积处理全部封装在闭源SDK，参考App不复制算法，
-不读取判断依据。App保持10秒周期、相对本场`elapsedRealtime`起点的偏移、排窗与上传时序。
-SDK没有新图时返回`null`，是正常结果，不显示失败提示，也不阻断末帧／停止。
-
-工厂在IO协程创建临时目录、读取SDK交付的JPEG File，随后在IO中删除临时File；
-字节原样交给现有三参`submitPresentation`。只有真实保存ACK成功才调用
-`confirmAccepted()`；保存失败不确认，后续仍可取得该图。周期帧确认结束后才开始末帧，
-末帧成功、无新图或失败都关闭单场会话和截图客户端，再续接`beforeStop`。
-截图等待、图像计算、编码和文件操作均不阻塞主线程，App不增加另一套截图处理队列。
-
-新固件的`SYSTEM_CAPTURE`路径每次在主线程现取当前已挂载浮窗token，包含字幕／互译／
-Mini和提醒遮罩、卡片。窗口工厂只使用公开`View.getWindowToken()`；隐藏／重新挂载后
-不缓存旧句柄，不临时隐藏窗口或反射访问SurfaceControl。伙伴自己的窗口工厂须实现
-`MeetingOverlayFactory.Window.windowToken()`，返回当前View的窗口token。
-
-旧CZUR固件／普通Android继续由SDK通过MediaProjection提供整屏截图。App事前按实际
-`supportsWindowExclusion()`选择空排除列表，并在会中说明演示图片会包含悬浮窗；不是
-排除失败后默默再截整屏。干净Mock没有截图SDK，演示开关明确禁用且说明不支持，
-不保留另一份采集引擎；字幕、UI和结果的Mock流程保持。
-SDK会话可选`enableProcessing = false`保留原图，File输出为PNG；开启内置处理后File
-输出为JPEG。也可直接使用Bitmap输出，交付后的Bitmap／File由调用方回收或保留。
-确认只推进本场内部状态，不回收图片、不删除File、不执行网络请求。旧回调接口保持兼容，
-Bitmap／File、Main／IO与Kotlin挂起接入见SDK随包的`SCREEN-CAPTURE.md`。
-本轮定向测试和APK构建与设备验收分别记录；设备验证使用公开API探针及既有固件截图能力，
-不把本机测试当作真实末帧Web图片验收，也不要求为本轮SDK/App改动重新编译系统固件。
-
-`sdk` 模式把 `starry` 独立 SDK Module 产出的版本化 AAR 从仓外注入。SDK 在有兼容
-共享音频接口的新 Starry 系统读取 Broker；旧 CZUR 系统无服务／接口不兼容，以及
-普通 Android 设备使用标准麦克风，并通过 WebSocket
-直连模型；本仓公开的 `TingwuModelAdapter` 编码
-`StartTranscription`/`StopTranscription`，把模型 partial/final 消息归一化为标准字幕。
-当前还可解析按国内版字段路径重建的听悟 `translate_result` 固定样例，并将译文与
-原文片段关联，在应用内双栏和悬浮窗显示。会前现场互译入口在 SDK 构建中已开放：
-后端本场能力决策允许翻译时，听悟启动消息会开启译文，组合层提交标准译文事件，
-Stop后由后端生成字幕和译文结果。2026-10-07实体MIC的字幕／单向互译及Web读回已有对应验收；
-双向现场声源的完整效果仍待具体条件补验。
-真实模式由组合层在创建会议后调用独立的
-`POST /v1/meetings/{meetingId}:modelSession` 领取材料：`adapterId`、完整的临时签名
-`endpoint`、`expiresAt`、`initParams.taskId`，可选 `token`。Create 的 `realtime`
-仍属于旧后端音频入口。`endpoint` 与
-`token` 不会写入日志或结果。SDK 模式首次开会会请求麦克风权限。
-
-P5-2 增加 `sample-json-ws` 第二格式样例：它的模型消息使用顶层
-`type/segment/revision`，与听悟的 `header/payload` 格式不同；两者在
-`MeetingAppAssembly` 持有的 `ModelAdapterRegistry` 中构建期注册，后端
-`modelSession.adapterId` 决定本场选用哪一个。伙伴适配其他格式时新增 Adapter 并在集中装配点
-登记其实时能力，通用会议页面和 SDK
-不用修改。登录后参考 App 调用 `MeetingClient.discover`，直接读取部署与本地能力
-已求交的 `availableCapabilities` 开放会前模式；发现失败时显示原因并保留账号切换入口，
-不创建会议。组合层读取 Create 响应的 `capabilityDecisions`，本场权益、
-模型与降级结果以该决策为准；必需能力不可用时不启动会议，可选能力不启用。
-P5-6历史参考结果方式包含网页、本地PDF、邮箱链接和互译无痕；P7默认仅Web。扫码接收由合作伙伴
-自行开发，并通过会前条件 Hook 扩展。
-
-`sdk` 模式已构建期登记公开的 `bailian-summary` 文本 Adapter。AI 会议纪要模式
-在模型最终字幕到齐后，向已认证后端请求本场 `:summarySession`；后端只下发
-百炼临时 Key、应用 completion 地址与过期时间。SDK 用短期 Bearer 向
-`/api/v1/apps/{appId}/completion` 发送 `input.prompt`，Adapter 从 `output.text`
-解析标准标题、概述、要点和待办；组合层在 Stop 前提交标准纪要，后端不调用总结模型。
-部署方须在后端配置百炼 AppId、永久 Key 及本场 `summary.structured` 能力，
-永久 Key 不进入 App。当前仅以环回假 HTTP 和代码构建验证协议，真实百炼请求及
-设备 App→后端→Web 纪要真链仍待验。
-
-不要将闭源 AAR、真实模型地址或会话材料提交到本仓。`sdk` 构建明确要求外部 AAR；
-缺失时配置阶段报错，不会退到 Mock。
-
-```bash
-# 干净检出默认 Mock
-./gradlew :app:assembleDebug :app:testDebugUnitTest
-
-# 从配套SDK交付包取得匹配版本的AAR后在本机注入；无需访问CZUR产品源码仓
-./gradlew :app:assembleDebug :app:testDebugUnitTest \
-  -PmeetingRuntime=sdk \
-  -PmeetingSdkAar=/absolute/path/ai-meeting-sdk-0.5.0-release.aar
-```
-
-### 可选字幕／窗口UI工具：构建期注入
-
-UI工具独立于主音源／会议SDK。干净Mock不需要闭源输入；提供`meetingUiAar`时，
-Mock与SDK使用同一独立UI AAR。正式SDK参考交付同时注入主AAR和UI AAR：
-
-```bash
-# Mock＋UI：core仍来自源码，勿用主SDK AAR充当UI依赖
-./gradlew :app:assembleDebug :app:testDebugUnitTest \
-  -PmeetingUiAar=/absolute/path/ai-meeting-ui-0.2.0-release.aar
-
-# SDK＋UI：core仅来自主SDK AAR，contract仍由公开源码模块提供
-./gradlew :app:assembleDebug :app:testDebugUnitTest \
-  -PmeetingRuntime=sdk \
-  -PmeetingSdkAar=/absolute/path/ai-meeting-sdk-0.5.0-release.aar \
-  -PmeetingUiAar=/absolute/path/ai-meeting-ui-0.2.0-release.aar
-```
-
-`src/meeting-ui/.../ui/SubtitleViewFactory.kt`直接调用UI工具；未提供UI AAR时只编译
-`src/basic-ui/.../ui/SubtitleViewFactory.kt`基础TextView版。两份工厂互斥，不反射加载，
-也不在公开仓提交AAR。基础版保障可重建和正常文字显示，不复制完整最近文字裁切功能。
-UI AAR只含控件和必要呈现类型，无core、contract、网络或原生采音，也没有其他运行依赖。
-
-工厂只接收`DisplaySnapshotPresentation`已投影的段ID、文字和各自1.0／0.8状态；
-`speakerColumn`仅把SDK源侧与交换开关投影为实际左右侧，原译整对同侧，未确定侧不猜测。
-页面历史单元保留整段；普通窗口用`renderParts`把final历史和当前partial交给SDK已有`setParts`，
-每段状态分别保留，只由控件裁最近可见行。没有旧`bilingual`跨侧入口或第二文字账本。
-参考宿主把24设计字号换成明确px交给工具，并用`setLineHeightPx`指定36设计行高；
-工厂原`create`默认1.3倍仍供其他宿主使用。缩窄／放大从完整输入重新排版，不改会议快照。
-占位也用工厂render→setParts提交，避免继承setText在重排时被旧字幕覆盖。
-页面与窗口的电平、Stop、结果Web及Service生命周期继续沿同一业务链。
-伙伴换字幕控件时只改对应薄工厂及构建输入；无需修改音源、Adapter或会议收口。
-3c默认会议窗口的WindowManager操作由UI工具持有；权限申请和提醒窗口仍留App。
-
-### 窗口工厂：默认四形态与一个形态的替换例
-
-`MeetingOverlay`只保留原Service调用签名、提醒和工厂句柄，不再持有第二份四形态状态。
-默认`MeetingAppAssembly.overlayFactory()`为构建期互斥的`OverlayViewFactory`：
-
-- 无UI AAR的`basic-ui`版复用同一国内素材和同侧View，仅提供一个基础字幕／普通互译窗口，
-  保留返回、交换、停止及同场声音指示；不复制完整四形态、Mini或SDK最近文字排版工具。
-- 有UI AAR的`meeting-ui`版装配`DefaultMeetingOverlay`，默认注册字幕、普通互译、大互译、Mini。
-  字幕和普通互译读取完整历史与当前句，裁最近3行；普通窗简洁模式裁2行。
-  大窗左右独立滚动历史；Mini恢复之前形态。窗口隐藏／切换
-  只影响UI，不暂停会议或修改音源、模型、计费及收口。
-
-`meeting-ui/.../ui/OverlayViewFactory.kt`同时是公开可编辑的px布局和内容装配例。
-App按1920×1080设计尺度等比换算：宽1800、字幕高222、普通互译293、大互译1008，
-Mini126×60；位置由App决定。字幕24设计字号／36设计行高，原文白色、译文黄色，
-普通互译的控制区在双栏中央；简洁模式高度164、背景透明，文字2行。
-Mini复用国内APNG和声音图，点击可恢复。原素材／动画字节不变，放入nodpi避免二次密度缩放。
-这些设计数值先在App换算，再交UI工具；不引入Starry私有pt／AutoSize或平台业务依赖。
-
-`CzurOverlayViews`是可编辑的纯显示内容；原`OverlayViewFactory.presentation`已删除，
-直接消费统一`DisplaySnapshotPresentation.speakerColumn`及字幕投影，保留源侧／交换和
-原／译文各自final；不改分栏、选段或音源。旧跨侧投影已随页面迁移移除。
-窗口Stop／交换／返回回调继续由同一Service提供，时长、电平来自其同一State。
-提醒仍由原App卡片及规则管理，没有放入UI AAR。宿主结束／退出时调用dismiss释放窗口，
-不是另发一次Stop。
-
-伙伴只要一个形态时，直接使用可编辑的`SingleFormOverlayFactory.kt`：
+模型 Adapter 在创建客户端之前登记，每场创建新实例。地址、材料和本场 `adapterId`
+来自后端，不写入 App 的部署配置：
 
 ```kotlin
-// 有 meetingUiAar 的构建，在首次显示之前（例如伙伴 Application.onCreate）显式装配：
-MeetingAppAssembly.registerOverlayFactory(SingleFormOverlayFactory())
-// 默认恢复：MeetingAppAssembly.registerOverlayFactory(OverlayViewFactory())
-```
-
-例子只注册`partner.single`，替换自己的View／位置尺寸，消费同一已投影字幕／双栏输入，
-不用实现默认四项，也没有专用演示页面或运行时插件加载。App扩展接口是
-`MeetingOverlayFactory`及其最小`Window`句柄；工具扩展接口是`OverlayController`嵌套
-`ContentFactory`／`Content`／`LayoutPolicy`／`WindowSpec`／`StateListener`。
-只改实现与Assembly注册，不修改Service、音源、Adapter、模型通信、分栏或会议收口。
-已创建的窗口继续使用自己的句柄；新装配从下一次创建窗口生效。
-
-排查真实模型字幕但设备 MIC 声学入口不确定时，可将同一 SDK Module 的
-`ai-meeting-sdk-0.5.0-debug.aar` 注入上面的 `meetingSdkAar` 参数。调试 AAR 若在
-参考 App 私有外部目录找到 `meeting-debug.wav`，会按实时节奏把该 16 kHz、单声道、
-PCM16 WAV 发往模型；没有该文件时，SDK 探测 CZUR／Starry 平台及共享音频接口兼容性，
-兼容时选择系统共享音频，由系统处理 SELF/OTHER 切换；旧系统无兼容服务时选择标准 MIC。
-普通 Android 平台使用标准 MIC。已探测到匹配接口描述符的 Broker 若实际开流失败，返回明确音频
-错误，不在本场取流失败后切换到普通 MIC，避免掩盖新系统故障和破坏音源竞合。
-新系统与 SDK 使用带 `clientToken` 的内部开流接口；共享供流、普通 MIC 双顺序和专业
-录拍竞合已有设备证据。2026-10-06 新接口复验确认实际模式为 `CZUR_BROKER`、音频
-帧持续增长，方向输出 `NO_DIRECTION` 与递增时间戳；撤销录音权限后直接调用 SDK 得到
-`PERMISSION_DENIED`，没有权限弹窗且进程存活，恢复权限后可重开 Broker 并正常停止。
-有效实体方向的左右准确性与物理旧系统的MIC降级仍未实测，作为P6核心签收之外的具体补验项保留。
-录音仅通过设备调试工具临时放在
-`/sdcard/Android/data/com.czur.aimeeting.reference/files/meeting-debug.wav`，
-不可加入仓库或 APK。正式 release AAR 使用相同的自动音频选择，但不包含 WAV。
-此验证仍使用真实参考 App、
-后端签发、听悟 Adapter、标准事件提交与结果页面；WAV 读完后在 App 点击停止。
-
-裸 AAR 不传递依赖元数据，`sdk` 模式显式添加 SDK 所需的 OkHttp 运行依赖。
-SDK 从公共 `model-runtime-contract-0.4.0.jar` 编译，参考 App 只打包本工程
-`model-runtime-contract`的同版类，避免重复类。SDK模式的正常链验收目标是实体语音产生真实字幕、
-音频直达模型、后端接收标准事件以及正常Stop／同场结果；2026-10-07已有对应新固件的签收记录。
-
-会中 `MeetingService` 持有完整会议句柄、跨应用字幕窗与平台资源；模型、音频和
-标准事件队列由 SDK 内的唯一协调器持有。用户在 App
-前台点击开始时启动 microphone 前台服务；切换到其他 App 后，SDK 音源与模型会话
-仍由该服务持有，页面重新打开时订阅同一场字幕状态。后台连续采集的具体设备验收范围以
-对应记录为准，源码生命周期说明不代签场景验证。悬浮窗需要用户在系统设置中授予
-“显示在其他应用上层”权限，页面和悬浮窗的停止操作进入同一 `MeetingSession.requestStop()`。
-Mock 构建使用同一服务流程，但选择不占用麦克风的 `dataSync` 前台服务类型。
-
-调试版参考 App（APK 的 `ApplicationInfo.FLAG_DEBUGGABLE` 已开启）在会议
-`MeetingService` 存活期间支持以下正常停止命令；字幕持续增加时也可直接使用：
-
-```bash
-adb shell am broadcast -a com.czur.aimeeting.reference.DEBUG_STOP -p com.czur.aimeeting.reference
-```
-
-广播在主线程调用与页面、悬浮窗相同的 `requestStop()`，沿现有流程排空音频、等待
-模型最终字幕、保存标准结果、确认READY清单后通用派发冻结动作；默认Web打开同场结果页。这是正常
-Stop，不是 `close()`、强停进程或可恢复的业务暂停。当前状态尚不能停止或已请求停止时，
-沿用原 `canStop` 判断。普通 Release APK 不注册接收器；调试接收器随 Service
-创建/销毁注册/注销，原 Service 仍不导出。此开关取决于 App 的调试标记，与注入的
-SDK AAR 是 Debug 还是 Release 无关。
-
-Create 响应的 `limits.maxMeetingDurationMs` 是本场计时上限；会议页与悬浮窗读取
-Service 的同一份“已进行 / 剩余”状态。上限超过 20 分钟时，剩余 20 分钟显示约
-10 秒的中央提醒卡片；从开会起连续 4 分钟无转写时显示剩余 60 秒倒数，确认或
-收到新转写后关闭，连续 5 分钟无转写或到达时长上限时进入现有 Stop 流程。
-非空原文 partial/final 会重置无转写计时。设备上的短会验收点是：
-两处都能看到相同的已进行/剩余时间、字幕继续修订且可正常手动停止和打开结果；
-分钟阈值由 `MeetingTimeRuleTest` 使用可控时钟验证，无需让设备空等五分钟。
-
-悬浮窗的“收起”会变为右上角 Mini，点击 Mini 恢复到收起前的字幕窗或互译窗；
-互译普通窗显示最近可见3行（简洁2行），大窗显示左右独立可滚动历史，两种窗都读取同一份会议状态。
-Mini 期间会议仍继续采音、收模型结果和提交标准事件，恢复后能看到新内容。
-国内版字幕收起的清空文字／暂停ASR入口属于P9产品规则，本步不迁移；
-参考版只实现窗口收起，不声称Mini暂停识别或计费。
-
-当前后端与Web地址在构建时确定；会前只从账号入口填写部署者预置的账号和密码。
-App调用`MeetingClient.login`更新集中装配的参考登录插件，默认实现把短期会话及到期时间保存到
-应用私有设置；Service用同一Provider创建独立会议客户端，进程重启后可恢复有效身份。
-组合层封装 `POST /v1/reference/session:login`、建会、标准字幕/译文提交及结束会议。
-字幕／互译两种会中呈现均可独立开启会后总结；用户选择的功能必须同时获本场授权。
-旧`MEETING_MINUTES`调用保留“字幕＋总结”的语义，新页面使用独立checkbox。
-两类事件在协调器内共用本场`clientSequence`与单线程
-提交队列；模型确认完成后，SDK先提交本场冻结用量，再按需总结和Stop，均排在此前事件之后。
-同场Stop重试复用已冻结值和已有确认，不重开音源或重复已成功的提交。
-切换账号在新登录成功后替换会话，菜单／表单取消或失败均保留原有效会话；明确退出或
-更换后端才清除旧会话。伙伴自定义登录入口同样不应在打开界面时提前清理旧身份。
-账号密码从不写入 APK、日志或持久化配置，默认插件只保存
-服务端返回的短期令牌、显示名和到期时间。登录地址须使用设备可访问的 HTTPS；本机调试
-可以通过 `adb reverse tcp:8080 tcp:8080`，构建时将后端注入为 `http://127.0.0.1:8080`
-以访问开发机；这是另一个诊断构建，不改变设备运行时设置。未做端口转发时，设备上的
-`localhost` 指设备自身。参考账号与 CZUR
-系统账号相互独立。
-会前选择的两种会议语言分别进入 `languages.source` 和 `languages.targets`；现场互译
-只在 SDK 构建中开放，且仍须本场后端能力决策和听悟 Adapter 同时允许。模型只有字幕
-能力时，本场不会启动互译。AI 会议纪要已接本地 Adapter，真实百炼材料与设备
-结果仍待验。P5使用调试录音验证双向互译会中与结果读回；2026-10-07随后补验了实体MIC
-中文原文与英语译文的正常Stop／Web链。双向现场声学效果不由这次单向短会代签。
-互译分栏同时考虑会前语言、模型源语种、有效方向角、片段修订和用户交换栏位；P5
-无有效方向角时按语种降级，实体方向角左右准确性仍列在后续补验范围。
-
-### SDK 音频来源、方向与权限边界
-
-基础模型运行接口的 `ModelSessionListener.onAudioInputMode(AudioInputMode)` 和组合入口的
-`MeetingListener.onAudioInputMode(AudioInputMode)` 均返回本次实际来源：`MIC`
-为标准 Android 麦克风，`CZUR_BROKER` 为兼容的新系统共享音频，`DEBUG_WAV` 为
-仅 Debug 的测试文件。参考 App 保留该值的接线，国内形态主界面不显示诊断枚举；伙伴可用于日志或状态展示，
-无需自行探测系统。旧 CZUR 系统的 MIC 降级遵循该系统既有录音竞合能力，不具备新
-Broker 的竞合保证；模式用于准确说明当前能力。
-
-`onAudioDirection(AudioDirectionSample)` 返回原始／稳定角度、单调时间戳和
-`AVAILABLE`／`NO_DIRECTION`／`UNSUPPORTED` 状态。SDK 基础层只提供技术样本，唯一
-公共 core 的 `MeetingDisplayState` 结合会前语言、模型语种、句开始方向快照及片段状态
-确定左右栏。完整会议的协调器在内部串行处理句开始、方向、字幕与译文，Service 只通过
-`onDisplay(MeetingDisplaySnapshot)` 接收已经配对及路由的不可变结果；页面/悬浮窗
-用同一无状态 `DisplaySnapshotPresentation` 设置文本和透明度，不再处理原始方向。
-`NO_DIRECTION` 保留上次有效稳定角，`UNSUPPORTED` 让新片段按语种
-降级，已有片段不搬栏。听悟模糊方向区的迟到语种窗口通过独立deadline定时释放，
-不被HTTP上传或秒级计时tick延长；停止即时冲刷待显示快照，真实語种不被显示侧改写。
-
-`onAudioError(AudioInputErrorCode, String)` 区分权限拒绝、开流失败与读取失败。
-SDK 无权限时返回 `PERMISSION_DENIED`，不负责申请权限；参考 App 的开始按钮和诊断
-正常入口检查并申请 `RECORD_AUDIO`，Service 只显示错误提示，不从后台弹权限框。
-SDK 终止本场音频后，用户仍可停止会议；组合层使用已收到的标准事件执行后端 Stop，
-不等待已关闭会话的最终模型回调，不生成缺字幕的纪要或主动交付空结果。结束后返回
-会前页面，由 App 正常申请权限并重新开始。
-只实现旧 `onError(String)` 的调用方仍会由默认方法收到音频错误。
-
-Debug `AudioDiagnosticActivity` 同时显示模式、方向状态、帧数和峰值；“SDK 权限自检
-（不申请）”按钮只用于撤销权限后的设备验收，验证 SDK 返回错误且应用不崩溃。正常
-诊断按钮仍由 App 请求权限，Release 不包含诊断页或测试音源。
-
-本轮诊断设备证据保存于 `/home/cfy/Sync/p6-sdk-audio-contract-20261006/`：`06`／`07`
-记录 Broker 模式、持续读帧、无有效声源的方向状态及正常停止；`11` 记录无权限错误
-回调；`13`／`14` 记录恢复权限后的重新取流和最终停止。这些证据验证模式与方向状态
-出口及 SDK 权限边界，不代签有效 DOA 左右分栏或物理旧系统的 MIC 取流。
-
-### 可注册结果动作：默认只Web
-
-`MeetingAppAssembly`是构建期唯一清单，默认`List.of(new WebResultActionPlugin())`。
-后端链接服务可用时页面显示网页查看，地址来自构建配置；没有未装配邮件／PDF／小程序／无痕选项，
-也没有最近PDF按钮。后端邮件能力声明不会自动添加入口。模型音频仍直连模型，
-标准事件、用量、总结和屏采顺序不因动作变化而改变。
-
-伙伴新增`AppResultActionPlugin`实现并在Assembly登记结果动作：
-公共core接口负责稳定ID、名称、产物／服务依赖、`prepare`与异步执行；App薄接口
-`createSettings(Context)`返回插件自己的View及`freeze`工厂。
-页面仅在会前Hook读取一次输入，工厂返回只含不可变参数和Application Context的core插件；
-`prepare`产生本场闭包，不保留Activity／View。没有输入的动作返回空View，不需改MainActivity。
-后端需要提供什么服务由部署负责，不默认转到CZUR服务。
-
-当前结果服务发现由`ResultActionRegistry.serviceCapabilities()`映射两类已有部署字段：
-`resultLinkTtlMs > 0`表示`result.link`，`resultEmailEnabled == true`表示`result.email`。
-已发现服务必须包含结果动作的全部`requiredServiceCapabilities()`；后端声明能力不会自动注册App插件。
-伙伴增加其他后端专属服务依赖时，需要同步扩展发现协议、后端声明、客户端解析及服务映射，
-再在Assembly装配对应插件；仅注册一个新服务ID不会让当前客户端发现该服务。
-纯本地动作无需增加后端服务发现，例如完成提示例沿用空的`requiredServiceCapabilities()`；
-如动作需要特定产物，仍由`requiredArtifactTypes()`声明，并在真实READY后校验。
-
-`MeetingStartConditions.prepare`先检查原伙伴条件，再准备动作。屏采授权期间沿用同一
-`PreparedMeeting`，授权返回后通过Assembly暂存、Service一次消费；不重读输入或接收者状态。
-取消授权／启动失败清理暂存，不承诺进程恢复。
-正常Stop只读真实READY Manifest，`onResult`先存结果，随后实际READY状态停止
-计时／屏采／悬浮窗／采音前台通知，并使用冻结动作通用派发。
-Web生成含同场`meetingId/genTime`的链接，保留已有query／fragment，不读取正文。
-
-插件需要可见页面时向`context.uiExecutor()`提交`AppResultActionPlugin.UiOperation`：
-Assembly的同进程内存宿主暂存已经准备好的通用操作，Service退出不清此交接；
-新Service绑定／Activity可见后沿原入口消费一次，不强行后台拉起页面，不承诺进程恢复。
-操作只捕获Application Context、冻结参数及完成回调，不捕获Activity／View，
-不重新使用已关闭Session；排队不是成功，实际显示后才报告成功。
-普通执行与完成回调仍走主线程，旧Service关闭只停止旧宿主状态更新，不吞掉完成闭包。
-耗时文件工作交原存活`workExecutor`，协议交该场仍有效的窄`access`；
-通用Service／MainActivity不识别PDF或邮件。普通失败只显示独立动作提示，提供“再次执行”
-和“结束本场结果交互”；重试沿用同一READY／genTime，不再Stop、采音、总结或计费。
-成功或结束交互释放原client；开始新场前也释放旧结果访问，仅支持当前进程交互。
-
-最小替换例，修改Assembly默认初始化即可（未加入默认清单）：
-
-```kotlin
-private var resultActions: List<AppResultActionPlugin> =
-    listOf(CompletionNoticeAction()) // example.notice：同场READY完成提示，无正文或网络。
-// 显式可选：LocalPdfResultActionPlugin()、EmailResultActionPlugin()
-```
-
-PDF插件READY后按需读取typed正文，复用原`LocalPdfWriter`／`LocalResultActivity`；
-邮件插件冻结网页地址与收件人，通过本场窄`sendEmail`通知。二者均需显式注册，
-失败不改变READY。旧六／七／八参MeetingSetup及七／八参MeetingOptions保持可编译，
-旧枚举只映射动作ID，不隐式安装实现；旧`DeliveryStatus`字段仅兼容保留。
-旧无痕调用映射`NO_ACTIVE_DELIVERY`，仍保存标准事件、按原总结／计费规则Stop，
-ENDED且不读Manifest／主动交付，不承诺无服务端记录。
-源码和主机测试不代签新接线的设备UI、真实Web或PDF／SMTP部署。
-
-### 完整会议入口与平台扩展点
-
-`src/sdk/.../MeetingRuntimeFactory` 构造
-`AiMeetingClient(context, config, MeetingAppAssembly.modelAdapters())`；Mock Factory
-为同一 `MeetingCoordinator` 注入同一注册表及现存固定字幕／纪要运行端口，不增加第二套业务流程。
-配置包含 Server 地址、登录 Token、客户端身份、会议档位和串行回调 Executor；Android
-使用主线程 Handler。Activity 的会前客户端和 Service 的会议客户端彼此独立。
-
-模型协议与身份、结果动作、页面／窗口工厂都在`MeetingAppAssembly`集中装配。
-运行工厂首次取用时创建的默认表包含听悟、`sample-json-ws`及百炼总结；单独使用页面／窗口装配不加载模型协议类。
-伙伴先实现公开`ModelAdapter`，
-再在首次创建Activity／Service客户端前（例如自己的`Application.onCreate`）注册：
-
-```kotlin
-// PartnerModelAdapter是伙伴自己的协议实现；每次调用工厂须创建新实例。
 val adapters = ModelAdapterRegistry()
-adapters.register(PartnerModelAdapter.ID, ::PartnerModelAdapter, setOf(MeetingCapabilityState.TRANSCRIPT))
+adapters.register(PartnerModelAdapter.ID, ::PartnerModelAdapter,
+    setOf(MeetingCapabilityState.TRANSCRIPT))
 MeetingAppAssembly.registerModelAdapters(adapters)
-// 恢复默认组合：MeetingAppAssembly.registerModelAdapters(ModelAdapterRegistry())
+// 总结／独立文本翻译分别通过 registerSummary／registerTranslation 登记。
 ```
 
-会后文本协议可在同一注册表调用`registerSummary(id, factory)`。相同ID后注册替换原工厂；
-解析能力须如实登记，后端仍决定本场`adapterId`、模型地址、短期材料与授权。
-装配只保存工厂，不保存某场Adapter；替换装配仅影响随后创建的客户端，会中不得修改原表。
-SDK版执行选中的真实Adapter；Mock版继续固定字幕／纪要演示，不领取真实材料、不执行伙伴Adapter，
-不能用Mock结果代签伙伴协议。更换模型实现只需新增实现并在此登记，无需修改两份运行工厂或SDK源码。
+内置听悟 `tingwu-realtime` 负责实时原文、原生译文与本场发言人归一化；
+`sample-json-ws`／`sample-json-translation` 是协议样例，需要伙伴实现对应服务。
+`bailian-summary` 通过后端签发的短期材料直连百炼应用 API，以 `input.prompt` 请求，
+从 `output.text` 解析标题、概述、要点和待办。永久 Key 只在后端配置。
+模型替换、文本翻译和显示规则见[公共核心说明](meeting-client-core/README.md)。
 
 ```kotlin
 val client = MeetingRuntimeFactory.create(context, config)
 val session = client.start(setup.toOptions(), object : MeetingListener {
     override fun onDisplay(snapshot: MeetingDisplaySnapshot) {
-        // SDK 已决定片段配对、源侧和交换；UI 只渲染 final=100%、partial=80%。
+        // SDK 已完成配对和路由；UI 渲染 final=100%、partial=80%。
     }
     override fun beforeStop(continuation: Runnable) {
-        // 停止周期屏采，等周期ACK后请求SDK末帧；成功／空结果／失败均关闭并续接。
-        continuation.run() // 没有屏采时直接继续；详细接线见 MeetingService。
+        // 有屏采时：停周期采集，等保存确认，完成末帧及关闭，再调用 continuation。
+        continuation.run() // 无屏采时直接继续。完整接线见 MeetingService。
     }
     override fun onResult(result: MeetingResult) {
-        // 只保存同场READY清单；收到onState(READY)后再用冻结动作通用派发。
+        // 保存真实 READY 清单；在 onState(READY) 后执行会前冻结的动作。
     }
 })
-// 稍后用户点击停止，且最近 onState 的 state.canStop() 为 true 时调用：
-session.requestStop() // 正常收口；client.close() 仅用于取消/释放，不产生会议结果。
+// 最近状态 canStop() 为 true 时正常结束。
+session.requestStop()
 ```
 
-`start()` 异步创建会议并立即返回句柄；App 保存该句柄，过早的 Stop 不受理。
+`start()` 异步建会并立即返回句柄。`requestStop()` 正常收尾；`close()` 取消和释放资源，
+不替代 Stop，也不生成结果。标准事件、冻结用量、选定总结、录音发布和后端 Stop
+由唯一协调器依序处理。App 无需自行数 PCM、调用模型或重复提交用量。
 
-屏幕授权、周期／末帧时序、PDF/MediaStore 和权限申请均在 App；图片处理和JPEG编码
-封装在SDK。截图通过三参 `session.submitPresentation(offsetMs, jpeg, callback)` 交组合层
-保存，真实成功回执后才确认SDK图片；系统单独停止投影只结束
-屏采，字幕会议继续。`onResult`先于READY状态，后者之后才执行冻结动作；正文或通知失败
-不回退会议READY，结果访问保留到成功或用户结束交互。合作伙伴可更换这些平台/UI
-实现，或在`MeetingAppAssembly`登记自定义Adapter工厂注册表，继续复用同一组合流程。
+## SDK 音频来源、方向与权限边界
 
-### 合作伙伴会前开会条件 Hook
+SDK 主动探测平台与兼容接口，通过 `onAudioInputMode(AudioInputMode)` 返回实际来源：
 
-`app/src/main/java/com/czur/aimeeting/reference/meeting/MeetingStartConditions.kt`
-是唯一需要修改的装配入口。参考实现返回始终放行的 `MeetingStartCondition`；合作伙伴
-可新增自己的实现类，再让 `create(Context)` 返回该实现。`MainActivity` 在登录、模型能力
-检查之后，申请录屏权限与启动会议Service之前，通过`MeetingStartConditions.prepare`组合
-`check(MeetingSetup)`与动作准备。返回 `Decision.block("请先完成接收者登记")` 时，页面显示该理由，
-本场不会创建会议；返回 `Decision.allow()` 才继续原流程。后端 Create/Start 的权益
-判断仍是权威检查，Hook 不能代替后端鉴权。
+| 模式 | 实际来源 |
+| --- | --- |
+| `MIC` | 普通 Android 或缺少兼容接口的 CZUR 固件，使用标准麦克风 |
+| `CZUR_BROKER` | 兼容 CZUR 共享音频接口，由系统处理共享源和竞合 |
+| `DEBUG_WAV` | 仅调试 AAR 的受控测试文件 |
 
-例如伙伴自行开发小程序接收时，可由其代码异步登记并缓存本场接收者人数，再在
-`check(MeetingSetup)` 读取缓存并决定是否放行。Hook 在主线程调用，不能在检查方法中
-同步请求网络或等待扫码轮询。伙伴需要自行开发扫码 UI、小程序和后端绑定；参考工程
-不包含这些模块，也不因保留 Hook 而展示扫码结果方式。
+已探测到兼容 Broker 但实际开流失败时会返回音频错误，本场不再切换普通 MIC。
+旧固件的 MIC 路径遵循该系统的标准录音能力，不附带新 Broker 的竞合保证。
+
+`onAudioDirection(AudioDirectionSample)` 提供原始／稳定方向、单调时间戳及
+`AVAILABLE`／`NO_DIRECTION`／`UNSUPPORTED`。完整会议中，公共 core 结合方向、
+会前语言、模型语种、片段状态和交换操作决定左右栏；App 只消费 `onDisplay`。
+无当前方向和不支持方向分别处理，既有片段不会随新句重新搬栏。
+
+`onAudioError` 返回 `PERMISSION_DENIED`、开流或读取失败等类型化错误。
+SDK 不申请权限；App 开始入口申请 `RECORD_AUDIO`，Service 不从后台弹权限框。
+同流 `onAudioLevel` 返回 0～100 电平及单调测量时刻；它基于 RMS，约 300ms 通知一次，
+用于声音图显示，不表示环境分贝，也不决定发言、结果事件或计费。停止时 UI 复位。
+
+## Service、计时与正常停止
+
+`MeetingService` 持有会议句柄、前台通知、跨应用窗口、计时和截图时序。页面离开只解除
+观察，重新打开订阅同一场状态；SDK 持有音源、模型和标准事件队列。SDK 模式从前台入口
+启动 `microphone` 类型服务，有截图时同时声明 `mediaProjection`；Mock 使用 `dataSync`。
+悬浮窗权限由 App 引导到系统设置授予。
+
+页面和窗口的停止使用同一 `requestStop()`。App 即时停止计时、退窗，再继续末帧和
+后台收尾；结果状态按实际后端确认推进。主动息屏同样请求正常停止。
+Create 的 `limits.maxMeetingDurationMs` 是本场上限：超过 20 分钟的会议在剩余 20 分钟
+时短暂提醒；连续 4 分钟无转写提醒，连续 5 分钟无转写或到达上限时正常停止。
+非空原文 partial／final 重置无转写计时；10 秒无新原文会清除当前可见文字，不删除结果。
+
+调试版 APK 的 Service 存活时，可用自动化工具沿同一业务入口正常停止：
+
+```bash
+adb shell am broadcast -a com.czur.aimeeting.reference.DEBUG_STOP -p com.czur.aimeeting.reference
+```
+
+Release 不注册该接收器。登录、开始和结果检查脚本见
+[设备工具说明](../tools/android-device/README.md)；脚本、构建和固定样例均不替代实际模型／硬件验收。
+
+## 可选字幕／窗口UI工具：构建期注入
+
+`SubtitleViewFactory` 的 `meeting-ui` 实现直接调用 UI AAR；基础实现使用 TextView。
+工厂消费 `DisplaySnapshotPresentation` 投影的片段、文字、源侧／交换和各段 final 状态，
+不持有第二份文字账本。页面展示完整历史；普通窗口通过 `renderParts`／`setParts`
+交付完整输入，由控件裁最近可见行。宿主用明确 px 设置字号和行高，重排不会改变会议快照。
+
+### 窗口工厂：默认四形态与一个形态的替换例
+
+UI AAR 的 `DefaultMeetingOverlay` 提供字幕、普通互译、大互译和 Mini 四形态。
+普通窗口显示最近 3 行，简洁模式 2 行；大窗两侧独立滚动；Mini 点击恢复此前形态。
+隐藏／切换窗口只改变 UI，仍继续采音、识别和计费。提醒卡片、权限和窗口尺寸由 App 管理。
+
+`MeetingOverlayFactory.Window` 是 App 最小句柄；`meeting-ui/.../ui/OverlayViewFactory.kt`
+提供可编辑的布局例。伙伴只需一种形态，可复用公开的 `SingleFormOverlayFactory`：
+
+```kotlin
+MeetingAppAssembly.registerOverlayFactory(SingleFormOverlayFactory())
+// 恢复默认：MeetingAppAssembly.registerOverlayFactory(OverlayViewFactory())
+```
+
+工具层还提供 `OverlayController.ContentFactory`／`Content`／`LayoutPolicy`／`WindowSpec`／
+`StateListener`。替换工厂仅影响随后创建的窗口，不改变音源、Adapter、显示路由或会议收尾。
+结束时 dismiss 释放窗口，无需额外停止一次会议。
+
+## 独立SDK截图与参考演示帧
+
+截图由 SDK `ScreenCaptureClient` 提供。App 在主线程申请投影授权并启动相应前台服务，
+通过 `ScreenCaptureSourceFactory` 创建 `createSession(enableProcessing = true)` 单场会话。
+App 决定 10 秒周期、相对本场单调起点的偏移、排除窗口和末帧时序；裁剪、过滤、去重、
+编码等处理封装于 SDK。调用方可以关闭内置处理，不读取内部判断依据；返回 `null` 表示
+本次没有新图，仍需正常续接停止。
+
+当前参考端使用 SDK File 输出，IO 协程读 JPEG 后清理临时文件，再提交
+`session.submitPresentation(offsetMs, jpeg, callback)`。只有后端真实保存 ACK 成功后
+调用 `confirmAccepted()`；失败不确认。周期请求完成后才采末帧，成功、无新图或失败
+均关闭会话／客户端并续接 `beforeStop`。截图计算、编码、文件和网络不阻塞主线程。
+
+兼容系统使用 `SYSTEM_CAPTURE` 排除悬浮窗：每次在主线程读取当前已挂载的
+`View.getWindowToken()`，不缓存跨挂载句柄。自定义窗口工厂应实现
+`MeetingOverlayFactory.Window.windowToken()`；提醒窗口也纳入排除清单。
+不支持排窗的系统使用 MediaProjection 整屏截图，App 按 `supportsWindowExclusion()`
+明确传空列表，并提示可能包含悬浮窗。
+
+SDK 另提供 Bitmap 输出；关闭处理时 File 为 PNG，开启处理时为 JPEG。
+交付后的 Bitmap／File 归调用方回收或保留，接受确认不负责回收，也不执行网络。
+完整方法和 Main／IO 协程约束见配套 SDK 的 `SCREEN-CAPTURE.md`。
+从窗口停止时，App 等末帧结束才返回会议页面，避免自己的会议整页进入末帧。
+
+## 可注册结果动作：默认只Web
+
+`MeetingAppAssembly` 默认只注册 `WebResultActionPlugin`。会前冻结动作设置和构建配置
+中的结果页地址，真实 READY 后生成带同场 `meetingId/genTime` 的链接并打开 Web。
+Web 动作不读取正文。`MeetingResult` 此时是 Manifest 清单，`content()` 为 `null`；
+需要正文的插件必须通过本场 `context.access().readContent(...)` 异步读取。
+
+伙伴实现 `AppResultActionPlugin`，声明稳定 ID、名称、产物／服务依赖，
+`createSettings(Context)` 返回设置 View 和冻结工厂；开始时生成不含 Activity／View 的
+插件闭包。注册示例：
+
+```kotlin
+MeetingAppAssembly.registerResultActions(listOf(CompletionNoticeAction()))
+// 显式可选：WebResultActionPlugin()、LocalPdfResultActionPlugin()、EmailResultActionPlugin()
+```
+
+PDF 插件通过窄 `readContent` 读取正文，再将文件工作放到 `workExecutor`；参考实现见
+[`LocalPdfResultActionPlugin.kt`](app/src/main/java/com/czur/aimeeting/reference/LocalPdfResultActionPlugin.kt)。
+邮件插件冻结收件人，通过窄 `sendEmail` 发送 Web 链接，仍需部署邮件服务。
+离线 HTML 可沿 PDF 的正文读取方式替换文件输出。扩展示例见
+[结果交付手册](../docs/partner-integration-guide.md)。
+
+结果服务发现目前映射两类字段：`resultLinkTtlMs > 0` 为 `result.link`，
+`resultEmailEnabled == true` 为 `result.email`。新后端服务依赖需同步扩展协议、
+后端声明、客户端解析和映射；纯本地动作可声明空服务集，仍按需要声明产物。
+协议声明服务不会自动安装 App 插件。
+
+READY 和动作成功分别处理；动作失败可以用原 READY、`genTime` 和冻结参数再次执行，
+无需重开会议、重复总结或计费。平台 UI 通过 `UiOperation` 在可见 Activity 消费；
+文件工作走 `workExecutor`。动作完成或用户结束交互时关闭原 client，新场开始前释放
+旧访问对象；默认交接只保存在进程内，不承诺进程恢复。
+
+`NO_ACTIVE_DELIVERY` 表示不主动交付：正常 Stop 后 ENDED、不取 Manifest／触发动作，
+仍保存标准事件并按原总结／用量规则收尾，不承诺删除服务端记录。
+
+## 合作伙伴会前开会条件 Hook
+
+[`MeetingStartConditions.kt`](app/src/main/java/com/czur/aimeeting/reference/meeting/MeetingStartConditions.kt)
+是开会前条件装配入口。默认 `MeetingStartCondition` 放行；伙伴可新增实现，
+由 `create(Context)` 返回。App 在登录、能力检查之后，申请屏采权限与启动 Service
+之前调用 `prepare`，组合 `check(MeetingSetup)` 与结果动作准备。
+
+返回 `Decision.block("请先完成接收者登记")` 时显示理由且不建会，返回
+`Decision.allow()` 后继续。Hook 在主线程，只读已准备的状态；网络、扫码和绑定由
+伙伴提前异步完成。参考包不提供小程序或扫码接收模块。后端 Create／Start 的
+鉴权与权益判断仍是权威检查。

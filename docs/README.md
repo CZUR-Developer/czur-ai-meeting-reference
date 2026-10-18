@@ -11,6 +11,7 @@
 
 ## 专项说明
 
+- [当前支持范围与验收清单](validation-scope.md)：首版实现、已有验证覆盖及目标环境需要核对的范围。
 - [局域网 HTTPS](local-lan-https.md)：准备开发证书、HTTPS入口、构建地址与Debug信任。
 - [后端交付部署](../deploy/README.md)：外部MySQL、唯一V001、Docker应用与外部配置、静态Web。
 - [Android App](../android-reference-app/README.md)：模块、运行模式和具体接线。

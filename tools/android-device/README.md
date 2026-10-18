@@ -139,7 +139,7 @@ python3 tools/android-device/meeting-device.py stop --timeout 90
 ```bash
 adb -s '<ADB序列号>' shell pidof com.czur.aimeeting.reference
 # 将下方 <PID> 替换为上条返回值；仅 Debug WebView 开放该 socket。
-adb -s '<ADB序列号>' forward tcp:19094 localabstract:webview_devtools_remote_<PID>
+adb -s '<ADB序列号>' forward tcp:19094 'localabstract:webview_devtools_remote_<PID>'
 node tools/android-device/check-web-result.mjs --port=19094 \
   --meeting-id=mtg_当前场次 --expect=transcript,translation,summary,audio --reload --play
 # 后端支持媒体 Range 后可增加 --seek，验证有限时长和实际拖动后继续播放。

@@ -1,390 +1,312 @@
 # 会议客户端公共核心
 
-本模块由 Kotlin/JVM 实现，产物是目标 JVM 17 的普通 JAR，供参考 Mock App 和 CZUR SDK 使用同一套会议编排、
-Server 协议、模型适配与国内显示规则。Android 控件、权限申请、音源、模型网络传输、
-屏幕采集和本地 PDF 不在本模块。模型直连仍在设备 SDK，不在后端代转音频。
+本模块使用 Kotlin/JVM，实现共享 Server 协议、会议编排、模型 Adapter 注册和显示规则。
+产物是 JVM 17 普通 JAR，供参考 Mock App 和 Android SDK 使用同一份实现。
+Android 控件、权限申请、音源、模型网络传输、屏幕采集和本地 PDF 由平台层实现；
+实时音频通过设备 SDK 直达模型。
 
-当前包含：
+首次接入见[从零指南](../../docs/partner-getting-started.md)，页面／Service 接线见
+[Android 参考应用](../README.md)。Android 参考交付最低支持 Android 14（API 34）。
 
-- `client.provider`：默认听悟、第二格式 JSON 样例、百炼总结及可选独立 JSON 文本翻译的公开解析实现。
-- `ModelAdapterRegistry`：按 Server 下发的 `adapterId` 选择工厂，每场会议创建独立实例。
-- `MeetingCapabilityState`：Create 响应的本场能力决策，不由厂商名字推断。
-- `DeploymentOptions.languages`：透传既有发现协议的语言code清单，供App设置页使用。
-- `client.display`：共享显示状态、句开始方向快照，以及国内 A/B 多语种兜底。
+## 模块内容与能力边界
 
-P10 本机联调基线已经验证“只声明 `transcript.realtime`”的部署：参考 App 会隐藏未声明
-的总结／互译入口，仍可完成登录、实时字幕、正常停止和 `READY` 结果。该行为是能力
-协商结果，不代表默认提供翻译、总结、录音或跨会议声纹；这些能力由各自 Provider、
-部署配置和本场授权共同声明后再单独验收。
+| 接口或包 | 职责 |
+| --- | --- |
+| `client.provider` | 听悟、JSON 实时样例、百炼总结与独立 JSON 文本翻译的协议适配 |
+| `ModelAdapterRegistry` | 按后端 `adapterId` 创建本场独立 Adapter |
+| `MeetingCapabilityState` | 保存 Create 返回的本场能力决策 |
+| `DeploymentOptions.languages` | 透传后端发现协议的语言列表 |
+| `client.display` | 统一字幕修订、句开始方向快照和 A／B 分栏 |
+| `client.result` | 结果动作注册、会前准备、同场结果访问与执行 |
 
-听悟 Adapter 将 `cn/en/ja/ko/de/fr/ru`（兼容旧 `JP/KR` 别名）归一化为
-`zh-CN/en-US/ja-JP/ko-KR/de-DE/fr-FR/ru-RU`，原文和译文使用同一映射。
-部署语言清单来自后端 `AI_MEETING_MODEL_LANGUAGES`；UI 按发现结果显示，
-识别未知语种时仍保留未知事实，不默认当作中文或据此提前锁定分栏。
+功能能力按本地可执行能力、后端部署和本场授权确定，不能从供应商品牌推断。
+所有当前会议模式要求 `transcript.realtime`；互译另需 `translation.realtime`，
+开启独立总结另需 `summary.structured`。用户选择的必需能力无法授予时，不启动本场模型。
+本场分人为可选能力，未授予时移除发言人字段，仍可开字幕会议。
+
+语言列表直接来自后端 `AI_MEETING_MODEL_LANGUAGES`，App 按发现结果显示。
+核心不会查询供应商的实时语种清单，也不会自动将语言配置与 Provider／Product Profile
+求交。部署者应声明实际模型支持且已开通的语种子集，语种变化时同步调整配置。
+听悟 Adapter 将 `cn/en/ja/ko/de/fr/ru`（含 `JP/KR` 别名）归一化为
+`zh-CN/en-US/ja-JP/ko-KR/de-DE/fr-FR/ru-RU`；映射存在不代表供应商为当前账户开放该能力。
+未知语种保持未知，不默认当作中文。
 
 ## 两层入口与组合契约
 
-基础层由 Android SDK 的 `AudioInput` 提供，不需要 Server/model：App 接收标准 PCM 和物理方向。
-组合层 `MeetingClient` 提供发现、登录与开始；`MeetingSession` 控制停止、截图与交换显示列；
-`MeetingListener` 返回不可变显示快照、状态和类型化结果。Android `AiMeetingClient` 只装配运行时，
-Mock 注入窄端口 `MeetingRuntimePort`；二者使用唯一 `MeetingCoordinator`，App 不领取材料或重复分栏。
-同进程基础输入、诊断和完整会议择一持有真实音源。
+基础层 `AudioInput` 交付标准 PCM 和物理方向，无需 Server 或模型。
+组合层 `MeetingClient` 提供身份、能力发现和开始；`MeetingSession` 提供停止、
+演示图片提交与显示列交换；`MeetingListener` 返回不可变显示快照、状态和结果。
+Android `AiMeetingClient` 装配平台运行时，Mock 注入 `MeetingRuntimePort`，
+二者共用 `MeetingCoordinator`。同进程基础输入、诊断和完整会议应择一持有真实音源。
 
-正常链为当前身份读取 → 能力发现 → Create → Server 材料/新 Adapter → StartClient → 采音/模型 → 标准事件保存 →
-冻结采音用量提交 → 按能力总结 → Stop 输入受理 → 实际 READY清单 → App显式动作。后端仍负责身份、模型选择、计费和存储。
-模型完整地址、短期材料及本场授权只取 Server，配置不接收模型地址或凭据。
+正常链为当前身份读取 → 能力发现 → Create → 领取材料／创建 Adapter → StartClient →
+采音／模型 → 标准事件确认 → 冻结采音用量 → 按需总结 → 录音发布 → 后端 Stop →
+真实 READY 清单 → App 显式结果动作。后端负责身份、模型选择、权益／计费和存储。
+模型完整地址、短期材料及本场授权均由后端下发。
 
-Server HTTP 的连接等待保持10秒；普通JSON POST与GET读取保持10秒。模型、总结及独立翻译
-材料发行可能等待厂商20秒，这三类材料POST单独使用30秒读取预算，避免后端成功前客户端
-先超时；封口录音上传仍使用60秒读取预算。以上为socket读取等待，不是整场会议或完整调用
-的总时限；本次调整不引入自动重试，也不改变停止时先退窗、释放音源的流程。
+`MeetingClientConfig` 接受 Server URL、`IdentityProvider`、`ClientIdentity`、
+`MeetingProfile` 和**串行** `callbackExecutor`。Android 通常使用主线程 Executor，
+避免结果与状态回调重排。`discover()` 提供匿名部署发现及本地可执行能力交集，
+可用功能不等于本场已获授权。固定访问令牌构造方式可供简单集成，持久登录应使用身份插件。
 
-`MeetingClientConfig` 接受 Server URL、`IdentityProvider`、`ClientIdentity`、`MeetingProfile` 和
-**串行** `callbackExecutor`。Android 通常用主线程 Executor；不能用无序线程池让结果和状态重排。
-旧访问令牌构造器保留，将固定token包装为参考内存身份。`discover()`仍为匿名能力发现，
-返回typed `DeploymentOptions`及本地可执行能力交集；可用功能不等于本场已获许可。
+HTTP 连接等待为 10 秒，普通 JSON 请求读取等待为 10 秒；实时模型、总结和独立翻译
+材料请求读取等待为 30 秒，同源录音上传读取等待为 60 秒。这些是 socket 读取等待，
+并非整场会议的总时限；停止音源不依赖普通结果 HTTP 请求完成。
 
 ### 可替换身份与默认登录
 
-`IdentityProvider.currentIdentity()`在IO队列返回`IdentityResult`：已登录、需要登录或读取失败。
-已登录的`IdentitySession`携带本部署会议后端接受的Bearer凭据及可选展示名。SDK不打开登录页、
-不读取Starry私有Provider，也不退出系统账号。App进入页面或登录返回时调用
-`MeetingClient.refreshIdentity()`，通过串行回调处理状态；开始会议时SDK再次读取，并把本次
-凭据冻结到本场Server客户端。会中刷新身份不会悄悄更换该场请求使用的账号。
+`IdentityProvider.currentIdentity()` 在 IO 队列返回已登录、需要登录或读取失败。
+`IdentitySession` 携带本部署后端接受的 Bearer 和可选显示名。SDK 不打开登录页，
+不读取特定厂商的私有账号接口，也不退出系统账号。
 
-参考核心仍提供不落盘的`ReferenceIdentityProvider`用于纯 JVM／Mock；参考 Android App 默认
-装配的`PersistentReferenceIdentityProvider`把后端地址对应的会话材料保存到应用私有设置，
-只保存访问令牌、显示名和服务端到期时间，不保存密码。`MeetingClient.login()`通过公开的
-`LoginIdentityProvider`写入会话并保留旧 typed 返回值；进程重启后读取仍经过同一
-`IdentityProvider`，过期或主动退出会清除。伙伴可以用同一接口替换为 ContentProvider、系统
-账号或自己的凭据仓库，会议编排和模型流程无需改变。
+App 进入页面或登录返回时调用 `MeetingClient.refreshIdentity()`；开始会议时 SDK
+再次读取，并冻结为本场 Server 客户端身份。刷新全局身份不会更改已开始会议的账号。
+
+`ReferenceIdentityProvider` 是 JVM／Mock 的内存实现；参考 App 默认装配
+`PersistentReferenceIdentityProvider`，将短期令牌、显示名、到期时间和后端归属
+保存到应用私有设置，不保存密码。有效会话可在进程重启后恢复，过期／主动退出清除。
+伙伴可替换成 ContentProvider、系统账户或自有凭据仓库：
 
 ```kotlin
 val identity = IdentityProvider {
-    // 伙伴从自己的会话来源读取；需要时在实现内交换成其会议后端可接受的凭据。
     val token = myAccount.currentMeetingToken()
     if (token == null) IdentityResult.loginRequired("请登录伙伴账号")
     else IdentityResult.loggedIn(IdentitySession(token, "伙伴账号"))
 }
-val config = MeetingClientConfig(serverUrl, identity, clientIdentity, productProfile, mainThreadExecutor)
+val config = MeetingClientConfig(
+    serverUrl, identity, clientIdentity, productProfile, mainThreadExecutor)
 ```
 
-如果伙伴提供自己的账号登录入口，不需要实现`MeetingClient.login()`；登录成功后将服务端认可
-的短期会话写入自定义`LoginIdentityProvider`，再调用`refreshIdentity()`即可。该接口不接收
-密码，也不规定凭据存储方式，Activity 与前台 Service 仍通过同一个 App 装配实例共享身份。
+默认 `MeetingClient.login()` 通过 `LoginIdentityProvider` 写入后端登录会话。
+伙伴使用自己的登录页面时，可在成功后将后端认可的会话写入身份插件，再调用
+`refreshIdentity()`；打开表单、取消或登录失败时不应提前清除有效身份。
+身份插件与 App 的登录 UI 分开装配，Activity 和 Service 使用同一身份来源。
 
-参考App的`MeetingAppAssembly`集中注册来源并供Activity与Service共用；开始时同进程交接冻结设置与动作，
-不复制可能过时的token。账号密码登录界面是默认示例，伙伴可替换页面动作和身份来源。
-CZUR系统token与默认参考token没有天然等价关系：私有身份及后端认可适配归P9，
-本接口及主机测试不代签CZUR生产账号联通。
+### 生命周期、回调与线程
 
-同一客户端同时只允许一场未完成会议，完成后可开下一场；`close()` 幂等取消，关闭后不可重用。
-所有 listener/会前回调排到配置的 Executor，关闭后不再执行尚未派发的通知。
-App 保留权限、前台服务、时长提醒/自动停止、页面/悬浮窗、屏幕授权/采集和 PDF。
+同一客户端同时只允许一场未完成会议，完成后可开下一场。
+`session/client.close()` 幂等取消，不执行后端 Stop 或生成 READY；client 关闭后不能复用。
+listener 和会前回调交给配置的串行 Executor，关闭后不再派发尚未执行的通知。
+App 负责权限、前台服务、计时／提醒、页面／窗口及屏采授权。
 
-| 类型/回调 | App 可使用的事实 |
+| 类型／回调 | 可使用的事实 |
 | --- | --- |
-| `MeetingStarted` | 本场单调 `startedAtMs`、Server `maxMeetingDurationMs` 和实际能力 |
-| `MeetingSessionState` | 阶段、`active`、`canStop`、实际能力；`savedEventCount` 只计成功保存的原文事件 |
-| `onDisplay` | 同一份源句/译文、语义 A/B、`swapped` 和真实语言，UI 只呈现 |
-| `onTranscriptActivity(nowMs)` | 非空原文到达即排队，不等待 1.5 秒显示窗口；与起点共用单调时基 |
-| `onAudioInputMode/onAudioError` | 实际音源和类型化错误；SDK 不申请权限或自动重试 |
-| `onAudioLevel` | 同流0～100的RMS显示电平及elapsedRealtime单调测量毫秒时刻，不交付PCM |
-| `onResult` | 只保存实际READY清单，先于READY状态；收到该状态后才派发动作 |
+| `MeetingStarted` | 本场单调 `startedAtMs`、`maxMeetingDurationMs` 和实际能力 |
+| `MeetingSessionState` | 阶段、`active`、`canStop`、能力及已确认原文事件数量 |
+| `onDisplay` | 不可变原译文快照、语义 A／B、`swapped` 和模型真实语言 |
+| `onTranscriptActivity(nowMs)` | 非空原文活动，不等待迟到语种显示窗口 |
+| `onAudioInputMode/onAudioError` | 实际音源与类型化音频错误 |
+| `onAudioLevel` | 同流 0～100 RMS 显示电平及单调测量时刻 |
+| `onResult` | 真实 READY 清单，在 READY 状态回调前到达 |
 
-Coordinator 使用轻量串行状态/方向/显示/deadline 队列、独立串行 HTTP/总结队列和
-独立 `modelControl` 队列；后者顺序处理模型 start/stop/close，挂起的事件或材料 HTTP
-不会拖住停源。用户停止仍先经过既有末帧 `beforeStop`，后端结果只在真实 ACK 后推进。
-`onAudioLevel`沿用串行callbackExecutor，正常停止受理、输入结束或关闭后不再派发在途电平。
-Android SDK每三个完整100ms PCM16LE帧测当次帧，约300ms通知一次；旧RMS相对满幅
--60～0dB映射0～100，不是物理环境分贝，也不是300ms累计窗口。App停止时复位显示，
-不通过电平改变无字幕超时、发言判断、结果事件或计费。基础`AudioInput.Listener`同样
-使用default回调，但在采音线程交付，由调用方快速返回并自行切换UI线程；Mock不伪造测量。
-
-慢网络不会阻塞句开始、活跃事实和语种截止点。所有模式必需 `transcript.realtime`；互译另需
-`translation.realtime`；独立`summaryEnabled`开启时另需`summary.structured`。
-互译＋总结同时请求／要求两项能力，缺少用户选择的必需能力不启动模型。
-speaker 可选，未授予时移除字段、不拒绝开场；总结工厂独立参与求交，不误当实时解析能力。
+Coordinator 将状态／显示、HTTP／总结和模型控制分开串行处理；慢 HTTP 不阻塞
+句开始、方向或语种截止点。`modelControl` 顺序调用模型 start／stop／close。
+完整会议的音量回调使用 `callbackExecutor`；基础 `AudioInput.Listener` 的电平在采音线程
+交付，应快速返回并自行切到 UI。SDK 约每 300ms 采样一个 100ms PCM 帧，
+将 RMS 相对满幅 -60～0dB 映射为 0～100；该值用于显示，不等于环境分贝。
 
 ### 模型请求描述与独立文本翻译
 
-`ModelHttpRequest` 是无网络对象的文本请求描述，地址仍来自本场 Server Grant。
-实时 `ModelAdapter.connectionRequest(grant)` 默认 GET＋非空 token 的 Bearer；
-`SummaryAdapter.request(grant, input)` 默认使用原 `requestBody(input)` 发 POST/JSON，
-并保留 Accept 与非空 token 的 Bearer。伙伴可以覆盖请求方法／头／内容类型／正文，
-SDK 按描述执行，不额外注入 Bearer。例如 x-api-key 模型由插件把 `grant.token()` 放入
-选定头，版本参数取 `grant.initParams()`；这些字段不进入标准事件或日志。已签名 URL
-可以不提供 token。旧 Adapter 方法与原 Grant 构造器保持可用。
+`ModelHttpRequest` 描述方法、头、内容类型和正文，不执行网络。
+`ModelAdapter.connectionRequest(grant)` 默认 GET，加上非空 token 的 Bearer；
+`SummaryAdapter.request(grant, input)` 默认 POST／JSON，正文来自 `requestBody(input)`。
+伙伴可覆盖请求描述，SDK 按描述发送，不额外补充 Bearer。签名 URL 可不提供 token；
+自定义 `x-api-key`、版本头或请求正文由 Adapter 使用本场 `grant` 构造。
 
-Adapter 输出的 `TranscriptEvent`／`SegmentStartedEvent` 时间是本次模型任务收到音频的
-相对毫秒；SDK 加一次连接首帧偏移，再向 App/core 交付本场完整录音相对时间。伙伴不要
-在 Adapter 里先加会议／续接偏移，避免第二代连接发生双重偏移。
+Adapter 输出事件的时间是该模型任务已收音频的相对毫秒。SDK 再加一次本次连接首帧
+偏移，转换为会议录音的相对时间；Adapter 不要自行叠加会议／续接偏移。
 
-需要“仅 ASR＋另一家文本翻译”时，在 Server 注入独立翻译签发器，并声明实际
-`translation.realtime` 和支持语言；同场 `modelSession` 附可选 `translationSession`
-（`adapterId/endpoint/expiresAt/token/initParams`）。原实时模型关闭原生翻译，App 仍只建
-一场会议、开一路音源。没有 sidecar 的默认听悟继续原生实时原译文路径。
+仅 ASR 加独立文本翻译时，后端注入独立翻译签发器并声明翻译能力和实际语言，
+在 `modelSession` 中附 `translationSession`（`adapterId/endpoint/expiresAt/token/initParams`）。
+实时模型关闭原生翻译，仍只开一场会议和一路音源。未装配 sidecar 的听悟使用原生译文。
 
 ```kotlin
 val adapters = ModelAdapterRegistry()
-// 默认已注册 sample-json-translation；伙伴换协议时只新增自己的实现和稳定ID。
 adapters.registerTranslation("partner-translation", ::PartnerTranslationAdapter)
 ```
 
-`TranslationAdapter` 只处理一段已确认原文的文本请求／响应；调用在既有 IO 队列，
-`TranslationInput` 提供原文 ID、revision、源语种、目标语种和正文。按实际源语种在会前两种
-语言之间选择目标，未知语种才沿现有方向／字形锁侧默认；交换显示列不改变目标语言。
-用 `input.result(text, detectedSourceLanguage)` 返回既有标准 `TranslationEvent`，可保持
-同一原文关联、稳定译文 ID、revision 和 final。相同 final 修订不重复调用，更新修订可再译。
+`TranslationAdapter` 在 IO 队列处理已确认原文的文本请求／响应。
+`TranslationInput` 含原文 ID、revision、源语种、目标语种和正文；
+`input.result(text, detectedSourceLanguage)` 返回关联原文的标准 `TranslationEvent`。
+根据真实源语种在会前两种语言间选择目标，交换显示列不改变翻译目标。
+相同 final 修订不重复调用，更新修订可再翻译。
 
-公开 `SampleJsonTranslationAdapter`（ID `sample-json-translation`）发送 JSON 字段
-`sourceSegmentId/sourceRevision/sourceLanguage/targetLanguage/text`，响应为
-`{"text":"译文","sourceLanguage":"实际源语种（可省略）"}`。材料可选
-`tokenHeader`（默认 Authorization）及 `tokenPrefix`（Authorization 默认 Bearer，其他头
-默认空），可演示 x-api-key；公开代码不包含真实 Key 或私有地址。
+`sample-json-translation` 发送 `sourceSegmentId/sourceRevision/sourceLanguage/targetLanguage/text`，
+响应为 `{"text":"译文","sourceLanguage":"实际源语种（可省略）"}`。
+可选 `tokenHeader` 默认 Authorization，`tokenPrefix` 对 Authorization 默认为 Bearer，
+其他头默认空。该协议样例需要部署者提供相应服务，不自带真实翻译模型。
 
-停止仍先关闭实时音源。Coordinator 等已接纳的独立译文走完既有标准事件序号／保存确认，
-再执行原总结、录音发布与 Stop，未收到模型译文不能假装 READY。翻译请求失败保留原输入，
-用户确认停止时重试，不引入磁盘翻译队列、定时重试或新会议状态机。长期会议在下一句
-翻译前检查 `expiresAt`，临近到期才经同场 `:translationSession` 续领；不重签实时材料、
-不重建 ASR，不在无语音时后台轮询。旧服务或 Runtime 没有此扩展时不声明 sidecar 支持。
+停止先关闭音源，再等待已接纳的译文保存，按顺序继续总结、发布和 Stop。
+翻译失败保留原输入，用户再次确认停止时可重试，不伪造译文或 READY。
+长期会议在下一次翻译前检查材料到期并同场续领，不后台轮询或重建 ASR。
 
-`speaker.identity.cross_meeting` 是明确的**服务端会后能力**，不进入实时 Adapter 白名单。
-能力发现仅在部署已声明该能力、客户端具备本场 speaker 工厂、Runtime 同源录音和实际
-`MeetingArtifactPublisher` 时保留它；Create 还需本场显式 `retainAudio=true` 才请求。
-材料在 Create 后下发，协调器会再次按实际选中的 Adapter 核对本场 speaker，并只把已请求、
-Create 已授予的跨会议身份冻结到 `MeetingStarted`／状态快照；缺任何前提都不启用该项，
-字幕、录音和其余已授权能力仍沿用原流程。旧部署未声明时，原请求与行为保持。
-关闭已协商快照的 `retainAudio` 会同时移除该请求，再开启需重新协商；原构造器和 Kotlin
-`copy`／`copy$default` JVM 签名保持不变。能力已冻结表示允许服务端处理，真实身份仍以
-服务端 `speaker.identity` 产物为准，客户端不把本场 `sessionSpeakerId` 充作跨会议 `personId`。
+### 本场建会参数与录音
 
-新构造器在原会前设置最后增加`summaryEnabled`，例如`LIVE_TRANSLATION`加`true`即互译＋纪要。
-旧七参数构造器、`Mode.MEETING_MINUTES`及其能力名称继续可用，保持字幕＋总结的行为。
-总结仍在末尾最终字幕完成、标准事件提交后生成，并在后端Stop前保存；设置拆分不改变
-P6的采音、模型、DOA或尾部收口时序。
+`MeetingOptions` 将会中 `mode`、独立 `summaryEnabled`、结果动作、语言和截图设置分开。
+`Mode.MEETING_MINUTES` 表示字幕加总结；`LIVE_TRANSLATION` 加 `summaryEnabled=true`
+表示互译加总结。总结在最终字幕保存后、后端 Stop 前生成。
 
-### 本场建会参数
-
-`MeetingOptions.withCreateParameters(title, timezone, retainAudio)` 返回新的不可变快照，
-只覆盖既有 Create 协议中的标题、时区和音频保留请求；mode、独立总结、结果动作、
-邮箱、演示截图及语言设置完整保留。`title=null` 时省略请求字段，时区需显式提供。
-原七／八／九参 PUBLIC 构造器全部保留，默认仍是 `参考会议`、`Asia/Shanghai`、
-`retainAudio=false`，参考 App 不因本接口改变默认行为。
+`withCreateParameters(title, timezone, retainAudio)` 返回不可变新快照，保留其他选项。
+`title=null` 时省略标题字段，时区显式提供。直接构造 `MeetingOptions` 默认标题
+`参考会议`、时区 `Asia/Shanghai`、`retainAudio=false`；参考 App 的 SDK 装配另通过
+`MeetingSetup.toOptions()` 明确设为 `true`，Mock 则为 `false`。
 
 ```kotlin
-val named = selected.withCreateParameters("客户会议", "Europe/Paris", false)
-// 将 named 交给现有 MeetingClient.start，模型材料和会议编排仍由 SDK 处理。
+val named = selected.withCreateParameters("客户会议", "Europe/Paris", true)
+// retainAudio=true 需要同时装配同源录音 Runtime 和产物发布器。
 ```
 
-`retainAudio` 透传已有服务端产物策略；显式启用时还要求 Runtime 同源录音和
-`MeetingArtifactPublisher` 均已装配。Coordinator 在停止后读取 `ModelSession.sealedAudioArtifact()`，
-核对本场 ID 与冻结采音时长，再发布并请求后端 Stop。模型异常不独立阻断已封口录音，
-音频输入失败与显式取消仍不发布；缺失 sealed 事实或封口失败不能伪造完成。
-参考 App 默认继续关闭录音。具体 SDK 编码、上传和旧消费者读回按各自实际证据验收；
-不增加私有 metadata map，不从品牌、保存方式或结果动作猜测此开关。
+Runtime 通过 `ModelRuntime/MeetingRuntimePort.supportsRetainedAudio()` 声明能力，
+`ModelSession.sealedAudioArtifact()` 提供停止、尾帧排完和编码封口后的本地音频事实。
+`SealedAudioArtifact` 包含本场 ID、格式／MIME、文件长度、实交 PCM 字节数及派生时长。
+同一 16kHz／mono／PCM16 流同时送模型和录音，编码 padding 不计用量。
+
+通过 `MeetingClientConfig.withArtifactPublisher(...)` 装配发布器。发布器只读取本场
+冻结身份、sealed 产物和用量；正常返回表示上传及必要登记已确认，随后执行后端 Stop。
+缺失 sealed 事实、发布失败或 Stop 未确认时保留 `STOP_PENDING`，用户可继续原场收尾。
+发布已确认后不重复发布，不重开音源、建会或重复计费；具体外部登记幂等由发布器实现。
+
+### 跨会议人物身份
+
+`speaker.identity.cross_meeting` 是服务端会后能力，不属于实时 Adapter 解析清单。
+只有部署声明、本场分人、Runtime 同源录音、已装配发布器及本场 `retainAudio=true`
+均满足时才请求；Create 授予后还会核对本场选中 Adapter 的分人能力。
+真实身份以服务端 `speaker.identity` 产物为准，不能将 `sessionSpeakerId` 当作跨场 `personId`。
+关闭录音会同时移除该请求；缺少此能力不阻断其他已授权功能。
 
 ### 可注册结果动作
 
-公共`client.result`已提供`ResultActionPlugin`、构建期`ResultActionRegistry`、独立
-`ResultActionOutcome`和`ResultOptions`。注册清单就是产品开放清单，没有隐式默认插件。
-插件声明稳定字符串ID、名称、所需真实产物及结果服务；会前在App既有Hook调用`prepare`，
-只读本地已准备状态并冻结参数闭包，阻止时不建会。网络／扫码准备由App提前异步完成。
+`ResultActionPlugin` 声明稳定 ID、名称、必需产物和后端服务；
+`ResultActionRegistry` 是 App 开放清单，不隐式安装插件。
+会前 `prepare` 只读取已准备的本地状态并冻结闭包，网络／扫码须提前异步完成。
 
-`ResultActionRegistry.serviceCapabilities(discovery)`将已有部署链接期限和邮件开关
-适配成`result.link`／`result.email`，不混入模型Adapter能力。会前只确认服务，执行前
-再检查SDK真实READY的`artifactTypes`。声明服务不会为App安装不存在的插件。
-
-真实READY后，App用同场`session.resultActionAccess()`取得异步`readContent`／`sendEmail`，
-SDK内部沿用开始时冻结的身份和本场`genTime`，不向插件暴露token、原Server client或JSON。
-Web／纯提示不调用正文读取；PDF等显式动作才按需读取。请求走既有IO队列，结果回配置的
-串行callbackExecutor。动作失败与READY分开；App可用同一准备闭包、READY和访问对象
-手动再执行，不重新Stop、采音、总结或计费。结果交互结束后关闭原client，关闭后不再派发回调。
+`serviceCapabilities(discovery)` 当前将链接期限映射为 `result.link`、邮件开关映射为
+`result.email`。新增后端专属依赖需要一起扩展发现协议和映射，声明服务不等于安装 App 动作。
+纯本地动作可以不依赖后端服务，但仍可要求真实产物。
 
 ```kotlin
 val registry = ResultActionRegistry(listOf(myNoticePlugin))
-// 先在会前Hook主线程准备；prepared应在开始时冻结并由Service持有。
 val prepared = registry.prepare("partner.notice", options, discovery)
 if (!prepared.allowed()) showMessage(prepared.message())
-// 下方只能在SDK已经确认同场READY后执行；平台工作／UI队列由App提供。
+// 仅在已确认同场 READY 后执行，平台工作／UI 队列由 App 提供。
 val context = ResultActionContext(readyResult, session.resultActionAccess(),
     ResultActionRegistry.serviceCapabilities(discovery), platformWork, mainExecutor)
 registry.execute(requireNotNull(prepared.action()), context, actionCallback)
 ```
 
-`MeetingOptions`原七／八参构造器保留并转换旧结果枚举；新八参构造器用`ResultOptions`
-替换原`ResultDelivery`参数，支持伙伴字符串ID，不新增固定枚举。旧纪要模式和独立总结语义不变。
-`NO_ACTIVE_DELIVERY`仅表达既有不主动交付策略，不承诺删除服务端数据。
-
-通用Coordinator现在只读取Manifest确认READY，不生成链接、下载正文或发送通知。
-旧构造器仍可编译，枚举仅映射动作ID；旧`DeliveryStatus`／`withDelivery`保留用于兼容，
-正常结果为`NOT_REQUESTED`、`resultUrl=null`、`content=null`，并非“会议没有结果”。
-旧调用者需要按映射的ID显式注册、准备和执行对应插件，不能依赖Coordinator隐式交付。
-参考App默认仅Web，PDF／邮件为显式可选实现；最小Notice替换只改实现与App集中装配。
-真实平台UI／Web仍需设备验收，构建不代表部署完成。
-
-### 正常停止与结果
-
-标准字幕与译文共用本场 `clientSequence`。Coordinator 在唯一 IO 队列中保留未确认的
-原序号／原不可变事件；后续模型事件或正常停止会先按原顺序补交队首，得到真实 HTTP
-确认后才移出并发送后续事件。响应丢失时仍重交相同事件 ID、序号和内容，复用后端幂等，
-不合并 partial/final 修订、不跳号；已经确认的事件不会再次提交。
-`savedEventCount` 仍只计实际确认的原文事件，译文或同包重交不重复增加。
-
-正常收尾会先确认所有待交标准事件，再进入用量、总结、发布和后端 Stop；仍未确认时
-保持 `STOP_PENDING/canStop=true`，同一句柄再次正常停止可以继续，不重复停音源。
-该机制仅覆盖同宿主内存中的事件补交，不包含定时重试、磁盘队列、进程恢复，
-也不代表 Android 模型 WebSocket 已具备断网重连能力；模型传输续接由 SDK 另行承接。
-
-组合层新增可选 `ModelSessionReconnector`：捕获开始时冻结的 Server／身份和 meetingId，
-只重新请求本场 `modelSession`，再由注册表创建新 Adapter，不重新 Create／StartClient。
-`ModelRuntime` 与 `MeetingRuntimePort` 的新六参入口默认仍委托原录音五参入口；旧 lambda、
-Mock 和伙伴实现保持原行为。材料端口可能阻塞，Android Runtime 必须放到独立续接工作线程，
-不能占用状态锁、采音回调或 `modelControl`；Stop 作废迟到材料，不等待 HTTP 返回。
-Adapter 默认 `supportsSessionReconnect() == false`；显式支持的模型可在旧连接丢弃前通过
-`drainConfirmedOnDisconnect()` 交出真实已确认原文，不能将 partial 改 final 或伪造 FINISHED。
-默认听悟已显式声明，并复用既有 source-final 队列交出等待译文的确认原文；未确认partial
-仍不结束。收到 `SentenceEnd` 后，即使仍在等待译文，同 index 迟到的 partial／stash
-也只补语种和发言人事实，保留确认正文及时间。当前这一步完成合同／编排桥、音源控制解耦及听悟声明；Runtime 真正续接及
-设备断网结果另行验收。
-
-`requestStop()` 只在 `canStop=true` 时受理：先冲刷显示，再调用 `beforeStop(continuation)`。
-App 停截图 tick，在工作线程完成最后有效截图的 `submitPresentation(offsetMs, jpeg)` 调用并关闭采集，
-再调用 continuation；无采集时直接延续。不要阻塞 UI 或遗漏延续，延续仅首次有效，之后不再接纳截图。
-JPEG 在调用时复制，`offsetMs` 相对 `startedAtMs`，序号由组合层分配。
-
-需要更新截图去重基线或确认末帧时，使用
-`submitPresentation(offsetMs, jpeg, MeetingClient.Callback<Void?>)`：内建Coordinator的回调
-都经配置的串行`callbackExecutor`，只有后端实际ACK的`chunkSequence`、`frameCount=1`
-和非空`artifactId`匹配才`onSuccess(null)`。旧void入口保留，仅表示排队，不代表已保存。
-旧自定义Session未实现此重载时明确抛出`UnsupportedOperationException`，不伪造确认。
-
-截图保存失败独立提示，不进入字幕／译文的待确认队列，已有文字仍可正常Stop。
-唯一IO队列仅在成功ACK后推进截图序号；响应未确认时至多保留一个原序号／原字节包，
-下一次截图先确认该原包，再保存新图。原包仍失败时，不用新图覆盖它；当前新图通过
-错误回调结束，App后续自行再次采集。不增加定时重试、持久缓存或进程恢复保证。
-请求正文及服务端规范化保存正文的UTF-8 JSON均须满足现行1MiB预算（含Base64、字段和
-保存时补充的`schemaVersion`）；任一超限都在发送和保留前报错，不消耗序号。
-
-App只在成功回调后更新去重基线；停止前截图的成功／失败都必须续接一次，例：
+正常 `MeetingResult` 仅包含 Manifest，`content()` 和 `resultUrl()` 为 `null`，
+`deliveryStatus()` 为 `NOT_REQUESTED`。这表示会议已就绪但尚未由插件交付。
+Web／纯提示动作无需正文；PDF／离线 HTML 必须在 READY 后通过窄访问异步读取：
 
 ```kotlin
-session.submitPresentation(offsetMs, jpeg, object : MeetingClient.Callback<Void?> {
-    override fun onSuccess(ignored: Void?) {
-        updateCaptureBaseline() // 只在真实保存确认后更新。
-        closeCaptureAndContinueStop()
+context.access().readContent(object : MeetingClient.Callback<MeetingResultContent?> {
+    override fun onSuccess(content: MeetingResultContent?) {
+        context.workExecutor().execute {
+            // 根据 content.artifactTypes() 渲染实际存在的章节；未提供的能力不伪造内容。
+            // 在此生成本地 HTML／PDF，打开界面时切换到 context.uiExecutor()。
+        }
     }
     override fun onError(message: String) {
-        showCaptureNotice(message) // 仅提示图片失败，文字会议仍应正常停止。
-        closeCaptureAndContinueStop()
+        // 结束本次动作并提示可重试；会议本身仍保持 READY。
     }
 })
 ```
 
-`closeCaptureAndContinueStop`由App装配，在其工作线程完成关闭后调原continuation；
-不要在主线程等待网络或同步执行Bitmap／文件清理。关闭client/session后仍遵守既有
-未派发通知抑制语义，显式取消不产生正常Stop或READY。
+上例省略插件完成回调和平台文件处理；完整实现见
+[`LocalPdfResultActionPlugin.kt`](../app/src/main/java/com/czur/aimeeting/reference/LocalPdfResultActionPlugin.kt)。
+请求沿本场 IO 队列执行，回到串行 `callbackExecutor`；访问内部使用开始时冻结的身份和
+`genTime`，不向插件暴露 token 或原 Server client。读正文、发邮件或 UI 动作失败不回退 READY，
+可用原结果和冻结动作再执行。交互结束才关闭 client，关闭后不再派发访问回调。
 
-随后停止同一音源、排完完整 PCM 尾帧，等待末尾字幕/译文与 FINISHED；
-标准事件和截图先保存，再读取 `ModelSession.frozenAudioDurationMs()`，通过
-`POST /v1/meetings/{meetingId}/usage:submit` 提交已冻结整数毫秒，随后按需总结和后端 Stop。
-SDK 复用本场唯一音源，标准 16kHz／mono／PCM16 的时长是实际完整帧字节数／32，
-静音、模型连接前采音和完整尾帧计入，网络重发及总结等待不计入。App无需自行计数或提交。
-旧模型／Mock 默认返回 empty，维持原结果链，不提交虚构的零；明确冻结的0会真实提交。
-自定义端口应实现 `MeetingServerClient.submitUsage()`，其默认兼容方法会明确报未实现。
-同场首次收口保存一次冻结快照，未确认用量时沿用 `STOP_PENDING`、以同值重试；
-已确认用量后不重复提交。Stop 202 也只到 `STOP_PENDING/canStop=true`，用户可再确认，
-不重复衔接、停音源、已提交用量或纪要。
-首次 Stop 受理后生成一次 `genTime`，Manifest、Artifact、链接和邮件共用它；受理不等于 READY。
+`NO_ACTIVE_DELIVERY` 正常 Stop 后直接 ENDED，不读取 Manifest 或主动动作；
+标准事件、总结和用量仍按选项保存，不承诺删除服务端数据。
+`ResultDelivery`／`DeliveryStatus` 等枚举入口仍可使用，动作 ID 需显式注册相应实现。
 
-开启总结的静音／过短会议若没有有效最终字幕，会明确提示“没有最终字幕，无法生成纪要”，
-跳过总结模型及提交；仍沿原顺序冻结用量、发布真实封口录音并正常 Stop，不停在
-`STOP_PENDING`，也不添加占位字幕或伪造总结成功。后端最终清单按实际已保存产物返回。
+### 正常停止与结果
 
-- 正常策略：只读真实READY清单，`onResult`先保存事实，随后`onState(READY)`触发动作。
-  Web／纯提示不读取正文；需要正文或邮件的插件通过同场窄访问显式执行。
-- `NO_ACTIVE_DELIVERY`（旧TRACELESS）：正常Stop后ENDED，不读Manifest、不触发onResult，
-  仍保存标准事件，不新增删除数据或改变总结／计费。音频输入失败后正常Stop同样不主动交付。
-- READY后普通动作失败不进入STOP_PENDING；手动再执行沿用同一结果／genTime／冻结参数。
-  宿主停止计时、屏采和采音前台通知，但保留结果访问到动作成功或用户结束交互。
-  开始新场前关闭旧client；不增加自动重试或进程恢复。
+只有 `canStop=true` 时受理 `requestStop()`。先冲刷显示，并调用
+`beforeStop(continuation)`；App 停止周期截图、结束末帧和采集后调用 continuation，
+无截图时直接续接。continuation 仅首次有效，不要在主线程等网络或遗漏续接。
 
-session/client `close()` 只是取消，不执行后端 Stop、不生成 READY/结果；希望交付应先正常停止。
-当前阶段为 CREATING/RUNNING/STOPPING/FINALIZING、必要时 STOP_PENDING，以及 READY/ENDED/FAILED；
-枚举 STARTING/CLOSED 暂未独立通知。
+截图使用 `submitPresentation(offsetMs, jpeg, callback)`，时间相对 `startedAtMs`。
+后端 ACK 的序号、单帧数量和产物 ID 确认后才调用 `onSuccess`；无回调入口仅表示排队。
+App 只有成功时才确认 SDK 图片被接受。无新图或截图失败仍需关闭采集、继续停止。
+公共核心负责序号和请求上限，App 不复制图片去重或编码算法。
 
-### 可选原场停止记录与同账号续签
+标准字幕／译文共用 `clientSequence`；未确认事件保留同序号和内容，后续提交或正常
+停止先补交队首，确认后再推进，复用后端幂等。该补交只覆盖当前宿主内存，不提供磁盘队列
+或进程恢复。`savedEventCount` 只计已确认原文事件，不因译文或重复提交增加。
 
-部署可通过 `withStoppedMeetingStore(store)` 注册自己的私有持久化实现。只有主动交付、
-标准尾事件／冻结用量／选定总结已确认且真实录音已 sealed 后，协调器才保存发布前
-`StoppedMeetingCheckpoint`。宿主重建后调用 `resumeFinalization(id, callback)`，只续原场
-发布、同键 Stop 与实际 READY；不 Create、采音、重开模型或重新生成总结。默认不装配，
-无痕仍是 Stop → ENDED。Store 不由 SDK 扫描音频目录或迁移、删除文件。
+随后停止同一音源、排完尾帧并等待模型最终事件，按顺序确认事件、冻结用量、总结、
+音频发布和后端 Stop。PCM16 的时长为完整字节数／32 的整数毫秒，静音、模型连接前采音
+和尾帧计入；网络重发与会后等待不计入。没有实采用量的 Mock 不提交虚构的零。
+无有效最终字幕时跳过总结并提示，仍可发布真实录音和正常结束，不制造空总结。
 
-`IdentityProvider.identityForFinalization(meetingId, originalIdentity)` 是可选同账号续签扩展。
-默认返回原访问会话，不读取后来登录的当前账号；普通首次 Stop 及已 READY 的记录也不
-额外调用。原 `STOP_PENDING` 再次确认和宿主重开续办才调用一次此扩展：部署先核私有
-原账号仍是当前账号，再正常认证并返回新 `IdentitySession`。不能用 displayName 或 JWT
-猜账号相同；没有登录、账号变化或认证失败时保留原记录，App 仍负责登录界面。
+未确认的阶段保留 `STOP_PENDING/canStop=true`，再次停止沿用原场和已确认阶段。
+Stop 受理后生成一次 `genTime`，Manifest、产物、链接和邮件共用；受理不等于 READY。
+`onResult` 先交付真实清单，随后的 READY 状态才允许 App 派发动作。
+状态包括 CREATING、RUNNING、STOPPING、FINALIZING、STOP_PENDING、READY、ENDED、FAILED；
+STARTING／CLOSED 枚举未作为独立状态通知。
 
-获准的新凭据由协调器同步保存，并同时用于 Publisher Context、Stop 和 Manifest HTTP。
-会议 ID、原 sealed 文件、冻结用量、服务及 ClientIdentity、Stop 幂等键、已 ACK 阶段和
-Stop 首次受理后的 genTime 保持。每次重试先读 Store 最新记录，防止旧内存候选回写旧
-Bearer；Store.save 仍须保留自己的登记 ACK、发布计划等私有字段。不新增 401 自动循环、
-后台重试器或认证框架；未确认尾事件、未完成总结与跨账号恢复不由此入口补造成功。
+### 连接续接与可选收尾记录
+
+`ModelSessionReconnector` 使用本场冻结 Server、身份和会议 ID 重新领取模型材料，
+再创建新 Adapter，不重建会议。`supportsSessionReconnect()` 默认 false；支持的 Adapter
+可通过 `drainConfirmedOnDisconnect()` 交出真实已确认原文，不把 partial 当作 final。
+听悟已声明支持并保留收到 `SentenceEnd` 的原文。Android Runtime 的材料请求需独立
+工作线程，Stop 不等待迟到 HTTP；连接重建不提供进程级恢复保证。
+
+`withStoppedMeetingStore(store)` 是可选持久化接缝，默认参考 App 未装配。
+尾事件、用量、选定总结已确认且音频封口后保存 `StoppedMeetingCheckpoint`；
+宿主重建调用 `resumeFinalization(id, callback)` 只续原场发布、Stop 和 READY，
+不重新采音或总结。Store 由部署者管理，不由核心扫描或删除音频目录。
+
+`IdentityProvider.identityForFinalization(meetingId, originalIdentity)` 可在原场再次收尾时
+提供同账号新会话，默认返回原身份。部署者须自行确认原账号归属，不能只比较显示名。
+新的材料同步用于发布、Stop 和 Manifest，会议 ID、用量、幂等键、已确认阶段和
+`genTime` 不变；此接口不引入后台自动登录或跨账号恢复。
 
 ### 默认听悟与国内显示
 
-听悟按同一 `index` 替换全量 partial，原文 final 与独立译文 final 按源句顺序配对；
-`stash_result` 保留下一句的 ID/起点。迟到 `detected_source_lang` 可修订标准原文的语种，
-已确认原文不会被旧 partial 重新打开。模型结束时仍保留已收到、尚缺译文的原文 final。
+听悟按同一 `index` 替换完整 partial，原文／译文 final 按源句顺序关联。
+`stash_result` 保留下一句 ID 和起点；迟到源语种可修订标准事件，已确认正文不被旧
+partial 覆盖。模型结束时，已确认但缺译文的原文仍保留。
 
-显示层通过 `onSegmentStarted()` 在句开始绑定方向；明确方向区 A=180～260°、B=280～360°。
-`NO_DIRECTION` 保留上次有效角，`UNSUPPORTED` 按语种降级；后续新句采样不移动已锁侧的旧句。
-Adapter声明源语种可能迟到、互译且有效模糊方向区时，启用一次最多1.5秒的语种窗口：最新快照替换旧快照，
-可信语种及时到达直接释放，到期/Stop 按会前 A/B 本地评分兜底，平分选 A。
-声明入口为`ModelAdapter.mayEmitDeferredSourceLanguage()`，默认false保留旧伙伴的即时显示；
-有此消息时序的伙伴实现覆盖返回true。内带听悟已声明true，Coordinator只读取实际Adapter声明，
-注册ID和供应商名称不决定等待，也不新增Server能力或App开关。
+`onSegmentStarted()` 绑定句开始方向：明确 A 区 180～260°、B 区 280～360°。
+`NO_DIRECTION` 保留上次有效角，`UNSUPPORTED` 按语种降级；新句采样不移动旧句。
+Adapter 通过 `mayEmitDeferredSourceLanguage()` 声明源语种可能迟到；互译且方向模糊时
+最多等待 1.5 秒，期间只保留最新快照，可信语种到达即释放。到期或 Stop 时按会前 A／B
+语种评分兜底，平分选 A。听悟已声明该行为，工厂 ID 或供应商品牌不决定等待规则。
 
-低层 `MeetingDisplayState.nextLanguageDeadlineMs()` 提供最早单调截止点，使用方独立于网络 IO
-安排一次定时调用 `releaseExpiredLanguages(nowMs)`；停止调用 `flushPendingLanguages()`。
-所有状态更新在同一串行上下文。`snapshot()` 输出不可变 `MeetingDisplaySnapshot`；
-显示侧和模型真实语言彼此独立，UI 根据 `isFinal` 渲染80%/100%透明度。
-组合入口已由 Coordinator 调度 deadline 和 Stop 冲刷，App 不再复制计时。
-`latestTranscriptSegmentId` 表示最近可见原文更新，非列表末行 ID；旧段迟到修订不改首次段顺序，
-但更新此字段，字幕浮窗可据此取最新原文。旧五参构造兼容，未知该事实时为 null。
-core 的窗口诊断使用 Java 日志 `FINE` 级，包含片段ID/修订/等待时长，不输出正文或凭据。
-
-伙伴只需新增 Adapter 实现，并在会议开始前注册工厂和可解析能力：
+基础显示使用 `nextLanguageDeadlineMs()`、`releaseExpiredLanguages(nowMs)` 和
+`flushPendingLanguages()`；状态更新应在同一串行上下文。组合入口已自动调度，
+App 只消费不可变 `MeetingDisplaySnapshot`，按 final 100%／partial 80% 呈现。
+`latestTranscriptSegmentId` 指最近可见原文更新，旧段迟到修订不改变首次排序。
 
 ```kotlin
-val adapters = ModelAdapterRegistry() // 自带听悟、样例和百炼。
+val adapters = ModelAdapterRegistry()
 adapters.register("partner-json", ::PartnerAdapter, setOf("transcript.realtime"))
-// 将 adapters 交给 AiMeetingClient；Server 本场返回 adapterId，Coordinator 自动选新实例。
+// 将注册表交给 AiMeetingClient；后端本场 adapterId 决定实际工厂。
 ```
 
-当前实时传输边界为 WebSocket 加 16 kHz/单声道/PCM16。Adapter 只归一化消息，
-不代表任意传输、编码或私有音频协议均已支持。会议模型地址、短期访问材料与本场权限由 Server 决定。
+实时传输当前为 WebSocket、16kHz／单声道／PCM16。Adapter 抹平消息格式差异，
+其他传输和音频编码需另行评估平台支持。日志不输出正文、音频、材料 URL 或 token。
 
-构建：
+## 构建和依赖
+
+在 `android-reference-app/` 执行：
 
 ```bash
 ./gradlew :model-runtime-contract:jar :meeting-client-core:jar :meeting-client-core:test
 ```
 
-产物是 `build/libs/meeting-client-core-0.1.0.jar`，不内带 `model-runtime-contract` 或 `org.json`。
-Mock App 直接依赖本模块；SDK App 使用私有 AAR 内带的同一 JAR，不再依赖本工程模块。
-SDK 从公共契约 JAR 以 `compileOnly` 编译，App 打包唯一一份契约；Android 提供 JSON 类。
-`api(project(":model-runtime-contract"))` 仅表达源码模块的编译依赖，不生成合并 JAR。
-两个公共模块使用 Kotlin 2.4.21。源码 Module 依赖会传递 Kotlin 标准库；如以裸 JAR
-交给未启用 Kotlin 插件的宿主，需显式提供匹配的 `org.jetbrains.kotlin:kotlin-stdlib:2.4.21`。
+产物位于本模块 `build/libs/meeting-client-core-0.1.0.jar`，不内带
+`model-runtime-contract` 或 `org.json`。Mock 依赖本模块源码；SDK 模式消费主 AAR 内带
+的同源 core，不重复打包。契约通过本工程打包一份，Android 提供 JSON 类。
+Kotlin 模块依赖会传递标准库；以裸 JAR 交付给未启用 Kotlin 插件的宿主时，需显式提供
+`org.jetbrains.kotlin:kotlin-stdlib:2.4.21`。
 
-`MeetingRuntimePort` 是平台/Mock 装配边界，不供业务 App 另写会议流程；真实运行时接收材料/新 Adapter，
-本地 Mock 可固定声明能力且不领材料（参数为 null），仍用同一 Coordinator。Android 装配覆盖
-`elapsedRealtimeMs()` 为 `SystemClock.elapsedRealtime()`；Mock 应使用同一 Android 单调时基。
-
-P6-5 与 P6-6 两片已独立签收；组合入口使用相同源码生成的 JAR 作为 SDK 输入。
-P6-7 继续迁移实际 App Service/页面链路并回归真机，主机环回或 AAR/APK 不代签真实听悟、实体方向、采集或 PDF。
-日志 INFO 记录阶段开始/结束/结果，逐段诊断为 FINE；不记录原文、原始载荷、URL、token 或 Throwable 正文。
-冻结用量沿用既有后端端口；标准事件仅提供上述同场内存补交，不建设备份恢复、通用重试或安全矩阵。
+`MeetingRuntimePort` 是平台／Mock 装配边界，无需业务 App 重写会议流程。
+Android 的单调时间来自 `SystemClock.elapsedRealtime()`；自定义 Runtime／Mock 应使用
+同一时基。构建、固定样例和单元测试不替代模型、部署和设备场景验收，当前范围见
+[验证范围](../../docs/validation-scope.md)。

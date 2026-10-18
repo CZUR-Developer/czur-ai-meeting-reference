@@ -1,8 +1,8 @@
-# 国内版窗口资源来源
+# 参考窗口资源来源
 
-本页记录 P7 窗口复刻使用的 CZUR 国内版显示资源。来源仓库为 `starry`，源码基线
-`929645431e2fd0fe79d5baa9a42d5743747f105c`；下表路径相对该仓库的
-`apps/transcription/src/main/res/`。原图逐字节复制，只修改公开工程内的资源名称和目录。
+本页说明参考窗口中来自 CZUR 国内版 AI 字幕纪要的显示资源。
+下表原始路径相对原应用资源目录，仅用于标识出处；使用参考工程无需取得原产品源码。
+原图逐字节复制，只修改参考工程内的资源名称和目录。
 图片放入 `drawable-nodpi/`，尺寸由 App 的 1920×1080 设计数值统一换算；不再按原
 tvdpi 或默认 drawable 密度二次缩放。动画放入 `raw/`。
 
@@ -35,9 +35,15 @@ tvdpi 或默认 drawable 密度二次缩放。动画放入 `raw/`。
 左右决策使用已有 SDK 快照的`sourceSide`和应用显示交换开关，不在 View 重算路由。
 
 `CzurVoiceLevelView`只迁移`AnimatedImageCloudsView.kt`的声音图和高度响应曲线，
-订阅、采音、PCM计算仍由 SDK 完成。WebP由 Android 平台解码，Android 26／27显示
-同素材的静态帧并保留电平响应；Mini沿用原版独立 APNG 3.0.5显示库。
+订阅、采音和 PCM 计算由 SDK 完成。WebP 由 Android 平台解码，声音图接收 SDK 的
+0～100 电平；Mini 使用独立 APNG 3.0.5 显示库。参考应用最低支持 Android 14。
 
-不复制 `baselib`、系统账号、Launcher、旧 CloudAsrService 或平台专属联动。
+参考工程不引入原产品基础业务库、系统账号、Launcher 或平台专属联动。
 伙伴可以改资源和这两种`OverlayViewFactory`；SDK的窗口管理、会议停止及模型接口
 无需随 UI 修改。完整四形态使用UI AAR；不带UI AAR的基础构建只提供当前字幕／普通双栏。
+
+## 许可与交付范围
+
+源码的许可和声明见仓库根目录 [LICENSE](../../LICENSE) 与 [NOTICE](../../NOTICE)。
+第三方显示库遵循其自身许可，配套 SDK／UI 制品以各自交付约定为准。
+本页的来源记录不扩大对未交付原产品源码或其他材料的使用权限。

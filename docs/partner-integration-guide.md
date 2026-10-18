@@ -67,8 +67,8 @@ SDK构建顺序见[从零指南第4节](partner-getting-started.md#4-按步骤�
 Android 默认读取 `android-reference-app/deployment.local.properties`，公开模板为同目录的
 `deployment.properties.example`，真实本地文件已忽略。也可用 `-PreferenceDeploymentFile`
 选择仓外 `.properties`；显式 `-PreferenceBackendUrl`／`-PreferenceResultWebUrl` 优先于
-文件中的同名键。未配置时 App 提示联系应用提供方，不重新打开地址输入界面，也不从旧
-手输设置回退。局域网开发可用 [`build-lan-apk.py`](../tools/android-device/build-lan-apk.py)
+文件中的同名键。未配置时 App 提示联系应用提供方；设备端没有手输地址界面或
+地址回退来源。局域网开发可用 [`build-lan-apk.py`](../tools/android-device/build-lan-apk.py)
 自动选择 PC 地址或显式传主机、独立端口／完整 URL 及配套 AAR／公开 Debug CA。
 构建与无地址步骤的设备启动命令见 [工具说明](../tools/android-device/README.md)。
 
@@ -92,7 +92,8 @@ AI_MEETING_MODEL_CAPABILITIES=transcript.realtime,translation.realtime
 
 服务端将 Provider、Product Profile、权益和部署限制求交，得到可用能力；支持语言
 则由部署方按实际 Provider 填写 `AI_MEETING_MODEL_LANGUAGES`，`/v1/capabilities`
-按该声明返回，参考界面不固定厂商清单。当前听悟实现已有中文、英语、日语、韩语、
+按该声明直接返回；未配置时为 `zh-CN,en-US`，当前没有 Provider／Profile 语言列表
+自动求交或向模型查询语种的过程。参考界面不固定厂商清单。当前听悟实现已有中文、英语、日语、韩语、
 德语、法语、俄语七种标准语言映射，部署只声明实际开放的子集。
 
 默认命令行入口的 ASR 发行器支持听悟和 `sample-json-ws`，并可选择组合下文的
@@ -249,7 +250,7 @@ suspend fun captureOneFrame() {
 ```
 
 上述保存方法是伙伴业务的示意，不是 SDK 的上传入口。参考 App 对应接线使用现有
-三参 `MeetingSession.submitPresentation`，只有 `onSuccess` 后才确认；两参旧入口
+三参 `MeetingSession.submitPresentation`，只有 `onSuccess` 后才确认；两参无回调入口
 只代表入队，不能用作保存确认。失败不确认，后续仍可取得该图；`null` 正常续接。
 
 需要 Bitmap 时改用 `captureBitmap(...)`。开启处理的 File 为 JPEG，关闭处理的 File
@@ -272,10 +273,79 @@ Manifest。
 
 伙伴可以新增：
 
-- 本地离线 HTML 或 PDF 渲染器：从 `MeetingResult` 生成自己的文件并交给 App；
+- 本地离线 HTML 或 PDF 渲染器：先通过动作上下文异步读取正文，再生成自己的文件并交给 App；
 - 邮件动作：发送同一结果链接或伙伴自己的附件策略；
 - 小程序／扫码动作：在 App 中接入伙伴接收端和 Hook；
 - NAS、企业 IM 或其他结果接收器：实现同一个动作接口。
+
+### 本地结果插件必须按需读取正文
+
+正常进入 `READY` 时，`context.result()` 提供本场 ID、标题、状态、`genTime` 和
+产物类型清单，`content()` 通常为 `null`。它不意味着正文为空。需要本地渲染的
+插件须调用 `context.access().readContent(...)`，取得同场实际 READY 的文字、
+译文、总结和演示帧等正文；默认 Web 动作只生成链接，不需要提前下载这些内容。
+
+下面是可装配到结果动作注册表的最小 Kotlin 示例。`writeHtml` 与 `openHtml` 是
+伙伴注入的文件生成和页面展示函数；示例未附带离线 HTML 渲染器：
+
+```kotlin
+import com.czur.aimeeting.client.MeetingClient
+import com.czur.aimeeting.client.MeetingOptions
+import com.czur.aimeeting.client.MeetingResult
+import com.czur.aimeeting.client.MeetingResultContent
+import com.czur.aimeeting.client.result.ResultActionOutcome
+import com.czur.aimeeting.client.result.ResultActionPlugin
+import java.io.File
+
+class LocalHtmlAction(
+    private val writeHtml: (MeetingResult, MeetingResultContent) -> File,
+    private val openHtml: (File) -> Unit,
+) : ResultActionPlugin {
+    override fun id() = "local.html"
+    override fun displayName() = "本地查看"
+    override fun requiredArtifactTypes() = setOf("transcript.final")
+
+    override fun prepare(options: MeetingOptions) =
+        ResultActionPlugin.Preparation.allow { context, callback ->
+            context.access().readContent(object : MeetingClient.Callback<MeetingResultContent?> {
+                override fun onSuccess(content: MeetingResultContent?) {
+                    if (content == null) {
+                        callback.onError("本场正文不可用")
+                        return
+                    }
+                    context.workExecutor().execute {
+                        runCatching { writeHtml(context.result(), content) }.fold(
+                            onSuccess = { file ->
+                                context.uiExecutor().execute {
+                                    runCatching { openHtml(file) }.fold(
+                                        onSuccess = {
+                                            callback.onSuccess(ResultActionOutcome.success(id(), "已打开本地结果"))
+                                        },
+                                        onFailure = { callback.onError("无法打开本地结果") },
+                                    )
+                                }
+                            },
+                            onFailure = { callback.onError("生成本地结果失败") },
+                        )
+                    }
+                }
+                override fun onError(message: String) {
+                    callback.onError("读取本场正文失败")
+                }
+            })
+        }
+}
+```
+
+文件读写／渲染交给 `workExecutor()`，页面操作交给 `uiExecutor()`；注入函数不能
+捕获已销毁的 Activity，异步动作最终只回调一次成功或失败。正文读取、文件生成或
+展示失败属于结果动作失败，重试该动作即可，不重新停止会议或重复结算。
+
+渲染时以 `MeetingResultContent.artifactTypes()` 和各字段实际内容决定区域；无译文、
+总结或图片时不造空区。`readContent` 不打包留存录音文件；完整离线媒体方案还需按
+Manifest 的 `ArtifactRef` 单独流式下载录音，再以本地相对路径引用。
+实际 PDF 接线见 [LocalPdfResultActionPlugin](../android-reference-app/app/src/main/java/com/czur/aimeeting/reference/LocalPdfResultActionPlugin.kt)，
+接口生命周期见 [公共客户端核心说明](../android-reference-app/meeting-client-core/README.md)。
 
 Web 只读取 `READY` Manifest。原文、译文、结构化总结和录音分别由真实
 `ArtifactRef` 决定是否展示；录音使用 `GET /v1/artifacts/{artifactId}?genTime=...`
@@ -290,7 +360,7 @@ Artifact Store 或反向代理时，应对齐该最长会议预算，避免录�
 
 启用跨会议人物身份时，默认参考 Web 还提供登录后的命名注册入口；匿名结果链接仍只读。
 `speaker.identity` 是单独的标准产物，本场 speaker 编号与跨会议 `personId` 分开。
-参考讯飞插件、FFmpeg 依赖和可选环境项见 [后端说明](../backend-reference/README.md#p10-可选跨会议声纹参考插件)
+参考讯飞插件、FFmpeg 依赖和可选环境项见 [后端说明](../backend-reference/README.md#可选跨会议声纹参考插件)
 及 [本机配置模板](../tools/reference-client.env.example)。未注册 Provider 时人物区隐藏，
 字幕／译文／总结和录音照常交付；伙伴可用自己的 `SpeakerIdentityProvider` 替换供应商与人员库。
 

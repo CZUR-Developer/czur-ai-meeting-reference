@@ -40,7 +40,7 @@ SDK 构建已接入可选的截图黑盒会话，图片处理、编码和去重�
 ## 本机开发验证
 
 使用 IntelliJ IDEA 打开根目录 `pom.xml`，使用 Android Studio 打开
-`android-reference-app/`。Android
+`android-reference-app/`。Android 最低支持 Android 14／API 34。
 应用的系统音频实现和签名组件由设备厂商通过 SDK 提供，不在此仓库中实现。
 
 开发机安装 Java 21、Maven、Python 3 和 Node.js/npm 后，从仓库根目录运行：
@@ -59,8 +59,8 @@ cd android-reference-app && ./gradlew :app:assembleDebug
 
 MySQL 5.7 的独立能力探针见 [`tools/mysql57-compatibility/`](tools/mysql57-compatibility/README.md)；
 此入口仅做本机隔离能力探针。共享核心保留 PostgreSQL 兼容适配，参考客户端直连
-会议链默认使用 MySQL 5.7；旧 WSS／Mock 兼容链仍可在显式 PostgreSQL 测试夹具中运行，
-不改变本期参考方案的 MySQL 交付边界。
+会议链默认使用 MySQL 5.7；非默认 WSS／Mock 链可在显式 PostgreSQL 测试夹具中运行，
+不改变参考方案的 MySQL 交付边界。
 
 公共后端核心的边界和消费方式见 [`backend-core/README.md`](backend-core/README.md)。
 两模块从根目录执行 `mvn -B clean test`；单独构建参考应用使用
@@ -73,7 +73,7 @@ MySQL 5.7 的独立能力探针见 [`tools/mysql57-compatibility/`](tools/mysql5
 `deployment.local.properties` 后填写实际地址，该本地文件已被 Git 忽略。也可通过
 `-PreferenceDeploymentFile` 选择仓外 `.properties`，或用显式
 `-PreferenceBackendUrl`／`-PreferenceResultWebUrl` 覆盖文件同名键。默认未配置时仍可构建，
-App 提示联系应用提供方；不会转而读取旧手输地址。
+App 提示联系应用提供方，设备端没有手输地址入口。
 
 局域网测试使用 [`build-lan-apk.py`](tools/android-device/build-lan-apk.py) 检测 PC 地址或
 显式传入主机、后端／Web 端口及配套 AAR／Debug CA。它只组合已有 Gradle 输入，不启动
@@ -104,9 +104,11 @@ Compose路径使用 `deploy/.env`；两份文件各自从对应模板复制。�
 
 合作伙伴的准备清单和实际接入步骤见[从零接入指南](docs/partner-getting-started.md)；
 全部模型及能力缺失行为见[模型与能力配置指南](docs/model-and-capability-guide.md)；
-接口扩展和交付边界见[扩展开发手册](docs/partner-integration-guide.md)。
+接口扩展和交付边界见[扩展开发手册](docs/partner-integration-guide.md)；
+已覆盖的验证范围和目标环境验收清单见[当前支持范围](docs/validation-scope.md)。
 
-## 开源发布
+## 发布前检查
 
-Gitee 是开发主仓；经过许可证、依赖和敏感信息扫描，并由发布负责人批准后，
-才将版本标签单向同步到 GitHub。日常开发不直接向 GitHub 推送。
+发布自己的产品前，应检查适用许可证、依赖、运行配置和敏感信息边界，
+使用正式签名与部署环境完成[验收清单](docs/validation-scope.md#目标环境的最小验收)。
+配套闭源 SDK 按其交付许可使用，不随参考源码重新公开。

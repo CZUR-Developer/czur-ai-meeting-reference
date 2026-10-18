@@ -4,10 +4,10 @@
 
 - [V001__initial_schema.sql](V001__initial_schema.sql)
 - 执行入口：[deploy/migrate.sh](../migrate.sh)
-- 兼容旧调用名：[deploy/migrate-mysql.sh](../migrate-mysql.sh)
+- 等价调用入口：[deploy/migrate-mysql.sh](../migrate-mysql.sh)
 - 基线登记表：`ai_trans_schema_migrations`
 
-脚本只向调用方已经创建的目标数据库新增会议专用 `ai_trans_*` 表，不创建数据库或账号，不读写旧业务表，也不加入 CZUR Cloud 的迁移版本链。应用启动只做只读 readiness 检查，不自动建表。
+脚本只向调用方已经创建的目标数据库新增会议专用 `ai_trans_*` 表，不创建数据库或账号，不读写其他业务表。应用启动只做只读 readiness 检查，不自动建表。
 
 MySQL 5.7 的 DDL（数据定义语句）会隐式提交，脚本只有在整份 V001 成功后才登记 `V001__initial_schema`；已完整登记的重复执行直接跳过。脚本不关闭外键检查，不删除或修复中途失败留下的结构。失败后请在仍然隔离的测试库中人工核对，再重新初始化。
 
@@ -22,4 +22,4 @@ export DATABASE_PASSWORD='只在本机注入'
 bash deploy/migrate.sh
 ```
 
-MySQL 容器可以作为本机临时测试依赖，例如使用 `mysql:5.7` 并只绑定 loopback；容器、数据卷和测试账号都不是参考代码交付物。正式部署由部署方提供 MySQL 实例并执行同一份 V001。PostgreSQL 适配代码仍保留在公共 core 以支持既有兼容宿主，但本期参考仓不再交付或默认使用 PostgreSQL 初始化脚本。
+MySQL 容器可以作为本机临时测试依赖，例如使用 `mysql:5.7` 并只绑定 loopback；容器、数据卷和测试账号由测试方维护。正式部署由部署方提供 MySQL 实例并执行同一份 V001。公共 core 包含 PostgreSQL 可选适配器，参考仓仅交付 MySQL 初始化脚本，默认链使用 MySQL。

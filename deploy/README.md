@@ -98,19 +98,22 @@ Android 默认读取已忽略的 `android-reference-app/deployment.local.propert
 ## 模型、身份和结果
 
 `REFERENCE_DEV_*` 仅是单账号示例登录；合作伙伴可替换 Identity／Login Provider，
-保存登录状态的逻辑在 App 装配层，不进入会议状态机。实时模型、翻译、总结、声纹和
-语言列表都由部署配置与 Provider 能力声明共同决定，真实厂商 Key 只留在后端本机或
-外部 Secret 注入，不写入模板、日志或仓库。
+保存登录状态的逻辑在 App 装配层，不进入会议状态机。实时模型、翻译、总结和声纹
+按部署声明与已装配 Provider 开放。语言列表由 `AI_MEETING_MODEL_LANGUAGES` 直接
+声明，省略时为 `zh-CN,en-US`；当前不自动求交 Provider／Profile 的语言列表，部署者
+须核对模型与 Adapter 实际支持范围。真实厂商 Key 只留在后端本机或外部 Secret 注入，
+不写入模板、日志或仓库。
 
-运行镜像已提供 `ffmpeg`，启用[可选声纹插件](../backend-reference/README.md#p10-可选跨会议声纹参考插件)
+运行镜像已提供 `ffmpeg`，启用[可选声纹插件](../backend-reference/README.md#可选跨会议声纹参考插件)
 后可直接提取样本；不启用时不会执行它。最长会议由 `AI_MEETING_MAX_MEETING_DURATION_MS`
 声明，HTTP 录音上传与 file／S3 Store 统一按 `最长毫秒数 × 32 + 1 MiB` 计算预算
-（至少保留旧 64 MiB），足以覆盖标准 PCM 回退；该预算不改变 JSON 限制或计费用量。
+（下限为 64 MiB），足以覆盖标准 PCM 回退；该预算不改变 JSON 限制或计费用量。
 外部反向代理如设置请求体限制，也应按该预算同步配置。
 
 默认结果展示是 Web；本地 HTML、邮件、扫码／小程序等通过结果动作或渲染器扩展，
 不复制会议状态机。截图采集／可选处理的接口与接入见 Android／SDK 手册，
-演示多图、末帧及 Web／PDF 对照仍按专项验收边界记录，不用部署成功代替设备验收。
+演示多图、末帧及 Web／PDF 对照须按[当前支持范围与验收清单](../docs/validation-scope.md)
+在目标设备上核对，不用部署成功代替设备验收。
 
 ## 镜像边界
 

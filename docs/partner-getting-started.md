@@ -76,7 +76,7 @@ SDK 会探测设备能力：有兼容系统共享音源接口时使用该接口�
 | 一个实时语音服务 | 本指南默认路径使用您自己的阿里云听悟 AppKey、AccessKey ID／Secret及已开通服务 | 将真实语音转为字幕 |
 | 示例登录信息 | 部署者自行设定的参考用户名、密码及会话配置 | 让终端用户正常登录 App |
 | 网络和 HTTPS | 设备到后端、Web、模型均可达；App 登录入口有可信 HTTPS | 设备连接与模型交互 |
-| Android 测试设备 | Android 8.0／API 26 或以上，麦克风、网络、ADB 调试条件 | 运行 App 和验证真实语音 |
+| Android 测试设备 | Android 14／API 34 或以上，麦克风、网络、ADB 调试条件 | 运行 App 和验证真实语音 |
 
 初次只开启字幕即可，百炼总结、讯飞声纹、对象存储、邮件和小程序均非必需。
 全部模型资源和缺失后的效果见[统一模型能力表](model-and-capability-guide.md#1-第三方平台与业务功能总表)。
@@ -89,7 +89,7 @@ Maven 的开发环境中打开。
 | 环境 | 说明 |
 | --- | --- |
 | Java Development Kit（JDK）21、Maven 3.9.x | 后端构建和运行；Android 工程自带 Gradle Wrapper |
-| Android Studio、Android SDK Platform 35、ADB | App 构建、安装与设备调试；项目最低运行 API 26 |
+| Android Studio、Android SDK Platform 35、ADB | App 构建、安装与设备调试；最低支持 Android 14／API 34 |
 | Node.js 18+、npm；建议 22+ | Web要求18+；可选WebView结果检查脚本使用22+内置能力 |
 | Python 3 | 本机 Web 启动、LAN 构建及设备脚本 |
 | MySQL 命令行客户端、curl | 执行初始化、检查服务 |

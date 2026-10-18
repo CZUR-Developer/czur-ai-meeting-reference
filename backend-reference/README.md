@@ -1,570 +1,263 @@
 # Backend reference implementation
 
-当前 Maven 后端由两个 Module 组成。共享领域、协议、会议流程和 JDBC 源码位于
-[`../backend-core/`](../backend-core/README.md)；本模块保留参考进程、演示登录、Mock
-和默认装配。下面的 `domain/`、`application/port/`、公共 `jdbc/` 等为核心中的包路径。
-现有测试保留在本模块 `src/test/java/`，通过普通核心依赖同时验证公共与参考行为。
-IntelliJ IDEA 打开仓库根 `pom.xml`，即可导入两个 Module。
+Java 21 参考应用，负责演示登录、默认插件选择、进程启动和参考测试。
+公共会议领域、协议、能力计划、HTTP 路由和 JDBC 实现在
+[`backend-core`](../backend-core/README.md)，通过普通 JAR 依赖复用，
+宿主无需依赖整个参考应用或复制状态机。
 
-`backend-core` 是参考和 CZUR 后续统一消费的唯一核心源码；宿主通过普通 JAR
-依赖并在装配层注入私有账号、模型、结算和发布插件，不依赖整个参考应用或复制状态机。
-本轮先完成参考链，Cloud 当前固定 JAR 暂不更新；同源制品升级和 CZUR 插件联调另行验收。
+首次接入请依次阅读：
 
-## 本机局域网客户端直连入口
+1. [从零接入指南](../docs/partner-getting-started.md)：环境、资源和首场真实会议。
+2. [模型与能力指南](../docs/model-and-capability-guide.md)：供应商、能力与可缺失组合。
+3. [伙伴扩展手册](../docs/partner-integration-guide.md)：替换登录、模型、存储和结果交付。
+4. [部署说明](../deploy/README.md)：外部 MySQL、配置和后端应用镜像。
 
-`ReferenceClientMeetingMain`／`ReferenceClientMeetingProcess` 是 P10 的本机参考入口。
-它只启动 HTTP，不启动旧 WSS 音频链或后台 Mock 收口 Worker；Android 通过
-`POST /v1/meetings/{meetingId}:modelSession` 取得短期模型材料后直连 Provider，标准
-字幕／译文／用量事件仍回写同一会议 HTTP 核心。这样可以直接验证“App→模型”和“App→
-参考后端”的边界，不把音频错误地转发到后端。
+## 默认运行链
 
-开发机可按以下顺序运行（不使用 Docker 做开发检查）：
+`ReferenceClientMeetingMain`／`ReferenceClientMeetingProcess` 是本机和 Docker
+交付的默认入口。它只启动 HTTP 业务服务；Android 通过
+`POST /v1/meetings/{meetingId}:modelSession` 领取短期材料，再由 SDK 直连模型。
+标准原文、译文和用量提交到会议后端，选择保留的封口录音也会上传后端。
+默认进程不启动服务端 WSS 音频入口、固定文本 Mock Worker 或第二套会议状态。
+
+```text
+Android App → SDK → 实时模型
+                ↘ 会议后端 → MySQL／产物存储 → Web 结果
+```
+
+在仓库根目录运行：
 
 ```bash
 cp tools/reference-client.env.example tools/reference-client.env
-# 编辑本机数据库、演示账号、局域网监听地址和模型 Adapter；不要提交该文件。
+# 先编辑本机配置，再初始化与启动；不要提交填好凭据的配置。
 bash tools/migrate-reference-client.sh
 bash tools/run-reference-client-backend.sh
-# 另一个终端：
+# 另一个终端检查：
 bash tools/check-reference-backend.sh
+```
+
+部署方须先创建 MySQL 5.7 专用数据库与账号。初始化脚本只执行仓库唯一的
+[MySQL V001](../deploy/migrations/V001__initial_schema.sql)，应用启动只检查基线，
+不自动建表。`tools/reference-client.env.example` 默认选择 `sample-json-ws` 协议样例，
+需要另行启动对应的样例模型服务；它不自带真实识别能力。
+真实听悟接入须更改 Adapter、注入已开通凭据并调整语言与能力声明。
+
+`AI_MEETING_HTTP_BIND=0.0.0.0:8080` 是后端 HTTP 上游；Android 登录与后端地址
+使用设备可达的 HTTPS 入口，见[局域网 HTTPS 指南](../docs/local-lan-https.md)。
+设备自己的 `127.0.0.1` 指设备本身。静态 Web 另部署，本机示例为：
+
+```bash
+# 将占位地址替换为设备可达的开发电脑局域网地址。
+REFERENCE_HTTP_BASE_URL='http://192.0.2.10:8080' \
+REFERENCE_WEB_BIND=0.0.0.0 REFERENCE_WEB_PORT=8090 \
 bash tools/run-reference-web.sh
 ```
 
-数据库必须先执行仓库内唯一的 `deploy/migrations/V001__initial_schema.sql`；应用启动
-只做只读 readiness，不自动建表或修补结构。`AI_MEETING_HTTP_BIND` 可以使用
-`0.0.0.0:8080`，它是 HTTP 上游。Android 的登录／后端地址须填设备可达的 HTTPS
-入口，例如 `https://192.168.1.20:8443`；可按[局域网 HTTPS 联调](../docs/local-lan-https.md)
-为开发 PC 配置入口和 Debug CA。不能填设备自己的 `127.0.0.1`；显式 `adb reverse`
-的 loopback HTTP 只用于诊断。`AI_MEETING_WSS_ORIGIN` 在该入口仅保留公开 Create
-的兼容字段，不代表本进程启动了 WSS。
+`run-reference-web.sh` 未设置 `REFERENCE_HTTP_BASE_URL` 时使用本机 loopback；
+设备回看必须显式配置可达地址。App 的后端与结果页地址在构建时注入，
+终端用户只输入示例账号和密码。
 
-最小模板使用本机 `sample-json-ws-model.py`，用于先验证路由和 Adapter 装配；真实
-听悟／总结验证时将 Adapter、语言和能力声明改为已获准的外部配置，长期 Key 只留在
-本机环境或 Secret 注入中。启动日志只记录阶段、端口和固定类别，不打印凭据、模型
-JoinUrl 或请求正文。参考宿主也可通过 `ReferenceMeetingHttpAssembly.startClientModel`
-传入自己的 `SessionLoginEndpoint`、`ModelSessionIssuer` 和 `SummarySessionIssuer`，
-不改核心会议流程。
+## 源码与装配边界
 
-这是公开仓中的 Java 21 参考后端，用于展示会议领域状态、能力计划、可替换的
-Model Driver 端口和 MySQL 5.7 事实源边界。领域、命令和应用端口保持与 HTTP
-框架、数据库实现、厂商 SDK 和生产服务解耦；Provider 特有的响应转换只能位于
-Driver 实现中。公共核心仍保留 PostgreSQL 兼容适配，供旧宿主或显式兼容测试使用，
-不改变本参考客户端默认使用 MySQL 的边界。
+| 实现 | 所在位置与职责 |
+| --- | --- |
+| `ReferenceClientMeetingProcess` | 本模块：默认客户端直连模型进程 |
+| `ReferenceMeetingHttpAssembly` | 本模块：参考插件选择与公共装配的薄封装 |
+| `ReferenceDevIdentityProvider`、预置登录入口 | 本模块：显式启用的单账号参考实现 |
+| 讯飞人物 Provider、FFmpeg 样本处理与人员映射 | 本模块：可选会后插件 |
+| `domain/`、`application/port/`、公共 HTTP／JDBC | `backend-core`：共享领域与框架实现 |
+| `src/test/java/` | 本模块：参考行为和公共核心测试 |
 
-## 当前公开范围
+IntelliJ IDEA 打开仓库根 `pom.xml` 即可导入两个模块。生产宿主直接依赖
+`backend-core`，在装配层注入自己的账号、模型、权益结算、存储和结果发布实现。
+源码归属及维护规则见 [`SOURCE.md`](SOURCE.md)。
 
-- `domain/meeting/`：会议状态机、聚合、不变量和快照恢复；本次同步新增部署范围语义，
-  并保留原有文件与测试。
-- `application/command/`：创建/停止命令、请求校验、幂等预占和会议仓库调用。
-- `application/port/`：`MeetingRepository`、`IdempotencyStore`、`OutboxStore` 等替换
-  边界；参考实现使用 MySQL 5.7，生产宿主也可接入 PostgreSQL 或其他持久化系统。
-- `application/identity/referencedev/`：默认禁用的固定 Bearer Token 身份示例，
-  只用于本地演示和契约测试，不是合作伙伴或 CZUR 生产账号实现。
-- `application/persistence/`：线程安全的内存适配器，仅用于参考和测试，不是生产事实源。
-- `application/persistence/jdbc/`：基于标准 JDBC `DataSource` 的 MySQL 5.7 参考适配器，
-  覆盖会议快照、幂等记录、Outbox、跨端口工作单元，以及配置、连接池、readiness/liveness
-  和关闭生命周期。运行时不自动建表，必须先执行并登记仓库唯一的
-  `deploy/migrations/V001__initial_schema.sql` 当前基线；同目录中的 PostgreSQL 适配只供
-  旧兼容宿主和显式夹具使用。
-- `domain/capability/`：P3-T01 已验收的能力描述、产品 Profile、依赖/回退规则和不可变能力计划。
-- `application/port/model/`：P3-T02 已验收的 Model Driver SPI、规范化会话/音频/事件对象、无网络 `MockModelDriver`，以及 P3-T04 的 `AlternativeTextModelDriver`。
-- 对应 `src/test/java/`：能力计划、Model Driver 生命周期、幂等、顺序、取消、超时及资源边界测试；`ModelDriverContractTestKit` 为任意 Driver 复用的测试作用域契约工具包。
+## 能力和语言声明
 
-能力计划把 Provider 能力事实、产品档位、本场授权和部署限制固化为带
-`planRevision` 的不可变结果。Model Driver 只接收应用层已经固化的
-`RealtimeSessionSpec`，按公共序号处理音频并输出稳定的
-`segmentId`/`revision`/`final` 事件；Mock 和 `AlternativeTextModelDriver` 均不访问网络，
-固定文本仅用于契约测试和示例；上述服务端 Driver 不承担 P5 的 Android 直连模型运行。
+`GET /v1/capabilities` 返回部署可用功能，依据产品档位、权益、模型能力、
+可选 Provider 是否装配及部署限制计算。Create 的 `capabilityDecisions`
+再冻结本场授权；发现接口不代表当前用户或某场会议已获准全部功能。
 
-## P5-1 听悟临时会话
+最小配置只开放 `transcript.realtime`。增加翻译、总结或本场分人时，
+须同时配置 Profile、权益和实际模型能力，并装配真实实现。总结还需要
+`SummarySessionIssuer`；跨会议身份来自单独人物 Provider。
+本场未请求的可选能力返回 `NOT_REQUESTED`，未获准所选翻译／总结时 App 提示并阻止启动。
 
-显式启用 `AI_MEETING_TINGWU_ENABLED=true` 后，已认证的
-`POST /v1/meetings/{meetingId}:modelSession` 为归属当前主体、处于 CREATED 或
-RUNNING 的会议调用听悟实时 `CreateTask`。响应只下发 `meetingId`、
-`adapterId=tingwu-realtime`、包含临时凭据的 `endpoint`、`expiresAt` 和
-`initParams.taskId`；听悟没有单独的 `token` 字段。RAM AccessKey 留在服务端，
-App 按公开 Adapter 接口直连听悟，后端继续只保存标准事件。此接口不改写
-Create v1 的 `realtime` 响应或旧 WSS 路径。部署变量及启用窗口见
-`deploy/README.md`。
+语言另由 `AI_MEETING_MODEL_LANGUAGES` 声明；省略时使用 `zh-CN,en-US`。
+发现接口的 `languages` 直接返回该有序列表，创建会议也按该列表校验语言。
+框架不会自动查询供应商语种，或对 Provider／Profile／配置执行语言求交。
+部署方更换模型时，须自行核实并同步声明 Adapter 与模型实际支持的语言。
 
-单语字幕与已获准的双语任务均显式设置
-`Parameters.Transcription.RealtimeDiarizationEnabled=true`、
-`DiarizationEnabled=true` 和 `Diarization.SpeakerCount=0`，按会议未知人数请求
-说话人分离。当前听悟实现按现有产品规则映射
-`zh-CN/en-US/ja-JP/ko-KR/de-DE/fr-FR/ru-RU` 七语；双语任务用所选两语生成
-`multilingual`、`LanguageHints` 及双目标翻译。连接材料默认五分钟期限保持。
-部署通过 `AI_MEETING_MODEL_LANGUAGES` 声明实际开放的有序标准语言列表，
-缺省保留原中英；`/v1/capabilities.languages` 直接使用该配置，App不硬编码七语。
-更换Adapter时同时调整部署语言声明，供应商短码转换归各自Adapter。
-定向请求映射测试与真实七语识别／翻译质量验收分别记账。
+### 听悟临时会话
 
-## 对象存储传输扩展
+选择 `AI_MEETING_MODEL_ADAPTER=tingwu-realtime`，并显式启用
+`AI_MEETING_TINGWU_ENABLED=true`、注入听悟 AppKey 与 RAM AccessKey 后，
+已认证且归属本场的 `:modelSession` 请求调用听悟实时 `CreateTask`。
+响应包含 `adapterId=tingwu-realtime`、临时连接 `endpoint`、`expiresAt`
+及 `initParams.taskId`；听悟没有单独的 `token` 字段。RAM 长期 Key 不下发 App。
 
-`S3ArtifactStore` 还提供公开的 `ObjectsApi` 和四参数构造器：
-`S3ArtifactStore(objects, objectPrefix, namespace, maxArtifactBytes)`。
-部署方可实现原生 OSS 等对象传输的 `get`／`putAbsent`／`delete`／`close`，
-复用唯一的产物写入、发布和读取逻辑，无需复制 Store 状态机或使用 S3 网络协议。
-`putAbsent` 使用实际存储的条件写入，不覆盖已存对象；其网络兼容性须在真实端点验收。
-`namespace` 明确标识部署、端点和 Bucket，相同物理存储与前缀使用相同值。
-Store 关闭时关闭传输客户端，原 S3 配置入口及公开 Artifact 协议保持。
-该实现全量读取小产物，配置大小上限；长会音频使用单独的流式上传能力。
-本扩展不自动承担部署方已有的存储计费、配额或旧资源登记。
-
-## P5-2 模型能力与第二格式样例
-
-后端现有完整 Create 会把 Product Profile、终端本场请求、权益授权、
-`AI_MEETING_MODEL_CAPABILITIES` 声明的模型能力求交，并在
-`capabilityDecisions` 返回每项能力的 `availability` 和 `reasonCode`。
-未设置模型能力变量时仍沿用 `AI_MEETING_MOCK_CAPABILITIES`，保持 P4 默认
-Mock 的原有行为。可选翻译、总结需先列入 Profile；ASR-only 模型只声明
-`transcript.realtime`，这两项便返回 `UNAVAILABLE` 与
-`PROVIDER_CAPABILITY_MISSING`。未在本场请求的可选能力返回
-`NOT_REQUESTED`，App 也应关闭入口。
-
-最小配置示例（其余必填项沿用 `.env.example`）：
-
-```dotenv
-AI_MEETING_PROFILE_OPTIONAL_CAPABILITIES=translation.realtime,summary.structured
-AI_MEETING_ENTITLEMENT_SUPPORTED_CAPABILITIES=transcript.realtime,translation.realtime,summary.structured
-AI_MEETING_MODEL_CAPABILITIES=transcript.realtime
-```
-
-本场 Create 的 `requestedCapabilities` 显式传入上述三项时，后两项返回
-`UNAVAILABLE / PROVIDER_CAPABILITY_MISSING`；参考 App 默认只请求实时字幕，
-因此默认请求里的后两项是 `NOT_REQUESTED`。P5-5 已建立可选翻译和总结的
-产物执行映射；是否启用仍由本场请求、权益、模型能力和部署许可共同决定。
-
-设置 `AI_MEETING_MODEL_ADAPTER=sample-json-ws` 和
-`AI_MEETING_SAMPLE_JSON_WS_ENDPOINT=ws://...` 后，原 `:modelSession` 接口
-签发 `adapterId=sample-json-ws`、该 WebSocket 地址、五分钟使用窗口和空的
-`initParams`。这个接口只提供模型连接材料；部署方须另行提供遵循样例 JSON
-格式的 WebSocket 模型服务。参考 App 按 `adapterId` 选择已注册 Adapter，
-Create v1 的旧 `realtime` 字段与 P2 音频链路不变。
+参考映射覆盖 `zh-CN/en-US/ja-JP/ko-KR/de-DE/fr-FR/ru-RU`，
+实际开放范围仍由已开通供应商能力与部署声明决定。实时任务按未知人数请求说话人分离；
+双语会话根据所选两语生成多语识别参数与双目标翻译。
+Adapter 有映射不等于供应商在所有组合中均保证同样的识别或翻译效果。
 
 ### 可选独立文本翻译
 
-`ReferenceClientMeetingProcess` 读取可选
-`AI_MEETING_SAMPLE_JSON_TRANSLATION_ENDPOINT`，有值时用
-`TextTranslationModelSessionIssuer` 组合当前 ASR 与 `SampleJsonTranslationSessionIssuer`。
-未配置地址时保持原有听悟原生译文／仅 ASR 路径。部署方仍须在 Profile、权益与模型
-能力中声明 `translation.realtime`，并声明组合实际支持的语言；配置地址不会绕过本场授权。
+`AI_MEETING_SAMPLE_JSON_TRANSLATION_ENDPOINT` 有值时，参考进程通过
+`TextTranslationModelSessionIssuer` 组合 ASR 与独立翻译材料，
+以 `adapterId=sample-json-translation` 演示 HTTP JSON 协议；
+需要另行提供对应服务，不自动连接任何翻译供应商。
+未配置时保留模型原生翻译或仅 ASR 路径。
 
-此发行器返回 `adapterId=sample-json-translation`、配置地址、五分钟有效期及空 token／
-参数，仅演示自有 HTTP JSON 服务接线，不连接翻译供应商、不代签真实模型效果。
-正式供应商实现公共 `TranslationSessionIssuer`，在自己的宿主组合，并由 Android
-注册对应 `TranslationAdapter`；样例请求／响应和配置见
-[接入手册](../docs/partner-integration-guide.md#可选独立文本翻译)。
+正式供应商实现公共 `TranslationSessionIssuer`，在 Android 注册对应
+`TranslationAdapter`。SDK 在短期材料将过期时调用同场 `:translationSession`
+续领，不新建 ASR 任务或会议；翻译仍须通过本场授权。
+详细格式见[可选独立文本翻译](../docs/partner-integration-guide.md#可选独立文本翻译)。
 
-首次 `:modelSession` 附可选 `translationSession`；SDK 在逐段翻译前发现距离过期
-不超过 30 秒时，只调用同场 `:translationSession` 续领。后端复用原归属、活动状态和
-首次冻结的翻译授权，只领取新翻译材料，不创建 ASR 任务、不另建会议或后台续领器。
-组合只关闭 ASR 原生译文，保留会前所选两语的识别；SDK 保存最终原译文后沿原流程 Stop。
+### 可选百炼结构化总结
 
-Android Adapter 通过中性 `ModelHttpRequest` 描述 `method/headers/contentType/body`，
-SDK 负责网络执行，支持 `x-api-key`、已签名 URL 等差异；默认实时 GET 和总结 POST/JSON
-保持。实时 WebSocket 握手仍为 GET／无正文，可变 method／body 用于文本 HTTP 请求。
-详细请求与线程契约见
-[公共 Android core 说明](../android-reference-app/meeting-client-core/README.md#模型请求描述与独立文本翻译)。
+显式配置 `AI_MEETING_BAILIAN_SUMMARY_ENABLED=true`、`AI_MEETING_BAILIAN_APP_ID`
+和 `DASHSCOPE_API_KEY` 后，已启动且获准 `summary.structured` 的会议可调用
+`POST /v1/meetings/{meetingId}:summarySession`。后端换取短期 Key，
+将短期 Bearer、应用 completion 地址和有效期交给 SDK，永久 Key 不下发。
+短期材料 TTL 默认 300 秒，允许 1～1800 秒。
 
-未声明或未装配可选翻译、总结、跨会议身份时，App 不开放相应入口，Web 按最终 Manifest
-隐藏对应产物区；本场 `sessionSpeakerId` 不冒充跨会议身份。只 ASR 仍可正常停止、进入
-READY 并回看原文，能力缺失矩阵见 [接入手册](../docs/partner-integration-guide.md#可选能力)。
+SDK 调用百炼应用 API，将响应归一化为标准总结后在 Stop 前提交。
+底层大语言模型由百炼应用配置决定，参考代码不固定某个模型型号。
+伙伴可以注入其他 `SummarySessionIssuer` 并注册对应 Android Adapter；
+未装配发行器时发现接口不开放总结，App 隐藏入口，结果页不显示空总结。
 
-## P5-5 百炼文本总结临时材料
+### 可选跨会议声纹参考插件
 
-显式配置 `AI_MEETING_BAILIAN_SUMMARY_ENABLED=true`、部署方的
-`DASHSCOPE_API_KEY` 与 `AI_MEETING_BAILIAN_APP_ID` 后，认证 App 在本场
-已 `startClient`、状态为 STARTING/RUNNING 且首次 Create 已获准
-`summary.structured` 时可调用
-`POST /v1/meetings/{meetingId}:summarySession`。后端向百炼
-`POST /api/v1/tokens?expire_in_seconds=...` 换取短期 Key，只将短期 Bearer、
-应用 completion 地址与过期时间交给 App；永久 Key 不进入响应、日志或结果。
-TTL 默认 300 秒，允许 1–1800 秒；地区地址可由 `.env.example` 中的变量配置。
-Android SDK 调用应用 completion，App 归一化后在 Stop 前提交标准纪要。
-未配置时旧会和 ASR-only 的 Create 行为不变；新版 App 的会前纪要入口会关闭。
-
-现有匿名 `GET /v1/capabilities` 返回当前部署的静态能力，取 Profile、权益、
-模型声明及部署开关的交集；`summary.structured` 还须已配置百炼签发。
-此接口不签发凭据，也不代表某位用户或某一场会议已获准能力；Create 的
-`capabilityDecisions` 仍是本场权威结果。
-
-## P5-6 邮箱结果链接
-
-部署者配置 `AI_MEETING_RESULT_EMAIL_ENABLED=true` 及 `.env.example` 中的 SMTP
-地址、端口、账号、密码和发件地址后，`/v1/capabilities` 才报告
-`resultEmailEnabled=true`。已登录 App 在 Stop 完成后调用
-`POST /v1/meetings/{meetingId}:sendResultEmail`，后端核对本场归属、输入已接管、
-结果 `genTime` 在统一有效期内，再向会前选定的 1～10 个邮箱发送同一结果页链接。
-邮件没有 PDF 附件；未配置 SMTP 时接口保持关闭。
-
-## P3-T05 会议应用切片
-
-会议应用切片同步自 `czur-cloud` 固定提交
-`23726454ebb893ae1402cff59b0f226b041daa04`。创建和停止命令通过端口访问会议事实源、
-幂等记录和 Outbox；`deploymentScope + clientSessionId` 是创建唯一性范围，旧调用
-默认使用 `default`。内存适配器只用于示例和测试；MySQL 5.7 适配器提供本期参考持久化
-端口，PostgreSQL 适配器保留旧兼容端口，
-HTTP API、认证、计费、Worker 和完整运行时编排不在本切片内。
-
-### JDBC 适配器与旧 PostgreSQL 兼容边界
-
-`JdbcMeetingRepository`、`JdbcIdempotencyStore` 和 `JdbcOutboxStore` 只依赖
-`javax.sql.DataSource`。参考客户端默认由应用使用 MySQL Connector/J 连接 MySQL 5.7；
-公共核心仍保留 PostgreSQL JDBC 驱动及旧 SQL 适配，供显式兼容宿主使用。核心领域和
-单元测试不要求数据库可用。适配器不会打印响应正文、Outbox 载荷或连接凭据。
-
-`MeetingCommandService` 保留旧的双端口构造器，供既有内存示例兼容使用；JDBC
-运行时应使用 `MeetingUnitOfWork` 构造器。`JdbcMeetingUnitOfWork` 在一个
-`Connection` 中提交会议快照、幂等记录和命令 Outbox，任何一步失败都会整体回滚。
-事务内读取会议时使用对应引擎的行锁，使多个后端实例并发 Stop 也只能由首次
-状态转换写入一条 `MeetingStopRequested`；后到事务复用已提交的停止状态。
-Outbox 的领取、发布和失败重试继续由提交后的 Worker 使用独立短事务执行，不能放入
-会议命令事务，更不能在 Gateway 中拼接业务事务。参考交付 Compose 不启动数据库
-容器，数据库是否由本机临时容器提供不改变这个边界。
-
-### 旧 PostgreSQL 运行时（兼容边界）
-
-`JdbcDatabaseRuntime` 是完整 PostgreSQL 会议的生产候选 JDBC 装配入口。它从
-`DATABASE_URL`、`DATABASE_USER`、`DATABASE_PASSWORD` 以及连接池参数创建一个
-共享 HikariCP `DataSource`，再向应用暴露 `JdbcMeetingUnitOfWork` 和提交后使用的
-`JdbcOutboxStore`。配置非法、数据库不可用、V001 未登记，或已登记基线的
-物理表不符合冻结契约时启动失败；不会自动执行迁移、修补半表，
-也不会回退到 `InMemory*`。
-
-`checkReadiness()` 检查连接、只读探针、V001 登记与物理 catalog 契约；
-迁移登记齐全但物理形态漂移时返回脱敏的
-`SCHEMA_INVALID`。`isLive()` 只表达运行时尚未关闭。因此数据库暂时中断时 readiness
-会失败而 liveness 保持正常，连接池可在数据库恢复后重新建连。`close()` 可重复调用，
-关闭后禁止继续取得业务组件。
-该运行时只接受 PostgreSQL URL，不根据 hostname 或 Profile 静默切换实现。参考客户端
-不使用此旧完整运行时；局域网入口使用下一节的 MySQL `JdbcDatabaseContext`。
-
-### P8 M1：MySQL 5.7 初始化与连接
-
-公共连接层新增 Connector/J `8.3.0` 和 `JdbcDatabaseContext`，配置继续使用
-`DATABASE_URL`、`DATABASE_USER`、`DATABASE_PASSWORD` 及原连接池参数。
-`jdbc:mysql://<host>:3306/<database>` 明确选择 MySQL，原 PostgreSQL URL、
-两个 `DatabaseRuntimeConfig.of` 重载及默认值保持。
-`DATABASE_SOCKET_TIMEOUT_SECONDS` 仍以整数秒配置；池向 pgjdbc 传秒，向
-Connector/J 传毫秒。MySQL 连接固定使用 UTF-8／`utf8mb4_bin`、UTC 时区及
-`forceConnectionTimeZoneToSession=true`，URL 不得覆盖这些运行时参数。
-
-先对选定库执行仓库唯一的 [MySQL 当前 V001](../deploy/migrations/V001__initial_schema.sql)
-及 [初始化入口](../deploy/migrate.sh)，再调用
-`JdbcDatabaseContext.start(config)`。上下文拥有唯一 HikariCP 池；
-`engine()` 和 `table(JdbcDatabaseTable)` 提供封闭固定映射：PostgreSQL 原表名
-保留，MySQL 当前包含 26 张必需基线表（25 张基础表加 1 张作用域锁表），另有可选
-`ai_trans_speaker_identity_person` 人物映射表，全部为 `ai_trans_*`，包含
-`ai_trans_schema_migrations`。启动只读检查连接、`V001__initial_schema` 登记及
-必要表存在／InnoDB，不读取旧业务表，不自动建表、登记或修补结构。
-`checkBaselineReadiness()` 的 READY 只签连接与最小初始化基线，不签会议业务。
-装配者统一关闭上下文，调用者关闭借出的连接；重复 `close()` 安全。
-
-### P10 可选跨会议声纹参考插件
-
-实时 ASR 只负责本场 `sessionSpeakerId`；跨会议识别由可替换会后
-`SpeakerIdentityProvider` 承担。参考客户端进程默认不装配该能力。选择讯飞示例时，
-外部环境配置如下；模板不携带真实 Key，不自动使用 CZUR 云端服务或既有人物库：
+实时 ASR 负责本场 `sessionSpeakerId`；跨会议识别由可替换的会后
+`SpeakerIdentityProvider` 承担，默认关闭。选择讯飞示例所需环境配置如下：
 
 | 配置项 | 意义与默认值 |
 | --- | --- |
 | `AI_MEETING_SPEAKER_IDENTITY_PROVIDER` | 空或 `none` 关闭；`xfyun` 显式选择参考实现 |
-| `AI_MEETING_XFYUN_VOICEPRINT_APP_ID`、`API_KEY`、`API_SECRET` | 三个名称均使用完整 `AI_MEETING_XFYUN_VOICEPRINT_` 前缀；启用时必填，只在仓外注入 |
-| `AI_MEETING_XFYUN_VOICEPRINT_ENDPOINT` | 可配置供应商 HTTPS 端点；默认讯飞公开声纹端点 |
-| `AI_MEETING_XFYUN_VOICEPRINT_SERVICE_ID` | 默认 `s1aa729d0`；必须与供应商接口对应 |
-| `AI_MEETING_XFYUN_VOICEPRINT_GROUP_PREFIX` | 默认 `reference_`；测试使用独立前缀，分组按原部署与主体归属生成 |
-| `AI_MEETING_XFYUN_VOICEPRINT_MATCH_THRESHOLD` | 默认 `0.6`；使用供应商分数范围 0～1 |
+| `AI_MEETING_XFYUN_VOICEPRINT_APP_ID`、`API_KEY`、`API_SECRET` | 三者均使用完整 `AI_MEETING_XFYUN_VOICEPRINT_` 前缀；启用时必填 |
+| `AI_MEETING_XFYUN_VOICEPRINT_ENDPOINT` | 供应商 HTTPS 端点，默认讯飞公开声纹端点 |
+| `AI_MEETING_XFYUN_VOICEPRINT_SERVICE_ID` | 默认 `s1aa729d0`，须与供应商接口对应 |
+| `AI_MEETING_XFYUN_VOICEPRINT_GROUP_PREFIX` | 默认 `reference_`；按部署与主体隔离分组 |
+| `AI_MEETING_XFYUN_VOICEPRINT_MATCH_THRESHOLD` | 默认 `0.6`，供应商分数范围 0～1 |
 | `AI_MEETING_XFYUN_VOICEPRINT_TIMEOUT_MS` | 单次 HTTP 超时，默认 `10000` 毫秒 |
-| `AI_MEETING_FFMPEG` | 默认 `ffmpeg`；产品镜像已提供，直接运行 JVM 时须在本机安装并加入 PATH |
-| `AI_MEETING_SPEAKER_PCM_SAMPLE_RATE`、`AI_MEETING_SPEAKER_PCM_CHANNELS` | 裸 PCM 原录音格式，默认 16000／1；Ogg 等容器按自身头部解码 |
+| `AI_MEETING_FFMPEG` | 默认 `ffmpeg`；应用镜像已提供，本机 JVM 运行须自行安装 |
+| `AI_MEETING_SPEAKER_PCM_SAMPLE_RATE`、`AI_MEETING_SPEAKER_PCM_CHANNELS` | 裸 PCM 默认 16000 Hz／单声道；容器录音按头部解码 |
 
-Product Profile 的 optional 能力及权益支持列表同时声明
-`speaker.diarization.session,speaker.identity.cross_meeting`；实时模型能力只声明真实
-分人能力，跨会议能力来自已装配的后处理 Provider。每场需请求该能力并选择保留录音。
-App／Web 依据实际能力和最终 Manifest 展示，不提供声纹时只保留真实本场分人。
+Profile optional 与权益支持列表须声明
+`speaker.diarization.session,speaker.identity.cross_meeting`；实时模型能力只声明
+真实本场分人，跨会议能力由已装配人物 Provider 注册。每场还须请求该能力并保留录音。
+不提供声纹时，App／Web 只展示实际本场分人，不虚构跨会议身份。
 
-唯一 MySQL V001 已包含可选人员映射。启动该插件时只读核对自己的表，默认会议
-readiness 不依赖它。标准 `person_id` 与私有 `group_id/feature_id` 分列保存，不将
-供应商编号返回 Web。会后按同一 speaker 的最终时间窗提取 3～5 秒 PCM 样本；短句
-先合并或连接，样本不足保留未识别。供应商故障不阻断其余产物 READY。
+唯一 MySQL V001 已包含可选人员映射表。启用插件时只读核对该表，
+默认会议 readiness 不依赖它。标准 `person_id` 和私有供应商特征引用分开保存，
+不向 Web 公开供应商编号。会后按同一 speaker 的最终时间窗提取 PCM 样本，
+样本不足保留未识别；供应商故障不阻断其余产物 READY。
 
-用户在 Web 登录后可调用
-`POST /v1/meetings/{meetingId}/speakers/{sessionSpeakerId}:enroll`，正文仅
-`{"displayName":"人物名称"}`，返回 `personId`、`displayName`、`manifestRevision`。
-注册成功再读取原 `genTime` 结果链接，身份产物与清单已更新，原文／录音／时间保留。
-匿名结果链接没有注册写权限。替换供应商只改此插件和工厂，公共状态机与 HTTP 协议不变。
+已登录用户可调用
+`POST /v1/meetings/{meetingId}/speakers/{sessionSpeakerId}:enroll`，
+正文仅 `{"displayName":"人物名称"}`，成功返回 `personId`、`displayName`、
+`manifestRevision`。注册更新身份产物与清单，原文、录音、时间和原结果链接保留。
+匿名结果链接没有写权限。替换供应商只改 Provider 与工厂，不复制状态机。
 
-定向测试 `XfyunSpeakerClientTest` 验证签名、供应商请求与真实本机 FFmpeg 样本转换；
-`ReferenceMeetingMysqlClientHttpAssemblyIntegrationTest` 使用随机新库和确定性插件验证
-两场识别／命名及人员映射，只代表协议／MySQL 正常路径，不代表真实模型准确率。
+### 可选邮件接口
 
-### P8 M2：显式客户端正常会议 HTTP 装配
+后端具有可选 SMTP 结果链接接口。配置 `AI_MEETING_RESULT_EMAIL_ENABLED=true`
+及 SMTP 参数后，发现接口报告 `resultEmailEnabled=true`，
+`POST /v1/meetings/{meetingId}:sendResultEmail` 可向 1～10 个收件人发送结果页链接，
+不发送 PDF 附件。它仍要求本场归属和有效结果链接。
+当前参考 App 默认仅提供 Web 结果动作；接入邮件还须自行注册应用侧结果插件。
 
-`ReferenceMeetingHttpAssembly.startClientModel(config, clock, artifactStore,
-identityProvider, entitlementPolicy, modelSessionIssuer, entitlementProviderDecorator)`
-从已初始化的 MySQL 5.7 创建唯一 `JdbcDatabaseContext` 池，显式要求部署方
-提供身份、资格、模型会话材料和持久产物 Store，不自动回退演示身份、模型或存储。
-它与旧入口共用唯一装配核心、创建／Stop 应用服务、领域状态机和持久权益账本。
-装饰器只调用一次，Create、客户端 Stop 及 `entitlementProvider()` 共用其返回实例。
-`databaseContext()` 返回同一个连接上下文，供同场 StartFacts／最终只读快照使用；
-调用方不得单独关闭。身份、策略、模型和 Store 的生命周期仍由调用方管理。
+## 宿主扩展与资源管理
 
-正常链覆盖 Create／同键重放、modelSession、startClient、标准字幕／译文事件、
-实测用量冻结、可选纪要及展示截图、Stop／同键重放、用量 COMMIT、READY、
-归属列表／详情、事件补拉、匿名 Manifest 和产物字节。所有 MySQL 事实仍写入固定
-`ai_trans_*` 表。模型输入由客户端直连，装配不接收或转发音频；可选纪要提交沿用
-冻结能力，`summarySession` 发行仍需明确配置发行器，无发行器时发现接口不宣称纪要生成。
-Create 原 `realtime` 字段仅保留协议兼容，实际模型材料由显式发行器提供。
-
-本入口不构造旧音频 Worker、Reconciler、WSS、删除或旧实时 Token 续签。
-对应有效 HTTP DELETE／renew 路由返回既有 501；`databaseRuntime()`、
-`newInputReconciliationScan()`、`newRealtimeWssServer()` 明确拒绝访问旧组件。
-健康探针只读取同一 Context 的初始化基线，不把 READY 探针当作完整业务验收。
-原 `ReferenceMeetingHttpAssembly.start(...)` 和 `JdbcDatabaseRuntime.start/open`
-完整 PG 兼容入口及 catalog 契约门保持；旧完整运行时仍在建池前拒绝 MySQL
-`INVALID_CONFIGURATION`，不能把未经适配的 PG 音频／Worker SQL 装到 MySQL。
-CZUR Cloud 服务装配留 M3。参考仓只交付一份当前 MySQL V001，不把历史兼容实现的
-SQL 与本期基线连续执行。
-
-本机定向真实连接测试使用 `REFERENCE_TEST_MYSQL_DATABASE_URL`、
-`REFERENCE_TEST_MYSQL_DATABASE_USER`、`REFERENCE_TEST_MYSQL_DATABASE_PASSWORD`，
-与原 PG 测试变量分开；仅接受 loopback 的 `ai_trans_m1_*` 隔离库。
-`JdbcDatabaseContextMysqlIntegrationTest` 只读核对实际5.7 server、当前基线、
-会话 UTC／utf8mb4、中文／emoji／canonical 原文及 UTC 微秒，未提供配置时明确跳过。
-该测试不运行会议 Store，也不代表生产业务库、CZUR 真会或部署已验收。
-
-M2 正常 HTTP 定向测试 `ReferenceMeetingMysqlClientHttpAssemblyIntegrationTest`
-使用相同的三个 MySQL 测试环境变量；正式初始化自己的 `ai_trans_m2_c_*` 随机库，
-经实际 loopback HTTP 验证正常链及同键重放，并核对原业务哨兵 DDL／数据未改变。
-模型、身份、资格和产物存储均为显式测试端口，不调用厂商。测试结束仅删除该例随机库，
-不访问或修改部署方业务库；这仍不代表 M3、异常／恢复矩阵或 Cloud 生产验收。
-
-### reference-dev 身份
-
-`ReferenceDevIdentityProvider` 只有在 `REFERENCE_DEV_IDENTITY_ENABLED=true` 时
-启用。启用后必须完整配置 `.env.example` 中的 Token、稳定主体、角色、权限、
-audience、client 和有效期；缺失或非法配置会在装配阶段失败，不会静默匿名登录。
-配置对象只保存固定 Token 的 SHA-256 摘要，诊断文本和日志不会输出 Token、摘要、
-主体或完整请求。部署者可额外配置 `REFERENCE_DEV_LOGIN_USERNAME` 和
-`REFERENCE_DEV_LOGIN_PASSWORD`，开放参考 App 使用的
-`POST /v1/reference/session:login`：提交 `{"username":"...","password":"..."}`，
-成功返回 `{"accessToken":"...","expiresAt":"..."}`，其中 Token 与上述固定
-Bearer Token 相同。该演示入口只有一个预置账号，不提供自助注册、管理员后台、
-Token 刷新或生产认证；合作伙伴应替换身份实现，不把它当作正式账号体系。
-
-## 注入部署方身份与开会资格策略
-
-P7-1c-1的装配开放保留上述默认参考链，并增加普通Java接口接入方式：
+自定义宿主优先直接使用 `MeetingHttpAssembly.startClientModel(...)`：
 
 ```java
-var config = ReferenceMeetingDeploymentConfig.fromEnvironmentWithExternalIdentity(
+var config = MeetingDeploymentConfig.fromEnvironmentWithExternalIdentity(
         environment, "meeting-api", "partner-android");
-// identityProvider验证部署方自己的凭据；entitlementPolicy读取自己的账号／会员规则。
-// clock、artifactStore与这两个实现均由部署方集中装配，示例中不携带真实凭据。
-try (var assembly = ReferenceMeetingHttpAssembly.start(
-        config, clock, artifactStore, identityProvider, entitlementPolicy)) {
+try (var assembly = MeetingHttpAssembly.startClientModel(
+        config, clock, artifactStore, identityProvider, entitlementPolicy, modelIssuer,
+        java.util.function.UnaryOperator.identity(), loginEndpoint, summaryIssuer)) {
+    // 外层 Servlet／Spring transport 复用此唯一 dispatcher，不另开内部转发服务。
     var dispatcher = assembly.dispatcher();
-    // 部署方HTTP入口将已约束的HttpRequest交给dispatcher.handle(request)，
-    // 再写回HttpResponse；Gateway只做协议转发，不另启第二listener。
-    // 既有收口Worker复用assembly.entitlementProvider()，不另建一套默认权益实现。
 }
 ```
 
-- `IdentityProvider`沿用已有接口，把部署方凭据转换为稳定主体与本次权限。
-  Create、Stop、查询／删除、模型材料及续期共用同一个实例。外部配置入口不要求
-  `REFERENCE_DEV_*`凭据或预置账号，且不开放演示登录；登录入口由部署方提供。
-- 新`EntitlementPolicy`只提供`authorizeStart`与`prepareReservation`。前者读取
-  当前开会资格，后者生成首次预占候选；两个方法不写会议记录、不扣费。现有JDBC
-  Provider 继续把预占和用量操作保存在同一会议 JDBC 库，供 Create 工作单元绑定；
-  参考客户端使用 MySQL 5.7，旧兼容宿主可选择 PostgreSQL，不能仅用外部授权成功
-  代替持久化预占记录。
-- 同一能力配置、会议协议与V001基线继续使用。原`fromEnvironment`、`start`和
-  JDBC Provider的默认策略构造器保留；参考Process的Worker与Create复用同一个
-  权益Provider。身份／策略需要支持并发调用，其外部服务资源由部署方关闭。
-- Maven仍输出普通`backend-reference-0.1.0-SNAPSHOT.jar`，无需Spring或新的
-  服务进程。消费方可在现有模块中装配公开端口；CZUR私有登录、会员和部署材料
-  不进入本参考工程。
+| 扩展点 | 责任 |
+| --- | --- |
+| `IdentityProvider`／`SessionLoginEndpoint` | 校验伙伴凭据、提供登录；参考账号不要求延用 |
+| `EntitlementPolicy` | 读取开会资格并生成预占候选，公共 JDBC Provider 保留持久用量事实 |
+| `UnaryOperator<EntitlementProvider>` | 可选外部结算装饰器，Create／Stop 共用返回实例 |
+| `ModelSessionIssuer`／`TranslationSessionIssuer`／`SummarySessionIssuer` | 为本场 Adapter 发行短期模型材料 |
+| `ArtifactStore` | 参考 file／S3，或伙伴自定义对象存储 |
+| `SpeakerIdentityFactory` | 可选会后人物插件，共用唯一数据库 Context 与 Store |
 
-### 同一公共HTTP分发入口
+身份、策略与模型实现须支持并发调用。装饰器须继续委托唯一 JDBC Provider，
+保持同场用量事实与重放语义，不能只在外部扣费而跳过会议账本。
+`assembly.databaseContext()` 提供唯一连接上下文，调用方不得单独关闭它。
+关闭顺序为外层 HTTP → Assembly → 宿主自有资源。
 
-`ReferenceMeetingHttpAssembly`只创建一份`MeetingHttpDispatcher`，通过
-`dispatcher()`提供给部署方Servlet／Spring等HTTP transport；显式创建的
-`newJdkHttpServer(address)`也使用该同一实例。原`runtime()`、`contextResolver()`
-和全部JDK构造器继续保留。部署方不必重写`MeetingHttpAdapter`路由选择，也不应
-另外启动一个JDK listener来转发本进程的业务请求。
+`S3ArtifactStore.ObjectsApi` 允许通过 `get/putAbsent/delete/close` 对接原生 OSS 等传输，
+复用现有产物发布与读取逻辑；条件写入、namespace 和真实端点可用性由部署方确认。
+小型标准产物与长录音采用对应读取／流式通路，不能把长录音一次读入 JSON。
 
-Dispatcher仅提取原JDK业务分发顺序：可选`ResultEmailEndpoint`未装配仍返回501，
-装配后使用既有客户端写入认证；读取／删除／客户端写入使用既有
-`authenticationRoute`及可信上下文解析器；Create／Stop仍由自身应用服务认证。
-原JDK内部健康路径、原始网络字节检查、有界执行器和关闭门留在JDK listener，
-不进入公共业务dispatcher。其他transport负责自身的网络边界与健康入口；应先
-停止请求接收，再关闭 Assembly 及其唯一 JDBC 池。此扩展不新增路由、鉴权规则、
-会议状态机或部署事实，不修改V001、模型和权益行为。
+### 最终事实与结果读取
 
-### 装配部署方结算装饰器
+停止采音后 SDK 提交实测 `audioDurationMs`，后端冻结同场值，再在 Stop 中结算并发布 READY。
+16 kHz、单声道、PCM16 以字节数除以 32 得到毫秒数，实测 0 也是有效用量。
+不要将模型收尾或总结等待时间当作采音时长。
 
-已有外部用量拥有者的部署可增加第七个参数
-`UnaryOperator<EntitlementProvider>`，薄装饰同一个持久Provider：
-
-```java
-// decoratorFactory接收唯一JDBC Provider，返回部署方自己的线程安全装饰器。
-try (var assembly = ReferenceMeetingHttpAssembly.start(
-        config, clock, artifactStore, identityProvider, entitlementPolicy,
-        issuer, decoratorFactory)) {
-    // Create、客户端Stop和Worker访问器共享工厂返回的同一个实例。
-    var workerEntitlement = assembly.entitlementProvider();
-}
-```
-
-工厂在数据库 readiness 通过后仅调用一次；`issuer`仍可为`null`以保留默认模型选择。
-旧`start`重载使用identity工厂，默认参考链和原外部身份／模型接线保持不变。
-工厂及其返回值不可为`null`；工厂失败时启动失败并关闭已创建的 JDBC 池。
-
-装饰器不取代数据库预占绑定、版本检查或稳定操作重放：`authorizeStart`保持只读，
-其余用量方法须委托输入 Provider。需要外部结算时，`commitUsage`可在数据库委托
-成功后确认同场外部幂等操作；外部未确认须返回失败，原Stop保留待收口状态，
-重复Stop使用同一冻结请求重试。PG成功或重放不表示外部已结算，不能因此跳过
-未确认操作，也不能提前发布READY。装饰器的外部资源由部署方负责关闭。
-本扩展只提供普通Java装配边界；参考测试使用替身确认时序，不代签真实账号扣费。
-
-客户端事件会议已开放`POST /v1/meetings/{meetingId}/usage:submit`：停止采音后
-提交`{"audioDurationMs":1000}`，首次返回201，同场同值重放返回200；不同值不能
-覆盖。后端同时保存首次Reservation版本，原Stop读取冻结值，通过共享Provider
-实际`commitUsage`后才生成READY。结果时长采用这份采音值，不把模型收口、总结
-等待计入。16kHz、单声道、PCM16沿用采音字节数除以32的整数毫秒口径，实测0可
-结算；旧没有提交用量的调用继续显示结果，不伪造零用量。Stop正文仍为空或`{}`。
-此处交付后端协议与正常结算；SDK同流计数／提交、真实CZUR身份和会员适配仍在
-P7-1c后续小提交完成，不能以参考测试或结果READY代签生产功能已迁移。
-
-### Stop 前读取最终标准事件快照
-
-部署方在模型尾事件及采音用量保存后，可调用普通 Java 只读入口：
+宿主需要生成自己的发布格式时，可在尾事件与用量保存后读取最终快照：
 
 ```java
 var snapshot = JdbcClientMeetingResultFinalizer.readFinalSnapshot(
-        assembly.databaseRuntime().dataSource(), verifiedContext, meetingId);
+        assembly.databaseContext(), verifiedContext, meetingId);
 if (snapshot instanceof JdbcClientMeetingResultFinalizer.Ready ready) {
-    // 部署方用本场最终标准事件生成自己的资源格式；不从尚未生成的 Artifact 读取。
     var finalTranscripts = ready.transcripts();
     var finalTranslations = ready.translations();
+    var optionalSummary = ready.summary();
     long capturedDurationMs = ready.frozenAudioDurationMs();
 }
 ```
 
-`verifiedContext`由部署方现有认证入口取得，并在上游检查所需权限；此方法在同一
-只读`REPEATABLE_READ`连接内先复用`MeetingAccessGuard`核对会议原始归属，再读取
-客户端启动标记、已保存的冻结采音值与首次Create。Create仍由原事实Store执行
-规范正文、摘要和响应一致性校验；最终修订、partial过滤与排序直接复用原Stop
-finalizer的同一个投影。返回的Protobuf消息和列表均不可变，保留全部标准字段。
+`Ready` 只表明同场最终事实已读取，不代表结算、发布或会议 READY。
+该读取不调用模型、不写产物和状态；长录音和截图只返回描述符。
+客户端结果内容、Manifest 与媒体流沿用统一访问决定，
+`artifactMediaPort()` 读句柄在流结束后由调用方关闭。
 
-`Ready`包含`transcripts`、`translations`、最终原文聚合`language`、实测
-`frozenAudioDurationMs`，以及首次Create的`retainAudioRequested`、`sourceLanguage`
-和可空`title`。当首次Create请求保留录音且客户端已完成封口登记时，`audioArtifact`
-提供同场`audio.original`的不可变描述符；它只引用现有`ArtifactStore`中的流，不把
-长音频读入快照或JSON。真实无final返回空列表／`und`；实测0返回0；未冻结采音值返回
-`Rejected(INVALID_STATE)`。其他拒绝沿用`ClientMeetingInputPort.Reason`的
-`NOT_FOUND`、`ACCESS_DENIED`、`INPUT_SOURCE_CONFLICT`和`STORAGE_UNAVAILABLE`。
+## 数据库范围
 
-客户端录音通过`ClientMeetingInputPort.appendAudio`进入同一公共产物链：首次 Create
-必须声明`retainAudio=true`，调用方传入已封口文件的媒体类型、编码后长度、小写
-`sha256`和`InputStream`。核心只在首次登记时读取流，不接管或关闭调用方流；同一
-`meetingId + audio.original` 的同值重放直接返回原产物，不重复读取。正文由既有
-`ArtifactStore`保存，READY descriptor写入既有产物元数据，Stop时纳入统一 Manifest。
-`MeetingHttpAssembly.artifactMediaPort()`提供与Manifest/genTime访问决定一致的流式
-读取端口，返回可关闭`ReadHandle`；长音频不经过小型JSON正文接口。HTTP上传和播放
-路由在下一小步接入，当前没有新表、新迁移或第二套结果状态机。
+默认客户端运行链使用 MySQL 5.7 与 `JdbcDatabaseContext`，全部会议表为
+`ai_trans_*`。会议命令工作单元将会议事实、幂等结果和命令 Outbox 放在同一事务。
+先执行唯一 MySQL V001，启动只读检查连接和初始化结果，不修改其他业务表。
+连接池与借出连接由对应所有者释放，不为每个插件建立第二套会议事实源。
 
-正常发布在`STARTING/RUNNING`读取，同场`STOPPING/READY`仍可只读核对。此处的
-`Ready`是快照读取结果，不代表资源发布、用量结算或会议READY：方法只结束只读
-事务，不调用Provider、不生成receipt、不写Artifact、Manifest或会议状态。
-部署方直接复用Assembly的唯一DataSource，不为读取构造新的finalizer／Clock／池。
-原公共HTTP协议、参考默认装配和Stop收口行为保持；真实对象上传和旧消费者接线
-需由部署方另行实现并在对应环境验收。
+源码另保留 PostgreSQL 适配和非默认服务端 WSS／Mock 入口，
+`ReferenceMeetingHttpAssembly.start(...)` 使用这套装配；它不适用于默认 MySQL 客户端。
+`JdbcDatabaseRuntime` 完整运行入口仍只接受 PostgreSQL，相关音频／Worker SQL
+未适配 MySQL。本仓交付的 MySQL V001 不能用于初始化 PostgreSQL；
+需要该非默认入口的宿主须另行准备匹配结构与显式兼容验证。
 
-### 注入部署方模型发行器
+`startClientModel(...)` 不创建服务端音频 Worker、WSS、删除或实时 Token 续签组件，
+相关有效 HTTP DELETE／renew 路由返回 501；Create 的 `realtime` 字段仅保留协议兼容。
+`AI_MEETING_WSS_ORIGIN` 的存在不表示默认后端中转实时音频。
 
-需要复用已有模型服务的部署，可在同一装配增加第六个参数：
+## 构建与验证
 
-```java
-// issuer实现ModelSessionIssuer；自身远程服务和资源由部署方集中装配。
-try (var assembly = ReferenceMeetingHttpAssembly.start(
-        config, clock, artifactStore, identityProvider, entitlementPolicy, issuer)) {
-    // 对接原运行时和身份解析器，不另开后端进程或模型会话管理器。
-}
-// 停止外层HTTP／WSS并关闭assembly后，部署方按资源所有权关闭issuer。
-```
-
-非null发行器优先于配置中的sample／听悟默认实现，无需再配置参考听悟凭据。
-身份、会议事实、公开`:modelSession`响应及唯一 V001 基线保持不变；可信能力
-配置仍参与首次Create交集，不能仅凭注入实现启用翻译或总结。
-
-`ModelSessionIssuer.Request`新增`meetingId()`：原Lookup从已经验证归属的同一
-持久快照传入真实会议ID、首次原语／目标语和冻结`translationEnabled`。部署方
-发行器可直接将该ID传给已有模型服务，不从客户端正文另取或生成另一场ID。
-旧三参数Request构造器保留，未知ID为null；默认听悟／sample发行器仍按原语言
-与能力行为签发。原五参数Assembly重载保留，模型发行选择不变；新重载的issuer
-为null时也使用原默认选择。发行器须支持并发调用，其资源不会被Assembly代关。
-这里只开放普通Java扩展端口，不携带CZUR私有Feign接口、凭据或部署实现。
-
-## P3-T04 Driver 契约测试
-
-`ModelDriverContractTestKit` 位于测试作用域，统一覆盖 `describe`、配置校验、
-能力子集、会话生命周期、音频重复/乱序、背压、超时/取消、幂等键、回调失败、
-并发完成、shutdown，以及 close/abort 与 pending/final 回调窗口的线性化。新增 Driver 的测试只需
-提供能力描述和工厂入口，即可继承同一组 JUnit 测试；若实现能提供确定性的
-pending 创建暂停点，再覆盖 `createPendingDriver` 与 `supportsPendingDispatchHook()`
-即可启用该竞态测试：
-
-```java
-final class MyDriverContractTest extends ModelDriverContractTestKit {
-    protected CapabilityDescriptor descriptor() { return myDescriptor; }
-    protected ModelDriver createDriver(CapabilityDescriptor d, ModelEventSink sink) {
-        return new MyDriver(d, sink); // 仅实现公开 ModelDriver 端口
-    }
-}
-```
-
-仓库中的 `MockModelDriverContractTest` 与 `AlternativeModelDriverContractTest`
-均通过该入口执行。后者使用独立 `providerId=alternative-fixed-text`、仅声明
-`transcript.realtime`/`transcript.final` 能力，并以“每帧独立分段、完成时逐段
-REPLACE”为不同固定语义；它拥有独立会话状态机，不依赖 Mock、HTTP、数据库、
-厂商 SDK 或生产配置。TCK 是端口和生命周期门禁，不是模型质量评测，
-也不替代真实会议的端到端测试。
-
-## 明确边界
-
-P3-T03 迁移上述已独立验收的纯 Java 公共切片；P3-T04 仅新增 Model Driver、
-TCK 及其登记，不修改 `contracts/`、
-`deploy/`、Gateway、API/Worker、Android、Web 或系统音频代码，也不携带真实模型、
-厂商 SDK、私有 DTO、生产地址、凭据、用户数据或闭源二进制。目标仓既有会议领域
-代码在 P3-T05 中补齐了应用命令、持久化端口和 `deploymentScope` 语义；领域和
-端口仍保持纯 Java，PostgreSQL 驱动只位于 JDBC 运行时适配边界。
-
-P2-T11 已验证连接池在 PostgreSQL 停止和重启后的恢复，但该切片仍不构成数据库
-备份/恢复演练、Meeting API/Worker、Gateway
-编排、真实 Provider Driver 或完整后端闭环验收；两个无网络固定文本实现只证明
-公开端口可替换，不代表真实模型质量或生产接入。数据库仍应是未来运行时会议状态、
-幂等记录和 Outbox 的事实源；内存和 Mock 仅用于单元测试与示例。
-
-## 独立验证
-
-在仓库根目录执行：
+在仓库根运行：
 
 ```bash
 mvn -B -f pom.xml clean test
+bash tools/verify-local.sh
 ```
 
-Maven 会从仓库根的 `contracts/realtime.proto` 用固定版本的 protoc 自动生成
-`backend-core/target/generated-sources/` 下的 Java 类；不使用开发机预装的 `protoc`，也不提交
-生成文件。干净检出后可先运行 `mvn -B -f pom.xml test-compile`；
-生成类只允许留在实时协议/传输边界，不进入会议领域或 Model Driver 端口。
+Maven 从根 `contracts/realtime.proto` 使用固定版本 protoc 生成
+`backend-core/target/generated-sources/` 下的 Java 类，不依赖本机预装 protoc，
+也不提交生成文件。默认测试不启动数据库或厂商模型；外部数据库测试需显式提供夹具。
 
-该命令从源码顺序构建两个 Module，不需要预先安装公共核心；不启动数据库或外部服务。
-Fixture、公开边界和依赖检查由仓库根目录的工具脚本执行。
-
-真实 MySQL 5.7 事务和运行时门禁需显式传入一次性测试库连接；先创建并初始化
-`ai_trans_m1_*` 隔离库，M2 用例再通过该账号创建自己的随机 `ai_trans_m2_c_*` 库，
-不要指向已有环境。正式部署则先执行 `deploy/migrate.sh`：
+MySQL 集成测试只接受 loopback 的 `ai_trans_m1_*` 隔离库。
+先建库并执行同一 V001，再按下例传入测试配置。部分测试会创建和删除自己唯一命名的
+`ai_trans_m2_*` 随机库，测试账号须有该权限；禁止指向部署库或其他已有业务库。
 
 ```bash
 REFERENCE_TEST_MYSQL_DATABASE_URL='jdbc:mysql://127.0.0.1:3306/ai_trans_m1_local?useSSL=false&allowPublicKeyRetrieval=true' \
@@ -572,3 +265,8 @@ REFERENCE_TEST_MYSQL_DATABASE_USER='meeting' \
 REFERENCE_TEST_MYSQL_DATABASE_PASSWORD='<从测试 Secret 注入>' \
 mvn -B -f pom.xml clean test
 ```
+
+固定文本 `MockModelDriver` 与 `AlternativeTextModelDriver` 均不访问真实模型。
+`ModelDriverContractTestKit` 验证对应端口生命周期与事件契约，
+不代替 SDK 直连模型、供应商质量或真实设备会议验收。
+真实接入按[从零指南的验收清单](../docs/partner-getting-started.md)确认。

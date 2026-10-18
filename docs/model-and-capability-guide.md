@@ -41,6 +41,9 @@
 
 可用功能由已装配实现、产品配置、账号权益和部署限制共同决定；创建会议时再冻结
 这场会议的请求。支持语言由部署配置声明，App 读取发现接口，不应自己写死厂商语言表。
+`AI_MEETING_MODEL_LANGUAGES` 省略时使用 `zh-CN,en-US`；发现接口直接返回声明列表，
+当前不会向 Provider 查询语种，也不对 Provider／Profile 语言列表自动求交。
+部署者须核对模型和 Adapter 的实际语言支持范围。
 
 ```text
 实际模型／Provider 已装配 + 正确凭据和服务开通
@@ -164,7 +167,7 @@ AI_MEETING_FFMPEG=ffmpeg
 前置条件是已开放 `speaker.diarization.session`，本场实际有分人信息并保留录音。
 在 Profile optional 和权益列表加入 `speaker.identity.cross_meeting`；该跨场能力由
 已注册 Provider 声明，**不要加入实时 ASR 的模型能力列表**。
-匹配阈值等可选项见[声纹插件说明](../backend-reference/README.md#p10-可选跨会议声纹参考插件)。
+匹配阈值等可选项见[声纹插件说明](../backend-reference/README.md#可选跨会议声纹参考插件)。
 
 参考 Web 读取结果不要求单独登录；“命名注册”是写操作，需要登录会议所属账号。
 没有可匹配人物时保持未识别，短片段或识别失败不伪造人物，也不阻断其余结果就绪。
