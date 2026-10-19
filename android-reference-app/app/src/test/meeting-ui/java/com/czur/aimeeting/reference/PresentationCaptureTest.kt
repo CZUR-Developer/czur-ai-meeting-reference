@@ -1,6 +1,7 @@
 package com.czur.aimeeting.reference
 
 import android.os.IBinder
+import android.os.Binder
 import android.os.Looper
 import android.os.SystemClock
 import android.view.View
@@ -151,6 +152,10 @@ class PresentationCaptureTest {
         set(service, "presentation", PresentationCapture(source, 0))
         set(service, "session", session)
         val overlay = get(service, "overlay") as MeetingOverlay
+        service.observe(object : MeetingService.Observer {
+            override fun onMeetingState(state: MeetingService.State) {}
+            override fun captureWindowTokens(): Array<IBinder?> = arrayOf(Binder())
+        })
         overlay.show(emptyDisplay(), {}, {}, {}, {})
         try {
             assertEquals(1, overlay.captureWindowTokens().size)
@@ -158,6 +163,38 @@ class PresentationCaptureTest {
             assertEquals(0, source.excluded.size)
             source.deliver()
             session.acknowledge()
+        } finally { host.destroy() }
+    }
+
+    @Test fun pageTokensAreReadAgainForFinalFrameAndReleasedWhenPageLeaves() {
+        val host = Robolectric.buildService(MeetingService::class.java).create()
+        val service = host.get()
+        val source = FakeSource(true, ArrayList())
+        var token: IBinder = Binder()
+        val observer = object : MeetingService.Observer {
+            override fun onMeetingState(state: MeetingService.State) {}
+            override fun captureWindowTokens(): Array<IBinder?> = arrayOf(token)
+        }
+        set(service, "presentation", PresentationCapture(source, 0))
+        set(service, "session", RecordingSession(ArrayList()))
+        set(service, "active", true)
+        service.observe(observer)
+        try {
+            val tick = get(service, "presentationTick") as Runnable
+            tick.run()
+            assertArrayEquals(arrayOf(token), source.excluded)
+            source.skip()
+            service.unobserve(observer)
+            tick.run()
+            assertEquals(0, source.excluded.size)
+            source.skip()
+            // 返回后的新窗口和停止后会前重绘都须排除，不能只在 active=true 时获取。
+            token = Binder()
+            service.observe(observer)
+            set(service, "active", false)
+            service.stopPresentationBefore {}
+            assertArrayEquals(arrayOf(token), source.excluded)
+            source.skip()
         } finally { host.destroy() }
     }
 

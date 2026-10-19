@@ -48,6 +48,30 @@ import org.robolectric.shadows.ShadowToast
 @Config(sdk = [35], qualifiers = "w1920dp-h1080dp-mdpi")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class ReferenceMeetingPageTest {
+    @Test fun visibleMeetingPageProvidesItsMountedWindowForCaptureExclusion() {
+        val serviceHost = Robolectric.buildService(MeetingService::class.java).create()
+        shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(
+            ComponentName(RuntimeEnvironment.getApplication(), MeetingService::class.java),
+            serviceHost.get().onBind(Intent()))
+        val controller = Robolectric.buildActivity(MainActivity::class.java).setup().visible()
+        try {
+            val activity = controller.get()
+            val observer = MainActivity::class.java.getDeclaredField("observer").run {
+                isAccessible = true
+                get(activity) as MeetingService.Observer
+            }
+            assertNotNull(activity.window.decorView.windowToken)
+            assertArrayEquals(arrayOf(activity.window.decorView.windowToken), observer.captureWindowTokens())
+            val defaultDim = activity.window.attributes.dimAmount
+            render(activity, display(false, false, true), 1, 0, capturingPresentation = true)
+            assertEquals(0f, activity.window.attributes.dimAmount, 0f)
+            render(activity, display(false, false, true), 2, 0, capturingPresentation = true, active = false)
+            assertEquals("停止末帧期间不得恢复背景暗化", 0f, activity.window.attributes.dimAmount, 0f)
+            render(activity, display(false, false, true), 3, 0, active = false)
+            assertEquals(defaultDim, activity.window.attributes.dimAmount, 0f)
+        } finally { controller.pause().stop().destroy(); serviceHost.destroy() }
+    }
+
     @After fun resetAssembly() {
         MeetingAppAssembly.configureBackend("")
         MeetingAppAssembly.configureResultWeb("")
@@ -634,12 +658,13 @@ class ReferenceMeetingPageTest {
                 TranscriptEvent("source", 2, 0, 100, "zh-CN", "source", complete), TranslationEvent("translation", "source", 1,
                     "zh-CN", "en-US", "译文", true), MeetingDisplaySnapshot.Side.A, DisplayRouter.Basis.MODEL_LANGUAGE)), "source")
 
-        private fun render(activity: MainActivity, display: MeetingDisplaySnapshot, version: Int, level: Int) {
+        private fun render(activity: MainActivity, display: MeetingDisplaySnapshot, version: Int, level: Int,
+            capturingPresentation: Boolean = false, active: Boolean = true) {
             MainActivity::class.java.getDeclaredMethod("renderMeetingState", MeetingService.State::class.java)
                 .apply { isAccessible = true }.invoke(activity, MeetingService.State(display, "会议中", "本场功能",
-                    true, true, true, false, version, null, null, false, "已进行 00:01:00", MeetingReminderPresentation.Notice.NONE,
+                    true, active, true, false, version, null, null, false, "已进行 00:01:00", MeetingReminderPresentation.Notice.NONE,
                     if (display.bilingual()) MeetingSetup.Mode.LIVE_TRANSLATION else MeetingSetup.Mode.LIVE_TRANSCRIPT,
-                    false, AudioInputLevel(level, 1000), ""))
+                    false, AudioInputLevel(level, 1000), "", capturingPresentation))
         }
         private fun field(target: Any, name: String): Any? = target.javaClass.getDeclaredField(name).run {
             isAccessible = true

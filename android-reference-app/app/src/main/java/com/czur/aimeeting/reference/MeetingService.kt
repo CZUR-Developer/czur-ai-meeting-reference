@@ -35,7 +35,11 @@ import java.util.concurrent.Executors
  * Activity 离开仅解除观察，所有会议回调仍走主线程串行队列。
  */
 class MeetingService : Service() {
-    fun interface Observer { fun onMeetingState(state: State) }
+    fun interface Observer {
+        fun onMeetingState(state: State)
+        /** 主线程逐帧读取当前页面窗口；离开页面解除观察后，不保留旧句柄。 */
+        fun captureWindowTokens(): Array<IBinder?> = emptyArray()
+    }
     class State(
         @JvmField val display: MeetingDisplaySnapshot, @JvmField val status: String,
         @JvmField val capabilityText: String, @JvmField val busy: Boolean, @JvmField val active: Boolean,
@@ -44,7 +48,8 @@ class MeetingService : Service() {
         @JvmField val actionRunning: Boolean, @JvmField val timeText: String,
         @JvmField val reminder: MeetingReminderPresentation.Notice, @JvmField val mode: MeetingSetup.Mode,
         @JvmField val summaryEnabled: Boolean, @JvmField val audioLevel: AudioInputLevel?,
-        @JvmField val presentationNotice: String
+        @JvmField val presentationNotice: String,
+        @JvmField val capturingPresentation: Boolean = false
     )
     inner class LocalBinder : Binder() { fun service() = this@MeetingService }
     private val binder = LocalBinder()
@@ -329,9 +334,16 @@ class MeetingService : Service() {
         val currentSession = session
         if (current == null || currentSession == null) { completed?.run(); return }
         try {
-            val excluded = if (current.supportsWindowExclusion()) overlay.captureWindowTokens() else emptyArray()
+            // 会中主页面和停止后同一窗口内的会前页也属于本 App 的 UI，和悬浮窗一并排除。
+            // Activity 只交窗口句柄，算法／图像处理仍完整留在 SDK；普通平台仍明确整屏采集。
+            val excluded = if (current.supportsWindowExclusion())
+                overlay.captureWindowTokens() + (observer?.captureWindowTokens() ?: emptyArray())
+            else emptyArray()
+            // Debug 只记录公共调用是否完成，不暴露 SDK 的内部判断或跳过原因。
+            if (BuildConfig.DEBUG) Log.d(TAG, "演示截图请求 final=${completed != null} excludedWindows=${excluded.size}")
             current.capture(SystemClock.elapsedRealtime(), excluded, object : PresentationCapture.Callback {
                 override fun onSuccess(frame: PresentationCapture.Frame?) {
+                    if (BuildConfig.DEBUG) Log.d(TAG, "演示截图返回 final=${completed != null} hasImage=${frame != null}")
                     if (frame == null) { completed?.run(); return }
                     if (destroyed || presentation !== current || session !== currentSession) {
                         frame.close()
@@ -483,7 +495,8 @@ class MeetingService : Service() {
         audioErrorText?.let { audioText += "\n$it" }
         val state = State(display, status, capabilityText + audioText, busy, active, canStop,
             overlay.isShowing(), transcriptVersion, readyResult, actionOutcome, actionRunning, timeText, reminder,
-            setup?.mode() ?: MeetingSetup.Mode.LIVE_TRANSCRIPT, setup?.summaryEnabled() == true, audioLevel, presentationNotice)
+            setup?.mode() ?: MeetingSetup.Mode.LIVE_TRANSCRIPT, setup?.summaryEnabled() == true, audioLevel, presentationNotice,
+            presentation != null)
         overlay.render(display, state.mode, state.summaryEnabled, timeText, reminder, canStop, observer == null, audioLevel?.level() ?: 0)
         observer?.onMeetingState(state)
     }

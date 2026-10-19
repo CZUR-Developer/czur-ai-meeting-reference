@@ -41,7 +41,14 @@ import java.util.Locale
 /** 参考入口只持有登录、会前设置和呈现，会议流程仍由完整 SDK 客户端管理。 */
 class MainActivity : Activity() {
     private val main = Handler(Looper.getMainLooper())
-    private val observer = MeetingService.Observer(::renderMeetingState)
+    private val observer = object : MeetingService.Observer {
+        override fun onMeetingState(state: MeetingService.State) = renderMeetingState(state)
+        override fun captureWindowTokens(): Array<IBinder?> {
+            // 截图时读取实际已挂载窗口，不缓存 Activity 重建前的句柄。
+            val views = listOfNotNull(window.decorView, loginDialog?.takeIf { it.isShowing }?.window?.decorView)
+            return views.filter { it.isAttachedToWindow }.map { it.windowToken }.toTypedArray()
+        }
+    }
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
             meetingService = (binder as MeetingService.LocalBinder).service()
@@ -106,9 +113,11 @@ class MainActivity : Activity() {
     private var setupSelection = MeetingSetupSelection()
     private var bindingSetupViews = false
     private var availableResultActions: Set<String> = emptySet()
+    private var defaultDimAmount = 0f
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        defaultDimAmount = window.attributes.dimAmount
         // 地址由 APK 编译配置装配；默认登录插件按同后端身份配对恢复会话。
         MeetingAppAssembly.initialize(this)
         setupPreferences = MeetingSetupPreferenceStore(this)
@@ -553,6 +562,10 @@ class MainActivity : Activity() {
         if (state.status.isNotBlank()) statusView.text = state.status
         capabilityView.text = state.capabilityText
         page.showMeeting(state.active); page.showPresentationNotice(state.active, state.presentationNotice)
+        // Dialog 的背景暗化层独立于页面窗口，单独排窗无法移除它。演示采集期间（含
+        // 停止末帧）不暗化真实内容；采集关闭后恢复原会前风格，不在截图回调中切 UI。
+        val dimAmount = if (state.capturingPresentation) 0f else defaultDimAmount
+        if (window.attributes.dimAmount != dimAmount) window.setDimAmount(dimAmount)
         renderWindowSize(state.active)
         page.showStopConfirmation(!state.active && state.canStop)
         updateStartAvailability()
