@@ -3,6 +3,8 @@ package com.czur.aimeeting.reference
 import android.content.Intent
 import android.os.Looper
 import android.os.SystemClock
+import android.os.PowerManager
+import android.content.Context
 import com.czur.aimeeting.client.MeetingClient
 import com.czur.aimeeting.client.MeetingSession
 import com.czur.aimeeting.client.display.DisplayRouter
@@ -23,12 +25,61 @@ import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import org.robolectric.shadows.ShadowSettings
+import com.czur.aimeeting.reference.meeting.MeetingAppAssembly
 
 /** 正常 UI 生命周期使用真实 Service／窗口；不建会、不联网，也不启动音源。 */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], qualifiers = "w1920dp-h1080dp-mdpi")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class MeetingServicePresentationTest {
+    @Test fun overlayStopUpdatesStateBeforeReturningToTheSingleSetupHost() {
+        ShadowSettings.setCanDrawOverlays(true)
+        val host = Robolectric.buildService(MeetingService::class.java).create()
+        val service = host.get()
+        var activeWhenStopped = true
+        var overlayWhenStopped = true
+        val session = Proxy.newProxyInstance(MeetingSession::class.java.classLoader, arrayOf(MeetingSession::class.java)) { _, method, _ ->
+            if (method.name == "requestStop") {
+                activeWhenStopped = get(service, "active") as Boolean
+                overlayWhenStopped = (get(service, "overlay") as MeetingOverlay).isShowing()
+            }
+            null
+        } as MeetingSession
+        set(service, "active", true); set(service, "canStop", true); set(service, "session", session)
+        try {
+            assertTrue(service.showOverlay())
+            val token = (get(service, "overlay") as MeetingOverlay).captureWindowTokens().first()
+            assertTrue(service.showOverlay())
+            assertSame("重复打开保留原浮窗", token, (get(service, "overlay") as MeetingOverlay).captureWindowTokens().first())
+            invoke(service, "requestStopFromOverlay")
+            assertFalse(activeWhenStopped)
+            assertFalse(overlayWhenStopped)
+            assertEquals(MainActivity::class.java.name, shadowOf(service).nextStartedActivity.component!!.className)
+            assertNull(shadowOf(service).nextStartedActivity)
+        } finally { host.destroy() }
+    }
+
+    @Test fun queuedResultWaitsWhileScreenIsOffThenOpensItsHostOnWake() {
+        val host = Robolectric.buildService(MeetingService::class.java).create()
+        val service = host.get()
+        val power = service.getSystemService(Context.POWER_SERVICE) as PowerManager
+        shadowOf(power).setIsInteractive(false)
+        try {
+            val command = AppResultActionPlugin.UiOperation(Runnable { })
+            invoke(service, "queueUiOperation", Runnable::class.java, command)
+            shadowOf(Looper.getMainLooper()).idle()
+            assertTrue(MeetingAppAssembly.hasPendingResultUi())
+            assertNull(shadowOf(service).nextStartedActivity)
+            shadowOf(power).setIsInteractive(true)
+            service.sendBroadcast(Intent(Intent.ACTION_SCREEN_ON))
+            shadowOf(Looper.getMainLooper()).idle()
+            assertEquals(MainActivity::class.java.name, shadowOf(service).nextStartedActivity.component!!.className)
+        } finally {
+            while (MeetingAppAssembly.consumeResultUiOperation() != null) { }
+            host.destroy()
+        }
+    }
+
     @Test fun normalStopDismissesOverlayAndFreezesClockBeforeBackendResultArrives() {
         ShadowSettings.setCanDrawOverlays(true)
         val host = Robolectric.buildService(MeetingService::class.java).create()

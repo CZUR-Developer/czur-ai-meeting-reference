@@ -20,6 +20,44 @@ def hierarchy(*nodes):
 
 
 class MeetingDeviceTests(unittest.TestCase):
+    def test_overlay_debug_snapshot_uses_current_bounds_for_real_touch(self):
+        adb = Mock()
+        adb.run.return_value = 'Broadcast completed: result=-1, data="{"controls":{"收起窗口":[100,200,140,240]}}"'
+        tool = device.MeetingDevice(adb)
+        tool.tap(tool.wait_overlay_control("收起窗口"))
+        adb.run.assert_any_call("shell", "input", "tap", "120", "220")
+
+    def test_overlay_requires_debug_receipt_instead_of_using_old_coordinates(self):
+        adb = Mock()
+        adb.run.return_value = 'Broadcast completed: result=0'
+        with self.assertRaises(device.ToolError):
+            device.MeetingDevice(adb).overlay_controls()
+
+    def test_overlay_selector_accepts_a_leaf_and_ignores_nonclickable_labels(self):
+        root = hierarchy(("", {"content-desc": "停止会议", "clickable": "true"}))
+        self.assertIsNotNone(device.by_description(root, "停止会议"))
+        self.assertIsNone(device.by_description(root, "普通窗口"))
+
+    def test_open_accepts_a_running_overlay_after_the_setup_activity_exits(self):
+        tool = device.MeetingDevice(Mock())
+        tool.dump = Mock(return_value=hierarchy(("", {"content-desc": "停止会议", "clickable": "true"})))
+        with patch("builtins.print"):
+            tool.open()
+        self.assertEqual(tool.dump.call_count, 1)
+
+    def test_window_receipt_counts_only_this_apps_real_overlay(self):
+        raw = f"""  Window #0 Window{{main}}:
+    package={device.PACKAGE}
+    mAttrs={{(0,0)(1800x1008) ty=BASE_APPLICATION}}
+  Window #1 Window{{panel}}:
+    package={device.PACKAGE}
+    mAttrs={{(60,968)(1800x222) ty=APPLICATION_OVERLAY}}
+  Window #2 Window{{other}}:
+    package=another.app
+    mAttrs={{(0,0)(200x100) ty=APPLICATION_OVERLAY}}
+"""
+        self.assertEqual(device.overlay_windows(raw), [{"type": "APPLICATION_OVERLAY", "width": 1800, "height": 222}])
+
     def test_resource_id_and_live_bounds(self):
         root = hierarchy(("start_meeting", {}))
         self.assertEqual(device.center(device.by_id(root, "start_meeting")), ("120", "70"))

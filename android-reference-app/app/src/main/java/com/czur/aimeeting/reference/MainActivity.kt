@@ -52,7 +52,7 @@ class MainActivity : Activity() {
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
             meetingService = (binder as MeetingService.LocalBinder).service()
-            meetingService?.observe(observer)
+            observeVisibleMeeting()
         }
         override fun onServiceDisconnected(name: ComponentName) { meetingService = null }
     }
@@ -185,11 +185,7 @@ class MainActivity : Activity() {
             updateStartAvailability()
         }
         refreshResultAvailability()
-        startButton.setOnClickListener {
-            if (MeetingRuntimeFactory.requiresMicrophone() && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
-                requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), MIC_PERMISSION_REQUEST)
-            else createAndStartMeeting()
-        }
+        startButton.setOnClickListener { requestMeetingPermissions() }
         stopButton.setOnClickListener { meetingService?.requestStop() }
         page.stopConfirmation.setOnClickListener { meetingService?.requestStop() }
         swapColumnsButton.setOnClickListener { meetingService?.swapDisplayColumns() }
@@ -462,11 +458,16 @@ class MainActivity : Activity() {
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode != MIC_PERMISSION_REQUEST) return
-        if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) createAndStartMeeting()
+        if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) requestMeetingPermissions()
         else statusView.text = "需要麦克风权限才能进行真实转写"
     }
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == OVERLAY_PERMISSION_REQUEST) {
+            if (Settings.canDrawOverlays(this)) createAndStartMeeting()
+            else statusView.text = "需要悬浮窗权限才能在其他应用上方显示会议字幕，会议未开始"
+            return
+        }
         if (requestCode != PRESENTATION_PERMISSION_REQUEST) return
         val approved = pendingPresentationMeeting
         pendingPresentationMeeting = null
@@ -476,6 +477,15 @@ class MainActivity : Activity() {
             updateStartAvailability(); setConfigurationEnabled(true); return
         }
         startMeeting(approved, resultCode, data)
+    }
+    /** 权限由 App 在建会前申请；SDK 只负责窗口，缺少权限时不创建付费会议。 */
+    private fun requestMeetingPermissions() {
+        if (MeetingRuntimeFactory.requiresMicrophone() && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), MIC_PERMISSION_REQUEST)
+        } else if (!Settings.canDrawOverlays(this)) {
+            statusView.text = "请允许在其他应用上层显示，返回后继续开始会议"
+            startActivityForResult(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")), OVERLAY_PERMISSION_REQUEST)
+        } else createAndStartMeeting()
     }
     private fun createAndStartMeeting() {
         val client = preMeetingClient
@@ -554,6 +564,15 @@ class MainActivity : Activity() {
 
     /** Service 推送不可变状态，Activity 重建直接重绘整场字幕，不重订模型事件。 */
     private fun renderMeetingState(state: MeetingService.State) {
+        // 默认会中入口属于 Service 的真悬浮窗。挂载成功后退出设置 Activity，释放
+        // 它的整页输入区域与暗化层；只有从浮窗时钟显式打开详情时才保留历史页面。
+        if (resumed && state.active && state.overlayShowing && !intent.getBooleanExtra(EXTRA_MEETING_DETAILS, false)) {
+            if (!isFinishing) {
+                Log.i(TAG, "会议已交给跨应用悬浮窗，会前页面退出")
+                finish()
+            }
+            return
+        }
         meetingBusy = state.busy; hasReadyResult = state.readyResult != null
         val failedAction = state.actionOutcome?.status() == ResultActionOutcome.Status.FAILED
         retryActionButton.visibility = if (failedAction) View.VISIBLE else View.GONE
@@ -570,7 +589,7 @@ class MainActivity : Activity() {
         page.showStopConfirmation(!state.active && state.canStop)
         updateStartAvailability()
         setConfigurationEnabled(!state.busy); stopButton.isEnabled = state.canStop
-        overlayButton.contentDescription = if (state.overlayShowing) "隐藏悬浮字幕" else "显示悬浮字幕"
+        overlayButton.contentDescription = "收起详情，返回悬浮字幕"
         elapsedView.text = state.timeText.split(" · ")[0].replace("已进行 ", "")
         val audioLevel = state.audioLevel?.level() ?: 0
         audioLevelBar.progress = audioLevel; page.voiceLevel.setLevel(audioLevel)
@@ -664,7 +683,7 @@ class MainActivity : Activity() {
             statusView.text = "请授予悬浮窗权限，返回会议页后再次点击显示"
             startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))); return
         }
-        service.toggleOverlay()
+        if (service.showOverlay()) finish()
     }
     private fun setConfigurationEnabled(enabled: Boolean) {
         val available = enabled && !meetingBusy && pendingPresentationMeeting == null
@@ -687,14 +706,27 @@ class MainActivity : Activity() {
         if (window.attributes.width != width || window.attributes.height != height) window.setLayout(width, height)
     }
     override fun onStart() { super.onStart(); serviceBound = bindService(Intent(this, MeetingService::class.java), serviceConnection, Context.BIND_AUTO_CREATE) }
-    override fun onResume() { super.onResume(); resumed = true; meetingService?.observe(observer); refreshIdentity(deploymentCapabilities.isEmpty()) }
-    override fun onPause() { resumed = false; super.onPause() }
+    /** 单实例入口避免反复点击图标叠出旧页面；只让前台 Activity 观察同一场快照。 */
+    override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); setIntent(intent) }
+    private fun observeVisibleMeeting() {
+        if (!resumed || isFinishing) return
+        val service = meetingService ?: return
+        if (!intent.getBooleanExtra(EXTRA_MEETING_DETAILS, false)) service.showOverlay()
+        service.observe(observer)
+    }
+    override fun onResume() {
+        super.onResume(); resumed = true; observeVisibleMeeting()
+        if (!isFinishing) refreshIdentity(deploymentCapabilities.isEmpty())
+    }
+    override fun onPause() { resumed = false; meetingService?.unobserve(observer); super.onPause() }
     override fun onStop() {
         if (serviceBound) { meetingService?.unobserve(observer); unbindService(serviceConnection); serviceBound = false; meetingService = null }
         super.onStop()
     }
     override fun onDestroy() { preMeetingClient?.close(); super.onDestroy() }
     companion object {
+        const val EXTRA_MEETING_DETAILS = "meetingDetails"
+        private const val OVERLAY_PERMISSION_REQUEST = 1003
         private const val TAG = "AiMeetingReference"
         private const val MIC_PERMISSION_REQUEST = 1001
         private const val PRESENTATION_PERMISSION_REQUEST = 1002

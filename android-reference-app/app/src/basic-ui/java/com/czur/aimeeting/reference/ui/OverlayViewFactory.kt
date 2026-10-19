@@ -78,6 +78,7 @@ class OverlayViewFactory : MeetingOverlayFactory {
         }
         override fun isShowing() = showing
         override fun windowToken(): IBinder? = if (showing) views?.view()?.windowToken else null
+        override fun controlBounds() = overlayControlBounds(views?.view())
         override fun render(display: MeetingDisplaySnapshot, mode: MeetingSetup.Mode, summaryEnabled: Boolean,
             timeText: String, canStop: Boolean, audioLevel: Int) {
             this.display = display; this.timeText = timeText; this.canStop = canStop; this.audioLevel = audioLevel

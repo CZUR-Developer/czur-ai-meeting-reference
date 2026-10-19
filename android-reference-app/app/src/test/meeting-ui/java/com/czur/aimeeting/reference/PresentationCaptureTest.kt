@@ -227,10 +227,10 @@ class PresentationCaptureTest {
         }
     }
 
-    @Test fun actualOverlayStopWithoutCaptureKeepsImmediateReturnAndNormalStop() {
+    @Test fun actualOverlayStopWithoutCaptureStopsBeforeReturningToTheHost() {
         OverlayStopFixture(false).use { fixture ->
             fixture.clickStop()
-            assertEquals(listOf("return", "stop", "continue"), fixture.events)
+            assertEquals(listOf("stop", "continue", "return"), fixture.events)
             assertFalse(get(fixture.service, "canStop") as Boolean)
             assertNull(Shadows.shadowOf(RuntimeEnvironment.getApplication()).nextStartedActivity)
         }
@@ -270,7 +270,7 @@ class PresentationCaptureTest {
     }
 
     /** 只控制SDK输出和业务ACK时刻；默认窗口按钮→Service→beforeStop仍走实际实现。 */
-    private class OverlayStopFixture(withCapture: Boolean) : AutoCloseable {
+    private class OverlayStopFixture(private val withCapture: Boolean) : AutoCloseable {
         val host = Robolectric.buildService(MeetingService::class.java).create()
         val service = host.get()
         val events = ArrayList<String>()
@@ -284,7 +284,7 @@ class PresentationCaptureTest {
         val session = object : RecordingSession(events) {
             override fun recordSubmission(offsetMs: Long) { events.add("submit") }
             override fun requestStop() {
-                if (!withCapture) { assertReturnedToMeeting(); events.add("return") }
+                if (!withCapture) assertNull(Shadows.shadowOf(RuntimeEnvironment.getApplication()).nextStartedActivity)
                 events.add("stop")
                 service.stopPresentationBefore {
                     if (withCapture) { assertReturnedToMeeting(); events.add("return") }
@@ -312,6 +312,7 @@ class PresentationCaptureTest {
             assertNotNull(stop)
             assertTrue(stop.isEnabled)
             assertTrue(stop.performClick())
+            if (!withCapture) { assertReturnedToMeeting(); events.add("return") }
         }
 
         private fun assertReturnedToMeeting() {

@@ -37,6 +37,29 @@ import org.robolectric.shadows.ShadowSettings
 class OverlayViewFactoryTest {
     @Before fun allowOverlay() = ShadowSettings.setCanDrawOverlays(true)
 
+    @Test fun automationBoundsFollowTheMountedFormAndExcludeDisabledControls() {
+        val window = OverlayViewFactory().create(RuntimeEnvironment.getApplication(), {}, {}, {}) as OverlayViewFactory.DefaultWindow
+        window.show(single("test", true))
+        window.render(single("test", true), MeetingSetup.Mode.LIVE_TRANSCRIPT, false, "00:10", true, 30)
+        try {
+            shadowOf(Looper.getMainLooper()).idle()
+            measure(window.overlay.controller())
+            assertTrue(window.controlBounds().getValue("停止会议").width() > 0)
+            assertTrue(window.controlBounds().containsKey("收起窗口"))
+            window.overlay.collapse()
+            shadowOf(Looper.getMainLooper()).idle()
+            measure(window.overlay.controller())
+            assertTrue(window.controlBounds().containsKey("展开会议窗口"))
+            assertFalse(window.controlBounds().containsKey("停止会议"))
+            window.overlay.restore()
+            window.render(single("test", true), MeetingSetup.Mode.LIVE_TRANSCRIPT, false, "00:10", false, 0)
+            shadowOf(Looper.getMainLooper()).idle()
+            measure(window.overlay.controller())
+            assertFalse(window.controlBounds().containsKey("停止会议"))
+        } finally { window.dismiss() }
+        assertTrue(window.controlBounds().isEmpty())
+    }
+
     @Test @Config(sdk = [34]) fun bundledWebpResourcesStillDecodeAsAnimations() {
         val context = RuntimeEnvironment.getApplication()
         // 资源分类调整后仍由平台读取原动画，不能悄悄退成单帧图片。

@@ -35,6 +35,24 @@ def by_id(root, name):
                  if node.get("resource-id") == resource_id), None)
 
 
+def by_description(root, description):
+    """浮窗按钮沿用可访问性文案；从实际层级读取位置，不写死屏幕坐标。"""
+    return next((node for node in root.iter("node")
+                 if node.get("content-desc") == description and node.get("clickable") == "true"), None)
+
+
+def overlay_windows(raw):
+    """只提取本App实际APPLICATION_OVERLAY窗口，Activity Dialog不计作浮窗。"""
+    found = []
+    for block in re.split(r"(?m)^\s*Window #\d+ Window", raw)[1:]:
+        if "package=" + PACKAGE not in block or not re.search(r"ty=(?:APPLICATION_OVERLAY|2038)\b", block):
+            continue
+        size = re.search(r"mAttrs=\{\([^)]*\)\((\d+)x(\d+)\)", block)
+        if size:
+            found.append({"type": "APPLICATION_OVERLAY", "width": int(size[1]), "height": int(size[2])})
+    return found
+
+
 def center(node):
     """使用本次 UI dump 的矩形，不缓存位置或为某台设备写固定坐标。"""
     values = re.findall(r"-?\d+", node.get("bounds", ""))
@@ -195,11 +213,26 @@ class MeetingDevice:
 
         def main_page(root):
             start = by_id(root, "start_meeting")
-            return start if start is not None else by_id(root, "stop_meeting")
+            if start is not None:
+                return start
+            stop = by_id(root, "stop_meeting")
+            if stop is not None:
+                return stop
+            # 默认会中已经退出Activity；再次点图标复用同场浮窗，Mini也保持。
+            floating_stop = by_description(root, "停止会议")
+            return floating_stop if floating_stop is not None else by_description(root, "展开会议窗口")
 
         def navigation_target(root):
             page = main_page(root)
-            return page if page is not None else by_id(root, "result_back")
+            if page is not None:
+                return page
+            back = by_id(root, "result_back")
+            if back is not None:
+                return back
+            # 不抢焦点的浮窗可能不在uiautomator的活动页面层级中。
+            if overlay_windows(self.adb.run("shell", "dumpsys", "window", "windows")) and self.log_state().get("phase") == "RUNNING":
+                return ET.Element("overlay")
+            return None
 
         target = self.wait(navigation_target, "参考 App 会前／会中页或结果返回入口")
         if target.get("resource-id") == PACKAGE + ":id/result_back":
@@ -374,6 +407,56 @@ class MeetingDevice:
             time.sleep(0.4)
         raise ToolError("未观察到同场 READY；DEBUG_STOP 仅 Debug APK 开放，请核对状态和结果页面")
 
+    def overlay_controls(self):
+        """Debug只读入口返回本次挂载按钮坐标，后续仍用adb input真实触摸。"""
+        raw = self.adb.run("shell", "am", "broadcast", "-a", PACKAGE + ".DEBUG_OVERLAY", "-p", PACKAGE)
+        payload = re.search(r'data="(\{.*\})"', raw)
+        if not payload:
+            raise ToolError("未取得浮窗按钮坐标；请安装提供DEBUG_OVERLAY的Debug包，Release请手动点击")
+        return json.loads(payload.group(1))["controls"]
+
+    def wait_overlay_control(self, description):
+        deadline = time.monotonic() + self.timeout
+        while time.monotonic() < deadline:
+            controls = self.overlay_controls()
+            if description in controls:
+                left, top, right, bottom = controls[description]
+                return ET.Element("node", {"bounds": f"[{left},{top}][{right},{bottom}]"})
+            time.sleep(.2)
+        raise ToolError("当前浮窗没有可操作按钮: " + description)
+
+    def overlay(self, action):
+        """操作真实浮窗按钮；形态切换验证后继入口与同场ID，停止等待同场READY。"""
+        self.stage = "overlay"
+        before = self.log_state()
+        actions = {"collapse": ("收起窗口", "展开会议窗口"), "restore": ("展开会议窗口", "收起窗口"),
+                   "large": ("大窗口", "普通窗口"), "normal": ("普通窗口", "大窗口"),
+                   "stop": ("停止会议", None)}
+        if action != "status":
+            description, expected = actions[action]
+            self.tap(self.wait_overlay_control(description))
+            if expected:
+                self.wait_overlay_control(expected)
+            else:
+                deadline = time.monotonic() + self.timeout
+                while time.monotonic() < deadline:
+                    current = self.log_state()
+                    if current.get("meetingId") == before.get("meetingId") and current.get("phase") == "READY":
+                        break
+                    time.sleep(.4)
+                else:
+                    raise ToolError("真实停止按钮已点击，尚未观察到同场READY")
+        current = self.log_state()
+        if action != "status" and current.get("meetingId") != before.get("meetingId"):
+            raise ToolError("窗口操作前后会议ID不一致")
+        windows = overlay_windows(self.adb.run("shell", "dumpsys", "window", "windows"))
+        if action == "stop" and windows:
+            raise ToolError("会议已READY，仍有本App悬浮窗")
+        if action != "stop" and not windows:
+            raise ToolError("没有本App实际APPLICATION_OVERLAY窗口")
+        self.evidence()
+        self.emit("PASS", action=action, windows=windows, **current)
+
     def status(self):
         self.stage = "status"
         root = self.dump()
@@ -392,7 +475,8 @@ class MeetingDevice:
 def parser():
     cli = argparse.ArgumentParser(description=__doc__)
     cli.add_argument("command", choices=("open", "login", "options", "start",
-                                         "setup-start", "stop", "status", "reverse", "remove-reverse"))
+                                         "setup-start", "stop", "status", "overlay", "reverse", "remove-reverse"))
+    cli.add_argument("--overlay-action", choices=("status", "collapse", "restore", "large", "normal", "stop"), default="status")
     cli.add_argument("--serial", default=os.environ.get("ANDROID_SERIAL"))
     cli.add_argument("--adb-command", default=os.environ.get("CZUR_ADB_COMMAND", "adb"))
     cli.add_argument("--username", default=os.environ.get("CZUR_MEETING_USERNAME"))
@@ -428,6 +512,8 @@ def main(argv=None):
             tool.login(args.username, password)
         elif args.command == "options":
             tool.options(args.mode, args.presentation, args.summary, args.source_language, args.target_language)
+        elif args.command == "overlay":
+            tool.overlay(args.overlay_action)
         elif args.command in ("reverse", "remove-reverse"):
             tool.stage = args.command
             arguments = ("reverse", "tcp:" + str(args.device_port), "tcp:" + str(args.host_port)) \

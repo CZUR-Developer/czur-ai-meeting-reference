@@ -1,5 +1,6 @@
 package com.czur.aimeeting.reference
 
+import android.app.Activity
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -16,6 +17,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
 import android.widget.Toast
@@ -56,6 +58,17 @@ class MeetingService : Service() {
     private val main = Handler(Looper.getMainLooper())
     private val debugStopReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action == ACTION_DEBUG_OVERLAY) {
+                // 标准 uiautomator 可能只返回底层 Activity。只读可见按钮坐标供脚本
+                // 发真实触摸，不绕过点击处理，也不暴露字幕、凭据或模型内部数据。
+                val controls = org.json.JSONObject()
+                overlay.controlBounds().forEach { (label, bounds) ->
+                    controls.put(label, org.json.JSONArray(listOf(bounds.left, bounds.top, bounds.right, bounds.bottom)))
+                }
+                resultData = org.json.JSONObject().put("controls", controls).toString()
+                resultCode = Activity.RESULT_OK
+                return
+            }
             if (intent.action != ACTION_DEBUG_STOP) return
             Log.d(TAG, "收到调试正常停止命令 active=$active canStop=$canStop")
             requestStop()
@@ -67,6 +80,7 @@ class MeetingService : Service() {
      */
     private val screenOffReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action == Intent.ACTION_SCREEN_ON) { openPendingResultHost(); return }
             if (intent.action != Intent.ACTION_SCREEN_OFF || !active) return
             Log.i(TAG, "设备已息屏，正常停止当前会议 meetingId=$meetingId")
             requestStop("屏幕已关闭，正在等待模型最终字幕…")
@@ -117,6 +131,7 @@ class MeetingService : Service() {
     /** 仅窗口停止登记；末帧完成后才回页面，避免末帧截到自己的整页。 */
     private var returnToMeetingAfterPresentation = false
     private var presentationNotice = ""
+    private var announcedPresentationNotice = ""
     private var setup: MeetingSetup? = null
     private var meetingId: String? = null
     /** 空闲绑定不发布账号／部署提示；实际创建会议后才由 Service 提供会议消息。 */
@@ -151,11 +166,11 @@ class MeetingService : Service() {
         overlay = MeetingOverlay(this)
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CHANNEL, "AI 会议进行中", NotificationManager.IMPORTANCE_LOW))
-        val screenFilter = IntentFilter(Intent.ACTION_SCREEN_OFF)
+        val screenFilter = IntentFilter(Intent.ACTION_SCREEN_OFF).apply { addAction(Intent.ACTION_SCREEN_ON) }
         // 最低 Android 14：系统息屏广播不向其他 App 开放；Debug 停止入口保留 ADB 调试能力。
         registerReceiver(screenOffReceiver, screenFilter, Context.RECEIVER_NOT_EXPORTED)
         if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
-            val filter = IntentFilter(ACTION_DEBUG_STOP)
+            val filter = IntentFilter(ACTION_DEBUG_STOP).apply { addAction(ACTION_DEBUG_OVERLAY) }
             registerReceiver(debugStopReceiver, filter, Context.RECEIVER_EXPORTED)
             debugStopReceiverRegistered = true
             Log.d(TAG, "调试正常停止命令已注册")
@@ -202,28 +217,49 @@ class MeetingService : Service() {
     fun takeUiOperation() = MeetingAppAssembly.consumeResultUiOperation()
     private fun queueUiOperation(command: Runnable) {
         main.post {
-            if (command is AppResultActionPlugin.UiOperation) MeetingAppAssembly.queueResultUiOperation(command)
+            if (command is AppResultActionPlugin.UiOperation) {
+                MeetingAppAssembly.queueResultUiOperation(command)
+                openPendingResultHost()
+            }
             else command.run() // 原宿主关闭不吞掉 Registry 的普通完成闭包。
         }
+    }
+    /** 默认会中没有 Activity。结果插件需要 UI 时才唤起宿主；息屏时等唤醒，不点亮屏幕。 */
+    private fun openPendingResultHost() {
+        if (!destroyed && observer == null && MeetingAppAssembly.hasPendingResultUi() &&
+            getSystemService(PowerManager::class.java).isInteractive) openMeetingPage()
+    }
+    /** 幂等显示，不切换已存在窗口的 Mini／大窗形态，不重建会议或重新申请音源。 */
+    fun showOverlay(): Boolean {
+        if (!active || stopRequested) return false
+        if (!overlay.isShowing()) {
+            overlay.show(display, Runnable { openMeetingPage(details = true) }, Runnable(::swapDisplayColumns),
+                Runnable(::confirmReminder), Runnable(::requestStopFromOverlay))
+            Log.i(TAG, "跨应用字幕窗挂载 showing=${overlay.isShowing()}")
+            publish()
+        }
+        return overlay.isShowing()
     }
     fun toggleOverlay() {
         if (!active || stopRequested) return
         if (overlay.isShowing()) { overlay.dismiss(); Log.i(TAG, "跨应用字幕窗已关闭") }
         else {
-            overlay.show(display, Runnable(::openMeetingPage), Runnable(::swapDisplayColumns), Runnable(::confirmReminder), Runnable(::requestStopFromOverlay))
-            Log.i(TAG, "跨应用字幕窗已显示")
+            showOverlay()
         }
         publish()
     }
     private fun requestStopFromOverlay() {
         if (!active || !canStop || session == null) return
-        returnToMeetingAfterPresentation = presentation != null
+        val waitForFinalFrame = presentation != null
+        returnToMeetingAfterPresentation = waitForFinalFrame
         Log.i(TAG, "悬浮窗请求正常停止 waitForFinalFrame=$returnToMeetingAfterPresentation meetingId=$meetingId")
-        if (!returnToMeetingAfterPresentation) openMeetingPage()
         requestStop()
+        // 先退窗并改变会中状态，再打开收尾宿主，避免它按RUNNING重新回到浮窗。
+        if (!waitForFinalFrame) openMeetingPage()
     }
-    private fun openMeetingPage() {
-        startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
+    private fun openMeetingPage(details: Boolean = false) {
+        startActivity(Intent(this, MainActivity::class.java).putExtra(MainActivity.EXTRA_MEETING_DETAILS, details)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP))
     }
     fun swapDisplayColumns() {
         if (!active || !display.bilingual() || session == null) return
@@ -235,7 +271,7 @@ class MeetingService : Service() {
         val requested = prepared.setup()
         preparedMeeting = prepared; setup = requested; busy = true; active = false; canStop = false
         stopRequested = false; presentationStopContinuation = null; returnToMeetingAfterPresentation = false
-        presentationNotice = ""; readyResult = null; actionOutcome = null; actionRunning = false; resultHintShown = false
+        presentationNotice = ""; announcedPresentationNotice = ""; readyResult = null; actionOutcome = null; actionRunning = false; resultHintShown = false
         visibleTextCleared = false
         timing = null; stoppedClock = null; meetingId = null; audioInputMode = null; audioErrorText = null; audioLevel = null
         display = MeetingDisplaySnapshot(requested.mode() == MeetingSetup.Mode.LIVE_TRANSLATION,
@@ -256,10 +292,12 @@ class MeetingService : Service() {
                     Log.i(TAG, "组合会议已启动 meetingId=$meetingId mode=${requested.mode()}")
                 }
                 override fun onState(next: MeetingSessionState) {
+                    val enteringRunning = next.phase() == MeetingSessionState.Phase.RUNNING && !active && !stopRequested
                     active = next.active() && !stopRequested; canStop = next.canStop()
                     if (next.phase() != MeetingSessionState.Phase.RUNNING) audioLevel = null
                     status = next.message()
                     Log.d(TAG, "组合会议状态 phase=${next.phase()} savedEventCount=${next.savedEventCount()}")
+                    if (enteringRunning) showOverlay()
                     when (next.phase()) {
                         MeetingSessionState.Phase.STOPPING, MeetingSessionState.Phase.FINALIZING,
                         MeetingSessionState.Phase.STOP_PENDING -> {
@@ -498,6 +536,11 @@ class MeetingService : Service() {
             setup?.mode() ?: MeetingSetup.Mode.LIVE_TRANSCRIPT, setup?.summaryEnabled() == true, audioLevel, presentationNotice,
             presentation != null)
         overlay.render(display, state.mode, state.summaryEnabled, timeText, reminder, canStop, observer == null, audioLevel?.level() ?: 0)
+        // 无会中页面时保留必要提示；同一条消息只显示一次，不随字幕／电平刷新刷屏。
+        if (active && presentationNotice.isNotEmpty() && presentationNotice != announcedPresentationNotice) {
+            announcedPresentationNotice = presentationNotice
+            Toast.makeText(applicationContext, presentationNotice, Toast.LENGTH_LONG).show()
+        }
         observer?.onMeetingState(state)
     }
     override fun onDestroy() {
@@ -513,6 +556,7 @@ class MeetingService : Service() {
     companion object {
         const val ACTION_BEGIN = "com.czur.aimeeting.reference.BEGIN"
         const val ACTION_DEBUG_STOP = "com.czur.aimeeting.reference.DEBUG_STOP"
+        const val ACTION_DEBUG_OVERLAY = "com.czur.aimeeting.reference.DEBUG_OVERLAY"
         const val EXTRA_PROJECTION_RESULT_CODE = "projectionResultCode"
         const val EXTRA_PROJECTION_DATA = "projectionData"
         private const val TAG = "AiMeetingReference"

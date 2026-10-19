@@ -148,6 +148,8 @@ object MeetingAppAssembly {
         notify?.run()
     }
     @JvmStatic @Synchronized fun consumeResultUiOperation(): Runnable? = pendingResultUi.poll()
+    /** 宿主只决定何时恢复可见页面，具体结果动作仍完全归插件。 */
+    @JvmStatic @Synchronized fun hasPendingResultUi(): Boolean = pendingResultUi.isNotEmpty()
     @JvmStatic @Synchronized fun observeResultUi(notify: Runnable) { resultUiObserver = notify }
     @JvmStatic @Synchronized fun unobserveResultUi(notify: Runnable) { if (resultUiObserver === notify) resultUiObserver = null }
 

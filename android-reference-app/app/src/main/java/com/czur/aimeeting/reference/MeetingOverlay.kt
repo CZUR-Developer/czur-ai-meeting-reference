@@ -24,6 +24,7 @@ class MeetingOverlay(private val context: Context) {
     private var reminderPopup: MeetingReminderPopup? = null
     private var onConfirmReminder: Runnable? = null
     fun isShowing() = window?.isShowing() == true
+    fun controlBounds() = window?.controlBounds().orEmpty()
 
     /**
      * 每次采集现取本应用全部浮窗。已挂载但尚无 token 的 null 必须保留，交 SDK 明确报错，

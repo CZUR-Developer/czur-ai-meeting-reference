@@ -3,6 +3,7 @@ package com.czur.aimeeting.reference
 import android.app.Activity
 import android.content.ComponentName
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.content.ServiceConnection
 import android.graphics.Color
 import android.graphics.Rect
@@ -42,12 +43,55 @@ import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import org.robolectric.shadows.ShadowAlertDialog
 import org.robolectric.shadows.ShadowToast
+import org.robolectric.shadows.ShadowSettings
 
 /** 实际原生布局与正常接线；不建会、不联网、不启动音源或操作实体设备。 */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], qualifiers = "w1920dp-h1080dp-mdpi")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class ReferenceMeetingPageTest {
+    @Test fun defaultRunningFlowLeavesSetupOnlyAfterTheRealOverlayIsMounted() {
+        ShadowSettings.setCanDrawOverlays(true)
+        val host = Robolectric.buildService(MeetingService::class.java).create()
+        val service = host.get()
+        field(service, "active", true)
+        field(service, "canStop", true)
+        field(service, "busy", true)
+        val app = RuntimeEnvironment.getApplication()
+        shadowOf(app).setComponentNameAndServiceForBindService(ComponentName(app, MeetingService::class.java), service.onBind(Intent()))
+        val activity = Robolectric.buildActivity(MainActivity::class.java).create().start().resume()
+        try {
+            idleMain()
+            assertTrue("正常入口交接后退出设置Activity", activity.get().isFinishing)
+            assertTrue((field(service, "overlay") as MeetingOverlay).isShowing())
+            assertTrue(field(service, "active") as Boolean)
+            assertEquals(988, activity.get().window.attributes.width)
+            assertEquals(ActivityInfo.LAUNCH_SINGLE_TASK,
+                app.packageManager.getActivityInfo(ComponentName(app, MainActivity::class.java), 0).launchMode)
+        } finally { activity.pause().stop().destroy(); host.destroy() }
+    }
+
+    @Test fun pausedDialogCannotStealTheForegroundObserverWhenItsBindArrivesLate() {
+        val host = Robolectric.buildService(MeetingService::class.java).create()
+        val service = host.get()
+        val app = RuntimeEnvironment.getApplication()
+        shadowOf(app).setComponentNameAndServiceForBindService(ComponentName(app, MeetingService::class.java), service.onBind(Intent()))
+        val previous = Robolectric.buildActivity(MainActivity::class.java).create().start().resume()
+        idleMain()
+        previous.pause() // 透明Activity仍可能处于STARTED；不依赖onStop解除观察。
+        val current = Robolectric.buildActivity(MainActivity::class.java).create().start().resume()
+        try {
+            idleMain()
+            val late = field(previous.get(), "serviceConnection") as ServiceConnection
+            late.onServiceConnected(ComponentName(app, MeetingService::class.java), service.onBind(Intent()))
+            field(service, "status", "本场已停止")
+            invoke(service, "publish")
+            assertSame(field(current.get(), "observer"), field(service, "observer"))
+            assertEquals("本场已停止", (field(current.get(), "page") as MeetingPageViews).status.text.toString())
+            assertNotEquals("本场已停止", (field(previous.get(), "page") as MeetingPageViews).status.text.toString())
+        } finally { current.pause().stop().destroy(); previous.stop().destroy(); host.destroy() }
+    }
+
     @Test fun visibleMeetingPageProvidesItsMountedWindowForCaptureExclusion() {
         val serviceHost = Robolectric.buildService(MeetingService::class.java).create()
         shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(
@@ -422,7 +466,8 @@ class ReferenceMeetingPageTest {
         ResultUiFixture(false).use { fixture ->
             fixture.ready()
             idleMain()
-            assertNull(shadowOf(RuntimeEnvironment.getApplication()).nextStartedActivity)
+            assertEquals("后台READY需要唤起唯一可见消费者", MainActivity::class.java.name,
+                shadowOf(fixture.old).nextStartedActivity.component!!.className)
             assertEquals(0, fixture.successes.get())
             fixture.destroyOld()
             fixture.returnToVisibleActivity()

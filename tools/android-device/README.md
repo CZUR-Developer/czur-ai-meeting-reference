@@ -126,8 +126,35 @@ python3 tools/android-device/meeting-device.py stop --timeout 90
 多设备时给各命令传 `--serial`，或先设置 `ANDROID_SERIAL`。`stop` 复用 App 已有
 `DEBUG_STOP`，经正常 `requestStop()` 完成末帧和会议收口，等待同场 READY；仅 Debug APK
 支持，Release 请使用正常停止按钮。它不负责校验 Web 图片／字幕内容或模拟完整会议。
-`open` 通过正常 Activity 导航回到会前／会中页；结果页仍在前台时使用其返回入口，
+`open` 通过正常 Activity 导航回到会前页或同场悬浮窗；会中保持已有 Mini／大窗形态。
+结果页仍在前台时使用其返回入口，
 不等待已删除的连接按钮，不清数据或重置登录，也不强停当前会议。
+
+### 真悬浮窗形态与按钮验证
+
+开始进入 RUNNING 后，默认设置 Activity 退出，由 Service 持有跨应用悬浮窗。可用
+下面的命令操作真实按钮，配合打开其他应用验证窗口外可操作：
+
+```bash
+python3 tools/android-device/meeting-device.py overlay --overlay-action status
+python3 tools/android-device/meeting-device.py overlay --overlay-action collapse
+python3 tools/android-device/meeting-device.py overlay --overlay-action restore
+# 互译模式才提供大窗／普通窗切换。
+python3 tools/android-device/meeting-device.py overlay --overlay-action large
+python3 tools/android-device/meeting-device.py overlay --overlay-action normal
+python3 tools/android-device/meeting-device.py overlay --overlay-action stop --timeout 90
+```
+
+不抢焦点的浮窗可能不会出现在标准 UI dump 中。Debug 包提供只读 `DEBUG_OVERLAY`
+入口，返回当前已挂载、可见且可用的按钮文案和屏幕坐标；命令据此发送真实触摸，
+不直接调用会议状态机，也不使用固定坐标。入口只在 Debug Service 中注册，Release
+没有该广播入口，自定义窗口可不提供 `controlBounds()`。返回内容不含字幕、凭据或模型数据。
+命令核对切换前后会议 ID 一致，并读取
+WindowManager 的 `APPLICATION_OVERLAY` 实际尺寸；Activity 的 `BASE_APPLICATION`
+不计为悬浮窗。`overlay ... stop` 点击真正的停止按钮，等待同场 READY 并确认没有残留
+悬浮窗。已有 `stop` 命令仍是 Debug 广播入口，两者验收范围分别记录。只读坐标回执不可用时
+明确失败，不使用历史坐标代签通过；Release 包请手动操作。悬浮窗权限首次需在系统设置中授予，
+此工具不代替用户修改该权限；返回 App 后继续正常开始。
 
 每个阶段输出一行 JSON：`stage`、`status`（PASS／PROGRESS／FAIL）和必要回执。
 登录 PASS 确认真实登录与能力加载后开始按钮可用；开始 PASS 确认**本场 App RUNNING
