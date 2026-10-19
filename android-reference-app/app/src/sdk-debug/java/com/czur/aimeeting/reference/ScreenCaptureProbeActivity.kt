@@ -89,7 +89,8 @@ class ScreenCaptureProbeActivity : Activity() {
                 val client = ScreenCaptureClient(this@ScreenCaptureProbeActivity, resultCode, data,
                     { main.post(it) }, Runnable { scope.cancel("屏幕授权已结束") })
                 capture = client
-                runChecks(client)
+                if (intent.getBooleanExtra("currentScreen", false)) captureCurrentScreen(client)
+                else runChecks(client)
                 writeResult("PASS", null)
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -103,7 +104,28 @@ class ScreenCaptureProbeActivity : Activity() {
                 // 根 Activity 按返回可能只退后台；验完即解绑，不能等 onDestroy 才结束探针服务。
                 if (bound) { unbindService(connection); bound = false }
                 foreground = null
+                if (intent.getBooleanExtra("currentScreen", false)) finish()
             }
+        }
+    }
+
+    /**
+     * 对当前外部测试画面分别取原图和内置处理输出，帮助定位采集与交付边界。
+     * 退到后台后等待页面稳定，只调用公开接口；无图也照实记录，不推断算法原因。
+     */
+    private suspend fun captureCurrentScreen(client: ScreenCaptureClient) {
+        moveTaskToBack(true)
+        delay(5000)
+        val directory = File(filesDir, "screen-api-probe").apply { mkdirs() }
+        checks.put("mode", client.mode().name)
+        client.createSession().use { raw ->
+            val image = requireNotNull(raw.captureFile(directory))
+            checks.put("rawFile", image.value.name)
+        }
+        client.createSession(enableProcessing = true).use { processed ->
+            val image = processed.captureFile(directory)
+            checks.put("processedImageDelivered", image != null)
+            image?.let { checks.put("processedFile", it.value.name) }
         }
     }
 
@@ -176,6 +198,7 @@ class ScreenCaptureProbeActivity : Activity() {
 
     private suspend fun writeResult(status: String, message: String?) {
         val result = JSONObject().put("status", status).put("checks", checks)
+            .put("runId", intent.getStringExtra("probeRunId"))
         message?.let { result.put("message", it) }
         withContext(Dispatchers.IO) {
             val directory = File(filesDir, "screen-api-probe").apply { mkdirs() }

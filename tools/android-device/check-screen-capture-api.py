@@ -9,6 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import uuid
 
 spec = importlib.util.spec_from_file_location("meeting_device", Path(__file__).with_name("meeting-device.py"))
 device = importlib.util.module_from_spec(spec)
@@ -22,6 +23,8 @@ def main():
     cli.add_argument("--output", required=True, help="本机证据目录；只包含探针测试图与 JSON")
     cli.add_argument("--timeout", type=int, default=60)
     cli.add_argument("--manual-permissions", action="store_true")
+    cli.add_argument("--current-screen", action="store_true",
+                     help="授权后退回原画面，记录原图和处理输出；只观察，不判定去重正确性")
     args = cli.parse_args()
     adb = device.Adb(args.adb_command, args.serial)
     tool = device.MeetingDevice(adb, output=args.output, auto_permissions=not args.manual_permissions)
@@ -30,8 +33,11 @@ def main():
     if tool.log_state().get("phase") in ("RUNNING", "STOPPING", "STOP_PENDING"):
         raise device.ToolError("请先正常结束当前会议，再运行独立截图探针")
     adb.run("shell", "input", "keyevent", "KEYCODE_WAKEUP")
-    started = adb.run("shell", "am", "start", "-W", "-n",
-                      device.PACKAGE + "/.ScreenCaptureProbeActivity")
+    run_id = uuid.uuid4().hex
+    started = adb.run("shell", "am", "start", "-W", "-f", "0x14000000", "-n",
+                      device.PACKAGE + "/.ScreenCaptureProbeActivity",
+                      "--ez", "currentScreen", "true" if args.current_screen else "false",
+                      "--es", "probeRunId", run_id)
     if "Error" in started:
         raise device.ToolError("请安装包含截图探针的 SDK Debug APK")
     deadline = time.monotonic() + args.timeout
@@ -40,8 +46,10 @@ def main():
         raw = adb.run("exec-out", "run-as", device.PACKAGE, "cat",
                       "files/screen-api-probe/result.json", allow_failure=True)
         try:
-            report = json.loads(raw)
-            break
+            candidate = json.loads(raw)
+            if candidate.get("runId") == run_id:
+                report = candidate
+                break
         except json.JSONDecodeError:
             pass
         try:
@@ -54,7 +62,7 @@ def main():
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
     (output / "result.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    for name in ("raw-excluded.png", report.get("checks", {}).get("processedFile"),
+    for name in (None if args.current_screen else "raw-excluded.png", report.get("checks", {}).get("processedFile"),
                  report.get("checks", {}).get("rawFile")):
         if name:
             with (output / Path(name).name).open("wb") as stream:
