@@ -3,10 +3,8 @@ package com.czur.aimeeting.reference.ui
 import android.content.Context
 import android.annotation.SuppressLint
 import android.graphics.Color
-import android.graphics.ImageDecoder
 import android.graphics.Typeface
 import android.graphics.drawable.AnimatedImageDrawable
-import android.os.Build
 import android.os.SystemClock
 import android.util.Log
 import android.util.TypedValue
@@ -24,7 +22,6 @@ import com.czur.aimeeting.reference.R
 import com.czur.aimeeting.reference.meeting.DisplaySnapshotPresentation
 import com.github.penfeizhou.animation.apng.APNGDrawable
 import com.github.penfeizhou.animation.loader.ResourceStreamLoader
-import java.io.IOException
 
 /**
  * 国内窗口的可编辑内容：只复用 View、资源和 1920×1080 几何关系，不持有音源或会议。
@@ -281,13 +278,11 @@ class CzurOverlayViews(context: Context, private val form: String, actions: Acti
     private class RecordingImage(context: Context) : ImageView(context) {
         init {
             scaleType = ScaleType.FIT_XY
-            if (Build.VERSION.SDK_INT >= 28) {
-                try { setImageDrawable(ImageDecoder.decodeDrawable(ImageDecoder.createSource(resources, R.raw.czur_overlay_recording))) }
-                catch (failed: IOException) { Log.w(TAG, "记录中动画解码失败，使用静态素材", failed); setImageResource(R.raw.czur_overlay_recording) }
-            } else setImageResource(R.raw.czur_overlay_recording)
+            // 参考端最低 Android 14，由平台按 drawable 资源解码原有动画 WebP。
+            setImageResource(R.drawable.czur_overlay_recording)
         }
-        override fun onAttachedToWindow() { super.onAttachedToWindow(); if (Build.VERSION.SDK_INT >= 28) (drawable as? AnimatedImageDrawable)?.start() }
-        override fun onDetachedFromWindow() { if (Build.VERSION.SDK_INT >= 28) (drawable as? AnimatedImageDrawable)?.stop(); super.onDetachedFromWindow() }
+        override fun onAttachedToWindow() { super.onAttachedToWindow(); (drawable as? AnimatedImageDrawable)?.start() }
+        override fun onDetachedFromWindow() { (drawable as? AnimatedImageDrawable)?.stop(); super.onDetachedFromWindow() }
     }
     companion object {
         private const val TAG = "AiMeetingReferenceUi"

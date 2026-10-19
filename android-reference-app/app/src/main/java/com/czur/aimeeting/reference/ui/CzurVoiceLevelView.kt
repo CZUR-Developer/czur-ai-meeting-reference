@@ -1,16 +1,12 @@
 package com.czur.aimeeting.reference.ui
 
 import android.content.Context
-import android.graphics.ImageDecoder
 import android.graphics.drawable.AnimatedImageDrawable
-import android.os.Build
 import android.util.AttributeSet
-import android.util.Log
 import android.view.Gravity
 import android.widget.FrameLayout
 import android.widget.ImageView
 import com.czur.aimeeting.reference.R
-import java.io.IOException
 import kotlin.math.pow
 
 /** 国内声音显示摘取，输入 SDK 的 0～100 电平，不自行订阅音源或计算 PCM。 */
@@ -19,13 +15,8 @@ class CzurVoiceLevelView @JvmOverloads constructor(context: Context, attributes:
     private var level = 0
     init {
         addView(image, LayoutParams(-1, -1, Gravity.CENTER))
-        if (Build.VERSION.SDK_INT >= 28) {
-            try { image.setImageDrawable(ImageDecoder.decodeDrawable(ImageDecoder.createSource(resources, R.raw.czur_overlay_voice))) }
-            catch (failure: IOException) {
-                Log.w(TAG, "声音动画解码失败，使用静态素材", failure)
-                image.setImageResource(R.raw.czur_overlay_voice)
-            }
-        } else image.setImageResource(R.raw.czur_overlay_voice)
+        // Android 14 直接加载动画 WebP；nodpi 保持原素材尺寸，振幅只由下面的曲线控制。
+        image.setImageResource(R.drawable.czur_overlay_voice)
         image.scaleY = .3f
         contentDescription = "输入声音"
     }
@@ -40,12 +31,11 @@ class CzurVoiceLevelView @JvmOverloads constructor(context: Context, attributes:
     fun getLevel() = level
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
-        if (Build.VERSION.SDK_INT >= 28) (image.drawable as? AnimatedImageDrawable)?.start()
+        (image.drawable as? AnimatedImageDrawable)?.start()
     }
     override fun onDetachedFromWindow() {
         image.animate().cancel()
-        if (Build.VERSION.SDK_INT >= 28) (image.drawable as? AnimatedImageDrawable)?.stop()
+        (image.drawable as? AnimatedImageDrawable)?.stop()
         super.onDetachedFromWindow()
     }
-    companion object { private const val TAG = "AiMeetingReferenceUi" }
 }

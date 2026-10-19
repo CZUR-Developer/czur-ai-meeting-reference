@@ -147,12 +147,11 @@ class MeetingService : Service() {
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CHANNEL, "AI 会议进行中", NotificationManager.IMPORTANCE_LOW))
         val screenFilter = IntentFilter(Intent.ACTION_SCREEN_OFF)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) registerReceiver(screenOffReceiver, screenFilter, Context.RECEIVER_NOT_EXPORTED)
-        else registerReceiver(screenOffReceiver, screenFilter)
+        // 最低 Android 14：系统息屏广播不向其他 App 开放；Debug 停止入口保留 ADB 调试能力。
+        registerReceiver(screenOffReceiver, screenFilter, Context.RECEIVER_NOT_EXPORTED)
         if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
             val filter = IntentFilter(ACTION_DEBUG_STOP)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) registerReceiver(debugStopReceiver, filter, Context.RECEIVER_EXPORTED)
-            else registerReceiver(debugStopReceiver, filter)
+            registerReceiver(debugStopReceiver, filter, Context.RECEIVER_EXPORTED)
             debugStopReceiverRegistered = true
             Log.d(TAG, "调试正常停止命令已注册")
         }

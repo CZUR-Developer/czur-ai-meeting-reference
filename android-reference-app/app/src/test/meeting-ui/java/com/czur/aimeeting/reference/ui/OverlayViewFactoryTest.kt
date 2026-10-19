@@ -1,6 +1,7 @@
 package com.czur.aimeeting.reference.ui
 
 import android.graphics.Rect
+import android.graphics.drawable.AnimatedImageDrawable
 import android.app.Application
 import android.content.res.Configuration
 import android.os.Looper
@@ -13,6 +14,7 @@ import com.czur.aimeeting.client.display.MeetingDisplaySnapshot
 import com.czur.aimeeting.model.TranscriptEvent
 import com.czur.aimeeting.model.TranslationEvent
 import com.czur.aimeeting.reference.meeting.MeetingSetup
+import com.czur.aimeeting.reference.R
 import com.czur.aimeeting.ui.DefaultMeetingOverlay
 import com.czur.aimeeting.ui.OverlayController
 import com.czur.aimeeting.ui.SubtitleTextView
@@ -34,6 +36,16 @@ import org.robolectric.shadows.ShadowSettings
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class OverlayViewFactoryTest {
     @Before fun allowOverlay() = ShadowSettings.setCanDrawOverlays(true)
+
+    @Test @Config(sdk = [34]) fun bundledWebpResourcesStillDecodeAsAnimations() {
+        val context = RuntimeEnvironment.getApplication()
+        // 资源分类调整后仍由平台读取原动画，不能悄悄退成单帧图片。
+        for (resource in listOf(R.drawable.czur_overlay_voice, R.drawable.czur_overlay_recording)) {
+            val drawable = context.getDrawable(resource)
+            assertTrue(context.resources.getResourceEntryName(resource), drawable is AnimatedImageDrawable)
+            assertTrue(drawable!!.intrinsicWidth > 0 && drawable.intrinsicHeight > 0)
+        }
+    }
 
     @Test fun lateOldRevisionSurvivesMiniAndHiddenThenUsesOriginalCallbacks() {
         val opens = AtomicInteger()
