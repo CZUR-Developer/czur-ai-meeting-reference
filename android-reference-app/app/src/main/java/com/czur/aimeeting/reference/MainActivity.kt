@@ -85,6 +85,7 @@ class MainActivity : Activity() {
     private lateinit var audioLevelView: TextView
     private lateinit var reminderPopup: MeetingReminderPopup
     private lateinit var statusView: TextView
+    private var renderedServiceStatus = ""
     private lateinit var capabilityView: TextView
     private lateinit var sourceLanguageView: Spinner
     private lateinit var targetLanguageView: Spinner
@@ -577,8 +578,10 @@ class MainActivity : Activity() {
         val failedAction = state.actionOutcome?.status() == ResultActionOutcome.Status.FAILED
         retryActionButton.visibility = if (failedAction) View.VISIBLE else View.GONE
         endResultButton.visibility = if (failedAction) View.VISIBLE else View.GONE
-        // 新的空闲 Service 没有会议消息，不覆盖本页面已有的身份／部署提示。
+        // 新空闲 Service 不带上场消息；清掉它此前画出的收尾文案，保留页面更新的身份／部署提示。
         if (state.status.isNotBlank()) statusView.text = state.status
+        else if (statusView.text.toString() == renderedServiceStatus) statusView.text = ""
+        renderedServiceStatus = state.status
         capabilityView.text = state.capabilityText
         page.showMeeting(state.active); page.showPresentationNotice(state.active, state.presentationNotice)
         // Dialog 的背景暗化层独立于页面窗口，单独排窗无法移除它。演示采集期间（含

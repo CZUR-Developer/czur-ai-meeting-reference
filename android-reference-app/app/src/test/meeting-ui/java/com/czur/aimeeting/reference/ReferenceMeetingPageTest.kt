@@ -50,6 +50,30 @@ import org.robolectric.shadows.ShadowSettings
 @Config(sdk = [35], qualifiers = "w1920dp-h1080dp-mdpi")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class ReferenceMeetingPageTest {
+    @Test fun idleServiceClearsItsPreviousProgressWithoutOverwritingNewIdentityMessage() {
+        val host = Robolectric.buildService(MeetingService::class.java).create()
+        val service = host.get()
+        val app = RuntimeEnvironment.getApplication()
+        shadowOf(app).setComponentNameAndServiceForBindService(ComponentName(app, MeetingService::class.java), service.onBind(Intent()))
+        val activity = Robolectric.buildActivity(MainActivity::class.java).setup()
+        try {
+            idleMain()
+            val status = (field(activity.get(), "page") as MeetingPageViews).status
+            field(service, "status", "本场结果已就绪，正在执行结果动作…")
+            invoke(service, "publish")
+            assertTrue(status.text.contains("正在执行"))
+            field(service, "status", "")
+            invoke(service, "publish")
+            assertEquals("", status.text.toString())
+            field(service, "status", "本场结果已就绪")
+            invoke(service, "publish")
+            status.text = "请重新登录"
+            field(service, "status", "")
+            invoke(service, "publish")
+            assertEquals("请重新登录", status.text.toString())
+        } finally { activity.pause().stop().destroy(); host.destroy() }
+    }
+
     @Test fun defaultRunningFlowLeavesSetupOnlyAfterTheRealOverlayIsMounted() {
         ShadowSettings.setCanDrawOverlays(true)
         val host = Robolectric.buildService(MeetingService::class.java).create()
