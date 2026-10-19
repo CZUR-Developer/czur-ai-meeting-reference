@@ -17,7 +17,7 @@ const meetingId = argumentsByName.get('meeting-id');
 const required = String(argumentsByName.get('expect') || 'transcript').split(',');
 if (!Number.isInteger(port) || port < 1 || port > 65535 || !meetingId) {
   console.error('用法：node check-web-result.mjs --meeting-id=mtg_... [--port=19094] '
-    + '[--expect=transcript,translation,summary,audio,identity] [--reload] [--play] [--seek]');
+    + '[--expect=transcript,translation,summary,audio,identity,presentation] [--reload] [--play] [--seek]');
   process.exit(1);
 }
 
@@ -69,11 +69,20 @@ try {
       await new Promise(resolve => setTimeout(resolve, 250));
     }
     const audio = document.querySelector('#audio-player');
+    const images = [...document.querySelectorAll('#presentation-frames img')];
+    // 图片通常位于长原文下面并启用 lazy loading；逐张解码核实际内容，避免只验容器可见。
+    if (${required.includes('presentation')}) for (const image of images) {
+      image.loading = 'eager';
+      try { await image.decode(); } catch { /* 数量核对会将失败标为 FAIL。 */ }
+    }
+    const loadedImages = images.filter(image => image.complete && image.naturalWidth > 0).length;
     return {
       ready: document.querySelector('#status')?.textContent === '结果已生成',
       transcript: visible('result'), translation: visible('translation-result'),
       summary: visible('summary-result'), audio: visible('audio-result'),
       identity: visible('speaker-identity-result'),
+      presentation: visible('presentation-result') && images.length > 0 && loadedImages === images.length,
+      presentationFrames: images.length, loadedPresentationFrames: loadedImages,
       transcriptSegments: document.querySelector('#transcript-segments')?.children.length || 0,
       translationSegments: document.querySelector('#translations')?.children.length || 0,
       identityCount: document.querySelector('#speaker-identities')?.children.length || 0,

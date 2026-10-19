@@ -146,9 +146,33 @@ node tools/android-device/check-web-result.mjs --port=19094 \
 ```
 
 `--expect` 只填写当前会议实际提供的模块，可选值为 `transcript`、`translation`、
-`summary`、`audio`、`identity`。工具报告各区可见性和段落数；不会输出会议正文、账号、
+`summary`、`audio`、`identity`、`presentation`。`presentation` 会逐张解码演示图片，要求
+图片数量大于零且全部成功，避免只验到标题／图片占位。工具报告各区可见性和段落数；不会输出会议正文、账号、
 Token 或结果链接。`--play`／`--seek` 会短暂播放后暂停；不传时只读状态。
 该脚本不登录、不创建结果，也不把本场 Speaker 当作跨会议身份。
+
+## 同场可选 PDF 插件验证（仅 Debug）
+
+参考 App 默认只启用 Web。需要比对同一场 Web／PDF 时，在正常停止且打开结果后执行：
+
+```bash
+adb -s '<ADB序列号>' shell am start \
+  -n com.czur.aimeeting.reference/.LocalPdfProbeActivity --es meetingId 'mtg_当前场次'
+adb -s '<ADB序列号>' pull \
+  /sdcard/Android/data/com.czur.aimeeting.reference/files/local-pdf-probe.json /tmp/local-pdf-probe.json
+```
+
+入口读取 Web 插件记住的原场次，使用当前登录身份、原有效期与标准正文读取端口，执行
+`LocalPdfResultActionPlugin` 并打开实际 PDF。不会创建会议或改变默认注册表；没有近期
+结果、身份失效或场次不匹配时报告失败，不静默改用其他场次。等待 `ReferencePdfProbe`
+日志出现对应 `status=PASS` 再拉回执；其中只有数量和图片摘要。PDF 保存到设备公共
+`Download/AI会议纪要/`。结合 `pdfinfo`／`pdfimages` 检查真实文件，回执本身不代签渲染。
+此页面及验收入口均不进入 Release；伙伴正式接入仍通过结果插件注册表。
+
+Debug 包的 `AiMeetingReference` 日志还记录截图请求是否为末帧、排除窗口数量，以及
+回调是否有图片。可据此区分没有请求、尚未返回和正常无图片；不记录 SDK 内部判断、
+特征或跳过原因。`presentation` 检查只证明已有图片能解码，变化页是否缺失、稳定页
+是否重复及末帧是否正确，仍须和实际输入画面、时间及图片清单一起核对。
 
 ## 可选 USB 调试映射（仅诊断）
 
