@@ -7,11 +7,11 @@ import android.content.pm.ActivityInfo
 import android.content.ServiceConnection
 import android.graphics.Color
 import android.graphics.Rect
-import android.graphics.drawable.DrawableContainer
 import android.graphics.drawable.GradientDrawable
 import android.os.Looper
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.webkit.WebView
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -89,20 +89,20 @@ class ReferenceMeetingPageTest {
             assertTrue("正常入口交接后退出设置Activity", activity.get().isFinishing)
             assertTrue((field(service, "overlay") as MeetingOverlay).isShowing())
             assertTrue(field(service, "active") as Boolean)
-            assertEquals(988, activity.get().window.attributes.width)
+            assertEquals(ViewGroup.LayoutParams.MATCH_PARENT, activity.get().window.attributes.width)
             assertEquals(ActivityInfo.LAUNCH_SINGLE_TASK,
                 app.packageManager.getActivityInfo(ComponentName(app, MainActivity::class.java), 0).launchMode)
         } finally { activity.pause().stop().destroy(); host.destroy() }
     }
 
-    @Test fun pausedDialogCannotStealTheForegroundObserverWhenItsBindArrivesLate() {
+    @Test fun pausedActivityCannotStealTheForegroundObserverWhenItsBindArrivesLate() {
         val host = Robolectric.buildService(MeetingService::class.java).create()
         val service = host.get()
         val app = RuntimeEnvironment.getApplication()
         shadowOf(app).setComponentNameAndServiceForBindService(ComponentName(app, MeetingService::class.java), service.onBind(Intent()))
         val previous = Robolectric.buildActivity(MainActivity::class.java).create().start().resume()
         idleMain()
-        previous.pause() // 透明Activity仍可能处于STARTED；不依赖onStop解除观察。
+        previous.pause() // 即使onStop尚未到达，也不能抢回前台观察者。
         val current = Robolectric.buildActivity(MainActivity::class.java).create().start().resume()
         try {
             idleMain()
@@ -130,13 +130,19 @@ class ReferenceMeetingPageTest {
             }
             assertNotNull(activity.window.decorView.windowToken)
             assertArrayEquals(arrayOf(activity.window.decorView.windowToken), observer.captureWindowTokens())
-            val defaultDim = activity.window.attributes.dimAmount
+            val attributes = activity.obtainStyledAttributes(intArrayOf(
+                android.R.attr.windowIsFloating, android.R.attr.windowIsTranslucent,
+                android.R.attr.backgroundDimEnabled))
+            try { for (index in 0..2) assertFalse(attributes.getBoolean(index, true)) }
+            finally { attributes.recycle() }
             render(activity, display(false, false, true), 1, 0, capturingPresentation = true)
-            assertEquals(0f, activity.window.attributes.dimAmount, 0f)
+            assertEquals(0, activity.window.attributes.flags and WindowManager.LayoutParams.FLAG_DIM_BEHIND)
             render(activity, display(false, false, true), 2, 0, capturingPresentation = true, active = false)
-            assertEquals("停止末帧期间不得恢复背景暗化", 0f, activity.window.attributes.dimAmount, 0f)
+            assertEquals("停止末帧期间也没有Dialog暗化层", 0,
+                activity.window.attributes.flags and WindowManager.LayoutParams.FLAG_DIM_BEHIND)
             render(activity, display(false, false, true), 3, 0, active = false)
-            assertEquals(defaultDim, activity.window.attributes.dimAmount, 0f)
+            assertEquals(ViewGroup.LayoutParams.MATCH_PARENT, activity.window.attributes.width)
+            assertEquals(ViewGroup.LayoutParams.MATCH_PARENT, activity.window.attributes.height)
         } finally { controller.pause().stop().destroy(); serviceHost.destroy() }
     }
 
@@ -152,57 +158,41 @@ class ReferenceMeetingPageTest {
         cleanup.destroy()
     }
 
-    // 同一会前用例使用1.5密度，捕获shape逐角／selector遗漏换算的实际视觉差异。
+    // 同时覆盖非mdpi资源和可用内容区变化；开始／提示不能被滚动设置挤出页面。
     @Config(qualifiers = "w1280dp-h720dp-hdpi")
-    @Test fun centeredCardHasSingleLanguageAndFixedStartOutsideScroll() {
+    @Test fun activitySetupFillsAvailableAreaAndKeepsActionsOutsideScroll() {
         val activity = Robolectric.buildActivity(Activity::class.java).create().get()
         val page = MeetingPageViews.DefaultFactory().create(activity)
-        measure(page.root)
-        val card = bounds(page.root, page.setupCard)
-        assertEquals(988, card.width())
-        assertEquals(856, card.height())
-        assertEquals(960, card.centerX())
-        assertEquals(540, card.centerY())
-        assertEquals(48f, page.setupTitle.textSize, 0f)
-        assertEquals(30f, page.root.findViewById<TextView>(R.id.setup_subtitle).textSize, 0f)
+        for ((width, height) in listOf(1920 to 1080, 1280 to 720)) {
+            measure(page.root, width, height)
+            val screen = bounds(page.root, page.setupCard)
+            assertEquals(Rect(0, 0, width, height), screen)
+            val start = bounds(page.root, page.start)
+            val status = bounds(page.root, page.status)
+            val settings = bounds(page.root, page.root.findViewById(R.id.setup_scroll))
+            assertTrue("开始按钮完整处于内容区", screen.contains(start))
+            assertTrue("状态提示完整处于内容区", screen.contains(status))
+            assertTrue("开始按钮与设置滚动区域分离", start.top >= settings.bottom)
+            assertTrue(page.setupTitle.textSize > page.root.findViewById<TextView>(R.id.setup_subtitle).textSize)
+            assertFixed(page.start)
+            assertFixed(page.status)
+            val pluginSettings = bounds(page.root, page.pluginSettingsHost)
+            val languages = bounds(page.root, page.sourceLanguage)
+            assertTrue("结果插件与会议设置分栏", pluginSettings.left > languages.right)
+        }
         assertEquals(View.GONE, page.targetContainer.visibility)
         assertEquals(View.GONE, page.swapLanguages.visibility)
-        assertFixed(page.start)
-        val start = bounds(page.root, page.start)
-        assertEquals(180, start.width())
-        assertEquals(50, start.height())
-        val header = page.root.findViewById<View>(R.id.setup_header).background as GradientDrawable
-        assertArrayEquals(floatArrayOf(40f, 40f, 40f, 40f, 0f, 0f, 0f, 0f), header.cornerRadii, 0f)
-        val buttons = page.start.background.constantState as DrawableContainer.DrawableContainerState
-        assertEquals(3, buttons.childCount)
-        // Android inflate先取整像素（hdpi的15dp成为23px），允许不足半像素舍入。
-        for (index in 0 until buttons.childCount) {
-            assertEquals(15f, (buttons.getChild(index) as GradientDrawable).cornerRadius, 0.5f)
-        }
-        assertTrue(start.bottom <= card.bottom && start.top >= card.top)
         assertEquals(0, activity.resources.getIdentifier("backend_url", "id", activity.packageName))
         assertEquals(0, activity.resources.getIdentifier("web_url", "id", activity.packageName))
         assertEquals(0, activity.resources.getIdentifier("settings_button", "id", activity.packageName))
-        // 浮动窗口只缩小根布局，卡片／字号仍按显示尺寸映射，不能被重复缩放。
-        repeat(3) {
-            page.root.measure(View.MeasureSpec.makeMeasureSpec(988, View.MeasureSpec.EXACTLY),
-                View.MeasureSpec.makeMeasureSpec(856, View.MeasureSpec.EXACTLY))
-            page.root.layout(0, 0, 988, 856)
-        }
-        assertEquals(988, page.setupCard.width)
-        assertEquals(856, page.setupCard.height)
-        assertEquals(48f, page.setupTitle.textSize, 0f)
-        val status = bounds(page.root, page.status)
-        assertTrue(status.top >= 0 && status.bottom <= 856)
-        assertSame(page.setupCard, page.status.parent)
         assertEquals(View.VISIBLE, page.close.visibility)
-        assertFixed(page.start)
         page.showSetupMode(true)
         assertEquals(View.VISIBLE, page.targetContainer.visibility)
         assertEquals(View.VISIBLE, page.swapLanguages.visibility)
         assertEquals(View.GONE, page.presentation.visibility)
+        assertEquals(View.GONE, page.root.findViewById<View>(R.id.presentation_setting).visibility)
         assertEquals("AI双语互译", page.setupTitle.text.toString())
-        assertEquals("（实时将两种语言进行互译）", page.root.findViewById<TextView>(R.id.setup_subtitle).text.toString())
+        assertEquals("实时进行双语互译", page.root.findViewById<TextView>(R.id.setup_subtitle).text.toString())
     }
 
     @Test fun missingTranslationAndSummaryHideOnlyThoseEntrancesAndKeepCaptions() {
@@ -214,6 +204,7 @@ class ReferenceMeetingPageTest {
 
         assertEquals(View.GONE, page.translationMode.visibility)
         assertEquals(View.GONE, page.summary.visibility)
+        assertEquals(View.GONE, page.root.findViewById<View>(R.id.summary_setting).visibility)
         assertEquals(View.VISIBLE, page.transcriptMode.visibility)
         assertTrue(page.transcriptMode.isChecked)
         assertEquals("AI字幕", page.setupTitle.text.toString())
@@ -742,11 +733,11 @@ class ReferenceMeetingPageTest {
         private fun field(target: Any, name: String, value: Any?) {
             target.javaClass.getDeclaredField(name).apply { isAccessible = true }.set(target, value)
         }
-        private fun measure(root: View) {
+        private fun measure(root: View, width: Int = 1920, height: Int = 1080) {
             repeat(3) {
-                root.measure(View.MeasureSpec.makeMeasureSpec(1920, View.MeasureSpec.EXACTLY),
-                    View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY))
-                root.layout(0, 0, 1920, 1080)
+                root.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY))
+                root.layout(0, 0, width, height)
             }
         }
         private fun bounds(root: ViewGroup, child: View): Rect = Rect(0, 0, child.width, child.height).also {

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 账号与结果次操作使用浅蓝底，不与开始会议争夺主操作层级。 -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_pressed="true">
+        <shape><solid android:color="#DCE5FF" /><corners android:radius="14dp" /></shape>
+    </item>
+    <item>
+        <shape><solid android:color="#E7EDFF" /><corners android:radius="14dp" /></shape>
+    </item>
+</selector>

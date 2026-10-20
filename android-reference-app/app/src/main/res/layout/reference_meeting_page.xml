@@ -1,94 +1,135 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 国内基准：dialog_transcription_setting、fragment_ai_trans[_subtitle]及会中Panel；
-     dp/sp数值表示设计单位，ReferenceUiScale局部适配，不依赖Launcher或私有UILib。 -->
+<!-- 会前使用完整 Activity 页面，沿用国内蓝白配色；会中 Panel 保留原有业务布局。
+     dp/sp 数值表示 1920×1080 设计单位，ReferenceUiScale 局部适配，不依赖 Launcher 或私有 UILib。 -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/reference_screen" android:layout_width="match_parent" android:layout_height="match_parent"
-    android:background="@android:color/transparent">
+    android:background="@color/reference_setup_canvas">
     <FrameLayout android:layout_width="match_parent" android:layout_height="match_parent">
         <FrameLayout android:layout_width="match_parent" android:layout_height="match_parent">
-            <LinearLayout android:id="@+id/setup_card" android:layout_width="988dp" android:layout_height="856dp"
-                android:layout_gravity="center" android:orientation="vertical" android:background="@drawable/czur_ref_card">
-                <LinearLayout android:id="@+id/setup_header" android:layout_width="match_parent" android:layout_height="86dp"
-                    android:orientation="horizontal" android:gravity="center_vertical" android:paddingStart="54dp" android:paddingEnd="24dp"
-                    android:background="@drawable/czur_ref_header">
-                    <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:orientation="horizontal"
-                        android:gravity="bottom" android:baselineAligned="true">
+            <LinearLayout android:id="@+id/setup_card" android:layout_width="match_parent" android:layout_height="match_parent"
+                android:orientation="vertical" android:paddingStart="80dp" android:paddingEnd="80dp"
+                android:paddingTop="32dp" android:paddingBottom="32dp" android:background="@drawable/reference_setup_background">
+                <!-- 顶部只保留返回、当前业务标题与账号入口，不承担会议状态或登录逻辑。 -->
+                <LinearLayout android:id="@+id/setup_header" android:layout_width="match_parent" android:layout_height="104dp"
+                    android:orientation="horizontal" android:gravity="center_vertical">
+                    <Button android:id="@+id/setup_close" style="@style/ReferenceSetupBackButton" android:layout_width="112dp" android:layout_height="52dp"
+                        android:text="‹ 返回" android:contentDescription="返回上一页" />
+                    <View android:layout_width="1dp" android:layout_height="48dp" android:layout_marginStart="24dp"
+                        android:layout_marginEnd="28dp" android:background="@color/reference_setup_border" />
+                    <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+                        android:orientation="vertical">
                         <TextView android:id="@+id/setup_title" android:layout_width="wrap_content" android:layout_height="wrap_content"
-                            android:text="@string/reference_setup_title" android:textColor="#FFFFFF" android:textSize="48sp" android:textStyle="bold"/>
+                            android:text="@string/reference_setup_title" android:textColor="@color/reference_setup_title"
+                            android:textSize="40sp" android:textStyle="bold" android:includeFontPadding="false" />
                         <TextView android:id="@+id/setup_subtitle" android:layout_width="wrap_content" android:layout_height="wrap_content"
-                            android:text="（实时将声音转文字）" android:textColor="#FFFFFF" android:textSize="30sp" android:textStyle="bold"/>
+                            android:layout_marginTop="10dp" android:text="实时将声音转文字"
+                            android:textColor="@color/reference_setup_muted" android:textSize="20sp" android:includeFontPadding="false" />
                     </LinearLayout>
-                    <Button android:id="@+id/account_button" style="@style/ReferenceHeaderButton" android:layout_width="100dp" android:layout_height="46dp"
+                    <Button android:id="@+id/account_button" style="@style/ReferenceSetupSecondaryButton" android:layout_width="164dp" android:layout_height="52dp"
                         android:text="@string/reference_account" />
-                    <Button android:id="@+id/setup_close" style="@style/ReferenceButton" android:layout_width="60dp" android:layout_height="60dp"
-                        android:layout_marginStart="16dp" android:background="@null" android:text="×" android:textSize="48sp"
-                        android:contentDescription="关闭会前设置" />
                 </LinearLayout>
+                <!-- 仅设置内容滚动；状态、开始和结果重试始终位于固定底部，插件增高不会挤走操作。 -->
                 <ScrollView android:id="@+id/setup_scroll" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1"
-                    android:fillViewport="true" android:overScrollMode="never">
+                    android:layout_marginTop="28dp" android:fillViewport="true" android:overScrollMode="never"
+                    android:scrollbarStyle="outsideOverlay" android:clipToPadding="false">
                     <LinearLayout android:id="@+id/setup_content" android:layout_width="match_parent" android:layout_height="wrap_content"
-                        android:orientation="vertical" android:gravity="center_horizontal" android:paddingTop="32dp" android:paddingBottom="8dp">
-                        <RadioGroup android:id="@+id/mode_group" android:layout_width="588dp" android:layout_height="46dp" android:orientation="horizontal">
-                            <RadioButton android:id="@+id/transcript_mode" style="@style/ReferenceModeButton" android:layout_width="286dp"
-                                android:layout_height="match_parent" android:checked="true" android:text="AI会议纪要" />
-                            <RadioButton android:id="@+id/translation_mode" style="@style/ReferenceModeButton" android:layout_width="286dp"
-                                android:layout_height="match_parent" android:layout_marginStart="16dp" android:text="AI双语互译" />
-                        </RadioGroup>
-                        <TextView android:id="@+id/language_hint" style="@style/ReferenceLabel" android:layout_width="588dp" android:layout_height="wrap_content"
-                            android:layout_marginTop="28dp" android:text="语言" android:textSize="30sp" android:textStyle="bold"/>
-                        <LinearLayout android:id="@+id/language_selection_row" android:layout_width="588dp" android:layout_height="50dp"
-                            android:layout_marginTop="8dp" android:orientation="horizontal" android:gravity="center_vertical">
-                            <LinearLayout android:id="@+id/source_language_container" android:layout_width="0dp" android:layout_height="50dp"
-                                android:layout_weight="1" android:orientation="vertical" android:background="@drawable/czur_ref_language_box">
-                                <Spinner android:id="@+id/source_language" android:layout_width="match_parent" android:layout_height="match_parent"
-                                    android:background="@null" android:spinnerMode="dropdown" android:popupBackground="@drawable/czur_ref_language_box"/>
+                        android:orientation="horizontal" android:baselineAligned="false">
+                        <LinearLayout android:id="@+id/meeting_settings_card" android:layout_width="0dp" android:layout_height="match_parent"
+                            android:layout_weight="2" android:orientation="vertical" android:padding="36dp"
+                            android:background="@drawable/reference_setup_section">
+                            <TextView style="@style/ReferenceSetupSectionTitle" android:layout_width="match_parent" android:layout_height="wrap_content"
+                                android:text="会议设置" />
+                            <TextView style="@style/ReferenceSetupHint" android:layout_width="match_parent" android:layout_height="wrap_content"
+                                android:layout_marginTop="8dp" android:text="选择本场会议的模式与语言" />
+                            <RadioGroup android:id="@+id/mode_group" android:layout_width="match_parent" android:layout_height="64dp"
+                                android:layout_marginTop="24dp" android:orientation="horizontal">
+                                <RadioButton android:id="@+id/transcript_mode" style="@style/ReferenceSetupModeButton" android:layout_width="0dp"
+                                    android:layout_weight="1" android:layout_height="match_parent" android:checked="true" android:text="AI会议纪要" />
+                                <RadioButton android:id="@+id/translation_mode" style="@style/ReferenceSetupModeButton" android:layout_width="0dp"
+                                    android:layout_weight="1" android:layout_height="match_parent" android:layout_marginStart="16dp" android:text="AI双语互译" />
+                            </RadioGroup>
+                            <TextView android:id="@+id/language_hint" style="@style/ReferenceSetupSectionTitle" android:layout_width="match_parent" android:layout_height="wrap_content"
+                                android:layout_marginTop="28dp" android:text="语言" android:textSize="24sp" />
+                            <LinearLayout android:id="@+id/language_selection_row" android:layout_width="match_parent" android:layout_height="56dp"
+                                android:layout_marginTop="12dp" android:orientation="horizontal" android:gravity="center_vertical">
+                                <LinearLayout android:id="@+id/source_language_container" android:layout_width="0dp" android:layout_height="match_parent"
+                                    android:layout_weight="1" android:orientation="vertical" android:background="@drawable/reference_setup_input">
+                                    <Spinner android:id="@+id/source_language" android:layout_width="match_parent" android:layout_height="match_parent"
+                                        android:background="@null" android:spinnerMode="dropdown" android:popupBackground="@drawable/czur_ref_language_box" />
+                                </LinearLayout>
+                                <Button android:id="@+id/swap_languages" style="@style/ReferenceButton" android:layout_width="88dp" android:layout_height="56dp"
+                                    android:background="@null" android:drawableTop="@drawable/czur_ref_swap_languages"
+                                    android:contentDescription="交换会议语言" android:visibility="gone" />
+                                <LinearLayout android:id="@+id/target_language_container" android:layout_width="0dp" android:layout_height="match_parent"
+                                    android:layout_weight="1" android:orientation="vertical" android:visibility="gone" android:background="@drawable/reference_setup_input">
+                                    <Spinner android:id="@+id/target_language" android:layout_width="match_parent" android:layout_height="match_parent"
+                                        android:background="@null" android:spinnerMode="dropdown" android:popupBackground="@drawable/czur_ref_language_box" />
+                                </LinearLayout>
                             </LinearLayout>
-                            <Button android:id="@+id/swap_languages" style="@style/ReferenceButton" android:layout_width="116dp" android:layout_height="50dp"
-                                android:background="@null" android:drawableTop="@drawable/czur_ref_swap_languages"
-                                android:contentDescription="交换会议语言" android:visibility="gone" />
-                            <LinearLayout android:id="@+id/target_language_container" android:layout_width="0dp" android:layout_height="50dp"
-                                android:layout_weight="1" android:orientation="vertical" android:visibility="gone" android:background="@drawable/czur_ref_language_box">
-                                <Spinner android:id="@+id/target_language" android:layout_width="match_parent" android:layout_height="match_parent"
-                                    android:background="@null" android:spinnerMode="dropdown" android:popupBackground="@drawable/czur_ref_language_box"/>
+                            <ImageView android:id="@+id/translation_illustration" android:layout_width="match_parent" android:layout_height="124dp"
+                                android:layout_marginTop="16dp" android:src="@drawable/czur_ref_translation_illustration" android:scaleType="fitCenter"
+                                android:contentDescription="两种语言的人群分坐左右两侧" android:visibility="gone" />
+                            <!-- 容器与说明随对应能力一起显示，不能只隐藏开关而留下空白的业务提示。 -->
+                            <LinearLayout android:id="@+id/summary_setting" android:layout_width="match_parent" android:layout_height="wrap_content"
+                                android:layout_marginTop="28dp" android:orientation="vertical">
+                                <com.czur.aimeeting.reference.CzurReferenceSwitch android:id="@+id/summary_enabled" style="@style/ReferenceSetupSectionTitle"
+                                    android:layout_width="match_parent" android:layout_height="48dp" android:paddingEnd="100dp"
+                                    android:text="生成会议纪要" android:textSize="24sp" />
+                                <TextView android:id="@+id/summary_hint" style="@style/ReferenceSetupHint" android:layout_width="match_parent"
+                                    android:layout_height="wrap_content" android:layout_marginTop="4dp"
+                                    android:text="会议结束后生成内容摘要，便于会后回顾。" />
+                            </LinearLayout>
+                            <LinearLayout android:id="@+id/presentation_setting" android:layout_width="match_parent" android:layout_height="wrap_content"
+                                android:layout_marginTop="20dp" android:orientation="vertical">
+                                <com.czur.aimeeting.reference.CzurReferenceSwitch android:id="@+id/presentation_capture" style="@style/ReferenceSetupSectionTitle"
+                                    android:layout_width="match_parent" android:layout_height="48dp" android:paddingEnd="100dp"
+                                    android:text="演示文稿（多模态）" android:textSize="24sp" />
+                                <TextView android:id="@+id/presentation_hint" style="@style/ReferenceSetupHint" android:layout_width="match_parent"
+                                    android:layout_height="wrap_content" android:layout_marginTop="4dp"
+                                    android:text="将智能截取投屏内容，进行 AI 识别后，融入 AI 会议纪要。" />
                             </LinearLayout>
                         </LinearLayout>
-                        <ImageView android:id="@+id/translation_illustration" android:layout_width="588dp" android:layout_height="140dp"
-                            android:layout_marginTop="8dp" android:src="@drawable/czur_ref_translation_illustration" android:scaleType="fitCenter"
-                            android:contentDescription="两种语言的人群分坐左右两侧" android:visibility="gone"/>
-                        <com.czur.aimeeting.reference.CzurReferenceSwitch android:id="@+id/summary_enabled" style="@style/ReferenceLabel"
-                            android:layout_width="588dp" android:layout_height="48dp" android:layout_marginTop="24dp" android:paddingEnd="100dp"
-                            android:text="生成会议纪要" android:textStyle="bold"/>
-                        <com.czur.aimeeting.reference.CzurReferenceSwitch android:id="@+id/presentation_capture" style="@style/ReferenceLabel"
-                            android:layout_width="588dp" android:layout_height="48dp" android:layout_marginTop="8dp" android:paddingEnd="100dp"
-                            android:text="演示文稿(多模态)" android:textSize="30sp" android:textStyle="bold"/>
-                        <TextView android:id="@+id/presentation_hint" style="@style/ReferenceLabel" android:layout_width="588dp"
-                            android:layout_height="wrap_content" android:textSize="23sp" android:text="将智能截取投屏内容，进行AI识别后，融入AI会议纪要。"/>
-                        <View android:layout_width="888dp" android:layout_height="1dp" android:layout_marginTop="24dp" android:background="#D6D6D6"/>
-                        <TextView style="@style/ReferenceLabel" android:layout_width="588dp" android:layout_height="wrap_content"
-                            android:layout_marginTop="20dp" android:text="结果查看" android:textStyle="bold"/>
-                        <RadioGroup android:id="@+id/result_group" android:layout_width="588dp" android:layout_height="wrap_content"/>
-                        <TextView android:id="@+id/result_description" style="@style/ReferenceLabel" android:layout_width="588dp"
-                            android:layout_height="wrap_content" android:textSize="20sp" android:padding="16dp"
-                            android:background="@drawable/czur_ref_language_box" android:text="@string/reference_result_description"/>
-                        <LinearLayout android:id="@+id/result_settings_host" android:layout_width="588dp" android:layout_height="wrap_content" android:orientation="vertical"/>
+                        <!-- 结果服务仍由插件提供，本页不写死结果类型，也不挪动插件设置入口。 -->
+                        <LinearLayout android:id="@+id/result_settings_card" android:layout_width="0dp" android:layout_height="match_parent"
+                            android:layout_weight="1" android:layout_marginStart="24dp" android:orientation="vertical"
+                            android:padding="36dp" android:background="@drawable/reference_setup_section">
+                            <TextView style="@style/ReferenceSetupSectionTitle" android:layout_width="match_parent" android:layout_height="wrap_content"
+                                android:text="会后结果" />
+                            <TextView style="@style/ReferenceSetupHint" android:layout_width="match_parent" android:layout_height="wrap_content"
+                                android:layout_marginTop="8dp" android:text="选择本场会议的结果查看方式" />
+                            <RadioGroup android:id="@+id/result_group" android:layout_width="match_parent" android:layout_height="wrap_content"
+                                android:layout_marginTop="24dp" />
+                            <TextView android:id="@+id/result_description" style="@style/ReferenceSetupHint" android:layout_width="match_parent"
+                                android:layout_height="wrap_content" android:layout_marginTop="16dp" android:padding="20dp"
+                                android:background="@drawable/reference_setup_result_hint" android:text="@string/reference_result_description" />
+                            <LinearLayout android:id="@+id/result_settings_host" android:layout_width="match_parent" android:layout_height="wrap_content"
+                                android:layout_marginTop="20dp" android:orientation="vertical" />
+                        </LinearLayout>
                     </LinearLayout>
                 </ScrollView>
-                <LinearLayout android:id="@+id/setup_footer" android:layout_width="match_parent" android:layout_height="114dp"
-                    android:orientation="vertical" android:gravity="center" android:paddingBottom="16dp">
-                    <Button android:id="@+id/start_meeting" style="@style/ReferenceButton" android:layout_width="180dp" android:layout_height="50dp"
-                        android:text="开始" android:enabled="false"/>
-                    <TextView style="@style/ReferenceLabel" android:layout_width="wrap_content" android:layout_height="wrap_content"
-                        android:layout_marginTop="14dp" android:textSize="20sp" android:text="持续5分钟无字幕，自动停止"/>
+                <LinearLayout android:id="@+id/setup_footer" android:layout_width="match_parent" android:layout_height="112dp"
+                    android:layout_marginTop="24dp" android:orientation="horizontal" android:gravity="center_vertical">
+                    <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+                        android:orientation="vertical" android:layout_marginEnd="32dp">
+                        <TextView android:id="@+id/status" style="@style/ReferenceLabel" android:layout_width="match_parent" android:layout_height="wrap_content"
+                            android:textColor="@color/reference_setup_title" android:textSize="22sp" android:maxLines="2"
+                            android:text="请先登录后开始会议" />
+                        <TextView style="@style/ReferenceSetupHint" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                            android:layout_marginTop="10dp" android:text="持续 5 分钟无字幕，自动停止" />
+                    </LinearLayout>
+                    <!-- 主操作槽也用于收尾失败后的停止确认；由页面接线切换，不叠放第二套会议状态。 -->
+                    <LinearLayout android:id="@+id/setup_action_slot" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                        android:orientation="horizontal" android:gravity="center_vertical">
+                        <Button android:id="@+id/start_meeting" style="@style/ReferenceSetupPrimaryButton" android:layout_width="240dp" android:layout_height="64dp"
+                            android:text="开始" android:enabled="false" />
+                    </LinearLayout>
                 </LinearLayout>
-                <!-- 提示与结果恢复入口归属当前卡片，缩为 Dialog 后仍在可见区域。 -->
-                <TextView android:id="@+id/status" style="@style/ReferenceLabel" android:layout_width="match_parent" android:layout_height="38dp"
-                    android:gravity="center" android:textSize="20sp" android:text="请先登录后开始会议"/>
                 <LinearLayout android:id="@+id/result_retry_bar" android:layout_width="match_parent" android:layout_height="wrap_content"
-                    android:orientation="horizontal" android:gravity="center">
-                    <Button android:id="@+id/retry_result" style="@style/ReferenceButton" android:layout_width="200dp" android:layout_height="50dp"
-                        android:visibility="gone" android:text="重新打开结果"/>
-                    <Button android:id="@+id/end_result" style="@style/ReferenceSecondaryButton" android:layout_width="200dp" android:layout_height="50dp"
-                        android:layout_marginStart="24dp" android:visibility="gone" android:text="返回会前设置"/>
+                    android:orientation="horizontal" android:gravity="end">
+                    <Button android:id="@+id/retry_result" style="@style/ReferenceSetupPrimaryButton" android:layout_width="224dp" android:layout_height="56dp"
+                        android:visibility="gone" android:text="重新打开结果" />
+                    <Button android:id="@+id/end_result" style="@style/ReferenceSetupSecondaryButton" android:layout_width="224dp" android:layout_height="56dp"
+                        android:layout_marginStart="16dp" android:visibility="gone" android:text="返回会前设置" />
                 </LinearLayout>
             </LinearLayout>
             <LinearLayout android:id="@+id/meeting_panel" android:layout_width="1800dp" android:layout_height="1008dp"

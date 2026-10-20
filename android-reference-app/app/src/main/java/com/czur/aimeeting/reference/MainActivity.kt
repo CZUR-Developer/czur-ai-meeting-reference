@@ -19,7 +19,6 @@ import android.os.Looper
 import android.provider.Settings
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
-import android.view.Gravity
 import android.view.LayoutInflater
 import android.util.Log
 import android.view.View
@@ -114,11 +113,9 @@ class MainActivity : Activity() {
     private var setupSelection = MeetingSetupSelection()
     private var bindingSetupViews = false
     private var availableResultActions: Set<String> = emptySet()
-    private var defaultDimAmount = 0f
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        defaultDimAmount = window.attributes.dimAmount
         // 地址由 APK 编译配置装配；默认登录插件按同后端身份配对恢复会话。
         MeetingAppAssembly.initialize(this)
         setupPreferences = MeetingSetupPreferenceStore(this)
@@ -197,10 +194,8 @@ class MainActivity : Activity() {
         reminderPopup = MeetingReminderPopup(this, false, Runnable { meetingService?.confirmReminder() })
         page.root.addView(reminderPopup.view(), FrameLayout.LayoutParams(-1, -1))
         setContentView(page.root)
-        window.decorView.setPadding(0, 0, 0, 0)
-        window.setGravity(Gravity.CENTER)
-        renderWindowSize(false)
-        setFinishOnTouchOutside(true)
+        // 普通 Activity 使用系统分配的完整内容区，不设置浮动尺寸或点击外围关闭。
+        // 开始成功后仍由原 Service 挂载真悬浮窗，并按既有流程退出本页。
         if (MeetingAppAssembly.serverUrl().isEmpty()) statusView.setText(R.string.reference_deployment_not_configured)
     }
 
@@ -566,7 +561,7 @@ class MainActivity : Activity() {
     /** Service 推送不可变状态，Activity 重建直接重绘整场字幕，不重订模型事件。 */
     private fun renderMeetingState(state: MeetingService.State) {
         // 默认会中入口属于 Service 的真悬浮窗。挂载成功后退出设置 Activity，释放
-        // 它的整页输入区域与暗化层；只有从浮窗时钟显式打开详情时才保留历史页面。
+        // 它的整页输入区域；只有从浮窗时钟显式打开详情时才保留历史页面。
         if (resumed && state.active && state.overlayShowing && !intent.getBooleanExtra(EXTRA_MEETING_DETAILS, false)) {
             if (!isFinishing) {
                 Log.i(TAG, "会议已交给跨应用悬浮窗，会前页面退出")
@@ -584,11 +579,6 @@ class MainActivity : Activity() {
         renderedServiceStatus = state.status
         capabilityView.text = state.capabilityText
         page.showMeeting(state.active); page.showPresentationNotice(state.active, state.presentationNotice)
-        // Dialog 的背景暗化层独立于页面窗口，单独排窗无法移除它。演示采集期间（含
-        // 停止末帧）不暗化真实内容；采集关闭后恢复原会前风格，不在截图回调中切 UI。
-        val dimAmount = if (state.capturingPresentation) 0f else defaultDimAmount
-        if (window.attributes.dimAmount != dimAmount) window.setDimAmount(dimAmount)
-        renderWindowSize(state.active)
         page.showStopConfirmation(!state.active && state.canStop)
         updateStartAvailability()
         setConfigurationEnabled(!state.busy); stopButton.isEnabled = state.canStop
@@ -692,22 +682,9 @@ class MainActivity : Activity() {
         val available = enabled && !meetingBusy && pendingPresentationMeeting == null
         loginButton.isEnabled = available
         page.close.isEnabled = available
-        // 会前允许点击外围退出；创建、授权或收尾中保持当前操作入口。
-        setFinishOnTouchOutside(available)
         loginDialog?.takeIf { it.isShowing }?.findViewById<View>(R.id.login_submit)?.isEnabled = available
     }
 
-    /**
-     * 同一宿主随既有会中状态切换窗口：会前沿用国内白卡，会中容纳原字幕大面板。
-     *
-     * 不以小窗口的 root 作为设计比例，也不复制会议状态；电平与计时频繁推送时，
-     * 仅在目标宽高真正变化后通知 WindowManager，避免每帧重复触发窗口重排。
-     */
-    private fun renderWindowSize(active: Boolean) {
-        val width = ReferenceUiScale.px(this, if (active) 1800 else 988)
-        val height = ReferenceUiScale.px(this, if (active) 1008 else 856)
-        if (window.attributes.width != width || window.attributes.height != height) window.setLayout(width, height)
-    }
     override fun onStart() { super.onStart(); serviceBound = bindService(Intent(this, MeetingService::class.java), serviceConnection, Context.BIND_AUTO_CREATE) }
     /** 单实例入口避免反复点击图标叠出旧页面；只让前台 Activity 观察同一场快照。 */
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); setIntent(intent) }

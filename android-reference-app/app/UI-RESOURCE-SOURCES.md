@@ -24,8 +24,9 @@
 
 ## 布局与纯显示代码
 
-- 会前卡片／标题：`dialog_transcription_setting.xml`，988×856卡片、86标题，1920×1080设计基准。窗口标题蓝底叠10%黑色，白卡当前40圆角。
-- 语言、演示、结果、开始：`fragment_ai_trans_subtitle.xml`／`fragment_ai_trans.xml`；语言50高、24字、浅蓝底，236／588宽；开始180×50。参考保留自身登录、单一Web结果及SDK能力控制。
+- 会前入口：参考工程独立设计的普通、不透明 Activity，沿用国内蓝白配色和1920×1080设计基准。顶部标题／账号、中部会议设置与结果分区、底部固定状态／开始；`reference_setup_*`是本页专用资源，不把原产品Dialog尺寸作为参考页约束。
+- 语言、演示、结果、开始的业务入口来源于`fragment_ai_trans_subtitle.xml`／`fragment_ai_trans.xml`。参考页语言框56高、开始240×64；保留自身登录、默认Web结果插件及SDK能力控制，未复制原产品业务状态。
+- 登录表单仍复用原`dialog_transcription_setting.xml`的白卡／蓝色标题配色和40圆角；它是普通起始Activity之上的独立账号弹窗，不改变起始页窗口类型。
 - 语言条目：`item_language_list.xml`／`LanguageListAdapter.kt`的24字号、50行高、选中底色`#DADFFD`及选中图片。
 - 按钮／开关：`base/UILib/.../CZButton.kt`、`CZSwitch.kt`与同库`values/colors.xml`。摘取蓝白配色、15按钮圆角和76×40开关；`CzurReferenceSwitch`保留原生CheckBox事件语义，没有复制私有扩展。
 - 字幕／互译：原产品 Panel 与 `item_trans_sentence.xml`。原文白色、译文 `#FFDB10`，24字号／36行高。每段原译同侧上下显示，侧别来自 SDK `sourceSide` 及纯显示 `swapped`；应用不重新计算方向角或语言路由。

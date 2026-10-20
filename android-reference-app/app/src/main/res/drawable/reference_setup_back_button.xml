@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 返回保留普通页面的轻量按钮语义；按下时提供可见反馈。 -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_pressed="true">
+        <shape><solid android:color="#E3EAFE" /><corners android:radius="12dp" /></shape>
+    </item>
+    <item>
+        <shape><solid android:color="#00FFFFFF" /><corners android:radius="12dp" /></shape>
+    </item>
+</selector>

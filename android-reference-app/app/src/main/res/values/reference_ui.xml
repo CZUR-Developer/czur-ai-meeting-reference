@@ -7,19 +7,24 @@
     <color name="reference_dark">#000B43</color>
     <color name="reference_dark_panel">#000B43</color>
     <color name="reference_translation">#FFDB10</color>
+    <!-- 起始页专用中性色；不改变会中字幕、悬浮窗和登录表单的原有配色。 -->
+    <color name="reference_setup_canvas">#F2F5FC</color>
+    <color name="reference_setup_title">#26334D</color>
+    <color name="reference_setup_muted">#68758C</color>
+    <color name="reference_setup_border">#E1E7F3</color>
     <string name="reference_setup_title">AI会议纪要</string>
     <string name="reference_account">账号登录</string>
     <string name="reference_deployment_not_configured">部署尚未配置，请联系应用提供方。</string>
     <string name="reference_source">语言</string>
     <string name="reference_target">目标语言</string>
     <string name="reference_result_description">会议结束后自动打开网页，查看本场字幕、译文及已提供的会议产物。</string>
-    <!-- 只给会议入口使用：真实浮动窗口透出后方页面，结果 Activity 保持原有整页呈现。 -->
-    <style name="ReferenceMeetingDialogActivity" parent="android:style/Theme.DeviceDefault.Light.Dialog.NoActionBar">
+    <!-- 会前入口为普通不透明 Activity；登录表单仍可独立使用 AlertDialog。 -->
+    <style name="ReferenceMeetingActivity" parent="android:style/Theme.DeviceDefault.Light.NoActionBar">
         <item name="android:windowNoTitle">true</item>
-        <item name="android:windowBackground">@android:color/transparent</item>
-        <item name="android:windowIsTranslucent">true</item>
-        <item name="android:windowMinWidthMajor">10%</item>
-        <item name="android:windowMinWidthMinor">10%</item>
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:windowIsTranslucent">false</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowBackground">@color/reference_setup_canvas</item>
     </style>
     <style name="ReferenceLabel">
         <item name="android:textColor">@color/reference_ink</item>
@@ -56,6 +61,33 @@
         <item name="android:gravity">center</item>
         <item name="android:padding">0dp</item>
         <item name="android:buttonTint">@null</item>
+    </style>
+    <!-- 起始页样式独立派生，避免调整全局按钮后波及结果页与会中控制。 -->
+    <style name="ReferenceSetupSectionTitle" parent="ReferenceLabel">
+        <item name="android:textColor">@color/reference_setup_title</item>
+        <item name="android:textSize">28sp</item>
+        <item name="android:textStyle">bold</item>
+    </style>
+    <style name="ReferenceSetupHint" parent="ReferenceLabel">
+        <item name="android:textColor">@color/reference_setup_muted</item>
+        <item name="android:textSize">20sp</item>
+        <item name="android:lineSpacingExtra">6dp</item>
+    </style>
+    <style name="ReferenceSetupPrimaryButton" parent="ReferenceButton">
+        <item name="android:textSize">22sp</item>
+        <item name="android:background">@drawable/reference_setup_primary_button</item>
+    </style>
+    <style name="ReferenceSetupSecondaryButton" parent="ReferenceSecondaryButton">
+        <item name="android:background">@drawable/reference_setup_secondary_button</item>
+    </style>
+    <style name="ReferenceSetupBackButton" parent="ReferenceButton">
+        <item name="android:background">@drawable/reference_setup_back_button</item>
+        <item name="android:textColor">@color/reference_setup_muted</item>
+        <item name="android:textSize">24sp</item>
+        <item name="android:textStyle">normal</item>
+    </style>
+    <style name="ReferenceSetupModeButton" parent="ReferenceModeButton">
+        <item name="android:background">@drawable/reference_setup_mode_button</item>
     </style>
     <style name="ReferenceDarkLabel">
         <item name="android:textColor">#FFFFFF</item>

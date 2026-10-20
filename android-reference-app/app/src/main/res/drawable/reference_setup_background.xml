@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 页面底色为不透明浅蓝白；渐变只提供层次，不模拟对话框遮罩。 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <gradient android:angle="270" android:startColor="#EFF3FE" android:endColor="#F8FAFF" />
+</shape>

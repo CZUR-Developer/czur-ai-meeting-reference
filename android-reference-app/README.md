@@ -124,8 +124,10 @@ Mock 无真实音源，设置为 `false`。录音在停止后上传到参考后�
 [公共核心的身份接入](meeting-client-core/README.md#可替换身份与默认登录)。
 
 `MeetingPageViews.Factory` 只创建／绑定 View，页面继续使用相同的会议状态。
-默认白色会前卡、蓝色标题栏和会中控制支持大屏比例缩放；`ReferenceUiScale` 在局部
-映射 1920×1080 设计尺度，不修改系统 `DisplayMetrics`。Start／Stop 固定在滚动文字之外。
+默认起始页使用普通、不透明的 Activity，采用蓝白配色；会议设置与会后结果分区，
+账号入口位于顶部，状态与开始入口固定在底部。登录表单仍可独立使用对话框。
+`ReferenceUiScale` 按页面实际内容区局部映射 1920×1080 设计尺度，不修改系统
+`DisplayMetrics`。Start／Stop 固定在滚动内容之外，会中仍交给 Service 的真悬浮窗。
 可编辑公开 XML，或在首次创建 Activity 前注册薄工厂：
 
 ```kotlin
@@ -136,6 +138,9 @@ MeetingAppAssembly.registerPageFactory { activity ->
 
 自定义布局提供相同控件 ID 即可复用 Activity 接线。原文白色、译文黄色，同一发言方
 原译同侧；页面与窗口共用已路由快照，不自行重做模型解析、方向路由或片段修订。
+`result_settings_host` 保留给结果插件提供自己的设置 View；`setup_action_slot` 承载开始／
+重新确认停止按钮，需放在滚动区域之外。`summary_setting`、`presentation_setting` 是
+可选显示分组，随对应能力或模式隐藏，不另行保存业务状态。
 资源来源见[页面资源清单](app/UI-RESOURCE-SOURCES.md)和[窗口资源清单](docs/czur-overlay-resources.md)。
 
 ## 完整会议入口与平台扩展点

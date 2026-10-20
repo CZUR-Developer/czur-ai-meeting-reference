@@ -77,12 +77,13 @@ class MeetingPageViews(@JvmField val root: FrameLayout) {
         placeholder.setTextColor(Color.WHITE)
         SubtitleViewFactory.render(placeholder, "", "记录中…", .8f)
         transcriptList.addView(placeholder)
-        setupCard.clipToOutline = true
         // 与原“开始”占用相同会前槽位，不把已停止的会议页或浮窗重新显示出来。
-        root.findViewById<LinearLayout>(R.id.setup_footer).addView(stopConfirmation, 1,
+        val actionSlot = root.findViewById<LinearLayout>(R.id.setup_action_slot)
+            ?: root.findViewById<LinearLayout>(R.id.setup_footer)
+        actionSlot.addView(stopConfirmation,
             LinearLayout.LayoutParams(start.layoutParams as LinearLayout.LayoutParams))
-        // Dialog 的根布局已经是卡片尺寸，视觉比例继续使用显示尺寸，避免二次缩小。
-        scale = ReferenceUiScale.bindDialog(root)
+        // 普通 Activity 按实际可用内容区适配；状态栏占用不挤走固定开始入口。
+        scale = ReferenceUiScale.bind(root)
         transcriptModeDesignWidth = transcriptMode.layoutParams.width
         SubtitleViewFactory.setLineHeightPx(placeholder, scale.px(36))
         icon(stop, R.drawable.czur_ref_stop, 40, 40)
@@ -137,6 +138,7 @@ class MeetingPageViews(@JvmField val root: FrameLayout) {
         translationMode.visibility = if (usableTranslation) View.VISIBLE else View.GONE
         translationMode.isEnabled = usableTranslation
         summary.visibility = if (transcriptAvailable && summaryAvailable) View.VISIBLE else View.GONE
+        root.findViewById<View>(R.id.summary_setting)?.visibility = summary.visibility
         summary.isEnabled = transcriptAvailable && summaryAvailable
         if (!transcriptAvailable || !summaryAvailable) summary.isChecked = false
         targetLanguage.isEnabled = usableTranslation && translationMode.isChecked
@@ -153,15 +155,16 @@ class MeetingPageViews(@JvmField val root: FrameLayout) {
         targetContainer.visibility = if (usableTranslation) View.VISIBLE else View.GONE
         swapLanguages.visibility = if (usableTranslation) View.VISIBLE else View.GONE
         presentation.visibility = if (usableTranslation || !transcriptAvailable) View.GONE else View.VISIBLE
+        root.findViewById<View>(R.id.presentation_setting)?.visibility = presentation.visibility
         root.findViewById<View>(R.id.presentation_hint).visibility = if (usableTranslation || !transcriptAvailable) View.GONE else View.VISIBLE
         root.findViewById<View>(R.id.translation_illustration).visibility = if (usableTranslation) View.VISIBLE else View.GONE
         root.findViewById<TextView>(R.id.language_hint).apply {
             text = when {
                 !transcriptAvailable -> "当前部署未提供实时字幕能力"
-                usableTranslation -> "提示：两种语言的人群，分坐左右两侧"
-                else -> "语言"
+                usableTranslation -> "两种语言的人群，请分坐左右两侧"
+                else -> "会议语言"
             }
-            setTextSize(TypedValue.COMPLEX_UNIT_PX, scale.px(if (usableTranslation) 20 else 30).toFloat())
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, scale.px(22).toFloat())
             setTypeface(null, if (usableTranslation) Typeface.NORMAL else Typeface.BOLD)
         }
         setupTitle.text = when {
@@ -171,9 +174,9 @@ class MeetingPageViews(@JvmField val root: FrameLayout) {
             else -> "AI字幕"
         }
         root.findViewById<TextView>(R.id.setup_subtitle).text = when {
-            !transcriptAvailable -> "（当前部署未声明 transcript.realtime）"
-            usableTranslation -> "（实时将两种语言进行互译）"
-            else -> "（实时将声音转文字）"
+            !transcriptAvailable -> "当前部署未提供实时字幕功能"
+            usableTranslation -> "实时进行双语互译"
+            else -> "实时将声音转为文字"
         }
     }
     fun textRow(ignoredLegacySp: Float, translated: Boolean): TextView =

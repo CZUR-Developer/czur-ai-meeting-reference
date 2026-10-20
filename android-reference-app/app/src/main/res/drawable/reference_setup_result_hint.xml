@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 结果说明只作辅助信息，不使用按钮描边，避免误认为可点击选项。 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <solid android:color="#F3F6FF" />
+    <corners android:radius="14dp" />
+</shape>

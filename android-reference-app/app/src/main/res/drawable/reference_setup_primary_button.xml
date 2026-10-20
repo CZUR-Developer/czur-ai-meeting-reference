@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 起始页主操作：保持国内蓝色与明确的禁用、按下反馈。 -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_enabled="false">
+        <shape><solid android:color="#A8BAFC" /><corners android:radius="16dp" /></shape>
+    </item>
+    <item android:state_pressed="true">
+        <shape><solid android:color="#496BE6" /><corners android:radius="16dp" /></shape>
+    </item>
+    <item>
+        <shape><solid android:color="@color/reference_blue" /><corners android:radius="16dp" /></shape>
+    </item>
+</selector>
