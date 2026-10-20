@@ -37,6 +37,33 @@ import org.robolectric.shadows.ShadowSettings
 class OverlayViewFactoryTest {
     @Before fun allowOverlay() = ShadowSettings.setCanDrawOverlays(true)
 
+    @Test fun subtitleTimerKeepsItsRightEdgeAtTheVoiceAreaAcrossTextLengthsAndScales() {
+        val app = RuntimeEnvironment.getApplication()
+        val window = OverlayViewFactory().create(app, {}, {}, {}) as OverlayViewFactory.DefaultWindow
+        window.show(single("test", true))
+        try {
+            for (qualifiers in listOf("w1920dp-h1080dp-mdpi", "w1280dp-h720dp-mdpi")) {
+                resize(app, qualifiers)
+                for (duration in listOf("00:12", "03:59:59")) {
+                    window.render(single("test", true), MeetingSetup.Mode.LIVE_TRANSCRIPT, false, duration, true, 30)
+                    val controller = window.overlay.controller()
+                    shadowOf(Looper.getMainLooper()).idle()
+                    measure(controller)
+                    val timer = visible(controller, "overlay.open") as TextView
+                    val voice = visible(controller, "overlay.level")
+                    assertEquals(ViewGroup.LayoutParams.WRAP_CONTENT, timer.layoutParams.width)
+                    assertEquals(voice.left, timer.right)
+                    assertEquals(voice.top, timer.top)
+                    assertEquals(voice.bottom, timer.bottom)
+                    assertEquals(duration.replace(":", " : "), timer.text.toString())
+                }
+            }
+        } finally {
+            window.dismiss()
+            resize(app, "w1920dp-h1080dp-mdpi")
+        }
+    }
+
     @Test fun automationBoundsFollowTheMountedFormAndExcludeDisabledControls() {
         val window = OverlayViewFactory().create(RuntimeEnvironment.getApplication(), {}, {}, {}) as OverlayViewFactory.DefaultWindow
         window.show(single("test", true))
@@ -345,7 +372,9 @@ class OverlayViewFactoryTest {
             val target = panel.findViewWithTag<View>(tag)
             assertNotNull(target)
             assertTrue(tag, target.width > 0 && target.height > 0)
-            val rect = Rect(0, 0, target.width, target.height)
+            // 用控件的可见绘制区起点换算；单行居中 TextView 的内部 scrollX 不等于窗口偏移。
+            val rect = Rect()
+            target.getDrawingRect(rect)
             panel.offsetDescendantRectToMyCoords(target, rect)
             assertTrue("$tag outside fixed height: $rect", rect.top >= 0 && rect.bottom <= panel.height)
             assertTrue("$tag outside fixed width: $rect", rect.left >= 0 && rect.right <= panel.width)

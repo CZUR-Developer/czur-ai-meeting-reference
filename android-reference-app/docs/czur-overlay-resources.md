@@ -34,6 +34,10 @@ tvdpi 或默认 drawable 密度二次缩放。动画放入 `raw/`。
 原文白色、译文黄色及同侧原译组合来自`TransNormalPanel`和`TransLargePanel`，
 左右决策使用已有 SDK 快照的`sourceSide`和应用显示交换开关，不在 View 重算路由。
 
+字幕模式的计时按文字宽度测量，右边缘对齐音量区域左边缘，上下与音量区域对齐，
+对应原布局的`wrap_content`和`endToStart`关系；不能改为固定宽框内居中，否则短计时会左偏。
+互译普通／大窗仍使用中间区域的居中计时，不受字幕模式的对齐方式影响。
+
 `CzurVoiceLevelView`只迁移`AnimatedImageCloudsView.kt`的声音图和高度响应曲线，
 订阅、采音和 PCM 计算由 SDK 完成。WebP 由 Android 平台解码，声音图接收 SDK 的
 0～100 电平；Mini 使用独立 APNG 3.0.5 显示库。参考应用最低支持 Android 14。

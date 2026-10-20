@@ -104,7 +104,13 @@ class CzurOverlayViews(context: Context, private val form: String, actions: Acti
                 background.visibility = View.GONE
             }
             "subtitle" -> {
-                put(time, 650, 14, 170, 44); put(voice, 832, 14, 136, 44)
+                // 对齐原字幕布局：计时按文字宽度测量，右边缘贴音量区域左边缘。
+                // 不在固定宽框内居中，否则短时间文字会偏到顶部凸起区域的左侧。
+                root.addView(time, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, px(44)).apply {
+                    gravity = Gravity.TOP or Gravity.RIGHT
+                    rightMargin = px(1800 - 832); topMargin = px(14)
+                })
+                put(voice, 832, 14, 136, 44)
                 put(stop, 968, 14, 40, 40); put(collapse, 1028, 14, 40, 40)
                 put(subtitle, 40, 82, 1700, 108); put(recording, 800, 82, 200, 40)
                 put(recordingAnimation, 966, 86, 32, 32); put(recordingHint, 660, 126, 480, 36)
