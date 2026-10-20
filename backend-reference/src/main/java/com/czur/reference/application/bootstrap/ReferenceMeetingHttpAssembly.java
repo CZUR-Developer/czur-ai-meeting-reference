@@ -117,7 +117,7 @@ public final class ReferenceMeetingHttpAssembly extends MeetingHttpAssembly {
             com.czur.reference.application.http.SessionLoginEndpoint login,
             SummarySessionIssuer summaryIssuer, SpeakerIdentityFactory speakerFactory) {
         return new ReferenceMeetingHttpAssembly(MeetingHttpAssembly.startClientModel(config, clock,
-                artifacts, identity, policy, issuer, decorator, login, summaryIssuer, speakerFactory));
+                artifacts, identity, policy, issuer, decorator, login, summaryIssuer, speakerFactory, true));
     }
 
     /**

@@ -88,6 +88,21 @@ public final class HttpErrorMapper {
     }
 
     /** 会后人物注册使用独立业务码，不借用模型会话错误提示。 */
+    public HttpResponse speakerEditingFailure(
+            com.czur.reference.application.port.speaker.SpeakerNameEditPort.Reason reason) {
+        return switch (reason) {
+            case NOT_FOUND, SEGMENT_NOT_FOUND -> query(new MeetingQueryPort.NotFound());
+            case ACCESS_DENIED -> query(new MeetingQueryPort.AccessDenied());
+            case INVALID_STATE -> error(409, HttpErrorEnvelope.Domain.CONTRACT,
+                    "SPEAKER_EDIT_INVALID_STATE", false, HttpErrorEnvelope.UserAction.NONE,
+                    "ai_meeting.contract.speaker_edit_invalid_state");
+            case UNAVAILABLE -> error(503, HttpErrorEnvelope.Domain.STORAGE,
+                    "SPEAKER_EDIT_UNAVAILABLE", true, HttpErrorEnvelope.UserAction.RETRY,
+                    "ai_meeting.storage.speaker_edit_unavailable");
+        };
+    }
+
+    /** 登记状态与本场改名分别返回，调用方不能把改名成功解释成声纹注册成功。 */
     public HttpResponse speakerEnrollmentFailure(SpeakerIdentityEnrollmentPort.Reason reason) {
         return switch (reason) {
             case NOT_FOUND -> query(new MeetingQueryPort.NotFound());

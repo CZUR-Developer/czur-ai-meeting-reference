@@ -378,6 +378,7 @@ class ReferenceMeetingMysqlClientHttpAssemblyIntegrationTest {
         var store = new PersistentFileSystemMockArtifactStore(artifactRoot, 1024 * 1024);
         AtomicInteger identifies = new AtomicInteger();
         AtomicInteger enrollments = new AtomicInteger();
+        var failEnrollment = new java.util.concurrent.atomic.AtomicBoolean();
         try (var assembly = ReferenceMeetingHttpAssembly.startClientModel(config, CLOCK, store,
                 identity, policy, issuer, java.util.function.UnaryOperator.identity(), null, null,
                 (database, artifacts) -> {
@@ -396,6 +397,7 @@ class ReferenceMeetingMysqlClientHttpAssemblyIntegrationTest {
                         }
                         @Override public Person enroll(Enrollment request) throws Exception {
                             enrollments.incrementAndGet();
+                            if (failEnrollment.get()) throw new SampleUnavailable("synthetic short sample");
                             Person person = new Person("person_reference_test", request.displayName());
                             persons.save(request.meeting().deploymentScope(), request.meeting().subjectScope(),
                                     new JdbcReferenceSpeakerPersons.Entry(person, "test-speaker", "private_group", "private_feature"));
@@ -449,11 +451,86 @@ class ReferenceMeetingMysqlClientHttpAssemblyIntegrationTest {
             assertEquals("person_reference_test", matched.path("speakers").get(0).path("personId").asText());
             assertEquals("参考人物😀", matched.path("speakers").get(0).path("displayName").asText());
             assertEquals(2, identifies.get());
+            String rename = "/v1/meetings/" + first + "/speakers/speaker-1:rename";
+            String single = """
+                    {"displayName":"单段记录","scope":"SINGLE","segmentId":"speaker-segment","remember":true}
+                    """;
+            assertEquals(401, exchange(client, port, "POST", rename, single, null, false).statusCode());
+            var renamed = exchange(client, port, "POST", rename, single, null, true);
+            assertEquals(200, renamed.statusCode());
+            assertEquals("REGISTERED", json(renamed).path("registration").asText());
+            var text = readTranscript(client, port, first, generation);
+            assertEquals("单段记录", text.path("segments").get(0).path("speakerDisplayName").asText());
+            assertEquals("参考人物😀", text.path("segments").get(1).path("speakerDisplayName").asText());
+            assertFalse(text.path("segments").get(2).has("speakerDisplayName"));
+            assertFalse(readTranscript(client, port, second, generation).path("segments").get(0)
+                    .has("speakerDisplayName"), "其他已完成会议保持原样");
+            int registrations = enrollments.get();
+            var all = exchange(client, port, "POST", rename,
+                    "{\"displayName\":\"本场全局\",\"scope\":\"ALL\",\"remember\":false}", null, true);
+            assertEquals("NOT_REQUESTED", json(all).path("registration").asText());
+            assertEquals(2, json(all).path("changedSegments").asInt());
+            assertEquals(registrations, enrollments.get());
+            assertEquals("本场全局", readTranscript(client, port, first, generation)
+                    .path("segments").get(1).path("speakerDisplayName").asText());
+            failEnrollment.set(true);
+            var partial = exchange(client, port, "POST", rename, single.replace("单段记录", "仍然保存"), null, true);
+            assertEquals(200, partial.statusCode());
+            assertEquals("SAMPLE_UNAVAILABLE", json(partial).path("registration").asText());
+            assertEquals("仍然保存", readTranscript(client, port, first, generation)
+                    .path("segments").get(0).path("speakerDisplayName").asText());
             assertSentinelUnchanged();
         }
     }
 
     private String completeSpeakerMeeting(HttpClient client, int port, String suffix) throws Exception {
+        return completeSpeakerMeeting(client, port, suffix, true);
+    }
+
+    @Test void manualNamesWorkWithoutSpeakerProviderOrPersonsTable() throws Exception {
+        try (var connection = fixture(); var statement = connection.createStatement()) {
+            statement.execute("DROP TABLE ai_trans_speaker_identity_person");
+        }
+        var config = config(true);
+        var policy = new ReferenceDevEntitlementPolicy(config.entitlement(), CLOCK, new EntitlementIdGenerator() {
+            public String newGrantId() { return "grant_" + UUID.randomUUID(); }
+            public String newReservationId() { return "reservation_" + UUID.randomUUID(); }
+            public String newLeaseToken() { return "lease_" + UUID.randomUUID(); }
+        });
+        try (var assembly = ReferenceMeetingHttpAssembly.startClientModel(config, CLOCK,
+                new PersistentFileSystemMockArtifactStore(artifactRoot, 1024 * 1024),
+                request -> IdentityProviderResult.success(verifiedIdentity()), policy,
+                request -> new ModelSessionIssuer.Session("sample-json-ws", "ws://model.example.invalid/manual",
+                        NOW.plusSeconds(300), Map.of()), java.util.function.UnaryOperator.identity());
+             var server = assembly.newJdkHttpServer(new InetSocketAddress("127.0.0.1", 0));
+             var client = HttpClient.newHttpClient()) {
+            server.start();
+            int port = server.address().getPort();
+            var capabilities = json(exchange(client, port, "GET", "/v1/capabilities", "", null, false));
+            assertTrue(capabilities.path("resultSpeakerEditingEnabled").asBoolean());
+            assertFalse(capabilities.path("capabilities").toString().contains("speaker.identity.cross_meeting"));
+            String id = completeSpeakerMeeting(client, port, "manual", false);
+            String rename = "/v1/meetings/" + id + "/speakers/speaker-1:rename";
+            var reply = exchange(client, port, "POST", rename,
+                    "{\"displayName\":\"人工名字\",\"scope\":\"ALL\",\"remember\":false}", null, true);
+            assertEquals(200, reply.statusCode());
+            assertEquals("NOT_REQUESTED", json(reply).path("registration").asText());
+            assertEquals("人工名字", readTranscript(client, port, id, "?genTime=" + NOW.toEpochMilli())
+                    .path("segments").get(1).path("speakerDisplayName").asText());
+        }
+    }
+
+    private JsonNode readTranscript(HttpClient client, int port, String id, String generation) throws Exception {
+        var manifest = MeetingManifestJson.decode(exchange(client, port, "GET",
+                "/v1/meetings/" + id + "/manifest" + generation, "", null, false).body());
+        var ref = manifest.artifacts().stream().filter(item -> "transcript.final".equals(item.type()))
+                .findFirst().orElseThrow();
+        var response = exchange(client, port, "GET", "/v1/artifacts/" + ref.artifactId() + generation, "", null, false);
+        assertEquals(200, response.statusCode());
+        return json(response);
+    }
+
+    private String completeSpeakerMeeting(HttpClient client, int port, String suffix, boolean crossMeeting) throws Exception {
         String body = """
                 {"clientSessionId":"speaker-%s","profile":{"id":"m2-c-profile","revision":1},
                  "client":{"appId":"speaker-app","appVersion":"1","contractVersion":"v1","deviceId":"test-device"},
@@ -462,6 +539,7 @@ class ReferenceMeetingMysqlClientHttpAssemblyIntegrationTest {
                  "requestedCapabilities":["transcript.realtime","speaker.diarization.session","speaker.identity.cross_meeting"],
                  "artifactPolicy":{"retainAudio":true,"presentationCapture":false}}
                 """.formatted(suffix);
+        if (!crossMeeting) body = body.replace(",\"speaker.identity.cross_meeting\"", "");
         var created = exchange(client, port, "POST", "/v1/meetings", body,
                 "speaker-create-" + suffix + "-123456789", true);
         assertEquals(201, created.statusCode());
@@ -475,6 +553,13 @@ class ReferenceMeetingMysqlClientHttpAssemblyIntegrationTest {
                  "speaker":{"sessionSpeakerId":"speaker-1"},"final":true}}
                 """;
         append(client, port, path + "/events:append", event);
+        append(client, port, path + "/events:append", event.replace("speaker-event", "speaker-event2")
+                .replace("\"clientSequence\":1", "\"clientSequence\":2")
+                .replace("speaker-segment", "speaker-segment2").replace("\"startMs\":0", "\"startMs\":2000"));
+        append(client, port, path + "/events:append", event.replace("speaker-event", "speaker-event3")
+                .replace("\"clientSequence\":1", "\"clientSequence\":3")
+                .replace("speaker-segment", "speaker-segment3").replace("speaker-1", "speaker-2")
+                .replace("\"startMs\":0", "\"startMs\":4000"));
         byte[] audio = new byte[16000 * 2 * 6];
         var upload = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path + "/audio-original"))
                 .timeout(Duration.ofSeconds(5)).header("Authorization", "Bearer " + TOKEN)

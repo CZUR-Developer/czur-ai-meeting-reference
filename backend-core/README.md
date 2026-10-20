@@ -107,6 +107,26 @@ try (var assembly = MeetingHttpAssembly.startClientModel(
 参考讯飞实现、所需配置和依赖见
 [后端参考说明](../backend-reference/README.md#可选跨会议声纹参考插件)。
 
+### 可选本场姓名编辑
+
+`SpeakerNameEditPort` 将人工编辑与声纹 Provider 分开。参考宿主显式调用
+`startClientModel(..., login, summaryIssuer, speakerFactory, true)` 装配
+`POST /v1/meetings/{meetingId}/speakers/{sessionSpeakerId}:rename`，能力发现返回
+`resultSpeakerEditingEnabled=true`。原方法／构造器保持可用，默认不开启新增写路由；
+其他消费相同核心 JAR 的宿主可独立决定是否开启，不会被动改变原有结果接口。
+
+`SINGLE` 仅编辑指定 `segmentId`；`ALL` 仅编辑本场同一 `sessionSpeakerId`。
+JDBC 实现使用会议行锁、已有结果表和不可变 Artifact，递增 Manifest revision；
+无需新表，原文、时间轴和其他产物保留。人工名字写入原文段的可选
+`speakerDisplayName`：缺席表示继续读取身份名称，字符串为人工覆盖，显式 `null`
+表示保留编号。单个编辑会冻结该人其他段的当前显示，避免随后登记连带改名。
+
+`remember=true` 时在本场保存提交并释放连接后复用现有登记端口；失败仍返回
+`Updated` 和独立 `registration`，供 UI 提示“本场已保存、登记未完成”。
+`remember=false` 不调用人物库或模型，未配置声纹时仍可使用本场编辑。
+接口、字段与状态详见 [OpenAPI](../contracts/ai-meeting-openapi.yaml) 和
+[Web 接入说明](../web-reference/README.md#发言人改名与可选跨会议记录)。
+
 ## 最终标准快照
 
 `JdbcClientMeetingResultFinalizer.readFinalSnapshot(assembly.databaseContext(),

@@ -453,6 +453,67 @@ paths:
                 $ref: "#/components/schemas/SubmitClientSummaryResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/meetings/{meetingId}/speakers/{sessionSpeakerId}:rename:
+    post:
+      tags: [Meetings]
+      operationId: editMeetingSpeakerName
+      summary: 修改本场发言人名称，可选登记下次自动识别
+      description: |
+        可选宿主装配，由 resultSpeakerEditingEnabled 宣告。仅会议所属账号可写 READY 结果。
+        SINGLE 修改 segmentId 对应段落；ALL 修改本场同一 sessionSpeakerId 的全部段落。
+        不改变原文、发言人编号、时间轴或其他会议。先保存本场名称，再执行可选声纹登记。
+        transcript.final.segments 的可选 speakerDisplayName 为人工名称；显式 null 表示保留
+        未命名编号显示，字段缺席时继续采用 speaker.identity。登记失败仍返回 200 和独立
+        registration 状态，调用方重读同一 Manifest，不能把本场保存当作登记成功。
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/MeetingId"
+        - name: sessionSpeakerId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [displayName, scope, remember]
+              properties:
+                displayName:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                scope:
+                  type: string
+                  enum: [SINGLE, ALL]
+                segmentId:
+                  type: string
+                  description: SINGLE 时必填，须属于路径中的本场发言人。
+                remember:
+                  type: boolean
+                  description: 是否另外登记下次识别，不扩大本场修改范围。
+      responses:
+        "200":
+          description: 本场名称已保存；声纹登记结果单独报告
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [manifestRevision, changedSegments, registration]
+                properties:
+                  manifestRevision:
+                    type: integer
+                  changedSegments:
+                    type: integer
+                  registration:
+                    type: string
+                    enum: [NOT_REQUESTED, REGISTERED, SAMPLE_UNAVAILABLE, NOT_GRANTED, UNAVAILABLE]
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/meetings/{meetingId}/speakers/{sessionSpeakerId}:enroll:
     post:
       tags: [Meetings]
@@ -911,6 +972,9 @@ components:
         resultEmailEnabled:
           type: boolean
           description: 部署方已配置 SMTP 且邮箱交付可用。
+        resultSpeakerEditingEnabled:
+          type: boolean
+          description: 宿主已显式装配本场发言人编辑；缺席时按 false，独立于声纹模型能力。
         limits:
           $ref: "#/components/schemas/Limits"
     RealtimeDescriptor:

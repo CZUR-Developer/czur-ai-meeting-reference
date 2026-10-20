@@ -35,6 +35,13 @@ public final class ReferenceDeploymentCapabilitiesEndpoint {
     /** 后处理人物能力以实际注册的 Provider 为准；不能由实时模型配置冒充。 */
     public ReferenceDeploymentCapabilitiesEndpoint(MeetingDeploymentConfig config,
             HttpErrorMapper errors, boolean summarySessionAvailable, boolean speakerIdentityAvailable) {
+        this(config, errors, summarySessionAvailable, speakerIdentityAvailable, false);
+    }
+
+    /** 人工结果编辑是部署提供的工具，独立于实时模型和声纹能力。 */
+    public ReferenceDeploymentCapabilitiesEndpoint(MeetingDeploymentConfig config,
+            HttpErrorMapper errors, boolean summarySessionAvailable, boolean speakerIdentityAvailable,
+            boolean speakerEditingEnabled) {
         this.errors = errors;
         TreeSet<String> available = new TreeSet<>();
         if (config.createEnabled()) {
@@ -74,6 +81,7 @@ public final class ReferenceDeploymentCapabilitiesEndpoint {
         config.resultLinkTtl().ifPresent(ttl ->
                 body.put("resultLinkTtlMs", ttl.toMillis()));
         body.put("resultEmailEnabled", config.resultEmail().isPresent());
+        body.put("resultSpeakerEditingEnabled", speakerEditingEnabled);
         try {
             response = HttpResponse.json(200, JSON.writeValueAsString(body));
         } catch (JsonProcessingException impossible) {

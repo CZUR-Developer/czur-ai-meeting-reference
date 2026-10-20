@@ -21,6 +21,7 @@ public final class MeetingHttpDispatcher {
     private final ResultEmailEndpoint resultEmail;
     private final MeetingArtifactHttpEndpoint artifactEndpoint;
     private final SpeakerIdentityEnrollmentEndpoint speakerEnrollment;
+    private final SpeakerNameEditEndpoint speakerEditing;
 
     /** 无外层身份解析器；保留旧JDK构造器的空上下文及邮件关闭行为。 */
     public MeetingHttpDispatcher(MeetingHttpRuntime runtime, HttpErrorMapper errors) {
@@ -61,6 +62,14 @@ public final class MeetingHttpDispatcher {
             AuthenticatedMeetingHttpContextResolver contextResolver,
             ResultEmailEndpoint resultEmail, MeetingArtifactHttpEndpoint artifactEndpoint,
             SpeakerIdentityEnrollmentEndpoint speakerEnrollment) {
+        this(runtime, errors, contextResolver, resultEmail, artifactEndpoint, speakerEnrollment, null);
+    }
+
+    /** 可选人工结果编辑；旧宿主构造器不自动开放写入口。 */
+    public MeetingHttpDispatcher(MeetingHttpRuntime runtime, HttpErrorMapper errors,
+            AuthenticatedMeetingHttpContextResolver contextResolver,
+            ResultEmailEndpoint resultEmail, MeetingArtifactHttpEndpoint artifactEndpoint,
+            SpeakerIdentityEnrollmentEndpoint speakerEnrollment, SpeakerNameEditEndpoint speakerEditing) {
         this.runtime = Objects.requireNonNull(runtime, "runtime");
         this.errors = Objects.requireNonNull(errors, "errors");
         if (contextResolver != null && contextResolver.errorMapper() != errors) {
@@ -70,6 +79,7 @@ public final class MeetingHttpDispatcher {
         this.resultEmail = resultEmail;
         this.artifactEndpoint = artifactEndpoint;
         this.speakerEnrollment = speakerEnrollment;
+        this.speakerEditing = speakerEditing;
     }
 
     /**
@@ -78,6 +88,15 @@ public final class MeetingHttpDispatcher {
      */
     public HttpResponse handle(HttpRequest request) {
         Objects.requireNonNull(request, "request");
+        if (SpeakerNameEditEndpoint.matches(request)) {
+            if (speakerEditing == null) return errors.notImplemented();
+            if (contextResolver == null) return errors.missingContext();
+            var resolution = contextResolver.forClientWrite(request);
+            if (resolution instanceof AuthenticatedMeetingHttpContextResolver.Rejected rejected)
+                return rejected.response();
+            return speakerEditing.handle(request,
+                    ((AuthenticatedMeetingHttpContextResolver.Ready) resolution).context());
+        }
         if (SpeakerIdentityEnrollmentEndpoint.matches(request)) {
             if (speakerEnrollment == null) return errors.notImplemented();
             if (contextResolver == null) return errors.missingContext();
@@ -167,7 +186,8 @@ public final class MeetingHttpDispatcher {
      */
     boolean supportsReferenceBrowserPost(String path) {
         return "/v1/reference/session:login".equals(path) && runtime.hasSessionLoginPath(path)
-                || speakerEnrollment != null && SpeakerIdentityEnrollmentEndpoint.matchesPath(path);
+                || speakerEnrollment != null && SpeakerIdentityEnrollmentEndpoint.matchesPath(path)
+                || speakerEditing != null && SpeakerNameEditEndpoint.matchesPath(path);
     }
 
 }

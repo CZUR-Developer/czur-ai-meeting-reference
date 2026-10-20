@@ -90,6 +90,31 @@ class MeetingHttpDispatcherTest {
     }
 
     @Test
+    void speakerEditingIsOptInAndKeepsTheExistingAuthenticatedWriteContext() {
+        try (Fixture fixture = new Fixture()) {
+            String path = DETAIL + "/speakers/s1:rename";
+            String body = "{\"displayName\":\"名字\",\"scope\":\"ALL\",\"remember\":false}";
+            assertEquals(501, fixture.dispatcher(null).handle(request("POST", path, "owner", body)).status());
+            var calls = new AtomicInteger();
+            var endpoint = new SpeakerNameEditEndpoint((context, id, speaker, edit) -> {
+                calls.incrementAndGet();
+                assertEquals("stable-owner", context.identity().subject().subjectScope());
+                assertEquals("s1", speaker);
+                return new com.czur.reference.application.port.speaker.SpeakerNameEditPort.Updated(2, 3,
+                        com.czur.reference.application.port.speaker.SpeakerNameEditPort.Registration.NOT_REQUESTED);
+            }, fixture.errors);
+            var dispatcher = new MeetingHttpDispatcher(fixture.runtime, fixture.errors,
+                    new AuthenticatedMeetingHttpContextResolver("trusted-deployment", "trusted-audience",
+                            "trusted-client", fixture.provider, fixture.errors), null, null, null, endpoint);
+            assertTrue(dispatcher.supportsReferenceBrowserPost(path));
+            assertEquals(401, dispatcher.handle(request("POST", path, null, body)).status());
+            assertEquals(403, dispatcher.handle(request("POST", path, "reader", body)).status());
+            assertEquals(200, dispatcher.handle(request("POST", path, "owner", body)).status());
+            assertEquals(1, calls.get());
+        }
+    }
+
+    @Test
     void optionalEmailKeepsDisabledBeforeAuthAndEnabledUsesTheSameWriteContext() {
         try (Fixture fixture = new Fixture()) {
             assertEquals(501, fixture.dispatcher(null).handle(emailRequest("owner")).status());
