@@ -14,6 +14,8 @@ import com.czur.reference.application.port.identity.IdentityProviderResult;
 import com.czur.reference.application.port.identity.IdentityVerificationRequest;
 import com.czur.reference.application.port.identity.Subject;
 import com.czur.reference.application.port.identity.VerifiedIdentity;
+import com.czur.reference.application.port.speaker.SpeakerNameEditPort;
+import com.czur.reference.application.port.speaker.SpeakerResultAccess;
 import com.czur.reference.domain.meeting.MeetingState;
 import org.junit.jupiter.api.Test;
 
@@ -111,6 +113,55 @@ class MeetingHttpDispatcherTest {
             assertEquals(403, dispatcher.handle(request("POST", path, "reader", body)).status());
             assertEquals(200, dispatcher.handle(request("POST", path, "owner", body)).status());
             assertEquals(1, calls.get());
+        }
+    }
+
+    @Test
+    void resultLinkOnlyAuthorizesThisMeetingWithoutInventingAnOwnerIdentity() {
+        try (Fixture fixture = new Fixture()) {
+            var resolver = new AuthenticatedMeetingHttpContextResolver("trusted-deployment", "trusted-audience",
+                    "trusted-client", fixture.provider, fixture.errors);
+            MeetingManifestPort manifest = request -> {
+                assertEquals(ID, request.meetingId());
+                assertEquals(123, request.genTime());
+                Instant now = Instant.now();
+                return new MeetingManifestPort.Found(new MeetingManifest("0.1", ID, 1,
+                        new MeetingManifest.Profile("reference-asr", 1), "参考会议", ManifestStatus.READY,
+                        now, now, 0, new MeetingManifest.Languages("zh-CN", List.of()), List.of(), List.of()));
+            };
+            var policy = SpeakerResultAccessPolicy.resultLink(resolver, manifest, "trusted-deployment", fixture.errors);
+            assertFalse(policy.requiresLogin());
+            var calls = new AtomicInteger();
+            var port = new SpeakerNameEditPort() {
+                @Override public Result edit(MeetingCommandContext context, String id, String speaker, Edit edit) {
+                    throw new AssertionError("Link visitors must not be converted into logged-in owners");
+                }
+                @Override public Result editAuthorized(SpeakerResultAccess access, String id, String speaker, Edit edit) {
+                    calls.incrementAndGet();
+                    assertNull(access.ownerContext());
+                    assertTrue(access.allows(ID, "trusted-deployment", "stored-owner"));
+                    assertFalse(access.allows("mtg_other", "trusted-deployment", "stored-owner"));
+                    assertFalse(access.allows(ID, "other-deployment", "stored-owner"));
+                    return new Updated(2, 1, Registration.NOT_REQUESTED);
+                }
+            };
+            var dispatcher = new MeetingHttpDispatcher(fixture.runtime, fixture.errors, resolver,
+                    null, null, null, new SpeakerNameEditEndpoint(port, fixture.errors, policy));
+            var request = new HttpRequest("POST", DETAIL + "/speakers/s1:rename", Map.of(),
+                    Map.of("genTime", "123"), "{\"displayName\":\"名字\",\"scope\":\"ALL\",\"remember\":false}");
+            assertEquals(200, dispatcher.handle(request).status());
+            assertEquals(1, calls.get());
+            assertEquals(0, fixture.identityRequests.size());
+            assertEquals(401, dispatcher.handle(request("POST", DETAIL + "/usage:submit", null, "")).status());
+
+            // 同一策略仍兼容旧所有者插件；没有扩展新方法的插件不会自动开放链接编辑。
+            SpeakerNameEditPort legacy = (context, id, speaker, edit) -> {
+                assertEquals("stable-owner", context.identity().subject().subjectScope());
+                return new SpeakerNameEditPort.Updated(3, 1, SpeakerNameEditPort.Registration.NOT_REQUESTED);
+            };
+            var endpoint = new SpeakerNameEditEndpoint(legacy, fixture.errors, policy);
+            assertEquals(503, endpoint.handle(request).status());
+            assertEquals(200, endpoint.handle(request("POST", request.path(), "owner", request.body())).status());
         }
     }
 

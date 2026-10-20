@@ -1,11 +1,11 @@
 package com.czur.reference.application.persistence.jdbc;
 
-import com.czur.reference.application.command.MeetingAccessGuard;
 import com.czur.reference.application.command.MeetingCommandContext;
 import com.czur.reference.application.port.MeetingManifest;
 import com.czur.reference.application.port.artifact.ArtifactStore;
 import com.czur.reference.application.port.speaker.SpeakerIdentityEnrollmentPort;
 import com.czur.reference.application.port.speaker.SpeakerIdentityProvider;
+import com.czur.reference.application.port.speaker.SpeakerResultAccess;
 import com.czur.reference.protocol.json.MeetingManifestJson;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -41,6 +41,11 @@ public final class JdbcSpeakerIdentityEnrollmentPort implements SpeakerIdentityE
     @Override
     public Result enroll(MeetingCommandContext context, String meetingId,
             String sessionSpeakerId, String displayName) {
+        return enrollAuthorized(SpeakerResultAccess.owner(context), meetingId, sessionSpeakerId, displayName);
+    }
+
+    @Override public Result enrollAuthorized(SpeakerResultAccess access, String meetingId,
+            String sessionSpeakerId, String displayName) {
         try {
             SpeakerIdentityProvider.MeetingSpeakers input;
             SpeakerIdentityProvider.Person existing;
@@ -48,7 +53,7 @@ public final class JdbcSpeakerIdentityEnrollmentPort implements SpeakerIdentityE
                 connection.setReadOnly(true);
                 connection.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
                 connection.setAutoCommit(false);
-                var reason = checkMeeting(connection, context, meetingId, false);
+                var reason = checkMeeting(connection, access, meetingId, false);
                 if (reason != null) return new Rejected(reason);
                 input = JdbcClientMeetingResultFinalizer.speakerInput(connection, database.engine(), meetingId);
                 if (input == null) return new Rejected(Reason.NOT_GRANTED);
@@ -74,7 +79,7 @@ public final class JdbcSpeakerIdentityEnrollmentPort implements SpeakerIdentityE
             try (Connection connection = database.dataSource().getConnection()) {
                 connection.setAutoCommit(false);
                 try {
-                    var reason = checkMeeting(connection, context, meetingId, true);
+                    var reason = checkMeeting(connection, access, meetingId, true);
                     if (reason != null) {
                         connection.rollback();
                         return new Rejected(reason);
@@ -125,15 +130,15 @@ public final class JdbcSpeakerIdentityEnrollmentPort implements SpeakerIdentityE
         }
     }
 
-    private Reason checkMeeting(Connection connection, MeetingCommandContext context,
+    private Reason checkMeeting(Connection connection, SpeakerResultAccess access,
             String meetingId, boolean lock) throws SQLException {
         try (var statement = connection.prepareStatement("SELECT deployment_scope, subject_scope, state FROM "
                 + table(JdbcDatabaseTable.MEETING) + " WHERE meeting_id=?" + (lock ? " FOR UPDATE" : ""))) {
             JdbcValues.setText(statement, 1, database.engine(), meetingId);
             try (var rows = statement.executeQuery()) {
                 if (!rows.next()) return Reason.NOT_FOUND;
-                if (MeetingAccessGuard.evaluate(context, JdbcValues.text(rows, "deployment_scope"),
-                        JdbcValues.text(rows, "subject_scope")) != MeetingAccessGuard.Decision.ALLOWED) {
+                if (!access.allows(meetingId, JdbcValues.text(rows, "deployment_scope"),
+                        JdbcValues.text(rows, "subject_scope"))) {
                     return Reason.ACCESS_DENIED;
                 }
                 return "READY".equals(JdbcValues.text(rows, "state")) ? null : Reason.INVALID_STATE;

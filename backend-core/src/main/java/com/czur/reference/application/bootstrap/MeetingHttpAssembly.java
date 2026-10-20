@@ -37,6 +37,7 @@ import com.czur.reference.application.persistence.jdbc.JdbcSpeakerIdentityEnroll
 import com.czur.reference.application.port.speaker.SpeakerIdentityProvider;
 import com.czur.reference.application.http.SpeakerIdentityEnrollmentEndpoint;
 import com.czur.reference.application.http.SpeakerNameEditEndpoint;
+import com.czur.reference.application.http.SpeakerResultAccessPolicy;
 import com.czur.reference.application.persistence.jdbc.JdbcSpeakerNameEditPort;
 import com.czur.reference.domain.capability.CapabilityDescriptor;
 import com.czur.reference.domain.capability.CapabilityIds;
@@ -300,6 +301,23 @@ public class MeetingHttpAssembly implements AutoCloseable {
             com.czur.reference.application.http.SessionLoginEndpoint login,
             SummarySessionIssuer summarySessionIssuer, SpeakerIdentityFactory speakerFactory,
             boolean speakerEditingEnabled) {
+        return startClientModel(config, clock, artifactStore, identityProvider, entitlementPolicy,
+                modelSessionIssuer, entitlementProviderDecorator, login, summarySessionIssuer,
+                speakerFactory, speakerEditingEnabled, null);
+    }
+
+    /**
+     * 结果编辑策略独立于会议身份；旧重载保持所有者登录要求。
+     * 参考宿主显式选择 resultLink，伙伴可通过 Factory 注入自己的策略。
+     */
+    public static MeetingHttpAssembly startClientModel(
+            MeetingDeploymentConfig config, Clock clock, ArtifactStore artifactStore,
+            IdentityProvider identityProvider, EntitlementPolicy entitlementPolicy,
+            ModelSessionIssuer modelSessionIssuer,
+            UnaryOperator<EntitlementProvider> entitlementProviderDecorator,
+            com.czur.reference.application.http.SessionLoginEndpoint login,
+            SummarySessionIssuer summarySessionIssuer, SpeakerIdentityFactory speakerFactory,
+            boolean speakerEditingEnabled, SpeakerResultAccessPolicy.Factory speakerAccessFactory) {
         Objects.requireNonNull(artifactStore, "artifactStore");
         Objects.requireNonNull(identityProvider, "identityProvider");
         Objects.requireNonNull(entitlementPolicy, "entitlementPolicy");
@@ -307,7 +325,7 @@ public class MeetingHttpAssembly implements AutoCloseable {
         Objects.requireNonNull(entitlementProviderDecorator, "entitlementProviderDecorator");
         return start(config, clock, artifactStore, identityProvider, entitlementPolicy,
                 modelSessionIssuer, entitlementProviderDecorator, login, null, true,
-                summarySessionIssuer, speakerFactory, speakerEditingEnabled);
+                summarySessionIssuer, speakerFactory, speakerEditingEnabled, speakerAccessFactory);
     }
 
     private static MeetingHttpAssembly start(
@@ -356,6 +374,19 @@ public class MeetingHttpAssembly implements AutoCloseable {
             LegacyAudioFactory legacyFactory, boolean clientModel,
             SummarySessionIssuer suppliedSummarySessionIssuer, SpeakerIdentityFactory speakerFactory,
             boolean speakerEditingEnabled) {
+        return start(config, clock, artifactStore, identityProvider, entitlementPolicy,
+                modelSessionIssuer, entitlementProviderDecorator, login, legacyFactory, clientModel,
+                suppliedSummarySessionIssuer, speakerFactory, speakerEditingEnabled, null);
+    }
+
+    private static MeetingHttpAssembly start(
+            MeetingDeploymentConfig config, Clock clock, ArtifactStore artifactStore,
+            IdentityProvider identityProvider, EntitlementPolicy entitlementPolicy,
+            ModelSessionIssuer modelSessionIssuer, UnaryOperator<EntitlementProvider> entitlementProviderDecorator,
+            com.czur.reference.application.http.SessionLoginEndpoint login,
+            LegacyAudioFactory legacyFactory, boolean clientModel,
+            SummarySessionIssuer suppliedSummarySessionIssuer, SpeakerIdentityFactory speakerFactory,
+            boolean speakerEditingEnabled, SpeakerResultAccessPolicy.Factory speakerAccessFactory) {
         Objects.requireNonNull(config, "config");
         Objects.requireNonNull(clock, "clock");
         JdbcDatabaseRuntime database = clientModel ? null : JdbcDatabaseRuntime.start(config.database());
@@ -467,8 +498,13 @@ public class MeetingHttpAssembly implements AutoCloseable {
                             .<SummarySessionIssuer>map(summary -> new BailianSummarySessionIssuer(summary, clock))
                             .orElse(null);
             // 能力发现必须依据最终装配结果；不能仅依据百炼配置隐藏宿主自定义总结 Provider。
+            var speakerAccess = !speakerEditingEnabled ? null : speakerAccessFactory == null
+                    ? SpeakerResultAccessPolicy.ownerOnly(resolver, errors)
+                    : Objects.requireNonNull(speakerAccessFactory.create(resolver, manifest,
+                            config.deploymentScope(), errors), "speaker access policy");
             var capabilities = new ReferenceDeploymentCapabilitiesEndpoint(
-                    config, errors, summarySessions != null, speakerAvailable, speakerEditingEnabled);
+                    config, errors, summarySessions != null, speakerAvailable, speakerEditingEnabled,
+                    speakerAccess == null || speakerAccess.requiresLogin());
             var modelSessionLanguages = modelSessions == null && summarySessions == null ? null
                     : new JdbcModelSessionLanguageLookup(databaseContext);
             if (config.createEnabled()) {
@@ -515,7 +551,8 @@ public class MeetingHttpAssembly implements AutoCloseable {
                             : new MeetingArtifactHttpEndpoint(clientInput, artifactMedia, errors),
                     enrollment == null ? null : new SpeakerIdentityEnrollmentEndpoint(enrollment, errors),
                     speakerEditingEnabled ? new SpeakerNameEditEndpoint(
-                            new JdbcSpeakerNameEditPort(databaseContext, artifactStore, enrollment), errors) : null,
+                            new JdbcSpeakerNameEditPort(databaseContext, artifactStore, enrollment), errors,
+                            speakerAccess) : null,
                     AudioArtifactBudget.forMaxDurationMs(config.runtimeLimits().maxMeetingDurationMs()));
         } catch (RuntimeException | Error failure) {
             try {

@@ -1,11 +1,11 @@
 package com.czur.reference.application.persistence.jdbc;
 
-import com.czur.reference.application.command.MeetingAccessGuard;
 import com.czur.reference.application.command.MeetingCommandContext;
 import com.czur.reference.application.port.MeetingManifest;
 import com.czur.reference.application.port.artifact.ArtifactStore;
 import com.czur.reference.application.port.speaker.SpeakerIdentityEnrollmentPort;
 import com.czur.reference.application.port.speaker.SpeakerNameEditPort;
+import com.czur.reference.application.port.speaker.SpeakerResultAccess;
 import com.czur.reference.protocol.json.MeetingManifestJson;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
@@ -34,6 +34,11 @@ public final class JdbcSpeakerNameEditPort implements SpeakerNameEditPort {
 
     @Override public Result edit(MeetingCommandContext context, String meetingId,
             String sessionSpeakerId, Edit edit) {
+        return editAuthorized(SpeakerResultAccess.owner(context), meetingId, sessionSpeakerId, edit);
+    }
+
+    @Override public Result editAuthorized(SpeakerResultAccess access, String meetingId,
+            String sessionSpeakerId, Edit edit) {
         int revision;
         int changed;
         try (var connection = database.dataSource().getConnection()) {
@@ -44,8 +49,8 @@ public final class JdbcSpeakerNameEditPort implements SpeakerNameEditPort {
                 JdbcValues.setText(statement, 1, database.engine(), meetingId);
                 try (var rows = statement.executeQuery()) {
                     if (!rows.next()) return new Rejected(Reason.NOT_FOUND);
-                    if (MeetingAccessGuard.evaluate(context, JdbcValues.text(rows, "deployment_scope"),
-                            JdbcValues.text(rows, "subject_scope")) != MeetingAccessGuard.Decision.ALLOWED)
+                    if (!access.allows(meetingId, JdbcValues.text(rows, "deployment_scope"),
+                            JdbcValues.text(rows, "subject_scope")))
                         return new Rejected(Reason.ACCESS_DENIED);
                     if (!"READY".equals(JdbcValues.text(rows, "state"))) return new Rejected(Reason.INVALID_STATE);
                 }
@@ -101,7 +106,7 @@ public final class JdbcSpeakerNameEditPort implements SpeakerNameEditPort {
         if (!edit.remember()) return new Updated(revision, changed, Registration.NOT_REQUESTED);
         if (enrollment == null) return new Updated(revision, changed, Registration.UNAVAILABLE);
         try {
-            var result = enrollment.enroll(context, meetingId, sessionSpeakerId, edit.displayName());
+            var result = enrollment.enrollAuthorized(access, meetingId, sessionSpeakerId, edit.displayName());
             if (result instanceof SpeakerIdentityEnrollmentPort.Enrolled enrolled)
                 return new Updated(enrolled.manifestRevision(), changed, Registration.REGISTERED);
             var reason = ((SpeakerIdentityEnrollmentPort.Rejected) result).reason();

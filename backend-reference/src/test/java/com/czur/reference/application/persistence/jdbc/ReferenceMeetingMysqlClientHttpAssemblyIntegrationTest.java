@@ -411,6 +411,8 @@ class ReferenceMeetingMysqlClientHttpAssemblyIntegrationTest {
             int port = network.address().getPort();
             assertTrue(json(exchange(client, port, "GET", "/v1/capabilities", "", null, false))
                     .path("capabilities").toString().contains("speaker.identity.cross_meeting"));
+            assertFalse(json(exchange(client, port, "GET", "/v1/capabilities", "", null, false))
+                    .path("resultSpeakerEditingRequiresLogin").asBoolean(true));
             String first = completeSpeakerMeeting(client, port, "first");
             String generation = "?genTime=" + NOW.toEpochMilli();
             var original = MeetingManifestJson.decode(exchange(client, port, "GET",
@@ -452,11 +454,23 @@ class ReferenceMeetingMysqlClientHttpAssemblyIntegrationTest {
             assertEquals("参考人物😀", matched.path("speakers").get(0).path("displayName").asText());
             assertEquals(2, identifies.get());
             String rename = "/v1/meetings/" + first + "/speakers/speaker-1:rename";
+            var preflight = client.send(java.net.http.HttpRequest.newBuilder(
+                    URI.create("http://127.0.0.1:" + port + rename + generation))
+                    .header("Origin", "https://reference-web.example.invalid")
+                    .header("Access-Control-Request-Method", "POST")
+                    .header("Access-Control-Request-Headers", "content-type")
+                    .method("OPTIONS", java.net.http.HttpRequest.BodyPublishers.noBody()).build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertEquals(204, preflight.statusCode(), "带原genTime的JSON跨源编辑必须能先通过预检");
+            assertEquals("*", preflight.headers().firstValue("Access-Control-Allow-Origin").orElseThrow());
             String single = """
                     {"displayName":"单段记录","scope":"SINGLE","segmentId":"speaker-segment","remember":true}
                     """;
             assertEquals(401, exchange(client, port, "POST", rename, single, null, false).statusCode());
-            var renamed = exchange(client, port, "POST", rename, single, null, true);
+            String expired = "?genTime=" + (NOW.toEpochMilli() - config.resultLinkTtl().orElseThrow().toMillis());
+            assertEquals(403, exchange(client, port, "POST", rename + expired, single, null, false).statusCode());
+            assertEquals(400, exchange(client, port, "POST", rename + "?genTime=invalid", single, null, false).statusCode());
+            var renamed = exchange(client, port, "POST", rename + generation, single, null, false);
             assertEquals(200, renamed.statusCode());
             assertEquals("REGISTERED", json(renamed).path("registration").asText());
             var text = readTranscript(client, port, first, generation);
@@ -466,8 +480,8 @@ class ReferenceMeetingMysqlClientHttpAssemblyIntegrationTest {
             assertFalse(readTranscript(client, port, second, generation).path("segments").get(0)
                     .has("speakerDisplayName"), "其他已完成会议保持原样");
             int registrations = enrollments.get();
-            var all = exchange(client, port, "POST", rename,
-                    "{\"displayName\":\"本场全局\",\"scope\":\"ALL\",\"remember\":false}", null, true);
+            var all = exchange(client, port, "POST", rename + generation,
+                    "{\"displayName\":\"本场全局\",\"scope\":\"ALL\",\"remember\":false}", null, false);
             assertEquals("NOT_REQUESTED", json(all).path("registration").asText());
             assertEquals(2, json(all).path("changedSegments").asInt());
             assertEquals(registrations, enrollments.get());
@@ -511,8 +525,8 @@ class ReferenceMeetingMysqlClientHttpAssemblyIntegrationTest {
             assertFalse(capabilities.path("capabilities").toString().contains("speaker.identity.cross_meeting"));
             String id = completeSpeakerMeeting(client, port, "manual", false);
             String rename = "/v1/meetings/" + id + "/speakers/speaker-1:rename";
-            var reply = exchange(client, port, "POST", rename,
-                    "{\"displayName\":\"人工名字\",\"scope\":\"ALL\",\"remember\":false}", null, true);
+            var reply = exchange(client, port, "POST", rename + "?genTime=" + NOW.toEpochMilli(),
+                    "{\"displayName\":\"人工名字\",\"scope\":\"ALL\",\"remember\":false}", null, false);
             assertEquals(200, reply.statusCode());
             assertEquals("NOT_REQUESTED", json(reply).path("registration").asText());
             assertEquals("人工名字", readTranscript(client, port, id, "?genTime=" + NOW.toEpochMilli())

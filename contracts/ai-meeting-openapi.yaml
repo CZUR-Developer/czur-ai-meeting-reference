@@ -459,7 +459,10 @@ paths:
       operationId: editMeetingSpeakerName
       summary: 修改本场发言人名称，可选登记下次自动识别
       description: |
-        可选宿主装配，由 resultSpeakerEditingEnabled 宣告。仅会议所属账号可写 READY 结果。
+        可选宿主装配，由 resultSpeakerEditingEnabled 宣告，仅可修改 READY 结果。
+        默认参考宿主允许持有效结果链接者编辑：携带原 genTime，无须再次登录。
+        授权策略可替换；resultSpeakerEditingRequiresLogin 为 true（或缺席）时，
+        使用会议所属账号的 Bearer。参考宿主也兼容无 query 的原 Bearer 调用。
         SINGLE 修改 segmentId 对应段落；ALL 修改本场同一 sessionSpeakerId 的全部段落。
         不改变原文、发言人编号、时间轴或其他会议。先保存本场名称，再执行可选声纹登记。
         transcript.final.segments 的可选 speakerDisplayName 为人工名称；显式 null 表示保留
@@ -467,8 +470,17 @@ paths:
         registration 状态，调用方重读同一 Manifest，不能把本场保存当作登记成功。
       security:
         - bearerAuth: []
+        - {}
       parameters:
         - $ref: "#/components/parameters/MeetingId"
+        - name: genTime
+          in: query
+          required: false
+          description: 结果链接编辑时必填，沿用原链接有效期；Bearer 所有者调用不携带。
+          schema:
+            type: integer
+            format: int64
+            minimum: -1
         - name: sessionSpeakerId
           in: path
           required: true
@@ -975,6 +987,9 @@ components:
         resultSpeakerEditingEnabled:
           type: boolean
           description: 宿主已显式装配本场发言人编辑；缺席时按 false，独立于声纹模型能力。
+        resultSpeakerEditingRequiresLogin:
+          type: boolean
+          description: 编辑入口的授权策略是否需要登录；缺席时按 true。参考宿主为 false，使用有效结果链接；此字段仅指导界面，不替代服务端授权。
         limits:
           $ref: "#/components/schemas/Limits"
     RealtimeDescriptor:

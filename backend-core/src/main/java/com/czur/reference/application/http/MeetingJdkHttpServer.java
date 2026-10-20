@@ -294,8 +294,10 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
         }
         if ("OPTIONS".equals(request.method())
                 && dispatcher.supportsReferenceBrowserPost(request.path())) {
-            // 浏览器在 JSON 登录、Bearer 命名前先预检；不能将它转为一次业务 POST。
-            if (!request.query().isEmpty() || !request.body().isEmpty()
+            // 链接编辑的 genTime 同样经过预检；这里只许可传输形状，实际授权仍在 POST 策略中。
+            boolean resultLinkQuery = SpeakerNameEditEndpoint.matchesPath(request.path())
+                    && request.query().keySet().equals(java.util.Set.of("genTime"));
+            if ((!request.query().isEmpty() && !resultLinkQuery) || !request.body().isEmpty()
                     || request.header("origin") == null
                     || !"POST".equals(request.header("access-control-request-method"))) {
                 return errors.invalidRoute();
@@ -505,7 +507,7 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
             exchange.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
         }
         // 成功、账号错误、缺少 Bearer、样本不足等都应让参考页面读到原业务响应。
-        // 只补网络响应头，POST 继续走原 dispatcher 的登录与会议归属检查；不用 Cookie。
+        // 只补网络响应头，POST 继续走 dispatcher 的已装配授权策略；不用 Cookie。
         if ("POST".equals(exchange.getRequestMethod())
                 && dispatcher.supportsReferenceBrowserPost(resultPath)) {
             exchange.getResponseHeaders().set("Access-Control-Allow-Origin", "*");

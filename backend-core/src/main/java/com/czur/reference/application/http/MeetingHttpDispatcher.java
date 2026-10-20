@@ -90,6 +90,7 @@ public final class MeetingHttpDispatcher {
         Objects.requireNonNull(request, "request");
         if (SpeakerNameEditEndpoint.matches(request)) {
             if (speakerEditing == null) return errors.notImplemented();
+            if (speakerEditing.hasAccessPolicy()) return speakerEditing.handle(request);
             if (contextResolver == null) return errors.missingContext();
             var resolution = contextResolver.forClientWrite(request);
             if (resolution instanceof AuthenticatedMeetingHttpContextResolver.Rejected rejected)
@@ -181,7 +182,7 @@ public final class MeetingHttpDispatcher {
     HttpErrorMapper errorMapper() { return errors; }
 
     /**
-     * 参考 Web 的两个跨源写入口；只读取装配状态，不解析 Bearer 或触发业务。
+     * 参考 Web 的登录、独立登记与姓名编辑跨源入口；只读取装配状态，不触发业务。
      * 伙伴自己的登录路径、建会、Stop、邮件等路由不随此接线开放跨源写入。
      */
     boolean supportsReferenceBrowserPost(String path) {

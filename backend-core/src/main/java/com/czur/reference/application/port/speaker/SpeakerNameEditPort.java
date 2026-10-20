@@ -6,11 +6,19 @@ import com.czur.reference.application.command.MeetingCommandContext;
  * 会后人工名称编辑扩展口，与模型分人和跨会议声纹分开。
  * SINGLE 只修改 segmentId 对应的原文段；ALL 修改本场同一 sessionSpeakerId 的所有段。
  * remember 仅表示另行登记下次识别，不扩大本场修改范围。实现必须先保存本场名称，
- * 再执行可选声纹登记；登记失败仍返回已保存及其独立状态。匿名结果链接没有写权限。
+ * 再执行可选声纹登记；登记失败仍返回已保存及其独立状态。是否允许结果链接访客编辑由
+ * 宿主的 SpeakerResultAccessPolicy 决定，不写死为登录所有者。
  */
 @FunctionalInterface
 public interface SpeakerNameEditPort {
     Result edit(MeetingCommandContext context, String meetingId, String sessionSpeakerId, Edit edit);
+
+    /** 宿主策略已授权的窄入口；旧实现未接入时保持关闭，不静默绕过归属。 */
+    default Result editAuthorized(SpeakerResultAccess access, String meetingId,
+            String sessionSpeakerId, Edit edit) {
+        return access.ownerContext() == null ? new Rejected(Reason.UNAVAILABLE)
+                : edit(access.ownerContext(), meetingId, sessionSpeakerId, edit);
+    }
 
     enum Scope { SINGLE, ALL }
     record Edit(String displayName, Scope scope, String segmentId, boolean remember) {

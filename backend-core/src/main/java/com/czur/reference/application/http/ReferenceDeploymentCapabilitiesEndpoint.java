@@ -42,6 +42,13 @@ public final class ReferenceDeploymentCapabilitiesEndpoint {
     public ReferenceDeploymentCapabilitiesEndpoint(MeetingDeploymentConfig config,
             HttpErrorMapper errors, boolean summarySessionAvailable, boolean speakerIdentityAvailable,
             boolean speakerEditingEnabled) {
+        this(config, errors, summarySessionAvailable, speakerIdentityAvailable, speakerEditingEnabled, true);
+    }
+
+    /** Web 按实际授权策略决定是否展示登录表单；不能由 Web 自行放宽后端权限。 */
+    public ReferenceDeploymentCapabilitiesEndpoint(MeetingDeploymentConfig config,
+            HttpErrorMapper errors, boolean summarySessionAvailable, boolean speakerIdentityAvailable,
+            boolean speakerEditingEnabled, boolean speakerEditingRequiresLogin) {
         this.errors = errors;
         TreeSet<String> available = new TreeSet<>();
         if (config.createEnabled()) {
@@ -82,6 +89,7 @@ public final class ReferenceDeploymentCapabilitiesEndpoint {
                 body.put("resultLinkTtlMs", ttl.toMillis()));
         body.put("resultEmailEnabled", config.resultEmail().isPresent());
         body.put("resultSpeakerEditingEnabled", speakerEditingEnabled);
+        body.put("resultSpeakerEditingRequiresLogin", speakerEditingRequiresLogin);
         try {
             response = HttpResponse.json(200, JSON.writeValueAsString(body));
         } catch (JsonProcessingException impossible) {

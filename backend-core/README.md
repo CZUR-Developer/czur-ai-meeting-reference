@@ -102,7 +102,8 @@ try (var assembly = MeetingHttpAssembly.startClientModel(
 没有匹配时 `personId/displayName` 为空，识别失败不阻断其余产物 READY。
 
 命名注册使用 `POST /v1/meetings/{meetingId}/speakers/{sessionSpeakerId}:enroll`，
-需要同场归属用户的 Bearer Token，正文仅 `displayName`；匿名结果链接只读。
+需要同场归属用户的 Bearer Token，正文仅 `displayName`。这是独立登记入口；
+默认 Web 使用下节的改名＋可选登记入口，其授权由宿主单独选择。
 注册后更新身份产物与原客户端 Manifest revision，原录音、原文、时间和链接保留。
 参考讯飞实现、所需配置和依赖见
 [后端参考说明](../backend-reference/README.md#可选跨会议声纹参考插件)。
@@ -110,10 +111,22 @@ try (var assembly = MeetingHttpAssembly.startClientModel(
 ### 可选本场姓名编辑
 
 `SpeakerNameEditPort` 将人工编辑与声纹 Provider 分开。参考宿主显式调用
-`startClientModel(..., login, summaryIssuer, speakerFactory, true)` 装配
+`startClientModel(..., login, summaryIssuer, speakerFactory, true,
+SpeakerResultAccessPolicy::resultLink)` 装配
 `POST /v1/meetings/{meetingId}/speakers/{sessionSpeakerId}:rename`，能力发现返回
 `resultSpeakerEditingEnabled=true`。原方法／构造器保持可用，默认不开启新增写路由；
 其他消费相同核心 JAR 的宿主可独立决定是否开启，不会被动改变原有结果接口。
+
+`SpeakerResultAccessPolicy.Factory` 是窄授权扩展点。参考宿主使用 `resultLink`：
+携带原结果链接的 `genTime`，复用同一 Manifest 端口检查有效期、删除和完成状态，
+允许持链接者编辑本场及可选登记，能力发现返回 `resultSpeakerEditingRequiresLogin=false`。
+不带 query 的原 Bearer 所有者调用仍兼容。已有 `true` 重载默认使用 `ownerOnly`，
+保持原登录与归属要求；伙伴也可注入自己的策略。缺少该发现字段的 Web 按需登录处理。
+
+策略只产生 `SpeakerResultAccess`，不把链接访客伪装成会议所有者。JDBC 再按会议／部署
+核对授权，登记所属人物库仍取数据库中的真实会议归属。该授权不能用于建会、停止、删除
+或独立人物库管理。已有端口实现仍可只实现原所有者方法；要支持链接访问，需实现
+`editAuthorized`／`enrollAuthorized`，未实现不会自动放行。
 
 `SINGLE` 仅编辑指定 `segmentId`；`ALL` 仅编辑本场同一 `sessionSpeakerId`。
 JDBC 实现使用会议行锁、已有结果表和不可变 Artifact，递增 Manifest revision；
