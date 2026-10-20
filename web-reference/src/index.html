@@ -36,18 +36,6 @@
           <section id="summary-result" hidden aria-label="总结纪要"><header class="section-heading"><h2>总结纪要</h2><button class="icon-button" data-copy="summary" title="复制总结纪要" aria-label="复制总结纪要"><img src="./assets/copy-btn.png" alt=""></button></header><div id="summary-content"></div></section>
           <section id="todos-result" hidden aria-label="待办事项"><header class="section-heading"><h2>待办事项</h2><button class="icon-button" data-copy="todos" title="复制待办事项" aria-label="复制待办事项"><img src="./assets/copy-btn.png" alt=""></button></header><div id="todos-content"></div></section>
           <section id="presentation-result" hidden aria-label="演示文稿"><header class="section-heading"><h2>演示文稿</h2><span class="muted">点击图片放大</span></header><div id="presentation-frames"></div></section>
-          <section id="speaker-identity-result" hidden aria-label="人物">
-            <header class="section-heading"><h2>会议人物</h2></header><div id="speaker-identities"></div>
-            <div id="speaker-legacy-controls"><details id="speaker-login-panel"><summary>登录后命名并注册发言人</summary><form id="speaker-login-form">
-              <label>本场会议所属账号<input id="speaker-username" name="username" autocomplete="username" required></label>
-              <label>密码<input id="speaker-password" name="password" type="password" autocomplete="current-password" required></label>
-              <button id="speaker-login-button" type="submit">登录以编辑人物</button>
-            </form></details>
-            <p id="speaker-auth-status" role="status">只读查看无需登录；命名注册请先登录本场会议所属账号。</p>
-            <form id="speaker-enrollment-form"><fieldset id="speaker-enrollment-fields" disabled><legend>命名并注册</legend>
-              <label>本场发言人<select id="speaker-selection" required></select></label><label>人物名称<input id="speaker-display-name" maxlength="128" required></label><button type="submit">命名并注册</button>
-            </fieldset></form><p id="speaker-enrollment-status" role="status"></p></div>
-          </section>
         </div>
       </aside>
     </div>
@@ -70,7 +58,7 @@
 <dialog id="speaker-edit-dialog" aria-labelledby="speaker-edit-title">
   <button id="speaker-edit-close" class="speaker-edit-close" aria-label="关闭发言人编辑" type="button">×</button>
   <h2 id="speaker-edit-title">修改发言人昵称</h2>
-  <form id="speaker-edit-login">
+  <form id="speaker-edit-login" hidden>
     <p>请使用本场会议所属账号登录后修改</p>
     <label>账号<input id="speaker-edit-username" autocomplete="username" required></label>
     <label>密码<input id="speaker-edit-password" type="password" autocomplete="current-password" required></label>

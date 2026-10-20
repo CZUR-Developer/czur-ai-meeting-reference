@@ -21,7 +21,7 @@ READY 的 `presentation.capture` 截图包按修订序号读取，画面按会�
 
 ## 页面与交互
 
-- 大屏：左侧原文／译文，右侧总结纪要、待办、演示文稿和可选人物栏目，各自滚动。
+- 大屏：左侧原文／译文，右侧总结纪要、待办、演示文稿，各自滚动；有总结时右侧默认显示总结。
   小屏（宽度不大于 768 CSS 像素）改为单区标签切换，录音控制保持在底部。
 - 原译对照使用 `sourceSegmentId` 关联，支持同段多目标语种。无法关联的译文单独显示，
   不按数组位置猜对应关系。可切换译文显隐，复制／导出会保留完整原译文。
@@ -50,7 +50,7 @@ READY 的 `presentation.capture` 截图包按修订序号读取，画面按会�
 
 代码按三层拆分，均为原生 ES modules，无前端框架或运行时 npm 依赖：
 
-- `src/result.mjs`：读取标准协议、渲染正文、装配人物登录与登记；伙伴可以替换账号端口。
+- `src/result.mjs`：读取标准协议、渲染正文、装配发言人编辑；伙伴可以替换编辑授权与账号端口。
 - `src/result-model.mjs`：结果可用性、原译关联、时间轴、复制与导出文本的纯函数。
 - `src/result-ui.mjs`：标签、媒体控制、段落跟随、复制／导出和图片预览；重绘时清理旧监听。
 - `src/index.html`、`src/result.css`、`src/assets/`：可直接替换的布局、样式及图标。
@@ -61,7 +61,7 @@ READY 的 `presentation.capture` 截图包按修订序号读取，画面按会�
 ## 发言人改名与可选跨会议记录
 
 参考宿主通过能力发现的 `resultSpeakerEditingEnabled=true` 开放原文姓名按钮。
-登录后可输入昵称，选择“单个”（所选原文段）或“全局”（本场同一
+持有有效结果链接即可输入昵称，不要求再次登录；选择“单个”（所选原文段）或“全局”（本场同一
 `sessionSpeakerId` 的全部原文段）。修改持久化到标准原文，不依赖声纹 Provider。
 无本场分人数据时没有姓名按钮。复制和 TXT 导出使用同一名称投影。
 
@@ -70,13 +70,13 @@ READY 的 `presentation.capture` 截图包按修订序号读取，画面按会�
 本场。单个＋登记也不会连带修改本场其他段落。登记失败明确提示本场已保存，保留弹窗
 供重试；不将其显示为下次识别成功。后续会议依样本和供应商实际匹配，不能保证每次命中。
 
-只有同场 Manifest 存在 READY 的 `speaker.identity` 时才展示人物区；
-本场编号与稳定 `personId` 分别标明。未匹配的 `personId/displayName` 为空。
-无 Provider 时仍可本场改名，自动识别选项和无产物的人物区隐藏。
+同场 READY 的 `speaker.identity` 只用于原文姓名投影和可选登记，不建立独立“人物”Tab，
+也不展示内部 `personId`。未匹配时保留本场编号；无 Provider 时仍可本场改名，隐藏
+自动识别选项。人物数据不会替代总结：没有真实总结产物就不显示总结栏目。
 
-匿名 `genTime` 链接只用于 GET。编辑时需显式登录本场会议所属账号：默认内联表单调用
-`POST /v1/reference/session:login`，再用取得的 Bearer 调用
-`POST /v1/meetings/{meetingId}/speakers/{sessionSpeakerId}:rename`，例如：
+默认参考宿主声明 `resultSpeakerEditingRequiresLogin=false`。页面使用原结果链接调用
+`POST /v1/meetings/{meetingId}/speakers/{sessionSpeakerId}:rename?genTime=<原值>`，
+不请求登录、不发送 Authorization；请求正文例如：
 
 ```json
 {"displayName":"演示发言人","scope":"SINGLE","segmentId":"segment-1","remember":false}
@@ -85,20 +85,23 @@ READY 的 `presentation.capture` 截图包按修订序号读取，画面按会�
 `ALL` 时可省略 `segmentId`；响应包含 `manifestRevision`、`changedSegments`、
 `registration`（`NOT_REQUESTED`、`REGISTERED`、`SAMPLE_UNAVAILABLE`、`NOT_GRANTED`、
 `UNAVAILABLE`）。本场已保存、登记失败也返回成功写入和独立登记状态。
-请求不携带 `genTime`，后端检查真实身份和会议归属。
-Token 只保留在本页内存，页面刷新需重新登录；不写入 URL、localStorage 或日志，密码
-在提交后清空。保存成功后重新读取同一 `meetingId`／原 `genTime` 的 Manifest 和产物，
+后端复用结果读取的有效期与撤销校验，仅授权本场编辑及附带登记；不开放其他会议控制
+或独立人物库管理。保存成功后重新读取同一 `meetingId`／原 `genTime` 的 Manifest 和产物，
 不凭写入响应伪造会议结果或另建结果状态。
 
 标准 `transcript.final.segments[].speakerDisplayName` 为可选字段：缺席时读取自动
 身份名称；字符串为本段人工名称；显式 `null` 保持编号显示。后两种优先于身份名称，
 保证单个修改不会因后来登记而扩大范围。其他结果渲染器应遵守同一规则。
-旧宿主未装配编辑入口时仍可使用既有 `:enroll` 与人物栏表单；新参考宿主使用上述弹窗。
+旧宿主未装配编辑入口时不显示姓名编辑按钮；既有 `:enroll` API 仍供已认证的自定义界面使用。
 
-登录是窄扩展点：`createSpeakerIdentityActions(base, meetingId, genTime, fetcher, authenticate)`
+授权是窄扩展点：后端替换 `SpeakerResultAccessPolicy.Factory`，Web 按
+`resultSpeakerEditingRequiresLogin` 决定是否显示登录；字段缺席默认需要登录，兼容旧宿主。
+`createSpeakerIdentityActions(base, meetingId, genTime, fetcher, authenticate, { requiresLogin })`
 接受可替换的 `authenticate(username, password)`，返回含 `accessToken` 的会话即可。
-伙伴可在结果页装配点换成自己的账号／单点登录适配，不需要改人物展示、登记或结果读取。
-此页仅提供默认参考登录示例，不建立账号管理或认证平台。
+选择 `ownerOnly` 的宿主使用无 query 的 rename 和 Bearer；默认认证示例调用
+`POST /v1/reference/session:login`。Token 只留在页面内存，密码提交后清空；刷新后需重新登录。
+伙伴可替换自己的账号／单点登录适配，不需要改姓名展示、登记或结果读取。
+参考默认链接策略不启用此表单，不建立账号管理或认证平台。
 
 本页面是参考方案的默认 `web` 结果动作，读取标准 `MeetingManifest` 和 `ArtifactRef`，不理解听悟或其他 Provider 的厂商字段。结果动作保持可替换：伙伴可以在 READY 后实现 `local.html`，将 Manifest 和所需产物写入本地目录／压缩包，使用相对路径离线查看，也可以实现邮件、NAS 或自有 Web 渲染器。替换渲染器不改变会议状态机、收口或结算。当前仓库交付默认 Web 页面和 App 可选 PDF 插件；离线 HTML 渲染器由伙伴实现，本地正文读取及媒体下载边界见[结果扩展说明](../docs/partner-integration-guide.md#本地结果插件必须按需读取正文)。
 
@@ -119,7 +122,7 @@ npm run build             # 生成 web-reference/dist/
 
 ## 验证
 
-Node 测试覆盖产物读取、人物登录协议、时间轴、原译配对、复制文本和缺能力投影。
+Node 测试覆盖产物读取、链接编辑与可选登录协议、时间轴、原译配对、复制文本和缺能力投影。
 真实页面交互可用[设备结果校验工具](../tools/android-device/README.md#设备实际-web-结果与录音)
 的 `--interactions` 验证；共用检查函数为 `tools/result-ui-checks.mjs`，可以在浏览器
 自动化中通过 `page.evaluate(checkResultInteractions)` 复用，不依赖特定测试框架。

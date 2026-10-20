@@ -45,3 +45,28 @@ test('编辑使用可替换登录和标准段落协议，保存后重读原链�
   assert.match(calls[1].url, /manifest\?genTime=123$/);
   assert.equal(saved.registration, 'NOT_REQUESTED');
 });
+
+test('参考结果链接直接改名及可选登记，不登录、不携带账号Token', async () => {
+  const calls = [];
+  const actions = createSpeakerIdentityActions('http://api.test', 'mtg_demo', '123', async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, status: 200, json: async () => options
+      ? { registration: 'REGISTERED' } : { artifacts: [] } };
+  }, () => { throw Error('不应触发登录'); }, { requiresLogin: false });
+  assert.equal(actions.isLoggedIn(), false);
+  assert.equal(actions.canEdit(), true);
+  assert.equal(actions.requiresLogin(), false);
+  const saved = await actions.rename('1', '甲', 'SINGLE', 's1', true);
+  assert.equal(calls[0].url, 'http://api.test/v1/meetings/mtg_demo/speakers/1:rename?genTime=123');
+  assert.equal(calls[0].options.headers.Authorization, undefined);
+  assert.deepEqual(JSON.parse(calls[0].options.body),
+    { displayName: '甲', scope: 'SINGLE', segmentId: 's1', remember: true });
+  assert.equal(saved.registration, 'REGISTERED');
+  assert.match(calls[1].url, /manifest\?genTime=123$/);
+});
+
+test('链接失效提示不再误导用户登录所属账号', async () => {
+  const actions = createSpeakerIdentityActions('', 'mtg_demo', '123',
+    async () => ({ ok: false, status: 403 }), undefined, { requiresLogin: false });
+  await assert.rejects(actions.rename('1', '甲', 'ALL', 's1', false), /结果链接已失效/);
+});

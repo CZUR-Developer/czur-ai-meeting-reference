@@ -5,7 +5,6 @@ const panels = [
   ['summary', '总结纪要', 'summary-result', 'summary-icon'],
   ['todos', '待办事项', 'todos-result', 'todo-icon'],
   ['presentation', '演示文稿', 'presentation-result', 'draft-icon'],
-  ['identity', '人物', 'speaker-identity-result', 'speaker'],
 ];
 
 /**

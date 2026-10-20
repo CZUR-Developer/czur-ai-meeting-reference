@@ -14,7 +14,7 @@ export async function checkResultInteractions() {
   const nav = innerWidth <= 768 ? get('mobile-tabs') : get('result-tabs');
   const active = nav.querySelector('[aria-selected="true"]');
   const ids = { original: 'original-panel', summary: 'summary-result', todos: 'todos-result',
-    presentation: 'presentation-result', identity: 'speaker-identity-result' };
+    presentation: 'presentation-result' };
   for (const tab of nav.children) {
     tab.click(); check(shown(get(ids[tab.dataset.tab])), `栏目${tab.dataset.tab}`);
   }

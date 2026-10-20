@@ -107,14 +107,15 @@ export async function loginReferenceIdentity(apiBaseUrl, username, password,
 }
 
 /**
- * 会后人物编辑的窄入口。authenticate(username, password) 返回 {accessToken}，伙伴可替换它
- * 对接自己的账号；会议结果读取与注册协议无需改变。Token 只存在此页内存闭包中，不写入
- * URL、浏览器持久存储或日志。genTime 只供匿名 GET，不能代替注册所需的 Bearer 身份。
+ * 会后人物编辑的窄入口。参考宿主声明 requiresLogin=false，使用原结果链接的 genTime
+ * 直接编辑；伙伴可在后端替换策略，并声明 requiresLogin=true 使用可替换 authenticate。
+ * Token 只存在此页内存闭包中，不写入 URL、浏览器持久存储或日志。旧调用默认保持登录。
  * 注册 ACK 不生成新的本地结果状态；始终重新读取原 meetingId／genTime 的实际 Manifest。
  */
 export function createSpeakerIdentityActions(apiBaseUrl, meetingId, genTime,
     fetcher = globalThis.fetch,
-    authenticate = (username, password) => loginReferenceIdentity(apiBaseUrl, username, password, fetcher)) {
+    authenticate = (username, password) => loginReferenceIdentity(apiBaseUrl, username, password, fetcher),
+    { requiresLogin = true } = {}) {
   const base = apiBaseUrl.replace(/\/+$/, '');
   let accessToken = null;
   return {
@@ -125,16 +126,22 @@ export function createSpeakerIdentityActions(apiBaseUrl, meetingId, genTime,
       accessToken = session.accessToken;
     },
     isLoggedIn: () => accessToken != null,
+    canEdit: () => !requiresLogin || accessToken != null,
+    requiresLogin: () => requiresLogin,
     async rename(sessionSpeakerId, displayName, scope, segmentId, remember) {
-      if (!accessToken) throw new Error('请先使用本场会议的账号登录');
+      if (requiresLogin && !accessToken) throw new Error('请先使用本场会议的账号登录');
+      const headers = { 'Content-Type': 'application/json' };
+      if (requiresLogin) headers.Authorization = `Bearer ${accessToken}`;
+      const query = requiresLogin ? '' : `?genTime=${encodeURIComponent(genTime)}`;
       const response = await fetcher(`${base}/v1/meetings/${encodeURIComponent(meetingId)}`
-        + `/speakers/${encodeURIComponent(sessionSpeakerId)}:rename`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+        + `/speakers/${encodeURIComponent(sessionSpeakerId)}:rename${query}`, {
+        method: 'POST', headers,
         body: JSON.stringify({ displayName: displayName.trim(), scope, segmentId, remember })
       });
       if (response.status === 401) accessToken = null;
       if (!response.ok) throw new Error(response.status === 401 ? '登录已失效，请重新登录'
-        : response.status === 403 ? '请使用本场会议所属账号登录' : `保存失败：HTTP ${response.status}`);
+        : response.status === 403 ? (requiresLogin ? '请使用本场会议所属账号登录' : '结果链接已失效，无法修改')
+          : `保存失败：HTTP ${response.status}`);
       const saved = await response.json();
       // 保存 ACK 和读取结果分开；读取失败时不能把已完成的写入描述成未保存。
       try { return { result: await readFinalTranscript(apiBaseUrl, meetingId, genTime, fetcher),
@@ -178,13 +185,13 @@ export function renderFinalResult(result, page) {
   page.querySelector('#title').textContent = result.title || '会议结果';
   // 注册后重读的是同一场完整结果；先清已有内容，避免字幕、纪要及人物名单重复追加。
   for (const selector of ['#result', '#translation-result', '#summary-result', '#todos-result',
-    '#presentation-result', '#audio-result', '#speaker-identity-result',
+    '#presentation-result', '#audio-result',
     '#transcript', '#transcript-segments']) {
     const section = page.querySelector(selector);
     if (section) section.hidden = true;
   }
   for (const selector of ['#transcript', '#transcript-segments', '#translations',
-    '#summary-content', '#todos-content', '#presentation-frames', '#speaker-identities', '#speaker-selection']) {
+    '#summary-content', '#todos-content', '#presentation-frames']) {
     const content = page.querySelector(selector);
     if (content) content.textContent = '';
   }
@@ -193,10 +200,12 @@ export function renderFinalResult(result, page) {
   const { transcript: hasTranscript, translation: hasTranslation, summary: hasSummary,
     presentation: hasPresentation, audio: hasAudio } = available;
   const identities = result.speakerIdentity?.speakers || [];
-  const hasSpeakerIdentity = identities.length > 0;
+  // 人物产物只供原文姓名投影／编辑使用，不建立独立“人物”栏目或显示内部ID。
+  const workspace = page.querySelector('#result-workspace');
+  if (workspace) workspace.dataset.speakerIdentityCount = String(identities.length);
   const segmentElements = new Map();
   const groupedTranslations = translationsBySegment(result.translations);
-  if (!hasTranscript && !hasTranslation && !hasSummary && !hasPresentation && !hasAudio && !hasSpeakerIdentity) {
+  if (!hasTranscript && !hasTranslation && !hasSummary && !hasPresentation && !hasAudio) {
     status.textContent = '本场会议没有识别到字幕';
     bindResultUi(result, page);
     return;
@@ -311,72 +320,8 @@ export function renderFinalResult(result, page) {
     if (player.src !== result.audio.url) player.src = result.audio.url;
     page.querySelector('#audio-result').hidden = false;
   }
-  if (hasSpeakerIdentity) {
-    const entries = page.querySelector('#speaker-identities');
-    const selection = page.querySelector('#speaker-selection');
-    for (const identity of identities) {
-      const row = page.createElement('article');
-      row.className = 'speaker-identity';
-      const name = page.createElement('h3');
-      name.textContent = identity.displayName || '未登记姓名';
-      const session = page.createElement('p');
-      session.textContent = `本场发言人 ID：${identity.sessionSpeakerId}`;
-      const person = page.createElement('p');
-      person.textContent = identity.personId
-        ? `跨会议人物 ID：${identity.personId}` : '尚无跨会议人物 ID';
-      row.append(name, session, person);
-      entries.append(row);
-      const option = page.createElement('option');
-      option.value = identity.sessionSpeakerId;
-      option.textContent = `${identity.displayName || '未登记姓名'}（本场：${identity.sessionSpeakerId}）`;
-      selection.append(option);
-    }
-    page.querySelector('#speaker-identity-result').hidden = false;
-  }
-  const legacyControls = page.querySelector('#speaker-legacy-controls');
-  if (legacyControls) legacyControls.hidden = Boolean(result.speakerEditingEnabled);
   status.textContent = '结果已生成';
   bindResultUi(result, page);
-}
-
-/** 登录与提交仅由用户显式操作；无人物产物时 showResult 不装配这组编辑行为。 */
-function bindSpeakerIdentityEditing(page, actions) {
-  const login = page.querySelector('#speaker-login-form');
-  const password = page.querySelector('#speaker-password');
-  const authStatus = page.querySelector('#speaker-auth-status');
-  const enrollment = page.querySelector('#speaker-enrollment-form');
-  const fields = page.querySelector('#speaker-enrollment-fields');
-  const enrollmentStatus = page.querySelector('#speaker-enrollment-status');
-  login.addEventListener('submit', async event => {
-    event.preventDefault();
-    const button = page.querySelector('#speaker-login-button');
-    button.disabled = true;
-    fields.disabled = true;
-    authStatus.textContent = '正在登录…';
-    try {
-      await actions.login(page.querySelector('#speaker-username').value, password.value);
-      authStatus.textContent = '已登录，可命名并注册本场发言人';
-      page.querySelector('#speaker-login-panel').open = false;
-    } catch (error) { authStatus.textContent = error.message; }
-    finally {
-      password.value = '';
-      button.disabled = false;
-      fields.disabled = !actions.isLoggedIn();
-    }
-  });
-  enrollment.addEventListener('submit', async event => {
-    event.preventDefault();
-    fields.disabled = true;
-    enrollmentStatus.textContent = '正在命名并注册…';
-    try {
-      const refreshed = await actions.enroll(page.querySelector('#speaker-selection').value,
-        page.querySelector('#speaker-display-name').value);
-      renderFinalResult(refreshed, page);
-      enrollmentStatus.textContent = '人物名称已更新';
-      page.querySelector('#speaker-display-name').value = '';
-    } catch (error) { enrollmentStatus.textContent = error.message; }
-    finally { fields.disabled = !actions.isLoggedIn(); }
-  });
 }
 
 async function showResult() {
@@ -405,11 +350,10 @@ async function showResult() {
       () => { status.textContent = '结果生成中…'; });
     result.speakerEditingEnabled = discovery.resultSpeakerEditingEnabled === true;
     renderFinalResult(result, document);
-    const actions = createSpeakerIdentityActions(config.apiBaseUrl || '', meetingId, genTime);
+    const actions = createSpeakerIdentityActions(config.apiBaseUrl || '', meetingId, genTime,
+      globalThis.fetch, undefined, { requiresLogin: discovery.resultSpeakerEditingRequiresLogin !== false });
     if (result.speakerEditingEnabled) {
       bindSpeakerNameEditing(document, actions, result, renderFinalResult, discovery);
-    } else if (result.speakerIdentity?.speakers.length > 0) {
-      bindSpeakerIdentityEditing(document, actions);
     }
   } catch (error) {
     status.textContent = error.message;

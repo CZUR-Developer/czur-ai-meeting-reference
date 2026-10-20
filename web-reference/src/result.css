@@ -81,15 +81,6 @@ body[data-ready="true"] #status { position: absolute; width: 1px; height: 1px; o
 .dropdown { position: absolute; right: 0; top: 44px; min-width: 180px; z-index: 10; padding: 6px; background: white; box-shadow: 0 4px 20px #0002; border: 1px solid #dedee4; border-radius: 8px; }
 .dropdown button { display: block; text-align: left; padding: 10px 12px; width: 100%; white-space: nowrap; border-radius: 4px; }
 .dropdown button:hover { background: #eff2ff; }
-.speaker-identity { padding: 12px 0; border-bottom: 1px solid #e2e3e8; }
-.speaker-identity h3 { font-size: 17px; }
-.speaker-identity p, #speaker-auth-status { font-size: 13px; color: #787d89; overflow-wrap: anywhere; }
-#speaker-login-panel { margin-top: 20px; }
-#speaker-identity-result form, #speaker-identity-result label, #speaker-enrollment-fields { display: grid; gap: 10px; }
-#speaker-identity-result form { margin-top: 12px; }
-#speaker-identity-result input, #speaker-identity-result select { min-width: 0; width: 100%; border: 1px solid #d8dae2; border-radius: 5px; padding: 8px; background: white; }
-#speaker-identity-result button { color: white; background: var(--accent); padding: 10px; border-radius: 5px; }
-#speaker-enrollment-fields { border: 1px solid #d8dae2; border-radius: 6px; min-width: 0; }
 .action-message { position: fixed; bottom: 130px; left: 50%; transform: translateX(-50%); z-index: 50; padding: 10px 20px; background: #272727ed; color: white; border-radius: 6px; max-width: 90vw; }
 #image-preview { padding: 0; border: 0; width: 96vw; max-width: 96vw; height: 94dvh; max-height: 94dvh; background: #202124; color: white; border-radius: 8px; }
 #image-preview::backdrop { background: #000c; }

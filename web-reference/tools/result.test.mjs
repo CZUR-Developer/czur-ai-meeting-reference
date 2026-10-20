@@ -11,8 +11,7 @@ function identityTestPage() {
     append(...items) { this.children.push(...items); } });
   const nodes = Object.fromEntries(['#status', '#title', '#transcript', '#transcript-segments',
     '#result', '#translations', '#translation-result', '#summary-result', '#summary-content',
-    '#presentation-result', '#presentation-frames', '#audio-result', '#audio-player',
-    '#speaker-identity-result', '#speaker-identities', '#speaker-selection']
+    '#presentation-result', '#presentation-frames', '#audio-result', '#audio-player']
     .map(selector => [selector, node()]));
   return { nodes, querySelector: selector => nodes[selector], createElement: node };
 }
@@ -309,12 +308,7 @@ test('READY 标准人物产物按本场 ID 映射字幕名称，稳定人物 ID 
   renderFinalResult(result, page);
   assert.deepEqual(page.nodes['#transcript-segments'].children.map(row => row.children[0].textContent),
     ['陈先生', '发言人 speaker-1']);
-  assert.equal(page.nodes['#speaker-identity-result'].hidden, false);
-  assert.deepEqual(page.nodes['#speaker-identities'].children.map(row => row.children.map(item => item.textContent)), [
-    ['未登记姓名', '本场发言人 ID：speaker-1', '尚无跨会议人物 ID'],
-    ['陈先生', '本场发言人 ID：speaker-2', '跨会议人物 ID：person_stable']
-  ]);
-  assert.deepEqual(page.nodes['#speaker-selection'].children.map(item => item.value), ['speaker-1', 'speaker-2']);
+  assert.equal(page.querySelector('#speaker-identity-result'), undefined, '默认页面不需要人物栏目');
 });
 
 test('无 READY 人物产物时保留本场字幕，不读取身份或显示命名注册区', async () => {
@@ -331,8 +325,7 @@ test('无 READY 人物产物时保留本场字幕，不读取身份或显示命�
   renderFinalResult(result, page);
   assert.equal(result.speakerIdentity, undefined);
   assert.equal(requests.length, 2);
-  assert.equal(page.nodes['#speaker-identity-result'].hidden, true);
-  assert.equal(page.nodes['#speaker-selection'].children.length, 0);
+  assert.equal(page.querySelector('#speaker-identity-result'), undefined);
   assert.equal(page.nodes['#transcript-segments'].children[0].children[0].textContent,
     '发言人 speaker-1');
 });
@@ -379,9 +372,7 @@ test('显式登录后才能注册，成功只重读原 genTime 清单且刷新�
   ]) }, page);
   renderFinalResult(refreshed, page);
   assert.equal(page.nodes['#transcript-segments'].children.length, 1);
-  assert.equal(page.nodes['#speaker-identities'].children.length, 1);
-  assert.equal(page.nodes['#speaker-selection'].children.length, 1);
-  assert.equal(page.nodes['#speaker-identities'].children[0].children[0].textContent, '实际清单名称');
+  assert.equal(page.nodes['#transcript-segments'].children[0].children[0].textContent, '实际清单名称');
 });
 
 test('伙伴登录仅替换 authenticate 回调，不改变人物注册协议', async () => {

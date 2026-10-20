@@ -196,7 +196,7 @@ AI_MEETING_MODEL_CAPABILITIES=transcript.realtime,translation.realtime
 | `translation.realtime` | 隐藏互译入口，只保留原文 | 无译文产物时隐藏译文区 |
 | `summary.structured` | 不显示纪要开关，不请求总结材料，Stop 后仍可回看文字 | 无总结产物时隐藏总结区 |
 | `speaker.diarization.session` | 不显示发言人列表，不把空 ID 当作发言人 | 原文按实际数据展示，不虚构分人结果 |
-| `speaker.identity.cross_meeting` | 不请求跨会议身份；本场临时 Speaker 不冒充跨场身份 | 隐藏自动识别选项及无产物的人物区；有本场编号时仍可人工改名 |
+| `speaker.identity.cross_meeting` | 不请求跨会议身份；本场临时 Speaker 不冒充跨场身份 | 隐藏自动识别选项；有本场编号时仍可人工改名，不设独立人物栏目 |
 
 `transcript.realtime` 是参考会议的必选能力；未声明时 App 保持开始按钮禁用，
 后端拒绝 Create。上述行为由能力声明和本场 Create 决定共同驱动，不能靠固定的
@@ -354,8 +354,8 @@ Web 只读取 `READY` Manifest。原文、译文、结构化总结和录音分�
 
 默认结果页提供大屏原文／总结分栏、小屏标签、原译对照、底部播放器、原文点击定位
 与跟随、演示大图及复制。浏览器还可导出文本／录音、打印演示 PDF；App WebView 默认
-隐藏需要下载／打印宿主的入口。页面完全依赖标准产物，缺少总结、翻译、录音或人物时
-对应区域自动收敛。字段、样式和交互层的替换位置见 [Web 结果页](../web-reference/README.md)。
+隐藏需要下载／打印宿主的入口。页面完全依赖标准产物，缺少总结、翻译或录音时
+对应区域自动收敛；人物数据只用于原文姓名，不单独占右栏。字段、样式和交互层的替换位置见 [Web 结果页](../web-reference/README.md)。
 
 保留录音时，默认 HTTP 上传与 file／S3 Store 使用同一预算函数：
 `max(64 MiB, AI_MEETING_MAX_MEETING_DURATION_MS × 32 + 1 MiB)`。
@@ -363,12 +363,17 @@ Web 只读取 `READY` Manifest。原文、译文、结构化总结和录音分�
 实际时长仍使用冻结采音事实，容量余量不计费用量。伙伴自建 HTTP transport、
 Artifact Store 或反向代理时，应对齐该最长会议预算，避免录音上传失败阻塞后台收尾。
 
-默认参考 Web 在原文姓名处提供登录后的“单个／全局”改名；全局仅指本场同一发言人。
+默认参考 Web 在原文姓名处提供“单个／全局”改名；持有效结果链接即可修改，无需再次登录。
+全局仅指本场同一发言人。
 未配置声纹时仍可人工改名。有本场跨会议身份能力和产物时可勾选“下次自动识别”，
-额外登记到可替换 Provider。登记失败仍保留本场已保存名称并明确提示；匿名结果链接仍只读。
+额外登记到可替换 Provider。登记失败仍保留本场已保存名称并明确提示。
+编辑沿用原 `genTime` 的有效期，登记归属使用会议真实所属账号，不伪造访客身份。
+后端 `SpeakerResultAccessPolicy.Factory` 可替换此规则；选择所有者登录策略时，
+通过 `resultSpeakerEditingRequiresLogin=true` 告知 Web，再接入自己的认证方式。
+这不改变 App 登录、会议控制及独立人物库管理的授权。
 `speaker.identity` 是单独的标准产物，本场 speaker 编号与跨会议 `personId` 分开。
 参考讯飞插件、FFmpeg 依赖和可选环境项见 [后端说明](../backend-reference/README.md#可选跨会议声纹参考插件)
-及 [本机配置模板](../tools/reference-client.env.example)。未注册 Provider 时人物区隐藏，
+及 [本机配置模板](../tools/reference-client.env.example)。未注册 Provider 时自动识别选项隐藏，
 字幕／译文／总结和录音照常交付；伙伴可用自己的 `SpeakerIdentityProvider` 替换供应商与人员库。
 写入协议、姓名优先级和登录扩展见 [Web 发言人编辑](../web-reference/README.md#发言人改名与可选跨会议记录)。
 

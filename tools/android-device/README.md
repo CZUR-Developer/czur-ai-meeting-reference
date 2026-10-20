@@ -181,7 +181,8 @@ node tools/android-device/check-web-result.mjs --port=19094 \
 ```
 
 `--expect` 只填写当前会议实际提供的模块，可选值为 `transcript`、`translation`、
-`summary`、`audio`、`identity`、`presentation`。`presentation` 会逐张解码演示图片，要求
+`summary`、`audio`、`identity`、`presentation`。`identity` 核对已读取的身份产物数量，
+不是要求页面存在“人物”Tab；身份只供原文姓名和编辑使用。`presentation` 会逐张解码演示图片，要求
 图片数量大于零且全部成功，避免只验到标题／图片占位。工具报告各区产物可用性和段落数；未选中标签被隐藏不等于能力缺失。不会输出会议正文、账号、
 Token 或结果链接。`--play`／`--seek` 会短暂播放后暂停；不传时只读状态。
 该脚本不登录、不创建结果，也不把本场 Speaker 当作跨会议身份。

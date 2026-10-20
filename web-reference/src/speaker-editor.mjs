@@ -22,7 +22,7 @@ export function registrationMessage(status) {
 }
 
 /**
- * 同一编辑弹窗供桌面、窄屏和 Android WebView 使用。身份来自可替换 actions，
+ * 同一编辑弹窗供桌面、窄屏和 Android WebView 使用。编辑授权来自可替换 actions，
  * 不接 CZUR 私有账号；写完重读同一结果，不在浏览器伪造保存成功。
  * 捕获姓名按钮点击，避免同时触发下方原文的录音定位。监听只绑定一次。
  */
@@ -34,8 +34,8 @@ export function bindSpeakerNameEditing(page, actions, initialResult, render, dis
   const status = get('speaker-edit-status');
   let current = initialResult, selected = null, busy = false;
   const syncLogin = () => {
-    login.hidden = actions.isLoggedIn();
-    fields.disabled = busy || !actions.isLoggedIn();
+    login.hidden = !actions.requiresLogin() || actions.isLoggedIn();
+    fields.disabled = busy || !actions.canEdit();
   };
   get('transcript-segments').addEventListener('click', event => {
     const button = event.target.closest('[data-edit-speaker]');
@@ -49,7 +49,7 @@ export function bindSpeakerNameEditing(page, actions, initialResult, render, dis
     get('speaker-remember').checked = available;
     status.textContent = '';
     syncLogin(); dialog.showModal();
-    (actions.isLoggedIn() ? get('speaker-edit-name') : get('speaker-edit-username')).focus();
+    (actions.canEdit() ? get('speaker-edit-name') : get('speaker-edit-username')).focus();
   }, true);
   get('speaker-edit-close').onclick = () => { if (!busy) dialog.close(); };
   dialog.addEventListener('cancel', event => { if (busy) event.preventDefault(); });

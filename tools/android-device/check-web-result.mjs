@@ -85,12 +85,12 @@ try {
       ready: document.querySelector('#status')?.textContent === '结果已生成',
       transcript: visible('result'), translation: visible('translation-result'),
       summary: visible('summary-result'), audio: visible('audio-result'),
-      identity: visible('speaker-identity-result'),
+      identity: Number(document.querySelector('#result-workspace')?.dataset.speakerIdentityCount || 0) > 0,
       presentation: visible('presentation-result') && images.length > 0 && loadedImages === images.length,
       presentationFrames: images.length, loadedPresentationFrames: loadedImages,
       transcriptSegments: document.querySelector('#transcript-segments')?.children.length || 0,
       translationSegments: document.querySelectorAll('.translation-item').length,
-      identityCount: document.querySelector('#speaker-identities')?.children.length || 0,
+      identityCount: Number(document.querySelector('#result-workspace')?.dataset.speakerIdentityCount || 0),
       audioDurationSeconds: Number.isFinite(audio?.duration) ? audio.duration : null,
     };
   })()`);
