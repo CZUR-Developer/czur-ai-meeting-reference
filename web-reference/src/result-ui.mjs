@@ -36,6 +36,8 @@ export function bindResultUi(result, page) {
     window.clearTimeout(messageTimer);
     messageTimer = window.setTimeout(() => { get('action-message').hidden = true; }, 3000);
   };
+  // 发言人编辑等独立工具共用可见反馈，避免只更新供读屏使用的隐藏状态文字。
+  on(page, 'result-action-message', event => message(event.detail));
 
   page.body.dataset.ready = String(hasAnything);
   get('result-columns').hidden = !hasOriginal && !visiblePanels.length;
@@ -225,6 +227,8 @@ export function bindResultUi(result, page) {
       row.setAttribute('aria-label', `从 ${formatTime(item.startMs / 1000)} 播放此段`);
       on(row, 'click', () => seek(item.startMs / 1000, true));
       on(row, 'keydown', event => {
+        // 姓名编辑等嵌套控件保留原生键盘行为，不让 Enter/Space 同时触发整段播放。
+        if (event.target !== row) return;
         if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); seek(item.startMs / 1000, true); }
       });
     }

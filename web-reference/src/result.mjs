@@ -1,4 +1,5 @@
 import { bindResultUi } from './result-ui.mjs';
+import { bindSpeakerNameEditing, speakerDisplayName } from './speaker-editor.mjs';
 import { formatTime, languageName, resultSections, translationsBySegment } from './result-model.mjs';
 
 /** 结果页只读取会后 Manifest 与最终产物；会议中字幕始终由 Android App 显示。 */
@@ -124,6 +125,22 @@ export function createSpeakerIdentityActions(apiBaseUrl, meetingId, genTime,
       accessToken = session.accessToken;
     },
     isLoggedIn: () => accessToken != null,
+    async rename(sessionSpeakerId, displayName, scope, segmentId, remember) {
+      if (!accessToken) throw new Error('请先使用本场会议的账号登录');
+      const response = await fetcher(`${base}/v1/meetings/${encodeURIComponent(meetingId)}`
+        + `/speakers/${encodeURIComponent(sessionSpeakerId)}:rename`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+        body: JSON.stringify({ displayName: displayName.trim(), scope, segmentId, remember })
+      });
+      if (response.status === 401) accessToken = null;
+      if (!response.ok) throw new Error(response.status === 401 ? '登录已失效，请重新登录'
+        : response.status === 403 ? '请使用本场会议所属账号登录' : `保存失败：HTTP ${response.status}`);
+      const saved = await response.json();
+      // 保存 ACK 和读取结果分开；读取失败时不能把已完成的写入描述成未保存。
+      try { return { result: await readFinalTranscript(apiBaseUrl, meetingId, genTime, fetcher),
+        registration: saved.registration }; }
+      catch { throw new Error('名称已保存，结果刷新失败，请重新打开本场结果'); }
+    },
     async enroll(sessionSpeakerId, displayName) {
       if (!accessToken) throw new Error('请先使用本场会议的账号登录');
       const response = await fetcher(`${base}/v1/meetings/${encodeURIComponent(meetingId)}`
@@ -177,7 +194,6 @@ export function renderFinalResult(result, page) {
     presentation: hasPresentation, audio: hasAudio } = available;
   const identities = result.speakerIdentity?.speakers || [];
   const hasSpeakerIdentity = identities.length > 0;
-  const identityBySpeaker = new Map(identities.map(item => [item.sessionSpeakerId, item]));
   const segmentElements = new Map();
   const groupedTranslations = translationsBySegment(result.translations);
   if (!hasTranscript && !hasTranslation && !hasSummary && !hasPresentation && !hasAudio && !hasSpeakerIdentity) {
@@ -199,8 +215,15 @@ export function renderFinalResult(result, page) {
         const speaker = page.createElement('h3');
         const id = typeof item.sessionSpeakerId === 'string'
           ? item.sessionSpeakerId.trim() : '';
-        const identity = identityBySpeaker.get(id);
-        speaker.textContent = identity?.displayName || (id ? `发言人 ${id}` : '发言人未知');
+        const label = speakerDisplayName(item, identities);
+        if (result.speakerEditingEnabled && id && item.segmentId) {
+          const edit = page.createElement('button');
+          edit.type = 'button'; edit.className = 'speaker-edit-trigger';
+          edit.textContent = label;
+          edit.dataset.editSpeaker = item.segmentId;
+          edit.setAttribute('aria-label', `修改发言人：${label}`);
+          speaker.append(edit);
+        } else speaker.textContent = label;
         const text = page.createElement('p');
         text.textContent = item.text || '';
         row.append(speaker, text);
@@ -310,6 +333,8 @@ export function renderFinalResult(result, page) {
     }
     page.querySelector('#speaker-identity-result').hidden = false;
   }
+  const legacyControls = page.querySelector('#speaker-legacy-controls');
+  if (legacyControls) legacyControls.hidden = Boolean(result.speakerEditingEnabled);
   status.textContent = '结果已生成';
   bindResultUi(result, page);
 }
@@ -378,10 +403,13 @@ async function showResult() {
     const result = await readFinalTranscript(config.apiBaseUrl || '', meetingId, genTime,
       globalThis.fetch, ms => new Promise(resolve => setTimeout(resolve, ms)),
       () => { status.textContent = '结果生成中…'; });
+    result.speakerEditingEnabled = discovery.resultSpeakerEditingEnabled === true;
     renderFinalResult(result, document);
-    if (result.speakerIdentity?.speakers.length > 0) {
-      bindSpeakerIdentityEditing(document,
-        createSpeakerIdentityActions(config.apiBaseUrl || '', meetingId, genTime));
+    const actions = createSpeakerIdentityActions(config.apiBaseUrl || '', meetingId, genTime);
+    if (result.speakerEditingEnabled) {
+      bindSpeakerNameEditing(document, actions, result, renderFinalResult, discovery);
+    } else if (result.speakerIdentity?.speakers.length > 0) {
+      bindSpeakerIdentityEditing(document, actions);
     }
   } catch (error) {
     status.textContent = error.message;

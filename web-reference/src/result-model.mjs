@@ -1,3 +1,4 @@
+import { speakerDisplayName } from './speaker-editor.mjs';
 /** 标准结果的纯页面投影；无模型、账号、DOM 或 CZUR 私有接口依赖。 */
 export function formatTime(seconds) {
   if (!Number.isFinite(seconds) || seconds < 0) return '--:--';
@@ -69,11 +70,9 @@ export function resultText(result, section) {
   const segments = result.segments || [];
   if (!segments.length) return [result.text, resultText(result, 'translation')].filter(Boolean).join('\n\n');
   const translations = translationsBySegment(result.translations);
-  const people = new Map((result.speakerIdentity?.speakers || [])
-    .map(item => [item.sessionSpeakerId, item.displayName]));
   const original = segments.map(item => {
     const time = Number.isFinite(item.startMs) && item.startMs >= 0 ? formatTime(item.startMs / 1000) : '';
-    const speaker = people.get(item.sessionSpeakerId) || (item.sessionSpeakerId ? `发言人 ${item.sessionSpeakerId}` : '');
+    const speaker = item.sessionSpeakerId ? speakerDisplayName(item, result.speakerIdentity?.speakers) : '';
     return [[time, speaker].filter(Boolean).join('  '), item.text,
       ...(translations.get(item.segmentId) || []).map(value => value.text)].filter(Boolean).join('\n');
   }).join('\n\n');

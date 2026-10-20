@@ -140,4 +140,24 @@ body[data-ready="true"] #status { position: absolute; width: 1px; height: 1px; o
   .original-panel, .insight-panel, .content-scroll { display: block !important; overflow: visible; background: white; padding: 0; }
   [data-available="true"] { display: block !important; }
   .presentation-frame { break-inside: avoid; }
+  #speaker-edit-dialog { display: none !important; }
 }
+
+.speaker-edit-trigger { border: 0; background: transparent; color: inherit; font: inherit; padding: 2px 0; cursor: pointer; border-bottom: 1px dashed #a6a6a6; }
+.speaker-edit-trigger:hover { color: #f15a24; }
+#speaker-edit-dialog { width: min(520px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); box-sizing: border-box; overflow: auto; border: 0; border-radius: 16px; padding: 30px; color: #333; box-shadow: 0 8px 48px #0003; }
+#speaker-edit-dialog::backdrop { background: #0005; }
+#speaker-edit-dialog h2 { margin: 0 34px 24px 0; font-size: 24px; }
+#speaker-edit-dialog fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+#speaker-edit-dialog label { display: block; margin: 14px 0; }
+#speaker-edit-dialog input:not([type=checkbox]) { display: block; width: 100%; box-sizing: border-box; border: 1px solid #ddd; border-radius: 6px; font: inherit; padding: 10px; margin-top: 6px; }
+#speaker-edit-dialog button { cursor: pointer; font: inherit; }
+#speaker-edit-dialog .speaker-edit-close { position: absolute; right: 16px; top: 12px; border: 0; background: none; font-size: 32px; }
+#speaker-remember-row { display: flex !important; gap: 10px; align-items: center; }
+#speaker-remember-row[hidden] { display: none !important; }
+#speaker-edit-dialog [hidden] { display: none; }
+.speaker-edit-actions { display: flex; gap: 16px; margin-top: 22px; }
+.speaker-edit-actions button, #speaker-edit-login-button { flex: 1; padding: 10px 24px; border: 1px solid #f15a24; color: #f15a24; border-radius: 6px; background: white; }
+.speaker-edit-actions button[value=ALL] { color: white; background: #f15a24; }
+#speaker-edit-status { margin: 16px 0 0; line-height: 1.5; }
+@media(max-width: 520px) { #speaker-edit-dialog { padding: 22px; } }

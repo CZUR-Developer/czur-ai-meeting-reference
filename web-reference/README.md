@@ -44,7 +44,7 @@ READY 的 `presentation.capture` 截图包按修订序号读取，画面按会�
 | 会议日期、时长 | Manifest 的 `startedAt`、`durationMs`；播放器优先使用媒体实际时长 | 隐藏缺失信息；不拿链接 `genTime` 当会议时间 |
 | 原文定位和高亮 | `segments[].startMs`，单位为相对于录音开始的毫秒 | 保留文字，省略该段定位；不伪造零秒 |
 | 原译关联 | `segments[].segmentId`、`translations[].sourceSegmentId` | 译文独立保留 |
-| 发言人姓名 | `sessionSpeakerId` 关联标准人物产物的 `displayName` | 仅显示本场发言人编号，不冒充跨场已注册姓名 |
+| 发言人姓名 | 段落 `speakerDisplayName` 优先，再按 `sessionSpeakerId` 读取标准人物产物 | 无姓名时显示本场编号；人工改名不代表跨场登记成功 |
 | 总结／待办 | `summary.structured` 的 `title`、`overview`、`keyPoints`、`actionItems` | 隐藏未生成的总结能力 |
 | 媒体 | `audio.original` 的 Artifact URL；`presentation.capture` 的标准截图序列 | 隐藏相应控制 |
 
@@ -58,21 +58,42 @@ READY 的 `presentation.capture` 截图包按修订序号读取，画面按会�
 更换 UI 时保留标准字段与有效期规则；不要在页面内绑定厂商返回字段、永久模型 Key
 或另建会议状态。图标来源与替换规则见[资源说明](ASSETS.md)。
 
-## 可选人物身份与命名注册
+## 发言人改名与可选跨会议记录
 
-只有同场 Manifest 存在 READY 的 `speaker.identity` 时，页面才读取标准
-`speaker-identity/v1` JSON，并开放人物区和“命名并注册”入口。人物名称按
-`sessionSpeakerId` 映射回字幕段；本场编号、稳定 `personId` 分别标明。
-没有匹配的 `personId`／`displayName` 保持为空，不把本场编号当作已注册人物。
-没有 Provider／没有标准身份产物时，页面保留本场发言人与其他结果，不显示注册入口。
+参考宿主通过能力发现的 `resultSpeakerEditingEnabled=true` 开放原文姓名按钮。
+登录后可输入昵称，选择“单个”（所选原文段）或“全局”（本场同一
+`sessionSpeakerId` 的全部原文段）。修改持久化到标准原文，不依赖声纹 Provider。
+无本场分人数据时没有姓名按钮。复制和 TXT 导出使用同一名称投影。
+
+部署声明 `speaker.identity.cross_meeting` 且本场存在对应身份产物时，弹窗提供
+“下次自动识别”。勾选后先保存本场名称，再调用可替换 Provider 登记；不勾选时只改
+本场。单个＋登记也不会连带修改本场其他段落。登记失败明确提示本场已保存，保留弹窗
+供重试；不将其显示为下次识别成功。后续会议依样本和供应商实际匹配，不能保证每次命中。
+
+只有同场 Manifest 存在 READY 的 `speaker.identity` 时才展示人物区；
+本场编号与稳定 `personId` 分别标明。未匹配的 `personId/displayName` 为空。
+无 Provider 时仍可本场改名，自动识别选项和无产物的人物区隐藏。
 
 匿名 `genTime` 链接只用于 GET。编辑时需显式登录本场会议所属账号：默认内联表单调用
 `POST /v1/reference/session:login`，再用取得的 Bearer 调用
-`POST /v1/meetings/{meetingId}/speakers/{sessionSpeakerId}:enroll`，正文仅为
-`{"displayName":"人物名称"}`，不携带 `genTime` 写入。后端负责真实身份和会议归属检查。
+`POST /v1/meetings/{meetingId}/speakers/{sessionSpeakerId}:rename`，例如：
+
+```json
+{"displayName":"演示发言人","scope":"SINGLE","segmentId":"segment-1","remember":false}
+```
+
+`ALL` 时可省略 `segmentId`；响应包含 `manifestRevision`、`changedSegments`、
+`registration`（`NOT_REQUESTED`、`REGISTERED`、`SAMPLE_UNAVAILABLE`、`NOT_GRANTED`、
+`UNAVAILABLE`）。本场已保存、登记失败也返回成功写入和独立登记状态。
+请求不携带 `genTime`，后端检查真实身份和会议归属。
 Token 只保留在本页内存，页面刷新需重新登录；不写入 URL、localStorage 或日志，密码
-在提交后清空。注册成功后重新读取同一 `meetingId`／原 `genTime` 的 Manifest 和产物，
-不凭注册响应伪造会议结果或另建结果状态。
+在提交后清空。保存成功后重新读取同一 `meetingId`／原 `genTime` 的 Manifest 和产物，
+不凭写入响应伪造会议结果或另建结果状态。
+
+标准 `transcript.final.segments[].speakerDisplayName` 为可选字段：缺席时读取自动
+身份名称；字符串为本段人工名称；显式 `null` 保持编号显示。后两种优先于身份名称，
+保证单个修改不会因后来登记而扩大范围。其他结果渲染器应遵守同一规则。
+旧宿主未装配编辑入口时仍可使用既有 `:enroll` 与人物栏表单；新参考宿主使用上述弹窗。
 
 登录是窄扩展点：`createSpeakerIdentityActions(base, meetingId, genTime, fetcher, authenticate)`
 接受可替换的 `authenticate(username, password)`，返回含 `accessToken` 的会话即可。

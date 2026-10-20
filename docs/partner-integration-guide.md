@@ -196,7 +196,7 @@ AI_MEETING_MODEL_CAPABILITIES=transcript.realtime,translation.realtime
 | `translation.realtime` | 隐藏互译入口，只保留原文 | 无译文产物时隐藏译文区 |
 | `summary.structured` | 不显示纪要开关，不请求总结材料，Stop 后仍可回看文字 | 无总结产物时隐藏总结区 |
 | `speaker.diarization.session` | 不显示发言人列表，不把空 ID 当作发言人 | 原文按实际数据展示，不虚构分人结果 |
-| `speaker.identity.cross_meeting` | 不请求跨会议身份；本场临时 Speaker 不冒充跨场身份 | 无身份产物时隐藏人物区和命名注册入口 |
+| `speaker.identity.cross_meeting` | 不请求跨会议身份；本场临时 Speaker 不冒充跨场身份 | 隐藏自动识别选项及无产物的人物区；有本场编号时仍可人工改名 |
 
 `transcript.realtime` 是参考会议的必选能力；未声明时 App 保持开始按钮禁用，
 后端拒绝 Create。上述行为由能力声明和本场 Create 决定共同驱动，不能靠固定的
@@ -363,11 +363,14 @@ Web 只读取 `READY` Manifest。原文、译文、结构化总结和录音分�
 实际时长仍使用冻结采音事实，容量余量不计费用量。伙伴自建 HTTP transport、
 Artifact Store 或反向代理时，应对齐该最长会议预算，避免录音上传失败阻塞后台收尾。
 
-启用跨会议人物身份时，默认参考 Web 还提供登录后的命名注册入口；匿名结果链接仍只读。
+默认参考 Web 在原文姓名处提供登录后的“单个／全局”改名；全局仅指本场同一发言人。
+未配置声纹时仍可人工改名。有本场跨会议身份能力和产物时可勾选“下次自动识别”，
+额外登记到可替换 Provider。登记失败仍保留本场已保存名称并明确提示；匿名结果链接仍只读。
 `speaker.identity` 是单独的标准产物，本场 speaker 编号与跨会议 `personId` 分开。
 参考讯飞插件、FFmpeg 依赖和可选环境项见 [后端说明](../backend-reference/README.md#可选跨会议声纹参考插件)
 及 [本机配置模板](../tools/reference-client.env.example)。未注册 Provider 时人物区隐藏，
 字幕／译文／总结和录音照常交付；伙伴可用自己的 `SpeakerIdentityProvider` 替换供应商与人员库。
+写入协议、姓名优先级和登录扩展见 [Web 发言人编辑](../web-reference/README.md#发言人改名与可选跨会议记录)。
 
 ## 6. 交付前检查
 

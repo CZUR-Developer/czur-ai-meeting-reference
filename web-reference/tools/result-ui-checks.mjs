@@ -77,6 +77,19 @@ export async function checkResultInteractions() {
     get('preview-close').click(); check(!get('image-preview').open, '退出大图');
     active?.click(); checks.preview = true;
   }
+  const speaker = document.querySelector('[data-edit-speaker]');
+  if (speaker) {
+    nav.querySelector('[data-tab="original"]')?.click();
+    const audio = get('audio-player');
+    const before = audio.currentTime;
+    speaker.click();
+    check(get('speaker-edit-dialog').open, '打开姓名编辑');
+    check(shown(get('speaker-edit-form')), '单个和全局编辑表单');
+    check(audio.paused && audio.currentTime === before, '姓名编辑不触发录音定位');
+    get('speaker-edit-close').click();
+    check(!get('speaker-edit-dialog').open, '关闭姓名编辑');
+    active?.click(); checks.speakerEditor = true;
+  }
   if (/\bwv\b/i.test(navigator.userAgent)) {
     check(get('export-menu').hidden && get('share-result').hidden, 'WebView不提供无宿主下载');
     checks.webViewActions = true;
