@@ -20,6 +20,27 @@ function identityTestPage() {
 const identityArtifact = speakers => ({ schemaVersion: 'speaker-identity/v1',
   artifactType: 'speaker.identity', speakers });
 
+test('标准会议时间来自Manifest，不用链接生成时间替代', async () => {
+  const result = await readFinalTranscript('http://api.test', 'mtg_time', '123', async () => ({
+    ok: true, status: 200, json: async () => ({ startedAt: '2026-10-20T00:00:00Z', durationMs: 42000, artifacts: [] })
+  }));
+  assert.equal(result.startedAt, '2026-10-20T00:00:00Z');
+  assert.equal(result.durationMs, 42000);
+});
+
+test('时间段落关联多语译文，未匹配译文独立保留', () => {
+  const page = identityTestPage();
+  renderFinalResult({ segments: [{ segmentId: 'a', startMs: 1500, text: '你好' }], translations: [
+    { sourceSegmentId: 'b', text: '独立译文' }, { sourceSegmentId: 'a', text: 'Hello' },
+    { sourceSegmentId: 'a', text: 'こんにちは' }
+  ] }, page);
+  const row = page.nodes['#transcript-segments'].children[0];
+  assert.equal(row.children[2].textContent, '00:01');
+  assert.deepEqual(row.children.slice(3).map(item => item.children[1].textContent), ['Hello', 'こんにちは']);
+  assert.equal(page.nodes['#translations'].children[0].children[1].textContent, '独立译文');
+  assert.equal(page.nodes['#translation-result'].hidden, false);
+});
+
 test('结果链接按后端同一有效期在边界时刻失效', () => {
   assert.equal(resultLinkExpired('1000', 86400000, 1000 + 86400000 - 1), false);
   assert.equal(resultLinkExpired('1000', 86400000, 1000 + 86400000), true);
@@ -242,7 +263,7 @@ test('本场发言人随最终字幕产物读取，逐段展示真实 ID 且缺�
   assert.equal(nodes['#transcript-segments'].hidden, false);
   assert.deepEqual(nodes['#transcript-segments'].children.map(row =>
     [row.children[0].textContent, row.children[1].textContent]), [
-    ['本场发言人 ID：speaker-2', '你好。'], ['发言人未知', '继续。']
+    ['发言人 speaker-2', '你好。'], ['发言人未知', '继续。']
   ]);
   assert.equal(nodes['#status'].textContent, '结果已生成');
 });
@@ -287,7 +308,7 @@ test('READY 标准人物产物按本场 ID 映射字幕名称，稳定人物 ID 
   const page = identityTestPage();
   renderFinalResult(result, page);
   assert.deepEqual(page.nodes['#transcript-segments'].children.map(row => row.children[0].textContent),
-    ['陈先生 · 本场发言人 ID：speaker-2', '本场发言人 ID：speaker-1']);
+    ['陈先生', '发言人 speaker-1']);
   assert.equal(page.nodes['#speaker-identity-result'].hidden, false);
   assert.deepEqual(page.nodes['#speaker-identities'].children.map(row => row.children.map(item => item.textContent)), [
     ['未登记姓名', '本场发言人 ID：speaker-1', '尚无跨会议人物 ID'],
@@ -313,7 +334,7 @@ test('无 READY 人物产物时保留本场字幕，不读取身份或显示命�
   assert.equal(page.nodes['#speaker-identity-result'].hidden, true);
   assert.equal(page.nodes['#speaker-selection'].children.length, 0);
   assert.equal(page.nodes['#transcript-segments'].children[0].children[0].textContent,
-    '本场发言人 ID：speaker-1');
+    '发言人 speaker-1');
 });
 
 test('显式登录后才能注册，成功只重读原 genTime 清单且刷新页面不重复字幕', async () => {

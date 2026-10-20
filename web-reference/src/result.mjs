@@ -1,3 +1,6 @@
+import { bindResultUi } from './result-ui.mjs';
+import { formatTime, languageName, resultSections, translationsBySegment } from './result-model.mjs';
+
 /** 结果页只读取会后 Manifest 与最终产物；会议中字幕始终由 Android App 显示。 */
 export async function readFinalTranscript(apiBaseUrl, meetingId, genTime,
     fetcher = globalThis.fetch, wait = ms => new Promise(resolve => setTimeout(resolve, ms)),
@@ -30,6 +33,8 @@ export async function readFinalTranscript(apiBaseUrl, meetingId, genTime,
   const presentation = artifacts.filter(item => item.type === 'presentation.capture'
     && item.status === 'READY').sort((a, b) => a.revision - b.revision);
   const result = { title: manifest.title, text: null };
+  if (manifest.startedAt != null) result.startedAt = manifest.startedAt;
+  if (manifest.durationMs != null) result.durationMs = manifest.durationMs;
   const audio = artifacts.find(item => item.type === 'audio.original'
     && item.status === 'READY');
   // 音频正文不随结果 JSON 下载；页面只拿到统一 Artifact 引用并让浏览器流式播放。
@@ -147,53 +152,46 @@ export function resultLinkExpired(genTime, ttlMs, now = Date.now()) {
   return !Number.isSafeInteger(generatedAt) || now - generatedAt >= ttlMs;
 }
 
-function languageName(code) {
-  if (code?.startsWith('zh')) return '中文';
-  if (code?.startsWith('en')) return 'English';
-  return code || '未知语言';
-}
-
 function meetingTime(offsetMs) {
-  const seconds = Math.floor(offsetMs / 1000);
-  return `${Math.floor(seconds / 60).toString().padStart(2, '0')}:${
-    (seconds % 60).toString().padStart(2, '0')}`;
+  return formatTime(offsetMs / 1000);
 }
 
 export function renderFinalResult(result, page) {
   const status = page.querySelector('#status');
-  if (result.title) page.querySelector('#title').textContent = result.title;
+  page.querySelector('#title').textContent = result.title || '会议结果';
   // 注册后重读的是同一场完整结果；先清已有内容，避免字幕、纪要及人物名单重复追加。
-  for (const selector of ['#result', '#translation-result', '#summary-result',
+  for (const selector of ['#result', '#translation-result', '#summary-result', '#todos-result',
     '#presentation-result', '#audio-result', '#speaker-identity-result',
     '#transcript', '#transcript-segments']) {
     const section = page.querySelector(selector);
     if (section) section.hidden = true;
   }
   for (const selector of ['#transcript', '#transcript-segments', '#translations',
-    '#summary-content', '#presentation-frames', '#speaker-identities', '#speaker-selection']) {
+    '#summary-content', '#todos-content', '#presentation-frames', '#speaker-identities', '#speaker-selection']) {
     const content = page.querySelector(selector);
     if (content) content.textContent = '';
   }
   const hasSegments = Array.isArray(result.segments) && result.segments.length > 0;
-  const hasTranscript = typeof result.text === 'string' || hasSegments;
-  const hasTranslation = Array.isArray(result.translations)
-    && result.translations.length > 0;
-  const hasSummary = result.summary != null;
-  const hasPresentation = Array.isArray(result.presentationFrames)
-    && result.presentationFrames.length > 0;
-  const hasAudio = result.audio != null;
+  const available = resultSections(result);
+  const { transcript: hasTranscript, translation: hasTranslation, summary: hasSummary,
+    presentation: hasPresentation, audio: hasAudio } = available;
   const identities = result.speakerIdentity?.speakers || [];
   const hasSpeakerIdentity = identities.length > 0;
   const identityBySpeaker = new Map(identities.map(item => [item.sessionSpeakerId, item]));
+  const segmentElements = new Map();
+  const groupedTranslations = translationsBySegment(result.translations);
   if (!hasTranscript && !hasTranslation && !hasSummary && !hasPresentation && !hasAudio && !hasSpeakerIdentity) {
     status.textContent = '本场会议没有识别到字幕';
+    bindResultUi(result, page);
     return;
   }
   if (hasTranscript) {
     const transcript = page.querySelector('#transcript');
-    const speakerSegments = hasSegments && result.segments.some(item =>
-      typeof item.sessionSpeakerId === 'string' && item.sessionSpeakerId.trim() !== '');
-    if (speakerSegments) {
+    const structuredSegments = hasSegments && result.segments.some(item =>
+      (typeof item.sessionSpeakerId === 'string' && item.sessionSpeakerId.trim() !== '')
+      || (Number.isFinite(item.startMs) && item.startMs >= 0)
+      || groupedTranslations.has(item.segmentId));
+    if (structuredSegments) {
       const entries = page.querySelector('#transcript-segments');
       for (const item of result.segments) {
         const row = page.createElement('article');
@@ -202,13 +200,20 @@ export function renderFinalResult(result, page) {
         const id = typeof item.sessionSpeakerId === 'string'
           ? item.sessionSpeakerId.trim() : '';
         const identity = identityBySpeaker.get(id);
-        speaker.textContent = identity?.displayName
-          ? `${identity.displayName} · 本场发言人 ID：${id}`
-          : id ? `本场发言人 ID：${id}` : '发言人未知';
+        speaker.textContent = identity?.displayName || (id ? `发言人 ${id}` : '发言人未知');
         const text = page.createElement('p');
         text.textContent = item.text || '';
         row.append(speaker, text);
+        // 没有说话人或时间的数据只显示原文；不制造身份或零秒定位。
+        speaker.hidden = !id;
+        if (Number.isFinite(item.startMs) && item.startMs >= 0) {
+          const time = page.createElement('span');
+          time.className = 'segment-time';
+          time.textContent = formatTime(item.startMs / 1000);
+          row.append(time);
+        }
         entries.append(row);
+        if (item.segmentId) segmentElements.set(item.segmentId, row);
       }
       entries.hidden = false;
     } else {
@@ -228,9 +233,9 @@ export function renderFinalResult(result, page) {
       const text = page.createElement('p');
       text.textContent = item.text;
       row.append(direction, text);
-      entries.append(row);
+      (segmentElements.get(item.sourceSegmentId) || entries).append(row);
     }
-    page.querySelector('#translation-result').hidden = false;
+    page.querySelector('#translation-result').hidden = entries.children.length === 0;
   }
   if (hasSummary) {
     const content = page.querySelector('#summary-content');
@@ -252,8 +257,12 @@ export function renderFinalResult(result, page) {
         entry.textContent = item;
         list.append(entry);
       }
-      content.append(heading, list);
+      const target = label === '待办事项' ? page.querySelector('#todos-content') || content : content;
+      if (target === content) target.append(heading, list);
+      else target.append(list);
     }
+    const todos = page.querySelector('#todos-content');
+    if (todos && !result.summary.actionItems?.length) todos.textContent = '暂无待办事项';
     page.querySelector('#summary-result').hidden = false;
   }
   if (hasPresentation) {
@@ -276,7 +285,7 @@ export function renderFinalResult(result, page) {
     const player = page.querySelector('#audio-player');
     player.controls = true;
     player.preload = 'metadata';
-    player.src = result.audio.url;
+    if (player.src !== result.audio.url) player.src = result.audio.url;
     page.querySelector('#audio-result').hidden = false;
   }
   if (hasSpeakerIdentity) {
@@ -302,6 +311,7 @@ export function renderFinalResult(result, page) {
     page.querySelector('#speaker-identity-result').hidden = false;
   }
   status.textContent = '结果已生成';
+  bindResultUi(result, page);
 }
 
 /** 登录与提交仅由用户显式操作；无人物产物时 showResult 不装配这组编辑行为。 */

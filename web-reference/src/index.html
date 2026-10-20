@@ -4,91 +4,68 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AI 会议纪要</title>
-  <style>
-    body { font-family: sans-serif; margin: 0; color: #202124; background: #f7f8fa; }
-    main { max-width: 760px; margin: 48px auto; padding: 24px; background: white; }
-    #transcript { white-space: pre-wrap; line-height: 1.7; }
-    #transcript-segments:not([hidden]) { display: grid; gap: 12px; }
-    .transcript-segment { border-left: 3px solid #637383; padding: 8px 12px; background: #f7f8fa; }
-    .transcript-segment h3 { font-size: 0.95rem; margin: 0 0 6px; color: #455563; }
-    .transcript-segment p { white-space: pre-wrap; line-height: 1.7; margin: 0; }
-    #translations { display: grid; gap: 12px; }
-    .translation-item { border-left: 3px solid #4f7ed7; padding: 8px 12px; background: #f7f9ff; }
-    .translation-item h3 { font-size: 0.95rem; margin: 0 0 6px; color: #3158a5; }
-    .translation-item p { white-space: pre-wrap; line-height: 1.7; margin: 0; }
-    #summary-content { line-height: 1.7; }
-    #summary-content h3, #summary-content h4 { margin-bottom: 6px; }
-    #summary-content p { white-space: pre-wrap; }
-    #presentation-frames { display: grid; gap: 20px; }
-    .presentation-frame { margin: 0; }
-    .presentation-frame img { display: block; width: 100%; height: auto; }
-    .presentation-frame figcaption { margin-top: 6px; color: #5f6368; }
-    #audio-player { width: 100%; }
-    #speaker-identities { display: grid; gap: 12px; }
-    .speaker-identity { padding: 10px 12px; background: #f7f8fa; }
-    .speaker-identity h3, .speaker-identity p { margin: 4px 0; }
-    #speaker-identity-result form { display: grid; gap: 12px; margin-top: 12px; }
-    #speaker-identity-result label { display: grid; gap: 5px; }
-    #speaker-identity-result input, #speaker-identity-result select,
-    #speaker-identity-result button { font: inherit; padding: 8px; }
-    #speaker-enrollment-fields { display: grid; gap: 12px; border: 1px solid #dce1e7; }
-    #speaker-login-panel { margin-top: 16px; }
-    #speaker-auth-status, #speaker-enrollment-status { color: #455563; }
-  </style>
+  <link rel="stylesheet" href="./result.css">
 </head>
 <body>
-  <main>
-    <h1 id="title">AI 会议纪要</h1>
-    <p id="status">正在读取会议结果…</p>
-    <section id="result" hidden aria-label="最终转写">
-      <h2>最终转写</h2>
-      <p id="transcript" hidden></p>
-      <div id="transcript-segments" hidden></div>
-    </section>
-    <section id="translation-result" hidden aria-label="最终译文">
-      <h2>最终译文</h2>
-      <div id="translations"></div>
-    </section>
-    <section id="summary-result" hidden aria-label="结构化纪要">
-      <h2>结构化纪要</h2>
-      <div id="summary-content"></div>
-    </section>
-    <section id="presentation-result" hidden aria-label="演示文稿">
-      <h2>演示文稿</h2>
-      <div id="presentation-frames"></div>
-    </section>
-    <section id="audio-result" hidden aria-label="会议录音">
-      <h2>会议录音</h2>
+  <main id="result-workspace">
+    <header class="meeting-info">
+      <div class="meeting-heading">
+        <h1 id="title">AI 会议纪要</h1>
+        <div class="meeting-meta"><time id="meeting-date" hidden></time><span id="meeting-duration" hidden></span><span id="ai-notice" hidden>内容由 AI 生成</span></div>
+      </div>
+      <div class="meeting-actions">
+        <button id="toggle-translation" class="text-button" aria-pressed="true" hidden>隐藏译文</button>
+        <button id="share-result" class="icon-button" title="复制结果链接" aria-label="复制结果链接" hidden><img src="./assets/share-btn.png" alt=""></button>
+        <details id="export-menu" hidden><summary class="icon-button" title="导出" aria-label="导出"><img src="./assets/export-btn.png" alt=""></summary><div id="export-items" class="dropdown"></div></details>
+      </div>
+    </header>
+    <p id="status" role="status">正在读取会议结果…</p>
+    <nav id="mobile-tabs" class="mobile-tabs" aria-label="会议结果栏目"></nav>
+    <div id="result-columns" class="result-columns" hidden>
+      <section id="original-panel" class="original-panel" aria-label="原文与译文">
+        <header class="panel-heading"><h2><img src="./assets/original-icon.png" alt="">原文</h2><button id="copy-original" class="icon-button" title="复制原文与译文" aria-label="复制原文与译文"><img src="./assets/copy-btn.png" alt=""></button></header>
+        <div id="original-scroll" class="content-scroll">
+          <section id="result" hidden aria-label="原文"><p id="transcript" hidden></p><div id="transcript-segments" hidden></div></section>
+          <section id="translation-result" hidden aria-label="未配对译文"><h3>译文</h3><div id="translations"></div></section>
+        </div>
+        <button id="follow-playback" class="follow-button" hidden>跟随播放位置</button>
+      </section>
+      <aside id="insight-panel" class="insight-panel" hidden aria-label="会议产物">
+        <nav id="result-tabs" class="result-tabs" aria-label="会议产物栏目"></nav>
+        <div id="insight-scroll" class="content-scroll">
+          <section id="summary-result" hidden aria-label="总结纪要"><header class="section-heading"><h2>总结纪要</h2><button class="icon-button" data-copy="summary" title="复制总结纪要" aria-label="复制总结纪要"><img src="./assets/copy-btn.png" alt=""></button></header><div id="summary-content"></div></section>
+          <section id="todos-result" hidden aria-label="待办事项"><header class="section-heading"><h2>待办事项</h2><button class="icon-button" data-copy="todos" title="复制待办事项" aria-label="复制待办事项"><img src="./assets/copy-btn.png" alt=""></button></header><div id="todos-content"></div></section>
+          <section id="presentation-result" hidden aria-label="演示文稿"><header class="section-heading"><h2>演示文稿</h2><span class="muted">点击图片放大</span></header><div id="presentation-frames"></div></section>
+          <section id="speaker-identity-result" hidden aria-label="人物">
+            <header class="section-heading"><h2>会议人物</h2></header><div id="speaker-identities"></div>
+            <details id="speaker-login-panel"><summary>登录后命名并注册发言人</summary><form id="speaker-login-form">
+              <label>本场会议所属账号<input id="speaker-username" name="username" autocomplete="username" required></label>
+              <label>密码<input id="speaker-password" name="password" type="password" autocomplete="current-password" required></label>
+              <button id="speaker-login-button" type="submit">登录以编辑人物</button>
+            </form></details>
+            <p id="speaker-auth-status" role="status">只读查看无需登录；命名注册请先登录本场会议所属账号。</p>
+            <form id="speaker-enrollment-form"><fieldset id="speaker-enrollment-fields" disabled><legend>命名并注册</legend>
+              <label>本场发言人<select id="speaker-selection" required></select></label><label>人物名称<input id="speaker-display-name" maxlength="128" required></label><button type="submit">命名并注册</button>
+            </fieldset></form><p id="speaker-enrollment-status" role="status"></p>
+          </section>
+        </div>
+      </aside>
+    </div>
+    <footer id="audio-result" class="audio-dock" hidden aria-label="会议录音">
       <audio id="audio-player" controls preload="metadata"></audio>
-    </section>
-    <section id="speaker-identity-result" hidden aria-label="跨会议人物">
-      <h2>跨会议人物</h2>
-      <p>人物名称与跨会议人物 ID 来自登记结果；本场发言人 ID 只在当前会议内有效。</p>
-      <div id="speaker-identities"></div>
-      <details id="speaker-login-panel">
-        <summary>登录后命名并注册发言人</summary>
-        <form id="speaker-login-form">
-          <label>本场会议所属账号
-            <input id="speaker-username" name="username" autocomplete="username" required>
-          </label>
-          <label>密码
-            <input id="speaker-password" name="password" type="password" autocomplete="current-password" required>
-          </label>
-          <button id="speaker-login-button" type="submit">登录以编辑人物</button>
-        </form>
-      </details>
-      <p id="speaker-auth-status" role="status">只读查看无需登录；命名注册请先登录本场会议所属账号。</p>
-      <form id="speaker-enrollment-form">
-        <fieldset id="speaker-enrollment-fields" disabled>
-          <legend>命名并注册</legend>
-          <label>本场发言人 <select id="speaker-selection" required></select></label>
-          <label>人物名称 <input id="speaker-display-name" maxlength="128" required></label>
-          <button type="submit">命名并注册</button>
-        </fieldset>
-      </form>
-      <p id="speaker-enrollment-status" role="status"></p>
-    </section>
+      <div id="audio-controls" hidden>
+        <label class="seek-label"><span class="sr-only">播放进度</span><input id="audio-seek" type="range" min="0" max="100" step="0.05" value="0" aria-label="播放进度" disabled></label>
+        <div class="audio-controls-row">
+          <div class="audio-time"><span id="audio-current">00:00</span><span class="muted"> / </span><span id="audio-duration">--:--</span></div>
+          <div class="transport"><button id="audio-back" class="icon-button" aria-label="后退15秒" disabled><img src="./assets/before15.png" alt=""></button><button id="audio-play" class="play-button" aria-label="播放录音"><img src="./assets/play-btn.png" alt=""></button><button id="audio-forward" class="icon-button" aria-label="前进15秒" disabled><img src="./assets/after15.png" alt=""></button></div>
+          <label class="rate-label">倍速 <select id="audio-rate" aria-label="播放倍速"><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option></select></label>
+        </div>
+      </div>
+      <p id="audio-error" role="status" hidden></p>
+    </footer>
   </main>
+  <dialog id="image-preview" aria-label="演示文稿大图"><div class="preview-toolbar"><button id="preview-previous" aria-label="上一张">‹</button><span id="preview-caption"></span><button id="preview-next" aria-label="下一张">›</button><button id="preview-zoom-out" aria-label="缩小图片">−</button><button id="preview-zoom-in" aria-label="放大图片">＋</button><button id="preview-close" aria-label="关闭大图">×</button></div><div id="preview-scroll"><img id="preview-image" alt=""></div></dialog>
+  <div id="action-message" class="action-message" role="status" hidden></div>
   <script type="module" src="./result.mjs"></script>
 </body>
 </html>
