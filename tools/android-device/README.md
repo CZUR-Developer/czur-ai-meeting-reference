@@ -177,13 +177,20 @@ adb -s '<ADB序列号>' forward tcp:19094 'localabstract:webview_devtools_remote
 node tools/android-device/check-web-result.mjs --port=19094 \
   --meeting-id=mtg_当前场次 --expect=transcript,translation,summary,audio --reload --play
 # 后端支持媒体 Range 后可增加 --seek，验证有限时长和实际拖动后继续播放。
+# 新结果工作区可增加 --interactions，逐项操作真实页面按钮，无需反复视觉定位。
 ```
 
 `--expect` 只填写当前会议实际提供的模块，可选值为 `transcript`、`translation`、
 `summary`、`audio`、`identity`、`presentation`。`presentation` 会逐张解码演示图片，要求
-图片数量大于零且全部成功，避免只验到标题／图片占位。工具报告各区可见性和段落数；不会输出会议正文、账号、
+图片数量大于零且全部成功，避免只验到标题／图片占位。工具报告各区产物可用性和段落数；未选中标签被隐藏不等于能力缺失。不会输出会议正文、账号、
 Token 或结果链接。`--play`／`--seek` 会短暂播放后暂停；不传时只读状态。
 该脚本不登录、不创建结果，也不把本场 Speaker 当作跨会议身份。
+
+`--interactions` 按当前产物检查栏目切换、译文显隐、播放／暂停、前后15秒、进度拖动、
+倍速、原文定位／高亮／恢复跟随及演示大图／翻页／缩放，最后暂停录音并恢复1倍速。
+手机窄屏使用同一组标签检查，WebView额外确认隐藏无宿主支持的分享／导出菜单。
+没有的产物跳过相应交互；`--expect` 仍负责声明本场必须具备的产物。脚本通过后仍应
+保留少量实际截图核对字体、面板和遮挡；浏览器文件下载／PDF打印另行验证。
 
 ## 同场可选 PDF 插件验证（仅 Debug）
 

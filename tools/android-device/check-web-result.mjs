@@ -6,8 +6,11 @@
  * 先将本 App 的 webview_devtools_remote_<pid> 转发到本机端口，再运行本脚本。
  * 使用 Node.js 22+ 的内置 WebSocket，不需要 npm 安装。只输出状态和数量，不输出
  * 会议正文、账号、Token 或结果链接。--reload 重新加载页面；--play/--seek 会短暂
- * 播放录音，结束后暂停。没有这些参数时不主动播放。
+ * 播放录音，结束后暂停。--interactions 操作工作区按钮、播放及预览后暂停；
+ * 没有这些交互参数时不主动播放。
  */
+import { checkResultInteractions } from '../../web-reference/tools/result-ui-checks.mjs';
+
 const argumentsByName = new Map(process.argv.slice(2).map(value => {
   const [name, ...parts] = value.replace(/^--/, '').split('=');
   return [name, parts.length ? parts.join('=') : true];
@@ -17,7 +20,7 @@ const meetingId = argumentsByName.get('meeting-id');
 const required = String(argumentsByName.get('expect') || 'transcript').split(',');
 if (!Number.isInteger(port) || port < 1 || port > 65535 || !meetingId) {
   console.error('用法：node check-web-result.mjs --meeting-id=mtg_... [--port=19094] '
-    + '[--expect=transcript,translation,summary,audio,identity,presentation] [--reload] [--play] [--seek]');
+    + '[--expect=transcript,translation,summary,audio,identity,presentation] [--reload] [--play] [--seek] [--interactions]');
   process.exit(1);
 }
 
@@ -63,14 +66,16 @@ try {
   };
   if (argumentsByName.has('reload')) await send('Page.reload', { ignoreCache: true });
   const state = await evaluate(`(async () => {
-    const visible = id => { const node = document.getElementById(id); return !!node && !node.hidden; };
+    // 未选中的tab也包含已生成产物；可用性与当前可见性分别检查。
+    const visible = id => { const node = document.getElementById(id);
+      return !!node && (node.dataset.available == null ? !node.hidden : node.dataset.available === 'true'); };
     for (let attempt = 0; attempt < 60; attempt++) {
       if (document.querySelector('#status')?.textContent === '结果已生成') break;
       await new Promise(resolve => setTimeout(resolve, 250));
     }
     const audio = document.querySelector('#audio-player');
     const images = [...document.querySelectorAll('#presentation-frames img')];
-    // 图片通常位于长原文下面并启用 lazy loading；逐张解码核实际内容，避免只验容器可见。
+    // 图片可能位于未选中的演示标签；逐张解码核实际内容，避免只验容器可用。
     if (${required.includes('presentation')}) for (const image of images) {
       image.loading = 'eager';
       try { await image.decode(); } catch { /* 数量核对会将失败标为 FAIL。 */ }
@@ -84,7 +89,7 @@ try {
       presentation: visible('presentation-result') && images.length > 0 && loadedImages === images.length,
       presentationFrames: images.length, loadedPresentationFrames: loadedImages,
       transcriptSegments: document.querySelector('#transcript-segments')?.children.length || 0,
-      translationSegments: document.querySelector('#translations')?.children.length || 0,
+      translationSegments: document.querySelectorAll('.translation-item').length,
       identityCount: document.querySelector('#speaker-identities')?.children.length || 0,
       audioDurationSeconds: Number.isFinite(audio?.duration) ? audio.duration : null,
     };
@@ -124,6 +129,9 @@ try {
       if (!state.playback.played || (argumentsByName.has('seek') && !state.playback.seeked)) {
         process.exitCode = 1;
       }
+    }
+    if (argumentsByName.has('interactions')) {
+      state.interactions = await evaluate(`(${checkResultInteractions.toString()})()`);
     }
     console.log(JSON.stringify({ status: process.exitCode ? 'FAIL' : 'PASS', stage: 'result', ...state }));
   }
