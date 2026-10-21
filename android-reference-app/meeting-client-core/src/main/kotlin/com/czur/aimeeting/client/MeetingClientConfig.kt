@@ -19,16 +19,17 @@ class MeetingClientConfig private constructor(
     private val callbackExecutor: Executor,
     private val artifactPublisher: MeetingArtifactPublisher,
     private val stoppedMeetingStore: StoppedMeetingStore?,
+    private val meetingRecoveryStore: MeetingRecoveryStore?,
 ) {
     constructor(serverUrl: String, accessToken: String, clientIdentity: ClientIdentity,
         profile: MeetingProfile, callbackExecutor: Executor) : this(serverUrl, accessToken,
         ReferenceIdentityProvider(accessToken), clientIdentity, profile, callbackExecutor,
-        MeetingArtifactPublisher.none(), null)
+        MeetingArtifactPublisher.none(), null, null)
 
     /** Provider 可由页面／Service 共用，SDK 不持有 Activity 或打开登录 UI。 */
     constructor(serverUrl: String, identityProvider: IdentityProvider, clientIdentity: ClientIdentity,
         profile: MeetingProfile, callbackExecutor: Executor) : this(serverUrl, "", identityProvider,
-        clientIdentity, profile, callbackExecutor, MeetingArtifactPublisher.none(), null)
+        clientIdentity, profile, callbackExecutor, MeetingArtifactPublisher.none(), null, null)
 
     fun serverUrl(): String = serverUrl
     /** 旧固定凭据或场内快照；新 App 用 refreshIdentity 读取身份。 */
@@ -40,16 +41,27 @@ class MeetingClientConfig private constructor(
     fun artifactPublisher(): MeetingArtifactPublisher = artifactPublisher
     /** 未装配保持原内存路径。 */
     fun stoppedMeetingStore(): Optional<StoppedMeetingStore> = Optional.ofNullable(stoppedMeetingStore)
+    /** 未装配原场现场端口时不写恢复记录，保持旧内存行为。 */
+    fun meetingRecoveryStore(): Optional<MeetingRecoveryStore> = Optional.ofNullable(meetingRecoveryStore)
     /** 不改变原配置，不开启录音，不发生上传；发布器只使用本场 Context。 */
     fun withArtifactPublisher(publisher: MeetingArtifactPublisher): MeetingClientConfig = MeetingClientConfig(
-        serverUrl, accessToken, identityProvider, clientIdentity, profile, callbackExecutor, publisher, stoppedMeetingStore)
+        serverUrl, accessToken, identityProvider, clientIdentity, profile, callbackExecutor, publisher,
+        stoppedMeetingStore, meetingRecoveryStore)
     /** 只注册应用私有停止记录端口，不写文件、不创建恢复任务。 */
     fun withStoppedMeetingStore(store: StoppedMeetingStore): MeetingClientConfig = MeetingClientConfig(
-        serverUrl, accessToken, identityProvider, clientIdentity, profile, callbackExecutor, artifactPublisher, store)
+        serverUrl, accessToken, identityProvider, clientIdentity, profile, callbackExecutor, artifactPublisher,
+        store, meetingRecoveryStore)
+    /**
+     * 只注册应用私有原场现场端口：开会时随采音起点落盘，正常结束或确认续办后清理。
+     * 不开启录音、不上传、不触发自动恢复；恢复由宿主在开机或启动时逐场调用。
+     */
+    fun withMeetingRecoveryStore(store: MeetingRecoveryStore): MeetingClientConfig = MeetingClientConfig(
+        serverUrl, accessToken, identityProvider, clientIdentity, profile, callbackExecutor, artifactPublisher,
+        stoppedMeetingStore, store)
     /** 组合层冻结本场凭据，避免账号刷新改变场内请求身份。 */
     fun forSession(session: IdentitySession): MeetingClientConfig = MeetingClientConfig(
         serverUrl, session.accessToken(), identityProvider, clientIdentity, profile, callbackExecutor,
-        artifactPublisher, stoppedMeetingStore)
+        artifactPublisher, stoppedMeetingStore, meetingRecoveryStore)
 
     companion object {
         /** 旧参考 App 薄适配，伙伴应配置自己的身份／档位。 */

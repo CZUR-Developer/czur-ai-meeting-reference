@@ -1,5 +1,6 @@
 package com.czur.aimeeting.model
 
+import java.io.File
 import java.io.IOException
 import java.util.Optional
 import java.util.OptionalLong
@@ -24,6 +25,13 @@ interface ModelSession : AutoCloseable {
      */
     @Throws(IOException::class)
     fun sealedAudioArtifact(): Optional<SealedAudioArtifact> = Optional.empty()
+
+    /**
+     * 本场同源录音文件在封口前的位置，只用于进程异常退出后的现场续办记录。
+     * 它不是封口事实，读不到大小／时长前不能发布、计费或声明录音成功。
+     * empty 表示未装配同源录音或文件位置尚未确定。
+     */
+    fun audioArtifactFile(): Optional<File> = Optional.empty()
 
     /** 取消并释放本场资源，调用方不再接收事件。 */
     override fun close()

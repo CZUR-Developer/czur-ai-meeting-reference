@@ -971,6 +971,113 @@ class MeetingCoordinatorTest {
         }
     }
 
+    @Test fun recoversInterruptedMeetingWithJournalSummaryAndStop() {
+        val dir = File.createTempFile("recovery", "").apply { delete(); mkdirs() }
+        try {
+            val audioFile = File(dir, "mtg_test.pcm").apply { writeBytes(ByteArray(32000)) }
+            val journal = File(dir, "mtg_test.jsonl").apply {
+                writeText("{\"segmentId\":\"a\",\"revision\":1,\"startMs\":0,\"language\":\"zh\",\"text\":\"第一段\"}\n")
+            }
+            val record = CapturingMeeting("mtg_test", "http://127.0.0.1", ClientIdentity.reference(),
+                audioFile, journal, 1L, "zh-CN", true, true, true)
+            val stopped = MemoryStore()
+            val recovery = MemoryRecoveryStore(record)
+            val publisher = Publisher()
+            val server = Server(ALL).also { publisher.server = it }
+            val runtime = Runtime(true)
+            val config = MeetingClientConfig("http://127.0.0.1", ReferenceIdentityProvider("test-token"),
+                ClientIdentity.reference(), MeetingProfile.reference(), java.util.concurrent.Executor { it.run() })
+                .withArtifactPublisher(publisher).withStoppedMeetingStore(stopped)
+                .withMeetingRecoveryStore(recovery)
+            val client = MeetingCoordinator(config, ModelAdapterRegistry(), runtime,
+                java.util.function.Function { server }, { 0L }, { 555L })
+            try {
+                val future = CompletableFuture<RecoveryResult>()
+                client.recoverInterrupted("mtg_test", resultCallback(future))
+                val result = future.get(3, TimeUnit.SECONDS)
+                assertEquals("mtg_test", result.meetingId())
+                assertTrue(result.delivered())
+                assertTrue(server.steps.containsAll(listOf("summaryGrant", "summary", "publish", "stop", "manifest")))
+                assertEquals("第一段", runtime.summaryInput!!.transcript())
+                assertTrue("续办成功后删除现场", recovery.deleted)
+                assertTrue(!journal.exists())
+                assertEquals("续办不新建会议", 0, runtime.openCalls)
+                assertFalse(server.steps.contains("create"))
+                assertEquals(MeetingResult.Status.READY, result.result()!!.status())
+            } finally { client.close() }
+        } finally { dir.deleteRecursively() }
+    }
+
+    @Test fun recoveryWithoutJournalStillStopsWithoutFakeSummary() {
+        val dir = File.createTempFile("recovery", "").apply { delete(); mkdirs() }
+        try {
+            val audioFile = File(dir, "mtg_test.pcm").apply { writeBytes(ByteArray(32000)) }
+            val record = CapturingMeeting("mtg_test", "http://127.0.0.1", ClientIdentity.reference(),
+                audioFile, null, 1L, "zh-CN", true, true, true)
+            val stopped = MemoryStore()
+            val recovery = MemoryRecoveryStore(record)
+            val publisher = Publisher()
+            val server = Server(ALL).also { publisher.server = it }
+            val runtime = Runtime(true)
+            val config = MeetingClientConfig("http://127.0.0.1", ReferenceIdentityProvider("test-token"),
+                ClientIdentity.reference(), MeetingProfile.reference(), java.util.concurrent.Executor { it.run() })
+                .withArtifactPublisher(publisher).withStoppedMeetingStore(stopped)
+                .withMeetingRecoveryStore(recovery)
+            val client = MeetingCoordinator(config, ModelAdapterRegistry(), runtime,
+                java.util.function.Function { server }, { 0L }, { 555L })
+            try {
+                val future = CompletableFuture<RecoveryResult>()
+                client.recoverInterrupted("mtg_test", resultCallback(future))
+                assertTrue(future.get(3, TimeUnit.SECONDS).delivered())
+                assertTrue(server.steps.contains("stop"))
+                assertFalse("缺原文不得伪造纪要", server.steps.contains("summary"))
+                assertNull(runtime.summaryInput)
+            } finally { client.close() }
+        } finally { dir.deleteRecursively() }
+    }
+
+    @Test fun recoveryRejectsMissingRecordAndExistingStopCheckpoint() {
+        val dir = File.createTempFile("recovery", "").apply { delete(); mkdirs() }
+        try {
+            val audioFile = File(dir, "mtg_test.pcm").apply { writeBytes(ByteArray(32000)) }
+            val record = CapturingMeeting("mtg_test", "http://127.0.0.1", ClientIdentity.reference(),
+                audioFile, null, 1L, "zh-CN", false, true, true)
+            val publisher = Publisher()
+            val server = Server(ALL).also { publisher.server = it }
+            val runtime = Runtime(true)
+            val emptyConfig = MeetingClientConfig("http://127.0.0.1", ReferenceIdentityProvider("test-token"),
+                ClientIdentity.reference(), MeetingProfile.reference(), java.util.concurrent.Executor { it.run() })
+                .withArtifactPublisher(publisher).withStoppedMeetingStore(MemoryStore())
+                .withMeetingRecoveryStore(MemoryRecoveryStore(null))
+            val emptyClient = MeetingCoordinator(emptyConfig, ModelAdapterRegistry(), runtime,
+                java.util.function.Function { server }, { 0L }, { 555L })
+            try {
+                val missing = CompletableFuture<RecoveryResult>()
+                emptyClient.recoverInterrupted("mtg_test", resultCallback(missing))
+                assertThrows(ExecutionException::class.java) { missing.get(3, TimeUnit.SECONDS) }
+                assertFalse(server.steps.contains("stop"))
+            } finally { emptyClient.close() }
+
+            // 已有停止记录时必须走停止续办，不能再用恢复现场重复收口。
+            val stopped = MemoryStore()
+            val context = MeetingArtifactPublisher.Context("mtg_test", audio("mtg_test", 0), 0L,
+                MeetingClientConfig("http://127.0.0.1", "fixture-token", ClientIdentity.reference(),
+                    MeetingProfile.reference(), java.util.concurrent.Executor { it.run() }))
+            stopped.save(StoppedMeetingCheckpoint.pending(context))
+            val config = MeetingClientConfig("http://127.0.0.1", ReferenceIdentityProvider("test-token"),
+                ClientIdentity.reference(), MeetingProfile.reference(), java.util.concurrent.Executor { it.run() })
+                .withArtifactPublisher(publisher).withStoppedMeetingStore(stopped)
+                .withMeetingRecoveryStore(MemoryRecoveryStore(record))
+            val client = MeetingCoordinator(config, ModelAdapterRegistry(), runtime,
+                java.util.function.Function { server }, { 0L }, { 555L })
+            try {
+                val conflict = CompletableFuture<RecoveryResult>()
+                client.recoverInterrupted("mtg_test", resultCallback(conflict))
+                assertThrows(ExecutionException::class.java) { conflict.get(3, TimeUnit.SECONDS) }
+            } finally { client.close() }
+        } finally { dir.deleteRecursively() }
+    }
+
     private fun resumeResult(client: MeetingClient): CompletableFuture<MeetingResult> {
         val result = CompletableFuture<MeetingResult>()
         client.resumeFinalization("mtg_test", resultCallback(result))
@@ -1761,6 +1868,17 @@ class MeetingCoordinatorTest {
             server.releaseUsage.countDown()
             server.releaseModelGrant.countDown()
             client.close()
+        }
+    }
+
+    /** 只用于公共合同测试的原场现场端口；不模拟磁盘格式。 */
+    private class MemoryRecoveryStore(private var record: CapturingMeeting?) : MeetingRecoveryStore {
+        @Volatile var deleted = false
+        @Synchronized override fun save(record: CapturingMeeting) { this.record = record }
+        @Synchronized override fun read(meetingId: String): Optional<CapturingMeeting> =
+            Optional.ofNullable(record?.takeIf { it.meetingId() == meetingId })
+        @Synchronized override fun delete(meetingId: String) {
+            if (record?.meetingId() == meetingId) { record = null; deleted = true }
         }
     }
 

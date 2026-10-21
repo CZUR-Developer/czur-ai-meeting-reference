@@ -9,6 +9,7 @@ import com.czur.aimeeting.client.result.ResultActionAccess
 import com.czur.aimeeting.client.result.ResultOptions
 import com.czur.aimeeting.client.server.*
 import com.czur.aimeeting.model.*
+import java.io.File
 import java.io.IOException
 import java.time.Instant
 import java.util.ArrayDeque
@@ -26,7 +27,9 @@ import java.util.regex.Pattern
  * 平台无关的唯一正常会议编排。状态／显示／deadline 只在 state 队列，HTTP／总结在 io，
  * start／stop／close 在 modelControl 保序，使挂起 HTTP 不拖停音源。SDK／Mock 只注入运行时。
  * 单客户端最多一场会议；未确认标准事件仅内存保留原包，由后续事件／停止补交。
- * 停止记录只覆盖尾部确认后的发布／同键 Stop／实际 READY，不建立实时持久队列或定时恢复。
+ * 停止记录只覆盖尾部确认后的发布／同键 Stop／实际 READY；装配原场现场端口时，
+ * 采音起点另落一份 CapturingMeeting，供进程异常退出后由宿主逐场调用 recoverInterrupted，
+ * 本类不自行扫描目录或定时恢复。
  */
 class MeetingCoordinator(
     private val config: MeetingClientConfig,
@@ -51,6 +54,8 @@ class MeetingCoordinator(
     private var current: Session? = null
     /** 仅客户端级互斥，续办不新建 Session，不阻塞回调队列等待网络。 */
     private var resumingFinalization = false
+    /** 原场现场续办互斥；与新建会议、停止续办互斥，避免同一场被两条流程同时收口。 */
+    private var recovering = false
 
     private fun setupCapabilities(): Set<String> = if (runtime.usesServerModelMaterials()) adapters.setupCapabilities()
         else java.util.Set.copyOf(runtime.localCapabilities())
@@ -124,7 +129,7 @@ class MeetingCoordinator(
     }
     @Synchronized override fun start(options: MeetingOptions, listener: MeetingListener): MeetingSession {
         requireOpen()
-        check(!resumingFinalization && (current == null || current!!.done)) { "已有会议或停止收尾正在进行" }
+        check(!resumingFinalization && !recovering && (current == null || current!!.done)) { "已有会议或原场收尾正在进行" }
         val session = Session(options, listener)
         current = session
         enqueue { session.begin() }
@@ -134,8 +139,8 @@ class MeetingCoordinator(
         requireOpen()
         val store = config.stoppedMeetingStore()
         if (store.isEmpty) { notifyClient { callback.onError("当前部署未装配停止记录续办") }; return }
-        if (resumingFinalization || current != null && !current!!.done) {
-            notifyClient { callback.onError("已有会议或停止收尾正在进行") }
+        if (resumingFinalization || recovering || current != null && !current!!.done) {
+            notifyClient { callback.onError("已有会议或原场收尾正在进行") }
             return
         }
         resumingFinalization = true
@@ -166,6 +171,76 @@ class MeetingCoordinator(
             else if (message != null) notifyClient { callback.onError(message) }
         }
     }
+    @Synchronized override fun recoverInterrupted(meetingId: String, callback: MeetingClient.Callback<RecoveryResult>) {
+        requireOpen()
+        val recoveryStore = config.meetingRecoveryStore()
+        val stoppedStore = config.stoppedMeetingStore()
+        if (recoveryStore.isEmpty || stoppedStore.isEmpty) {
+            notifyClient { callback.onError("当前部署未装配原场现场续办") }
+            return
+        }
+        if (resumingFinalization || recovering || current != null && !current!!.done) {
+            notifyClient { callback.onError("已有会议或原场收尾正在进行") }
+            return
+        }
+        recovering = true
+        io.execute {
+            var outcome: RecoveryResult? = null
+            var error: String? = null
+            try {
+                if (closed) return@execute
+                val record = recoveryStore.get().read(meetingId)
+                    .orElseThrow { IOException("原场现场不存在或原账号已改变") }
+                if (stoppedStore.get().read(meetingId).isPresent)
+                    throw IOException("原场已有停止记录，应由停止续办收口")
+                val identity = config.identityProvider().currentIdentity()
+                if (identity.status() != IdentityResult.Status.LOGGED_IN) throw IOException("原场账号身份尚未就绪")
+                val sessionConfig = config.forSession(identity.session()!!)
+                if (record.serverUrl() != sessionConfig.serverUrl()) throw IOException("原场服务地址已改变")
+                val server = servers.apply(sessionConfig)
+                // 录音只为续办读取文件持久前缀；估算时长不冒充正常停止的计数门原值。
+                val audio = RecoveredAudioFacts.sealedArtifact(meetingId, record.audioFile())
+                var checkpoint = stoppedStore.get().save(StoppedMeetingCheckpoint.pending(
+                    MeetingArtifactPublisher.Context(meetingId, audio, audio.durationMs(), sessionConfig)))
+                LOG.info("原场现场续办开始 phase=${checkpoint.phase()}")
+                // 发布快照要求本场冻结用量已提交；正常停止在发布前提交，续办必须补同一事实。
+                LOG.info("原场冻结用量提交开始 durationMs=${audio.durationMs()}")
+                server.submitUsage(meetingId, audio.durationMs())
+                LOG.info("原场冻结用量已确认")
+                // 纪要必须在发布前补交：发布计划按当时的最终快照冻结纪要。
+                submitRecoveredSummary(record, server)
+                val result = finishSavedFinalization(checkpoint, stoppedStore.get(), server,
+                    sessionConfig.artifactPublisher(), BooleanSupplier { closed }, wallClockMs,
+                    Runnable {}, record.activeDelivery())
+                recoveryStore.get().delete(meetingId)
+                record.journalFile()?.let { journal -> if (journal.exists() && !journal.delete()) LOG.warning("原场字幕日志删除失败") }
+                outcome = RecoveryResult(meetingId, result)
+            } catch (failure: Exception) {
+                if (failure !is IOException && failure !is RuntimeException) throw failure
+                logFailure("原场现场续办", failure)
+                error = "原场续办尚未完成，请检查登录和连接后再次续办"
+            } finally { synchronized(this) { recovering = false } }
+            // 先释放互斥，再回调，允许宿主在回调中处理下一场。
+            val actual = outcome
+            val message = error
+            if (actual != null) notifyClient { callback.onSuccess(actual) }
+            else if (message != null) notifyClient { callback.onError(message) }
+        }
+    }
+    /**
+     * 用本机字幕日志补交标准纪要；日志缺失或为空时不伪造，按静音／短会继续收口。
+     * 模型材料与正常停止同一入口，不新增第二套总结路径。
+     */
+    private fun submitRecoveredSummary(record: CapturingMeeting, server: MeetingServerClient) {
+        if (!record.summaryEnabled()) return
+        val journal = record.journalFile() ?: return
+        val input = TranscriptJournal(journal).summaryInput(record.sourceLanguage()) ?: return
+        LOG.info("原场纪要重跑开始")
+        val grant = if (runtime.usesServerModelMaterials()) server.requestSummarySession(record.meetingId()) else null
+        val adapter = if (grant == null) null else adapters.createSummary(grant.adapterId())
+        server.submitSummary(record.meetingId(), runtime.summarize(grant, adapter, input))
+        LOG.info("原场纪要已提交")
+    }
     /** 每次续办只调用一次同账号身份扩展，先持久保存新材料，再允许外部发布／Stop。 */
     private fun renewFinalizationIdentity(checkpoint: StoppedMeetingCheckpoint, store: StoppedMeetingStore): StoppedMeetingCheckpoint {
         if (checkpoint.phase() == StoppedMeetingCheckpoint.Phase.READY) return checkpoint
@@ -181,7 +256,7 @@ class MeetingCoordinator(
     /** 已确认尾部共用唯一流程，真实 ACK 先保存；READY 也读实际清单，不由本地阶段伪造。 */
     private fun finishSavedFinalization(initial: StoppedMeetingCheckpoint, store: StoppedMeetingStore,
         server: MeetingServerClient, publisher: MeetingArtifactPublisher, aborted: BooleanSupplier,
-        acceptedGenTime: LongSupplier, onStopAccepted: Runnable): MeetingResult? {
+        acceptedGenTime: LongSupplier, onStopAccepted: Runnable, deliverResult: Boolean = true): MeetingResult? {
         if (aborted.asBoolean) return null
         var checkpoint = store.save(initial)
         if (aborted.asBoolean) return null
@@ -202,6 +277,12 @@ class MeetingCoordinator(
         }
         if (aborted.asBoolean) return null
         onStopAccepted.run()
+        if (!deliverResult) {
+            // NO_ACTIVE_DELIVERY 只收口到 ENDED，不读清单；本地阶段仍记录到 Stop 已受理。
+            if (checkpoint.phase() != StoppedMeetingCheckpoint.Phase.READY) store.save(checkpoint.ready())
+            LOG.info("原场已停止，未主动交付结果")
+            return null
+        }
         LOG.info("读取原场实际 READY 清单开始")
         val result = server.readResult(checkpoint.checkpointId(), checkpoint.genTime()!!, false)
         if (checkpoint.phase() != StoppedMeetingCheckpoint.Phase.READY) store.save(checkpoint.ready())
@@ -256,6 +337,9 @@ class MeetingCoordinator(
         /** 含失败在内，同场只读取一次 sealed 事实，仅 IO 队列访问。 */
         private var audioArtifactRead = false
         private var audioArtifactFailure: IOException? = null
+        /** 采音起点落盘的原场现场；结束或确认收口后清理，崩溃时留给宿主续办。 */
+        private var recoveryRecord: CapturingMeeting? = null
+        private var audioJournal: TranscriptJournal? = null
         private var publicationContext: MeetingArtifactPublisher.Context? = null
         private var publicationConfirmed = false
         private var stoppedCheckpoint: StoppedMeetingCheckpoint? = null
@@ -400,6 +484,8 @@ class MeetingCoordinator(
                             }
                         }
                     }, options.retainAudio(), reconnector)
+                // 采音真正开始前落原场现场；此后进程异常退出，宿主可凭本记录续办。
+                recordRecovery(startedAtMs)
                 active = true; audioLevelActive = true; canStop = runtime.waitsForModelFinish()
                 acceptingPresentation = options.presentationCapture()
                 phase = MeetingSessionState.Phase.RUNNING
@@ -413,12 +499,42 @@ class MeetingCoordinator(
                 }
             } catch (failure: RuntimeException) { logFailure("创建模型会话", failure); failStart("打开模型会话失败") }
         }
+        /**
+         * 采音起点写原场现场：只有装配了恢复端口、本场保留录音且模型给出录音文件位置时才写。
+         * 写入失败只告警，不阻断开会；缺现场等于回到旧的无恢复行为。
+         */
+        private fun recordRecovery(startedAtMs: Long) {
+            val store = config.meetingRecoveryStore()
+            if (store.isEmpty || !options.retainAudio()) return
+            try {
+                val audio = model?.audioArtifactFile()?.orElse(null) ?: return
+                val journal = TranscriptJournal(File(audio.absoluteFile.parentFile, "${id}.jsonl"))
+                val record = CapturingMeeting(id, sessionConfig.serverUrl(), sessionConfig.clientIdentity(),
+                    audio, journal.file(), startedAtMs, options.sourceLanguage(), options.summaryEnabled(),
+                    options.retainAudio(),
+                    options.resultOptions().policy() != ResultOptions.Policy.NO_ACTIVE_DELIVERY)
+                store.get().save(record)
+                recoveryRecord = record; audioJournal = journal
+                LOG.info("原场现场已落盘")
+            } catch (failure: Exception) {
+                LOG.warning("原场现场落盘失败 class=${failure.javaClass.simpleName}")
+            }
+        }
+        /** 已确认收口或明确失败才删除现场；未确认现场保留给宿主续办。 */
+        private fun cleanupRecovery() {
+            val record = recoveryRecord ?: return
+            recoveryRecord = null
+            audioJournal?.delete(); audioJournal = null
+            try { config.meetingRecoveryStore().orElse(null)?.delete(record.meetingId()) }
+            catch (failure: Exception) { LOG.warning("原场现场清理失败 class=${failure.javaClass.simpleName}") }
+        }
         private fun transcript(event: TranscriptEvent) {
             if (done || modelFinished) return
             val standard = if (available.contains(MeetingCapabilityState.SPEAKER)) event else event.withoutSpeaker()
             val nowMs = monotonicMs.asLong
             if (standard.text().isNotBlank()) notifyListener { listener.onTranscriptActivity(nowMs) }
             finals.apply(standard); display.apply(standard, nowMs); showDisplay(); scheduleDeadline()
+            audioJournal?.let { journal -> io.execute { journal.append(standard) } }
             val number = ++sequence
             io.execute { saveStandardEvent(PendingStandardEvent(number, standard, null)) }
             queueTextTranslation(standard)
@@ -711,6 +827,7 @@ class MeetingCoordinator(
         private fun ready(finalResult: MeetingResult) {
             if (done) return
             done = true; active = false; phase = MeetingSessionState.Phase.READY; readyResult = finalResult
+            cleanupRecovery()
             notifyListener { listener.onResult(finalResult) }
             publish("本场结果已就绪"); LOG.info("会议结果已就绪")
         }
@@ -737,12 +854,14 @@ class MeetingCoordinator(
         private fun endWithoutDelivery(message: String) {
             if (done) return
             done = true; active = false; phase = MeetingSessionState.Phase.ENDED
+            cleanupRecovery()
             publish(message); LOG.info("会议已停止，未主动交付结果")
         }
         private fun failStart(message: String) {
             if (done) return
             audioLevelActive = false; done = true; active = false; canStop = false; phase = MeetingSessionState.Phase.FAILED
             cancelDeadline()
+            cleanupRecovery()
             model?.let { modelControl.execute(it::close) }
             publish(message)
         }

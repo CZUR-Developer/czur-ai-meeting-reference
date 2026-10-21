@@ -23,6 +23,14 @@ interface MeetingClient : AutoCloseable {
     fun resumeFinalization(checkpointId: String, callback: Callback<MeetingResult>) {
         callback.onError("当前会议客户端未实现停止记录续办")
     }
+    /**
+     * 续办进程异常退出留下的原场：用本机现场重建封口录音事实，补交缺失的标准纪要，
+     * 再按与停止记录相同的发布／Stop／READY 顺序收口。不新建场次、不重开音源或模型，
+     * 未确认现场保留。默认在调用线程明确报告不支持。
+     */
+    fun recoverInterrupted(meetingId: String, callback: Callback<RecoveryResult>) {
+        callback.onError("当前会议客户端未实现原场现场续办")
+    }
     /** 取消并释放当前会议，关闭后不可重用；不做正常 Stop，不产生 READY。 */
     override fun close()
 
