@@ -241,6 +241,22 @@ adb shell am broadcast -a com.czur.aimeeting.reference.DEBUG_STOP -p com.czur.ai
 Release 不注册该接收器。登录、开始和结果检查脚本见
 [设备工具说明](../tools/android-device/README.md)；脚本、构建和固定样例均不替代实际模型／硬件验收。
 
+### 进程异常退出后的续办
+
+参考 App 演示了 SDK 的原场续办：开会时 SDK 把会议编号、服务地址、录音文件位置和
+结果设置写入应用私有的 `meeting-active` 目录，并把最终字幕追加到同目录的本地日志；
+正常收口或续办成功后删除现场。
+
+页面启动和登录成功后，App 在后台对未确认停止的现场逐场调用 `recoverInterrupted`。
+SDK 用录音文件的持久前缀重建封口事实，补交冻结用量与标准纪要，再按发布／Stop／
+READY 的顺序收口。未登录、网络或后端失败时现场保留，下次启动或登录后重试；伙伴
+可以改到开机广播、工作队列或其他时机，也可以把 `ReferenceMeetingRecoveryStore`
+换成自己的数据库实现。
+
+后端必须接受创建很久之后才到达的 Stop，并要求用量提交先于发布；参考后端按这套
+协议实现。长期未收口的会议是否、以及多久标记为中断，是各部署自己的产品策略，
+公共协议不规定，参考实现也不替伙伴做决定。
+
 ## 可选字幕／窗口UI工具：构建期注入
 
 `SubtitleViewFactory` 的 `meeting-ui` 实现直接调用 UI AAR；基础实现使用 TextView。

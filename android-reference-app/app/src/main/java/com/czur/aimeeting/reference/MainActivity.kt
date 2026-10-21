@@ -118,6 +118,8 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         // 地址由 APK 编译配置装配；默认登录插件按同后端身份配对恢复会话。
         MeetingAppAssembly.initialize(this)
+        // 上次进程异常退出留下的原场在后台逐场续办；未登录时保留现场，登录后再触发。
+        resumeInterruptedMeetingsInBackground()
         setupPreferences = MeetingSetupPreferenceStore(this)
         startCondition = MeetingStartConditions.create(applicationContext)
         page = MeetingAppAssembly.pageFactory().create(this)
@@ -263,9 +265,20 @@ class MainActivity : Activity() {
                 statusView.text = "登录成功，正在获取可用功能…"
                 Log.i(TAG, "参考账号登录成功")
                 refreshIdentity(true)
+                // 登录前无法续办的原场，登录成功后立即补一次。
+                resumeInterruptedMeetingsInBackground()
             }
             override fun onError(message: String) { setConfigurationEnabled(true); loginMessage(message); Log.w(TAG, "参考账号登录失败") }
         })
+    }
+
+    /** 后台续办上次未确认停止的原场；不阻塞页面，失败保留现场等下次启动或登录。 */
+    private fun resumeInterruptedMeetingsInBackground() {
+        Thread {
+            MeetingAppAssembly.resumeInterruptedMeetings { meetingId ->
+                Log.w(TAG, "原场续办未完成 meetingId=$meetingId")
+            }
+        }.start()
     }
 
     /** 进入页面或伙伴登录返回时读取身份，页面不直接读取 token 或 Provider 私有字段。 */

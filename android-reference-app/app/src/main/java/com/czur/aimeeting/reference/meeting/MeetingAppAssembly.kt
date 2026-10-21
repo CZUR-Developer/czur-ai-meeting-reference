@@ -2,11 +2,13 @@ package com.czur.aimeeting.reference.meeting
 
 import android.content.Context
 import com.czur.aimeeting.client.ClientIdentity
+import com.czur.aimeeting.client.MeetingClient
 import com.czur.aimeeting.client.MeetingClientConfig
 import com.czur.aimeeting.client.HttpMeetingArtifactPublisher
 import com.czur.aimeeting.client.MeetingProfile
 import com.czur.aimeeting.client.MeetingDiscovery
 import com.czur.aimeeting.client.ModelAdapterRegistry
+import com.czur.aimeeting.client.RecoveryResult
 import com.czur.aimeeting.client.result.ResultActionRegistry
 import com.czur.aimeeting.client.result.ResultActionPlugin
 import com.czur.aimeeting.client.result.ResultOptions
@@ -23,6 +25,7 @@ import com.czur.aimeeting.reference.identity.PersistentReferenceIdentityProvider
 import com.czur.aimeeting.reference.identity.AppLoginEntry
 import com.czur.aimeeting.reference.identity.DefaultAppLoginEntry
 import java.util.ArrayDeque
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 
 /**
@@ -46,6 +49,8 @@ object MeetingAppAssembly {
     private var resultUiObserver: Runnable? = null
     private var overlayFactory: MeetingOverlayFactory = OverlayViewFactory()
     private var pageFactory: MeetingPageViews.Factory = MeetingPageViews.DefaultFactory()
+    private var applicationContext: Context? = null
+    private var recoveryStore: ReferenceMeetingRecoveryStore? = null
 
     /**
      * 页面首次启动时调用一次，以当前 APK 的 BuildConfig 装配后端和结果 Web。
@@ -58,6 +63,8 @@ object MeetingAppAssembly {
     @JvmStatic @Synchronized fun initialize(context: Context) {
         if (initialized) return
         val application = context.applicationContext
+        applicationContext = application
+        recoveryStore = ReferenceMeetingRecoveryStore(application)
         preferences = application.getSharedPreferences("czur_reference_settings", Context.MODE_PRIVATE)
         identityProvider = PersistentReferenceIdentityProvider(application)
         applyBackend(BuildConfig.REFERENCE_BACKEND_URL, preferences?.getString(KEY_BACKEND_URL, "").orEmpty())
@@ -154,9 +161,59 @@ object MeetingAppAssembly {
     @JvmStatic @Synchronized fun unobserveResultUi(notify: Runnable) { if (resultUiObserver === notify) resultUiObserver = null }
 
     /** 页面和 Service 共用身份来源，分别创建自己的客户端与串行回调队列。 */
-    @JvmStatic @Synchronized fun clientConfig(callbacks: Executor) = MeetingClientConfig(serverUrl, identityProvider,
-        ClientIdentity.reference(), MeetingProfile.reference(), callbacks)
-        .withArtifactPublisher(HttpMeetingArtifactPublisher())
+    @JvmStatic @Synchronized fun clientConfig(callbacks: Executor): MeetingClientConfig {
+        val config = MeetingClientConfig(serverUrl, identityProvider,
+            ClientIdentity.reference(), MeetingProfile.reference(), callbacks)
+            .withArtifactPublisher(HttpMeetingArtifactPublisher())
+        // 未初始化时保持旧行为；初始化后同一份现场用于开会落盘和启动续办。
+        return recoveryStore?.let { config.withMeetingRecoveryStore(it) } ?: config
+    }
+
+    /**
+     * 启动时对未确认停止的原场逐场续办：SDK 用本机录音和字幕日志补交用量／纪要后
+     * 发布、Stop、读 READY；成功后删除现场，失败保留等下次启动。
+     *
+     * <p>调用方负责放在后台线程；未登录时 SDK 拒绝并保留现场，登录后再次调用即可。
+     * 参考实现只在页面启动触发一次，伙伴可以改到开机广播或工作队列。</p>
+     */
+    @JvmStatic fun resumeInterruptedMeetings(onFailure: (String) -> Unit = {}) {
+        val store: ReferenceMeetingRecoveryStore
+        val context: Context
+        synchronized(MeetingAppAssembly::class.java) {
+            store = recoveryStore ?: return
+            context = applicationContext ?: return
+        }
+        val pending = try { store.pendingIds() } catch (_: Exception) { return }
+        if (pending.isEmpty()) return
+        val client = MeetingRuntimeFactory.create(context, clientConfig { it.run() })
+        try {
+            for (meetingId in pending) {
+                val finished = CountDownLatch(1)
+                var recovered = false
+                try {
+                    client.recoverInterrupted(meetingId, object : MeetingClient.Callback<RecoveryResult> {
+                        override fun onSuccess(result: RecoveryResult) {
+                            recovered = true
+                            finished.countDown()
+                        }
+                        override fun onError(message: String) {
+                            finished.countDown()
+                        }
+                    })
+                    finished.await()
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return
+                } catch (_: RuntimeException) {
+                    // 单场失败不阻断其余现场，下一次启动继续尝试。
+                }
+                if (!recovered) onFailure(meetingId)
+            }
+        } finally {
+            client.close()
+        }
+    }
+
     @JvmStatic @Synchronized fun clearReferenceSession() { (identityProvider as? LoginIdentityProvider)?.clearSession() }
 
     private const val KEY_BACKEND_URL = "backend_url"
