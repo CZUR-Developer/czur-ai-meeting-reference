@@ -51,6 +51,7 @@ object MeetingAppAssembly {
     private var pageFactory: MeetingPageViews.Factory = MeetingPageViews.DefaultFactory()
     private var applicationContext: Context? = null
     private var recoveryStore: ReferenceMeetingRecoveryStore? = null
+    private var stoppedStore: ReferenceStoppedMeetingStore? = null
 
     /**
      * 页面首次启动时调用一次，以当前 APK 的 BuildConfig 装配后端和结果 Web。
@@ -65,6 +66,7 @@ object MeetingAppAssembly {
         val application = context.applicationContext
         applicationContext = application
         recoveryStore = ReferenceMeetingRecoveryStore(application)
+        stoppedStore = ReferenceStoppedMeetingStore(application)
         preferences = application.getSharedPreferences("czur_reference_settings", Context.MODE_PRIVATE)
         identityProvider = PersistentReferenceIdentityProvider(application)
         applyBackend(BuildConfig.REFERENCE_BACKEND_URL, preferences?.getString(KEY_BACKEND_URL, "").orEmpty())
@@ -162,11 +164,13 @@ object MeetingAppAssembly {
 
     /** 页面和 Service 共用身份来源，分别创建自己的客户端与串行回调队列。 */
     @JvmStatic @Synchronized fun clientConfig(callbacks: Executor): MeetingClientConfig {
-        val config = MeetingClientConfig(serverUrl, identityProvider,
+        var config = MeetingClientConfig(serverUrl, identityProvider,
             ClientIdentity.reference(), MeetingProfile.reference(), callbacks)
             .withArtifactPublisher(HttpMeetingArtifactPublisher())
         // 未初始化时保持旧行为；初始化后同一份现场用于开会落盘和启动续办。
-        return recoveryStore?.let { config.withMeetingRecoveryStore(it) } ?: config
+        stoppedStore?.let { config = config.withStoppedMeetingStore(it) }
+        recoveryStore?.let { config = config.withMeetingRecoveryStore(it) }
+        return config
     }
 
     /**
