@@ -19,16 +19,18 @@
 | 组成 | 作用 | 获得方式 |
 | --- | --- | --- |
 | Android 参考 App | 登录、会前选项、字幕／互译、悬浮窗、停止和结果入口 | 本仓 `android-reference-app/`，Kotlin First |
-| Android 会议 SDK | 音源探测、采音、模型连接、数据归一化及通用会议流程 | 从配套交付包取得主 SDK AAR，公开仓库不携带闭源二进制 |
+| 设备 AAR（闭源） | 音源探测、采音、截图和 native；不含 core／契约 | 从配套交付包取得，公开仓库不携带闭源二进制 |
+| 业务 AAR（源码） | 模型连接、数据归一化及通用会议门面 | 本仓 `android-reference-app/meeting-android/`，构建时用 `-PdeviceSdkAar` 注入设备 AAR |
 | Android UI 工具 | 悬浮窗和字幕 View 等可复用工具 | 从配套交付包取得 UI AAR；App 也保留基础 UI 实现 |
 | 公共服务端核心 | 会议流程、标准协议、能力协商、持久化与扩展端口 | 本仓 `backend-core/`，构建成普通 JAR |
 | 参考后端 | 可启动的 HTTP 服务，装配示例登录、模型发行器和结果存储 | 本仓 `backend-reference/` |
 | Web 结果页 | 按实际结果显示原文、译文、总结、录音、图片及人物信息 | 本仓 `web-reference/`，构建成静态文件 |
 | 数据库初始化与部署示例 | 唯一 MySQL 初始化 SQL、后端 Dockerfile 和 Compose | 本仓 `deploy/` 及根目录 `Dockerfile` |
 
-AAR 是 Android 库包。公共源码可以构建不带闭源 SDK 的 Mock（模拟）版本，供阅读和
+AAR 是 Android 库包。公共源码可以构建不带闭源设备的 Mock（模拟）版本，供阅读和
 界面调试；真实麦克风与模型联调须使用 SDK 运行模式。完整 UI 体验建议使用匹配的
-主 SDK 与 UI AAR。两者的版本及设备架构支持以配套 SDK 交付说明为准。
+设备 AAR 与 UI AAR；业务 AAR 由本仓源码构建。设备 AAR 的版本及设备架构支持以
+配套 SDK 交付说明为准。
 
 参考方案独立部署，不依赖 CZUR 的账号、业务服务、内部域名或现成的模型额度。
 第三方服务账号和资源由部署方申请与维护，真实 Key 不包含在源码或 SDK 中。
@@ -70,7 +72,7 @@ SDK 会探测设备能力：有兼容系统共享音源接口时使用该接口�
 | 资源 | 需要准备的内容 | 用途 |
 | --- | --- | --- |
 | 工程源码 | 当前参考工程完整目录 | 同时构建后端、App 和 Web |
-| SDK 交付包 | 匹配的主 SDK AAR；完整 UI 还使用 UI AAR及其说明 | 真实音频与模型运行、可复用 UI |
+| SDK 交付包 | 匹配的设备 AAR；完整 UI 还使用 UI AAR 及其说明；业务 AAR 由本仓源码构建 | 真实音频与模型运行、可复用 UI |
 | 开发电脑／服务主机 | 可被 Android 设备访问，具有可写结果目录 | 运行后端和静态 Web |
 | MySQL | MySQL 5.7 兼容实例、专用数据库及可初始化／读写的账号 | 保存会议状态与元数据 |
 | 一个实时语音服务 | 本指南默认路径使用您自己的阿里云听悟 AppKey、AccessKey ID／Secret及已开通服务 | 将真实语音转为字幕 |
@@ -219,7 +221,8 @@ bash tools/run-reference-web.sh
 
 ### 第 5 步：构建并安装真实 SDK 版本 App
 
-从 SDK 配套交付包准备两份匹配 AAR，替换以下占位路径。仍在仓库根目录执行：
+从 SDK 交付包取得设备 AAR 和可选 UI AAR，业务 AAR 由本仓 `meeting-android` 自行构建。
+替换以下占位路径后在仓库根目录执行：
 
 ```bash
 python3 tools/android-device/build-lan-apk.py \

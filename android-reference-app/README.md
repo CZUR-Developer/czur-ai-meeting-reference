@@ -19,10 +19,12 @@ Gradle 8.7 和 Android Gradle Plugin 8.5.2，目标 JVM 为 17。Android 自有�
 | `app/` | 可编辑的页面、身份与结果插件、权限、前台 Service、计时和截图时序 |
 | `model-runtime-contract/` | 模型 Adapter、会话材料、音源状态和标准事件契约 |
 | `meeting-client-core/` | 共享 Server 协议、会议编排、Adapter 注册和显示规则 |
-| 配套主 SDK AAR | 系统／标准 MIC 音源、模型直连、同源录音及截图能力；内带同源 core |
+| 配套设备 AAR（闭源） | 系统／标准 MIC 音源、同源录音及截图能力、native；不含 core 或契约 |
+| `meeting-android/`（业务 AAR） | 模型连接与会议门面；构建时注入设备 AAR，产物是宿主唯一依赖的业务 AAR |
 | 配套 UI AAR | 可选字幕控件、窗口基础管理及默认窗口实现 |
 
-主 SDK 和 UI 工具由配套交付包提供。无需访问 CZUR 产品源码仓；AAR、模型 Key、
+设备 AAR 和 UI 工具由配套交付包提供；业务 AAR 由本仓 `meeting-android/` 源码构建，
+构建时用 `-PdeviceSdkAar` 指向交付的设备 AAR。无需访问 CZUR 产品源码仓；AAR、模型 Key、
 真实会话材料和本地配置均不提交到本公开源码仓。具体功能、版本配套与供应商账户
 准备方式见[从零指南](../docs/partner-getting-started.md)。
 

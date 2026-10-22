@@ -9,17 +9,24 @@
 
 ## 构建
 
-```bash
-# 1. starry 仓先构建设备 AAR
-./gradlew :base:aiMeetingSdk:assembleRelease
+### 合作伙伴路径
 
-# 2. 本仓构建业务 AAR（设备 AAR 路径必填）
+合作伙伴从 SDK 交付包取得 `ai-meeting-device-*.aar`，不需要访问 Starry 私有仓：
+
+```bash
+# 设备 AAR 路径必填；产物是宿主唯一依赖的业务 AAR
 ./gradlew :meeting-android:assembleRelease \
-  -PdeviceSdkAar=/absolute/path/ai-meeting-sdk-0.5.0-release.aar
+  -PdeviceSdkAar=/absolute/path/ai-meeting-device-0.5.0-release.aar
 
 # 产物
 meeting-android/build/outputs/aar/meeting-android-release.aar
 ```
+
+### 内部维护路径
+
+本仓维护者需要先从 Starry 仓构建设备 AAR，再执行上面的业务 AAR 构建；
+`tools/build-meeting-business-aar.sh` 只做“设备 AAR → 业务 AAR → Starry libs”的内部同步，
+不是伙伴构建入口。
 
 AGP 不允许 Android library 直接依赖本地 `.aar` 再产出 AAR；构建时会把设备 AAR 解包成
 `classes.jar` 和 `jni/` 再打包，因此业务 AAR 是自包含的。
