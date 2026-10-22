@@ -1,6 +1,7 @@
 package com.czur.aimeeting.reference.meeting
 
 import android.content.Context
+import android.util.Log
 import com.czur.aimeeting.client.ClientIdentity
 import com.czur.aimeeting.client.MeetingClient
 import com.czur.aimeeting.client.MeetingClientConfig
@@ -35,6 +36,7 @@ import java.util.concurrent.Executor
  * 登录交互入口与身份数据来源分开替换，模型端点继续由后端下发。
  */
 object MeetingAppAssembly {
+    private const val TAG = "MeetingAppAssembly"
     private var serverUrl = ""
     private var resultWebUrl = ""
     private var identityProvider: IdentityProvider = ReferenceIdentityProvider()
@@ -51,6 +53,9 @@ object MeetingAppAssembly {
     private var pageFactory: MeetingPageViews.Factory = MeetingPageViews.DefaultFactory()
     private var applicationContext: Context? = null
     private var recoveryStore: ReferenceMeetingRecoveryStore? = null
+    /** 当前进程里正在进行的会议；页面重进触发扫描时不得当成异常原场续办。 */
+    @Volatile private var activeMeetingId: String? = null
+    private val recoveryScanning = java.util.concurrent.atomic.AtomicBoolean(false)
     private var stoppedStore: ReferenceStoppedMeetingStore? = null
 
     /**
@@ -181,13 +186,36 @@ object MeetingAppAssembly {
      * 参考实现只在页面启动触发一次，伙伴可以改到开机广播或工作队列。</p>
      */
     @JvmStatic fun resumeInterruptedMeetings(onFailure: (String) -> Unit = {}) {
+        if (!recoveryScanning.compareAndSet(false, true)) {
+            Log.i(TAG, "原场续办扫描已在进行，跳过重复触发")
+            return
+        }
+        try {
+            resumeInterruptedMeetingsOnce(onFailure)
+        } finally {
+            recoveryScanning.set(false)
+        }
+    }
+
+    /** 由会议 Service 在开始／结束会议时调用；新进程里为空，异常现场才允许续办。 */
+    @JvmStatic fun markActiveMeeting(meetingId: String?) { activeMeetingId = meetingId }
+
+    private fun resumeInterruptedMeetingsOnce(onFailure: (String) -> Unit) {
         val store: ReferenceMeetingRecoveryStore
         val context: Context
         synchronized(MeetingAppAssembly::class.java) {
             store = recoveryStore ?: return
             context = applicationContext ?: return
         }
-        val pending = try { store.pendingIds() } catch (_: Exception) { return }
+        val pendingIds = try { store.pendingIds() } catch (_: Exception) { return }
+        val active = activeMeetingId
+        Log.i(TAG, "原场续办扫描 pending=${pendingIds.size} active=$active")
+        val pending = pendingIds.filter { meetingId ->
+            if (meetingId == active) {
+                Log.i(TAG, "跳过正在进行的会议，不按异常原场续办 meetingId=$meetingId")
+                false
+            } else true
+        }
         if (pending.isEmpty()) return
         val client = MeetingRuntimeFactory.create(context, clientConfig { it.run() })
         try {

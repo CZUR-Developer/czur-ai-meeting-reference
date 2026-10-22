@@ -273,7 +273,8 @@ class MeetingService : Service() {
         stopRequested = false; presentationStopContinuation = null; returnToMeetingAfterPresentation = false
         presentationNotice = ""; announcedPresentationNotice = ""; readyResult = null; actionOutcome = null; actionRunning = false; resultHintShown = false
         visibleTextCleared = false
-        timing = null; stoppedClock = null; meetingId = null; audioInputMode = null; audioErrorText = null; audioLevel = null
+        timing = null; stoppedClock = null; meetingId = null; MeetingAppAssembly.markActiveMeeting(null)
+        audioInputMode = null; audioErrorText = null; audioLevel = null
         display = MeetingDisplaySnapshot(requested.mode() == MeetingSetup.Mode.LIVE_TRANSLATION,
             requested.sourceLanguage(), requested.targetLanguage(), false, emptyList(), null)
         transcriptVersion++; status = "正在创建会议…"; capabilityText = "本场功能将在创建会议后按后端能力显示"
@@ -284,7 +285,8 @@ class MeetingService : Service() {
             client = created
             session = created.start(requested.toOptions(), object : MeetingListener {
                 override fun onStarted(started: MeetingStarted) {
-                    meetingId = started.meetingId(); timing = MeetingTimeRule(started.startedAtMs(), started.maxMeetingDurationMs())
+                    meetingId = started.meetingId(); MeetingAppAssembly.markActiveMeeting(meetingId)
+                    timing = MeetingTimeRule(started.startedAtMs(), started.maxMeetingDurationMs())
                     reminderPresentation = MeetingReminderPresentation(); limitReminderLogged = false; idleReminderLogged = false
                     capabilityText = describeCapabilities(started.availableCapabilities())
                     if (requested.presentationCapture()) startPresentation(started.startedAtMs())
@@ -497,7 +499,10 @@ class MeetingService : Service() {
         publish()
         current.requestStop()
     }
-    private fun resultReady() { stopMeetingUi(); status = "本场结果已就绪"; publish(); executeResultAction() }
+    private fun resultReady() {
+        MeetingAppAssembly.markActiveMeeting(null)
+        stopMeetingUi(); status = "本场结果已就绪"; publish(); executeResultAction()
+    }
     fun retryResultAction() { if (actionOutcome?.status() == ResultActionOutcome.Status.FAILED) executeResultAction() }
     private fun executeResultAction() {
         val result = readyResult ?: return
@@ -576,7 +581,7 @@ class MeetingService : Service() {
         observer?.onMeetingState(state)
     }
     override fun onDestroy() {
-        destroyed = true; presentationStopContinuation = null; returnToMeetingAfterPresentation = false; observer = null
+        destroyed = true; MeetingAppAssembly.markActiveMeeting(null); presentationStopContinuation = null; returnToMeetingAfterPresentation = false; observer = null
         MeetingAppAssembly.unobserveResultUi(resultUiAvailable); audioLevel = null
         if (debugStopReceiverRegistered) {
             unregisterReceiver(debugStopReceiver); debugStopReceiverRegistered = false; Log.d(TAG, "调试正常停止命令已注销")
