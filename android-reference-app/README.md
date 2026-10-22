@@ -70,13 +70,14 @@ cp deployment.properties.example deployment.local.properties
 ```bash
 ./gradlew :app:assembleDebug :app:testDebugUnitTest \
   -PmeetingRuntime=sdk \
-  -PmeetingSdkAar=/absolute/path/ai-meeting-sdk-0.5.0-release.aar \
+  -PdeviceSdkAar=/absolute/path/ai-meeting-device-0.5.0-release.aar \
   -PmeetingUiAar=/absolute/path/ai-meeting-ui-0.2.0-release.aar
 ```
 
-`sdk` 缺少主 AAR 时配置失败。主 AAR 内带同一公共 core，App 不再依赖
-`:meeting-client-core`，避免重复类；`model-runtime-contract` 由本工程打包唯一一份。
-裸 AAR 不传递依赖元数据，App 已显式补齐 OkHttp 和截图挂起接口所需的协程运行依赖。
+`sdk` 缺少设备 AAR 时配置失败。`sdk` 模式依赖 `:meeting-android`（业务 AAR 的源码
+模块），它把设备 AAR、公共 core、契约和模型传输一起打包；App 不再单独依赖 core 或
+契约 Module。Mock 模式才从工程内引用这两个 Module。设备 AAR 只提供 MIC/Broker 采集、
+投屏截图和 native，业务层的模型/服务端通信在本模块源码里，可修改后重新构建。
 
 UI AAR 独立选择，也可用于 Mock：
 

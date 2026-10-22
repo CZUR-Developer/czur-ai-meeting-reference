@@ -80,7 +80,7 @@ val meetingRuntime = providers.gradleProperty("meetingRuntime").orElse("mock").g
 require(meetingRuntime == "mock" || meetingRuntime == "sdk") {
     "meetingRuntime must be mock or sdk"
 }
-val sdkAar = providers.gradleProperty("meetingSdkAar").orNull
+
 // UI 与音源/会议 SDK 独立选择；干净 Mock 不需要任何闭源 AAR。
 val meetingUiAar = providers.gradleProperty("meetingUiAar").orNull
 if (meetingUiAar != null) {
@@ -89,9 +89,10 @@ if (meetingUiAar != null) {
     }
 }
 val subtitleUiSource = if (meetingUiAar == null) "basic-ui" else "meeting-ui"
+val deviceSdkAar = providers.gradleProperty("deviceSdkAar").orNull
 if (meetingRuntime == "sdk") {
-    require(!sdkAar.isNullOrBlank() && file(sdkAar).isFile) {
-        "sdk mode requires -PmeetingSdkAar=/absolute/path/ai-meeting-sdk-0.5.0-release.aar"
+    require(!deviceSdkAar.isNullOrBlank() && file(deviceSdkAar).isFile) {
+        "sdk mode requires -PdeviceSdkAar=/absolute/path/ai-meeting-device-0.5.0-release.aar"
     }
 }
 
@@ -161,16 +162,14 @@ dependencies {
         implementation(files(meetingUiAar))
         testImplementation("org.robolectric:robolectric:4.16.1")
     }
-    implementation(project(":model-runtime-contract"))
     if (meetingRuntime == "mock") {
+        implementation(project(":model-runtime-contract"))
         implementation(project(":meeting-client-core"))
     }
     if (meetingRuntime == "sdk") {
-        implementation(files(sdkAar!!))
-        // SDK AAR 内带同一 core JAR；不要再次依赖 :meeting-client-core 造成重复类。
-        // 本地 AAR 文件不传递 POM 依赖；SDK 的 WebSocket 运行时需要 OkHttp。
+        // 业务 AAR 以工程依赖接入；它自带 core、契约、设备能力和模型传输。
+        implementation(project(":meeting-android"))
         implementation("com.squareup.okhttp3:okhttp:4.12.0")
-        // 本地 AAR 不携带 POM；显式补齐截图 suspend API 的同版协程运行依赖。
         implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
     }
     testImplementation("junit:junit:4.13.2")
