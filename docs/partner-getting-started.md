@@ -224,7 +224,7 @@ bash tools/run-reference-web.sh
 ```bash
 python3 tools/android-device/build-lan-apk.py \
   --host '192.0.2.10' --backend-port 8443 --web-port 8090 \
-  --sdk-aar /absolute/path/ai-meeting-sdk-0.5.0-release.aar \
+  --device-aar /absolute/path/ai-meeting-device-0.5.0-release.aar \
   --ui-aar /absolute/path/ai-meeting-ui-0.2.0-release.aar \
   --debug-ca /absolute/path/ca.pem
 

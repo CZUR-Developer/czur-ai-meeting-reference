@@ -91,12 +91,12 @@ curl --cacert "$REFERENCE_TLS_DIR/ca.pem" "https://$PC_LAN_IP:8443/v1/capabiliti
 ```bash
 python3 tools/android-device/build-lan-apk.py \
   --host "$PC_LAN_IP" --backend-port 8443 --web-port 8090 \
-  --sdk-aar /absolute/path/ai-meeting-sdk-0.5.0-release.aar \
+  --device-aar /absolute/path/ai-meeting-device-0.5.0-release.aar \
   --ui-aar /absolute/path/ai-meeting-ui-0.2.0-release.aar \
   --debug-ca "$REFERENCE_TLS_DIR/ca.pem"
 ```
 
-两份 AAR 必须版本匹配。省略 `--host` 时工具根据本机路由选址；证书仍须与最终主机
+设备 AAR 与 UI AAR 必须版本匹配；业务 AAR 由工程内模块构建。省略 `--host` 时工具根据本机路由选址；证书仍须与最终主机
 匹配，多网卡时应显式指定。已有 Web 在其他端口时传 `--web-port`，后端使用独立的
 `--backend-port`；已有完整地址时可传 `--backend-url`／`--web-url` 原样覆盖。增加
 `--dry-run` 可只查看 Gradle 参数，不执行构建。工具不启动服务、生成证书或安装 APK。
@@ -110,7 +110,7 @@ python3 tools/android-device/build-lan-apk.py \
 cd android-reference-app
 ./gradlew :app:assembleDebug \
   -PmeetingRuntime=sdk \
-  -PmeetingSdkAar=/absolute/path/ai-meeting-sdk-0.5.0-release.aar \
+  -PdeviceSdkAar=/absolute/path/ai-meeting-device-0.5.0-release.aar \
   -PmeetingUiAar=/absolute/path/ai-meeting-ui-0.2.0-release.aar \
   -PreferenceBackendUrl="https://$PC_LAN_IP:8443" \
   -PreferenceResultWebUrl="http://$PC_LAN_IP:8090/index.html" \
