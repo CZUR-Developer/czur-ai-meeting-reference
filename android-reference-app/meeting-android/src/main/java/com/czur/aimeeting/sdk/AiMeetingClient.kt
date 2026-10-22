@@ -57,6 +57,10 @@ class AiMeetingClient : MeetingClient {
 
     internal constructor(config: MeetingClientConfig, adapters: ModelAdapterRegistry,
         model: ModelRuntime, summary: SummaryRuntime, translation: TranslationRuntime = AndroidTranslationRuntime()) {
+        // 业务 AAR 与设备 AAR 是成对 ABI；混用不同版本时构建期无法发现，构造入口直接拒绝。
+        check(AiMeetingSdkVersion.VALUE == EXPECTED_DEVICE_VERSION) {
+            "业务 AAR 需要设备 AAR $EXPECTED_DEVICE_VERSION，实际 ${AiMeetingSdkVersion.VALUE}"
+        }
         delegate = MeetingCoordinator(config, adapters, object : MeetingRuntimePort {
             override fun elapsedRealtimeMs(): Long = SystemClock.elapsedRealtime()
             override fun open(grant: ModelSessionGrant?, adapter: ModelAdapter?,
@@ -84,6 +88,11 @@ class AiMeetingClient : MeetingClient {
                 input: SummaryInput): SummaryResult = summary.summarize(grant!!, adapter!!, input)
         })
     }
+    private companion object {
+        /** 本业务 AAR 编译时对应的设备 AAR 版本；升级设备 AAR 时同步更新。 */
+        const val EXPECTED_DEVICE_VERSION = "0.5.0"
+    }
+
     override fun discover(callback: MeetingClient.Callback<MeetingDiscovery>) = delegate.discover(callback)
     override fun refreshIdentity(callback: MeetingClient.Callback<IdentityResult>) = delegate.refreshIdentity(callback)
     override fun login(username: String, password: String,

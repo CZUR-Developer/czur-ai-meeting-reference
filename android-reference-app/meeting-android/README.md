@@ -43,4 +43,6 @@ AGP 不允许 Android library 直接依赖本地 `.aar` 再产出 AAR；构建�
 ## 版本与依赖
 
 - 契约 0.4.0、SDK 0.5.0；设备 AAR 与业务 AAR 成对升级。
+- 业务 AAR 构造时校验设备 AAR 的 `AiMeetingSdkVersion.VALUE` 与自身编译版本；混用不同
+  设备 AAR 会在初始化直接失败，而不是等到运行中出现 JNI／ABI 错误。
 - OkHttp 与宿主对齐：Starry 5.3.2，参考 App 5.3.2；裸 AAR 不传递 POM，宿主需显式提供 OkHttp 和协程。
