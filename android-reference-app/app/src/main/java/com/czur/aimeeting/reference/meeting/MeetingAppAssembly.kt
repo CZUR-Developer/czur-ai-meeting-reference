@@ -10,6 +10,7 @@ import com.czur.aimeeting.client.MeetingProfile
 import com.czur.aimeeting.client.MeetingDiscovery
 import com.czur.aimeeting.client.ModelAdapterRegistry
 import com.czur.aimeeting.client.RecoveryResult
+import com.czur.aimeeting.client.MeetingResult
 import com.czur.aimeeting.client.result.ResultActionRegistry
 import com.czur.aimeeting.client.result.ResultActionPlugin
 import com.czur.aimeeting.client.result.ResultOptions
@@ -207,7 +208,11 @@ object MeetingAppAssembly {
             store = recoveryStore ?: return
             context = applicationContext ?: return
         }
+        val stopped: ReferenceStoppedMeetingStore
+        synchronized(MeetingAppAssembly::class.java) { stopped = stoppedStore ?: return }
+        val pendingStopIds = try { stopped.pendingIds() } catch (_: Exception) { emptyList() }
         val pendingIds = try { store.pendingIds() } catch (_: Exception) { return }
+            .filter { it !in pendingStopIds }
         val active = activeMeetingId
         Log.i(TAG, "原场续办扫描 pending=${pendingIds.size} active=$active")
         val pending = pendingIds.filter { meetingId ->
@@ -216,9 +221,38 @@ object MeetingAppAssembly {
                 false
             } else true
         }
-        if (pending.isEmpty()) return
+        Log.i(TAG, "原场停止记录待续办 pending=$pendingStopIds")
+        if (pending.isEmpty() && pendingStopIds.isEmpty()) return
         val client = MeetingRuntimeFactory.create(context, clientConfig { it.run() })
         try {
+            for (meetingId in pendingStopIds) {
+                val finished = CountDownLatch(1)
+                var resumed = false
+                Log.i(TAG, "原场停止收尾请求 meetingId=$meetingId")
+                try {
+                    client.resumeFinalization(meetingId, object : MeetingClient.Callback<MeetingResult> {
+                        override fun onSuccess(result: MeetingResult) {
+                            resumed = true
+                            Log.i(TAG, "原场停止收尾续办完成 meetingId=$meetingId")
+                            finished.countDown()
+                        }
+                        override fun onError(message: String) {
+                            Log.w(TAG, "原场停止收尾续办未完成 meetingId=$meetingId")
+                            finished.countDown()
+                        }
+                    })
+                    finished.await()
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return
+                } catch (failure: RuntimeException) {
+                    Log.w(TAG, "原场停止收尾请求异常 meetingId=$meetingId class=${failure.javaClass.simpleName}")
+                }
+                if (resumed) {
+                    stopped.delete(meetingId)
+                    store.delete(meetingId)
+                } else onFailure(meetingId)
+            }
             for (meetingId in pending) {
                 val finished = CountDownLatch(1)
                 var recovered = false

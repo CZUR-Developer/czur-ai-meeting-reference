@@ -60,6 +60,19 @@ class ReferenceStoppedMeetingStore(context: Context) : StoppedMeetingStore {
             if (json.isNull("genTime")) null else json.getLong("genTime")))
     }
 
+    /** 尚未收口到 READY 的停止记录；交给 resumeFinalization 逐场推进。 */
+    @Synchronized
+    @Throws(IOException::class)
+    fun pendingIds(): List<String> = directory.listFiles { file -> file.isFile && file.extension == "json" }
+        ?.filter { file ->
+            val saved = read(file.nameWithoutExtension)
+            saved.isPresent && saved.get().phase() != StoppedMeetingCheckpoint.Phase.READY
+        }?.map { it.nameWithoutExtension }?.sorted().orEmpty()
+
+    /** READY 后删除停止记录；失败保留，下次启动继续。 */
+    @Synchronized
+    fun delete(checkpointId: String) { file(checkpointId).delete() }
+
     private fun persist(checkpoint: StoppedMeetingCheckpoint) {
         val context = checkpoint.context()
         val audio = context.audio()
