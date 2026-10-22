@@ -116,6 +116,19 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    buildTypes {
+        // 最小混淆构建用于验证 AAR 的消费端规则；默认关闭，验证时传 -PreferenceMinify。
+        // debug 变体保留局域网调试 CA，release 的调试 CA 只用于可信部署。
+        debug {
+            isMinifyEnabled = providers.gradleProperty("referenceMinify").isPresent
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
+        }
+        release {
+            isMinifyEnabled = providers.gradleProperty("referenceMinify").isPresent
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
+        }
+    }
+
     sourceSets.getByName("main").java.srcDir("src/$meetingRuntime/java")
     sourceSets.getByName("test").java.srcDir("src/test/$meetingRuntime/java")
     if (meetingRuntime == "sdk") {

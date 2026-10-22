@@ -41,6 +41,10 @@ android {
     defaultConfig {
         // 与设备 AAR 和现有 CZUR App 保持一致；参考 App 的 34 由应用自身决定。
         minSdk = 31
+        if (unpackDeviceAar != null) {
+            // 设备 AAR 的 JNI 保留规则必须作为消费端规则继续传递给宿主；只解包不打包等于丢了。
+            consumerProguardFiles(deviceUnpacked.map { it.file("proguard.txt") })
+        }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

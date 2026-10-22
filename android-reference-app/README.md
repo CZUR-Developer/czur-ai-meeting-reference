@@ -74,6 +74,10 @@ cp deployment.properties.example deployment.local.properties
   -PmeetingUiAar=/absolute/path/ai-meeting-ui-0.2.0-release.aar
 ```
 
+最小混淆验证：传 `-PreferenceMinify` 会开启 debug／release 的 R8，用来检查业务 AAR 的
+消费端规则；局域网自签 CA 只在 debug 变体信任，验 JNI 和业务规则用 debug 变体，release
+只用于已有可信 HTTPS 的部署。
+
 `sdk` 缺少设备 AAR 时配置失败。`sdk` 模式依赖 `:meeting-android`（业务 AAR 的源码
 模块），它把设备 AAR、公共 core、契约和模型传输一起打包；App 不再单独依赖 core 或
 契约 Module。Mock 模式才从工程内引用这两个 Module。设备 AAR 只提供 MIC/Broker 采集、
