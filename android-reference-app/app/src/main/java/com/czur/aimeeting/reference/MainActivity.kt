@@ -304,7 +304,15 @@ class MainActivity : Activity() {
         setConfigurationEnabled(!meetingBusy)
         if (!loggedIn) {
             deploymentCapabilities = emptySet(); discovery = null; refreshLanguageOptions(emptyList())
-            if (!meetingBusy && !hasReadyResult) statusView.text = identity.message()
+            if (!meetingBusy && !hasReadyResult) {
+                // SDK 只回状态码；参考宿主自己决定未登录时的提示话术。
+                statusView.text = when (identity.status()) {
+                    IdentityResult.Status.LOGIN_REQUIRED ->
+                        identity.message().ifBlank { "请先登录" }
+                    IdentityResult.Status.READ_FAILED -> "读取登录状态失败，请稍后重试"
+                    else -> ""
+                }
+            }
         }
         refreshResultAvailability(); refreshModeAvailability()
         updateStartAvailability()

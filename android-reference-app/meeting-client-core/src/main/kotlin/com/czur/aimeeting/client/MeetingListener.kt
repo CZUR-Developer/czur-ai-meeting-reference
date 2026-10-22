@@ -22,7 +22,12 @@ interface MeetingListener {
      * 通知经串行执行器；停止后不再通知，App 在停止状态复位 UI。
      */
     fun onAudioLevel(level: AudioInputLevel) {}
-    /** SDK 不申请权限或重试；输入错误后仍可正常停止，但不主动交付结果。 */
+    /**
+     * SDK 不申请权限或重试；输入错误后仍可正常停止，但不主动交付结果。
+     * 宿主应重写本方法并按码映射文案；原因只写 SDK 日志。
+     */
+    fun onAudioError(code: AudioInputErrorCode) { onAudioError(code, code.name) }
+    /** 旧入口；新代码只回错误码名称，不再回 SDK 文案。 */
     fun onAudioError(code: AudioInputErrorCode, message: String) {}
     /**
      * App 停截图 tick，异步完成最后截图及保存确认后调用 continuation；无采集时直接调用。

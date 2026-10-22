@@ -21,7 +21,7 @@ interface MeetingClient : AutoCloseable {
      * 使用原身份；部署可在身份扩展中批准同账号续签。默认在调用线程明确报告不支持。
      */
     fun resumeFinalization(checkpointId: String, callback: Callback<MeetingResult>) {
-        callback.onError("当前会议客户端未实现停止记录续办")
+        callback.onError(MeetingError(MeetingErrorCode.STOP_STORE_MISSING))
     }
     /**
      * 续办进程异常退出留下的原场：用本机现场重建封口录音事实，补交缺失的标准纪要，
@@ -29,14 +29,23 @@ interface MeetingClient : AutoCloseable {
      * 未确认现场保留。默认在调用线程明确报告不支持。
      */
     fun recoverInterrupted(meetingId: String, callback: Callback<RecoveryResult>) {
-        callback.onError("当前会议客户端未实现原场现场续办")
+        callback.onError(MeetingError(MeetingErrorCode.RECOVERY_STORE_MISSING))
     }
     /** 取消并释放当前会议，关闭后不可重用；不做正常 Stop，不产生 READY。 */
     override fun close()
 
-    /** 结果及可读错误，不返回 HTTP／模型正文；Void 成功值允许为 null。 */
+    /**
+     * 结果及稳定错误码，不返回 HTTP／模型正文，也不返回面向终端用户的句子；
+     * Void 成功值允许为 null。宿主按 [MeetingError.code] 映射自身文案和交互。
+     */
     interface Callback<T> {
         fun onSuccess(result: T)
+        /**
+         * 旧入口：保留给宿主插件传递自己的错误文本；SDK 自身不再调用，
+         * SDK 只通过 [onError(error: MeetingError)] 回稳定错误码。
+         */
         fun onError(message: String)
+        /** 宿主应重写本方法；默认转旧入口，保证既有实现仍能收到通知。 */
+        fun onError(error: MeetingError) { onError(error.code.name) }
     }
 }

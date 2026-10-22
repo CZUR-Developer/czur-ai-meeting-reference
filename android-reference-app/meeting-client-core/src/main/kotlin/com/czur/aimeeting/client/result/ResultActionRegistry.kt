@@ -1,5 +1,8 @@
 package com.czur.aimeeting.client.result
 
+import com.czur.aimeeting.client.MeetingError
+import com.czur.aimeeting.client.MeetingErrorCode
+
 import com.czur.aimeeting.client.MeetingClient
 import com.czur.aimeeting.client.MeetingDiscovery
 import com.czur.aimeeting.client.MeetingOptions
@@ -52,18 +55,18 @@ class ResultActionRegistry(plugins: List<ResultActionPlugin>) {
         }
         context.uiExecutor().execute {
             if (!context.result().artifactTypes().containsAll(action.requiredArtifactTypes())) {
-                completion.onError("本场未产生所选动作需要的结果产物")
+                completion.onError(MeetingError(MeetingErrorCode.RESULT_ARTIFACT_MISSING))
                 return@execute
             }
             if (!context.serviceCapabilities().containsAll(action.requiredServiceCapabilities())) {
-                completion.onError("当前部署尚未提供所选结果服务")
+                completion.onError(MeetingError(MeetingErrorCode.RESULT_SERVICE_UNAVAILABLE))
                 return@execute
             }
             LOG.info("结果动作开始 id=${action.id()}")
             try { action.execution().execute(context, completion) }
             catch (failure: RuntimeException) {
                 LOG.warning("结果动作失败 id=${action.id()} type=${failure.javaClass.simpleName}")
-                completion.onError("结果动作执行失败，请再次执行")
+                completion.onError(MeetingError(MeetingErrorCode.RESULT_ACTION_FAILED))
             }
         }
     }

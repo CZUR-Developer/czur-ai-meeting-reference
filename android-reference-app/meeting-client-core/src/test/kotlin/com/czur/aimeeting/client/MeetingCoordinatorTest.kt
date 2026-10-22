@@ -93,7 +93,7 @@ class MeetingCoordinatorTest {
             f.runtime.failTranslationOnce = true
             f.start(MeetingOptions.Mode.LIVE_TRANSLATION, MeetingOptions.ResultDelivery.WEB, false)
             f.runtime.emit("one", 1, "zh-CN", "需要保留原文", true)
-            f.probe.awaitMessage("独立翻译尚未完成")
+            f.probe.awaitNotice(MeetingNotice.TRANSLATION_PENDING)
             f.session.requestStop()
             assertNotNull(f.probe.result())
             assertEquals(2, f.runtime.translationInputs.size)
@@ -344,7 +344,7 @@ class MeetingCoordinatorTest {
             assertNotNull(f.probe.result())
             assertNull("没有最终字幕不调用总结运行时", f.runtime.summaryInput)
             assertTrue("不添加占位字幕或伪总结", f.server.transcripts.isEmpty())
-            assertTrue(f.probe.states.any { value -> value.message().contains("没有最终字幕") })
+            assertTrue(f.probe.states.any { value -> value.notice() == MeetingNotice.NO_FINAL_TRANSCRIPT })
             assertSame(sealed, publisher.contexts.get(0).audio())
             assertEquals(listOf(1000L), f.server.usages)
             assertEquals(1, f.runtime.stopCalls)
@@ -356,7 +356,7 @@ class MeetingCoordinatorTest {
     @Test fun retainAudioWithoutRuntimeIsRejectedBeforeCreate() {
         Fixture(true, ALL, ReferenceIdentityProvider("fixture-token"), Publisher()).use { f ->
             f.session = f.client.start(retainedOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT), f.probe)
-            assertTrue(f.probe.awaitPhase(MeetingSessionState.Phase.FAILED).message().contains("同源录音"))
+            assertTrue(f.probe.awaitPhase(MeetingSessionState.Phase.FAILED).errorCode() == MeetingErrorCode.AUDIO_RETAIN_UNSUPPORTED)
             assertTrue(f.server.steps.isEmpty())
             assertEquals(0, f.runtime.openCalls)
         }
@@ -366,7 +366,7 @@ class MeetingCoordinatorTest {
         Fixture(true, ALL).use { f ->
             f.runtime.retainedAudioSupported = true
             f.session = f.client.start(retainedOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT), f.probe)
-            assertTrue(f.probe.awaitPhase(MeetingSessionState.Phase.FAILED).message().contains("产物发布"))
+            assertTrue(f.probe.awaitPhase(MeetingSessionState.Phase.FAILED).errorCode() == MeetingErrorCode.AUDIO_RETAIN_UNSUPPORTED)
             assertTrue(f.server.steps.isEmpty())
             assertEquals(0, f.runtime.openCalls)
         }
@@ -421,9 +421,9 @@ class MeetingCoordinatorTest {
             val revision: TranscriptEvent = TranscriptEvent("s1", 2, 0, 200, "zh-CN", "原文修订", true)
             f.server.failAppend = true
             f.runtime.transcripts.onTranscript(first)
-            assertEquals(0, f.probe.awaitMessage("尚未确认").savedEventCount())
+            assertEquals(0, f.probe.awaitNotice(MeetingNotice.TRANSCRIPT_UNCONFIRMED).savedEventCount())
             f.runtime.listener.onTranslation(translation)
-            f.probe.awaitMessage("尚未确认")
+            f.probe.awaitNotice(MeetingNotice.TRANSCRIPT_UNCONFIRMED)
             assertEquals("失败队首未确认前不发送后续译文", listOf(
                     "discover", "create", "grant", "start", "event1", "event1"), f.server.steps)
             f.server.failAppend = false
@@ -452,7 +452,7 @@ class MeetingCoordinatorTest {
                     "zh-CN", "en-US", "Confirmed source", true)
             f.server.failAppend = true
             f.runtime.listener.onTranslation(translation)
-            assertEquals(1, f.probe.awaitMessage("尚未确认").savedEventCount())
+            assertEquals(1, f.probe.awaitNotice(MeetingNotice.TRANSCRIPT_UNCONFIRMED).savedEventCount())
             f.server.failAppend = false
             f.runtime.emit("s2", 1, "zh-CN", "恢复后的原文", true)
             f.probe.awaitSavedEvents(2)
@@ -1078,6 +1078,26 @@ class MeetingCoordinatorTest {
         } finally { dir.deleteRecursively() }
     }
 
+    @Test fun meetingOptionsCarryAudioMixToRuntime() {
+        Fixture(true, ALL, ReferenceIdentityProvider("test-token"), Publisher()).use { f ->
+            val options = MeetingOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT, "zh-CN", "en-US", false,
+                MeetingOptions.ResultDelivery.WEB, "https://result.example.test/index.html",
+                listOf("recipient@example.test"))
+                .withAudioMix(AudioMixOptions(capturePlayback = false, micGainPercent = 80, playbackGainPercent = 120))
+            f.start(options)
+            assertEquals(AudioMixOptions(false, 80, 120), f.runtime.audioMix)
+        }
+    }
+
+    @Test fun audioMixDefaultsAndRangeAreEnforced() {
+        val options = MeetingOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT, "zh-CN", "en-US", false,
+            MeetingOptions.ResultDelivery.WEB, "https://result.example.test/index.html",
+            listOf("recipient@example.test"))
+        assertEquals(AudioMixOptions(), options.audioMix())
+        assertThrows(IllegalArgumentException::class.java) { AudioMixOptions(micGainPercent = 401) }
+        assertThrows(IllegalArgumentException::class.java) { AudioMixOptions(playbackGainPercent = -1) }
+    }
+
     private fun resumeResult(client: MeetingClient): CompletableFuture<MeetingResult> {
         val result = CompletableFuture<MeetingResult>()
         client.resumeFinalization("mtg_test", resultCallback(result))
@@ -1303,7 +1323,7 @@ class MeetingCoordinatorTest {
             assertEquals(IdentityResult.Status.LOGIN_REQUIRED, refreshed.poll(2, TimeUnit.SECONDS).status())
             f.session = f.client.start(options(MeetingOptions.Mode.LIVE_TRANSCRIPT,
                     MeetingOptions.ResultDelivery.WEB, false), f.probe)
-            assertEquals("请先登录", f.probe.awaitPhase(MeetingSessionState.Phase.FAILED).message())
+            assertEquals(MeetingErrorCode.LOGIN_REQUIRED, f.probe.awaitPhase(MeetingSessionState.Phase.FAILED).errorCode())
             assertTrue(f.server.steps.isEmpty())
             assertNull(f.sessionToken)
         }
@@ -1337,10 +1357,11 @@ class MeetingCoordinatorTest {
             f.client.refreshIdentity(identityCallback(refreshed))
             val identity: IdentityResult = refreshed.poll(2, TimeUnit.SECONDS)
             assertEquals(IdentityResult.Status.READ_FAILED, identity.status())
-            assertEquals("读取登录状态失败，请稍后重试", identity.message())
+            assertEquals(IdentityResult.Status.READ_FAILED, identity.status())
+            assertEquals("", identity.message())
             f.session = f.client.start(options(MeetingOptions.Mode.LIVE_TRANSCRIPT,
                     MeetingOptions.ResultDelivery.WEB, false), f.probe)
-            assertEquals(identity.message(), f.probe.awaitPhase(MeetingSessionState.Phase.FAILED).message())
+            assertEquals(MeetingErrorCode.LOGIN_REQUIRED, f.probe.awaitPhase(MeetingSessionState.Phase.FAILED).errorCode())
             assertTrue(f.server.steps.isEmpty())
             assertEquals(1, f.runtime.started.count)
         }
@@ -1463,7 +1484,7 @@ class MeetingCoordinatorTest {
             f.session.submitPresentation(10000, ByteArray(786381), resultCallback(oversized))
             val failure: ExecutionException = assertThrows(ExecutionException::class.java,
                     { oversized.get(2, TimeUnit.SECONDS) })
-            assertTrue(failure.cause!!.message!!.contains("1MiB"))
+            assertEquals("PRESENTATION_TOO_LARGE", failure.cause!!.message)
             assertTrue(f.server.captures.isEmpty())
             val valid: CompletableFuture<Void?> = CompletableFuture()
             f.session.submitPresentation(2000, byteArrayOf(1), resultCallback(valid))
@@ -1816,6 +1837,9 @@ class MeetingCoordinatorTest {
         object : MeetingClient.Callback<T> {
             override fun onSuccess(result: T) { future.complete(result) }
             override fun onError(message: String) { future.completeExceptionally(IOException(message)) }
+            override fun onError(error: MeetingError) {
+                future.completeExceptionally(IOException(error.code.name))
+            }
         }
 
     private class Fixture(
@@ -1945,11 +1969,11 @@ class MeetingCoordinatorTest {
                 if (next!!.phase() == phase) return next
             }
         }
-        fun awaitMessage(text: String): MeetingSessionState {
+        fun awaitNotice(notice: MeetingNotice): MeetingSessionState {
             while (true) {
                 val next = states.poll(3, TimeUnit.SECONDS)
                 assertNotNull("应收到事件保存状态", next)
-                if (next!!.message().contains(text)) return next
+                if (next!!.notice() == notice) return next
             }
         }
         fun awaitSavedEvents(count: Int) {
@@ -1997,6 +2021,7 @@ class MeetingCoordinatorTest {
         var grant: ModelSessionGrant? = null
         var adapter: ModelAdapter? = null
         var reconnector: ModelSessionReconnector? = null
+        var audioMix: AudioMixOptions? = null
         var summaryInput: SummaryInput? = null
         @Volatile var stopCalls = 0
         var emitTail = false
@@ -2029,6 +2054,12 @@ class MeetingCoordinatorTest {
             listener: ModelSessionListener, retainAudio: Boolean, reconnector: ModelSessionReconnector?): ModelSession {
             this.reconnector = reconnector
             return open(grant, adapter, transcripts, listener, retainAudio)
+        }
+        override fun openWithAudioMix(grant: ModelSessionGrant?, adapter: ModelAdapter?,
+            transcripts: TranscriptListener, listener: ModelSessionListener, retainAudio: Boolean,
+            reconnector: ModelSessionReconnector?, audioMix: AudioMixOptions): ModelSession {
+            this.audioMix = audioMix
+            return open(grant, adapter, transcripts, listener, retainAudio, reconnector)
         }
         override fun open(grant: ModelSessionGrant?, adapter: ModelAdapter?, transcripts: TranscriptListener,
             listener: ModelSessionListener, retainAudio: Boolean): ModelSession {

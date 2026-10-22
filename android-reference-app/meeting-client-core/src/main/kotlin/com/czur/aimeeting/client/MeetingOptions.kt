@@ -25,6 +25,8 @@ data class MeetingOptions(
     // 主构造器保持原十二参，连同 Kotlin 生成的 copy／copy$default 保留原 JVM 签名，
     // 已编译的 SDK／伙伴调用方可继续消费新版 core；赋值入口只在下方两个复制方法内。
     private var requestedCapabilitiesOverride: List<String>? = null
+    /** 本场共享音频混流选项；不进入 Create 请求，只影响设备端采集。 */
+    private var audioMixOptions: AudioMixOptions = AudioMixOptions()
 
     constructor(mode: Mode, sourceLanguage: String, targetLanguage: String,
         presentationCapture: Boolean, resultDelivery: ResultDelivery, resultWebUrl: String,
@@ -68,6 +70,19 @@ data class MeetingOptions(
     fun title(): String? = title
     fun timezone(): String = timezone
     fun retainAudio(): Boolean = retainAudio
+    /** 本场共享音频混流选项；默认开启播放捕获、两路增益 100。 */
+    fun audioMix(): AudioMixOptions = audioMixOptions
+
+    /**
+     * 只替换本场音频混流选项，不改建会参数、能力协商或结果动作。
+     * 选项只作用于设备端音源，不进入 Create 请求；老调用方不设置时沿用默认值。
+     */
+    fun withAudioMix(options: AudioMixOptions): MeetingOptions =
+        MeetingOptions(mode, sourceLanguage, targetLanguage, presentationCapture, resultDelivery,
+            resultWebUrl, resultEmails, summaryEnabled, resultOptions, title, timezone, retainAudio).also {
+            it.requestedCapabilitiesOverride = requestedCapabilitiesOverride
+            it.audioMixOptions = options
+        }
 
     /**
      * 仅复制建会参数，不改变其他会前选择；title 可为空由 HTTP 省略，不启动或保证录音。
@@ -82,6 +97,7 @@ data class MeetingOptions(
                     retainAudio || capability != MeetingCapabilityState.SPEAKER_IDENTITY_CROSS_MEETING
                 })
             }
+            it.audioMixOptions = audioMixOptions
         }
 
     /**
@@ -105,13 +121,14 @@ data class MeetingOptions(
                     availableCapabilities.contains(MeetingCapabilityState.SPEAKER_IDENTITY_CROSS_MEETING))
                     add(MeetingCapabilityState.SPEAKER_IDENTITY_CROSS_MEETING)
             })
+            it.audioMixOptions = audioMixOptions
         }
 
-    enum class Mode(private val displayName: String, private val requiredCapability: String) {
-        LIVE_TRANSCRIPT("实时字幕", MeetingCapabilityState.TRANSCRIPT),
-        MEETING_MINUTES("AI 会议纪要", MeetingCapabilityState.SUMMARY),
-        LIVE_TRANSLATION("现场互译", MeetingCapabilityState.TRANSLATION);
-        fun displayName(): String = displayName
+    /** 模式只作为枚举交给宿主，SDK 不携带面向终端用户的名称。 */
+    enum class Mode(private val requiredCapability: String) {
+        LIVE_TRANSCRIPT(MeetingCapabilityState.TRANSCRIPT),
+        MEETING_MINUTES(MeetingCapabilityState.SUMMARY),
+        LIVE_TRANSLATION(MeetingCapabilityState.TRANSLATION);
         fun requiredCapability(): String = requiredCapability
     }
     enum class ResultDelivery { WEB, LOCAL, EMAIL, TRACELESS }

@@ -29,6 +29,14 @@ interface MeetingRuntimePort {
     fun open(grant: ModelSessionGrant?, adapter: ModelAdapter?, transcripts: TranscriptListener,
         listener: ModelSessionListener, retainAudio: Boolean, reconnector: ModelSessionReconnector?): ModelSession =
         open(grant, adapter, transcripts, listener, retainAudio)
+    /**
+     * 本场共享音频混流选项；默认委托旧六参，Mock 与未装配共享流的运行时忽略该参数。
+     * Android 实现把它交给音源，打开系统共享流时按场决定是否混入播放及两路增益。
+     */
+    fun openWithAudioMix(grant: ModelSessionGrant?, adapter: ModelAdapter?, transcripts: TranscriptListener,
+        listener: ModelSessionListener, retainAudio: Boolean, reconnector: ModelSessionReconnector?,
+        audioMix: AudioMixOptions): ModelSession =
+        open(grant, adapter, transcripts, listener, retainAudio, reconnector)
     @Throws(IOException::class)
     fun summarize(grant: SummarySessionGrant?, adapter: SummaryAdapter?, input: SummaryInput): SummaryResult
 }

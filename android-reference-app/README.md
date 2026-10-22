@@ -206,7 +206,7 @@ SDK 主动探测平台与兼容接口，通过 `onAudioInputMode(AudioInputMode)
 会前语言、模型语种、片段状态和交换操作决定左右栏；App 只消费 `onDisplay`。
 无当前方向和不支持方向分别处理，既有片段不会随新句重新搬栏。
 
-`onAudioError` 返回 `PERMISSION_DENIED`、开流或读取失败等类型化错误。
+`onAudioError(code)` 只回 `PERMISSION_DENIED`、开流或读取失败等类型化错误码，原因只写 SDK 日志。
 SDK 不申请权限；App 开始入口申请 `RECORD_AUDIO`，Service 不从后台弹权限框。
 同流 `onAudioLevel` 返回 0～100 电平及单调测量时刻；它基于 RMS，约 300ms 通知一次，
 用于声音图显示，不表示环境分贝，也不决定发言、结果事件或计费。停止时 UI 复位。

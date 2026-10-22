@@ -295,7 +295,7 @@ class MeetingService : Service() {
                     val enteringRunning = next.phase() == MeetingSessionState.Phase.RUNNING && !active && !stopRequested
                     active = next.active() && !stopRequested; canStop = next.canStop()
                     if (next.phase() != MeetingSessionState.Phase.RUNNING) audioLevel = null
-                    status = next.message()
+                    status = describeState(next)
                     Log.d(TAG, "组合会议状态 phase=${next.phase()} savedEventCount=${next.savedEventCount()}")
                     if (enteringRunning) showOverlay()
                     when (next.phase()) {
@@ -305,7 +305,7 @@ class MeetingService : Service() {
                             stopMeetingPresentation()
                             publish()
                         }
-                        MeetingSessionState.Phase.FAILED, MeetingSessionState.Phase.ENDED, MeetingSessionState.Phase.CLOSED -> finishWithStatus(next.message())
+                        MeetingSessionState.Phase.FAILED, MeetingSessionState.Phase.ENDED, MeetingSessionState.Phase.CLOSED -> finishWithStatus(describeState(next))
                         MeetingSessionState.Phase.READY -> resultReady()
                         else -> publish()
                     }
@@ -339,6 +339,38 @@ class MeetingService : Service() {
         }
     }
     /** 只投影 SDK 快照，不修改它的分栏、标准事件或结果历史。 */
+    /** SDK 只回阶段/提示/错误码；参考宿主自己决定展示文本。 */
+    private fun describeState(state: MeetingSessionState): String {
+        state.errorCode()?.let { code ->
+            return when (code) {
+                MeetingErrorCode.LOGIN_REQUIRED -> "请先登录"
+                MeetingErrorCode.AUDIO_RETAIN_UNSUPPORTED -> "当前宿主未装配同源录音"
+                MeetingErrorCode.START_FAILED -> "会议启动失败"
+                MeetingErrorCode.MODEL_START_FAILED -> "模型会话打开失败"
+                else -> "操作失败"
+            }
+        }
+        state.notice()?.let { notice ->
+            return when (notice) {
+                MeetingNotice.AUDIO_INPUT_ENDED -> "音频输入已结束"
+                MeetingNotice.MODEL_SESSION_ENDED -> "模型会话已结束"
+                MeetingNotice.TRANSLATION_PENDING -> "翻译尚未完成"
+                MeetingNotice.TRANSCRIPT_UNCONFIRMED -> "字幕尚未确认"
+                MeetingNotice.STOP_RETRY_REQUIRED -> "请再次确认停止"
+                MeetingNotice.NO_FINAL_TRANSCRIPT -> "没有最终字幕，纪要不会生成"
+            }
+        }
+        return when (state.phase()) {
+            MeetingSessionState.Phase.CREATING -> "正在创建会议"
+            MeetingSessionState.Phase.RUNNING -> "会议进行中"
+            MeetingSessionState.Phase.STOPPING -> "正在停止"
+            MeetingSessionState.Phase.STOP_PENDING -> "正在等待停止确认"
+            MeetingSessionState.Phase.FINALIZING -> "正在保存结果"
+            MeetingSessionState.Phase.READY -> "结果已就绪"
+            else -> ""
+        }
+    }
+
     private fun updateDisplay(next: MeetingDisplaySnapshot) {
         display = if (visibleTextCleared) withoutVisibleText(next) else next
         transcriptVersion++

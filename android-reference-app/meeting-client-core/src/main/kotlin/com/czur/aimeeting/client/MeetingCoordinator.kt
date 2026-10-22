@@ -88,7 +88,7 @@ class MeetingCoordinator(
             } catch (failure: Exception) {
                 if (failure !is IOException && failure !is RuntimeException) throw failure
                 logFailure("部署能力发现", failure)
-                notifyClient { callback.onError("读取部署能力失败") }
+                notifyClient { callback.onError(MeetingError(MeetingErrorCode.DISCOVERY_FAILED)) }
             }
         }
     }
@@ -104,14 +104,14 @@ class MeetingCoordinator(
         catch (failure: Exception) {
             if (failure !is IOException && failure !is RuntimeException) throw failure
             logFailure("身份读取", failure)
-            IdentityResult.readFailed("读取登录状态失败，请稍后重试")
+            IdentityResult.readFailed()
         }
     override fun login(username: String, password: String, callback: MeetingClient.Callback<ReferenceLoginSession>) {
         requireOpen()
         io.execute {
             val identityProvider = config.identityProvider()
             if (identityProvider !is LoginIdentityProvider) {
-                notifyClient { callback.onError("请使用当前身份来源的应用登录入口") }
+                notifyClient { callback.onError(MeetingError(MeetingErrorCode.IDENTITY_ENTRY_MISMATCH)) }
                 return@execute
             }
             try {
@@ -123,7 +123,7 @@ class MeetingCoordinator(
             } catch (failure: Exception) {
                 if (failure !is IOException && failure !is RuntimeException) throw failure
                 logFailure("终端用户登录", failure)
-                notifyClient { callback.onError("登录失败，请检查账号和部署地址") }
+                notifyClient { callback.onError(MeetingError(MeetingErrorCode.LOGIN_FAILED)) }
             }
         }
     }
@@ -138,15 +138,15 @@ class MeetingCoordinator(
     @Synchronized override fun resumeFinalization(checkpointId: String, callback: MeetingClient.Callback<MeetingResult>) {
         requireOpen()
         val store = config.stoppedMeetingStore()
-        if (store.isEmpty) { notifyClient { callback.onError("当前部署未装配停止记录续办") }; return }
+        if (store.isEmpty) { notifyClient { callback.onError(MeetingError(MeetingErrorCode.STOP_STORE_MISSING)) }; return }
         if (resumingFinalization || recovering || current != null && !current!!.done) {
-            notifyClient { callback.onError("已有会议或原场收尾正在进行") }
+            notifyClient { callback.onError(MeetingError(MeetingErrorCode.BUSY)) }
             return
         }
         resumingFinalization = true
         io.execute {
             var result: MeetingResult? = null
-            var error: String? = null
+            var errorCode: MeetingErrorCode? = null
             try {
                 if (closed) return@execute
                 var checkpoint = store.get().read(checkpointId).orElseThrow { IOException("原场停止记录不存在") }
@@ -162,13 +162,13 @@ class MeetingCoordinator(
             } catch (failure: Exception) {
                 if (failure !is IOException && failure !is RuntimeException) throw failure
                 logFailure("续办原场停止收尾", failure)
-                error = "原场收尾尚未完成，请检查登录和连接后再次续办"
+                errorCode = MeetingErrorCode.FINALIZATION_FAILED
             } finally { synchronized(this) { resumingFinalization = false } }
             // 先释放互斥，再回调，允许宿主在回调中开始下一场。
             val actual = result
-            val message = error
+            val code = errorCode
             if (actual != null) notifyClient { callback.onSuccess(actual) }
-            else if (message != null) notifyClient { callback.onError(message) }
+            else if (code != null) notifyClient { callback.onError(MeetingError(code)) }
         }
     }
     @Synchronized override fun recoverInterrupted(meetingId: String, callback: MeetingClient.Callback<RecoveryResult>) {
@@ -176,17 +176,17 @@ class MeetingCoordinator(
         val recoveryStore = config.meetingRecoveryStore()
         val stoppedStore = config.stoppedMeetingStore()
         if (recoveryStore.isEmpty || stoppedStore.isEmpty) {
-            notifyClient { callback.onError("当前部署未装配原场现场续办") }
+            notifyClient { callback.onError(MeetingError(MeetingErrorCode.RECOVERY_STORE_MISSING)) }
             return
         }
         if (resumingFinalization || recovering || current != null && !current!!.done) {
-            notifyClient { callback.onError("已有会议或原场收尾正在进行") }
+            notifyClient { callback.onError(MeetingError(MeetingErrorCode.BUSY)) }
             return
         }
         recovering = true
         io.execute {
             var outcome: RecoveryResult? = null
-            var error: String? = null
+            var errorCode: MeetingErrorCode? = null
             try {
                 if (closed) return@execute
                 val record = recoveryStore.get().read(meetingId)
@@ -218,13 +218,13 @@ class MeetingCoordinator(
             } catch (failure: Exception) {
                 if (failure !is IOException && failure !is RuntimeException) throw failure
                 logFailure("原场现场续办", failure)
-                error = "原场续办尚未完成，请检查登录和连接后再次续办"
+                errorCode = MeetingErrorCode.RECOVERY_FAILED
             } finally { synchronized(this) { recovering = false } }
             // 先释放互斥，再回调，允许宿主在回调中处理下一场。
             val actual = outcome
-            val message = error
+            val code = errorCode
             if (actual != null) notifyClient { callback.onSuccess(actual) }
-            else if (message != null) notifyClient { callback.onError(message) }
+            else if (code != null) notifyClient { callback.onError(MeetingError(code)) }
         }
     }
     /**
@@ -353,26 +353,31 @@ class MeetingCoordinator(
         private val translating = HashSet<TranslationInput>()
 
         private fun notifyListener(task: Runnable) { notifyClient { if (!cancelled) task.run() } }
-        private fun publish(message: String) {
-            if (phase != lastLoggedPhase) { LOG.info("会议状态 $phase：$message"); lastLoggedPhase = phase }
-            val snapshot = MeetingSessionState(phase, meetingId, available, savedEvents, active, canStop, message)
+        private fun publish(notice: MeetingNotice? = null, errorCode: MeetingErrorCode? = null) {
+            if (phase != lastLoggedPhase) {
+                LOG.info("会议状态 $phase" + (notice?.let { " notice=$it" } ?: "") +
+                    (errorCode?.let { " error=$it" } ?: ""))
+                lastLoggedPhase = phase
+            }
+            val snapshot = MeetingSessionState(phase, meetingId, available, savedEvents, active, canStop,
+                notice, errorCode)
             notifyListener { listener.onState(snapshot) }
         }
         private fun showDisplay() { val snapshot = display.snapshot(); notifyListener { listener.onDisplay(snapshot) } }
         fun begin() {
             if (cancelled || closed) return
             if (options.retainAudio() && !canPublishRetainedAudio()) {
-                failStart("本场音频保留需要装配同源录音与产物发布")
+                failStart(MeetingErrorCode.AUDIO_RETAIN_UNSUPPORTED)
                 return
             }
-            publish("正在确认登录状态并创建会议…")
+            publish()
             io.execute {
                 var step = "身份读取"
                 try {
                     val identity = readIdentity()
                     if (identity.status() != IdentityResult.Status.LOGGED_IN) {
                         LOG.info("会议开始身份未就绪 state=${identity.status()}")
-                        enqueue { failStart(identity.message()) }
+                        enqueue { failStart(MeetingErrorCode.LOGIN_REQUIRED) }
                         return@execute
                     }
                     sessionConfig = config.forSession(identity.session()!!)
@@ -419,7 +424,7 @@ class MeetingCoordinator(
                 } catch (failure: Exception) {
                     if (failure !is IOException && failure !is RuntimeException) throw failure
                     logFailure(step, failure)
-                    enqueue { failStart("创建或启动会议失败，请检查本场能力与模型配置") }
+                    enqueue { failStart(MeetingErrorCode.START_FAILED) }
                 }
             }
         }
@@ -452,7 +457,7 @@ class MeetingCoordinator(
                     LOG.fine("本场模型续接材料及新解析实例已准备")
                     ModelSessionConnection(next, fresh)
                 }
-                model = runtime.open(grant, adapter, TranscriptListener { event -> enqueue { transcript(event) } },
+                model = runtime.openWithAudioMix(grant, adapter, TranscriptListener { event -> enqueue { transcript(event) } },
                     object : ModelSessionListener {
                         override fun onAudioInputMode(mode: AudioInputMode) { enqueue { if (!done) notifyListener { listener.onAudioInputMode(mode) } } }
                         override fun onAudioLevel(level: AudioInputLevel) {
@@ -466,9 +471,9 @@ class MeetingCoordinator(
                             enqueue {
                                 if (!done) {
                                     audioFailed = true; modelFinished = true; audioLevelActive = false
-                                    LOG.warning("本场音频输入终止 code=$code")
-                                    notifyListener { listener.onAudioError(code, message) }
-                                    publish("音频输入已结束，请检查权限或音频连接后停止本场会议")
+                                    LOG.warning("本场音频输入终止 code=$code message=$message")
+                                    notifyListener { listener.onAudioError(code) }
+                                    publish(notice = MeetingNotice.AUDIO_INPUT_ENDED)
                                     maybeComplete()
                                 }
                             }
@@ -478,12 +483,12 @@ class MeetingCoordinator(
                                 if (!done) {
                                     modelFinished = true; audioLevelActive = false
                                     LOG.warning("本场模型运行时终止")
-                                    publish("模型会话已结束，请检查连接或停止本场会议")
+                                    publish(notice = MeetingNotice.MODEL_SESSION_ENDED)
                                     maybeComplete()
                                 }
                             }
                         }
-                    }, options.retainAudio(), reconnector)
+                    }, options.retainAudio(), reconnector, options.audioMix())
                 // 采音真正开始前落原场现场；此后进程异常退出，宿主可凭本记录续办。
                 recordRecovery(startedAtMs)
                 active = true; audioLevelActive = true; canStop = runtime.waitsForModelFinish()
@@ -491,13 +496,13 @@ class MeetingCoordinator(
                 phase = MeetingSessionState.Phase.RUNNING
                 val info = MeetingStarted(id, startedAtMs, created.maxMeetingDurationMs(), available)
                 notifyListener { listener.onStarted(info) }
-                showDisplay(); publish("会议已开始，正在接收标准字幕"); LOG.info("会议已开始")
+                showDisplay(); publish(); LOG.info("会议已开始")
                 modelControl.execute {
                     if (cancelled || closed || done) return@execute
                     try { model!!.start() }
-                    catch (failure: RuntimeException) { logFailure("启动模型运行时", failure); enqueue { failStart("打开模型会话失败") } }
+                    catch (failure: RuntimeException) { logFailure("启动模型运行时", failure); enqueue { failStart(MeetingErrorCode.MODEL_START_FAILED) } }
                 }
-            } catch (failure: RuntimeException) { logFailure("创建模型会话", failure); failStart("打开模型会话失败") }
+            } catch (failure: RuntimeException) { logFailure("创建模型会话", failure); failStart(MeetingErrorCode.MODEL_START_FAILED) }
         }
         /**
          * 采音起点写原场现场：只有装配了恢复端口、本场保留录音且模型给出录音文件位置时才写。
@@ -594,7 +599,7 @@ class MeetingCoordinator(
                     enqueue {
                         translating.remove(input)
                         if (!done && !cancelled) {
-                            publish("独立翻译尚未完成；原文继续保存，停止时可重试")
+                            publish(notice = MeetingNotice.TRANSLATION_PENDING)
                             maybeComplete()
                         }
                     }
@@ -608,7 +613,7 @@ class MeetingCoordinator(
             try { savePendingStandardEvents() }
             catch (failure: IOException) {
                 logFailure("保存标准字幕或译文", failure)
-                enqueue { if (!done) publish("标准字幕或译文尚未确认，后续事件或停止时继续提交") }
+                enqueue { if (!done) publish(notice = MeetingNotice.TRANSCRIPT_UNCONFIRMED) }
             }
         }
         /** IO 队列原序号重交，Server 返回后先出队再更新计数，Stop 也复用此确认屏障。 */
@@ -626,7 +631,7 @@ class MeetingCoordinator(
                             savedEvents++
                             if (!runtime.waitsForModelFinish() && event.transcript.isFinal() && !stopRequested) canStop = true
                         }
-                        publish(if (phase == MeetingSessionState.Phase.RUNNING) "标准字幕或译文已保存" else "正在等待本场正常收口")
+                        publish()
                     }
                 }
             }
@@ -644,7 +649,7 @@ class MeetingCoordinator(
             modelFinished = true; audioLevelActive = false
             if (display.flushPendingLanguages()) showDisplay()
             cancelDeadline()
-            publish(if (stopRequested) "模型最终输出已接收，正在收口" else "模型已完成，可结束会议")
+            publish()
             maybeComplete()
         }
         override fun submitPresentation(offsetMs: Long, jpeg: ByteArray) {
@@ -656,7 +661,9 @@ class MeetingCoordinator(
         override fun submitPresentation(offsetMs: Long, jpeg: ByteArray, callback: MeetingClient.Callback<Void?>) {
             val frame = PresentationFrame(offsetMs, jpeg)
             enqueue {
-                if (done || !acceptingPresentation) notifyListener { callback.onError("本场当前不接收演示截图") }
+                if (done || !acceptingPresentation) {
+                    notifyListener { callback.onError(MeetingError(MeetingErrorCode.PRESENTATION_REJECTED)) }
+                }
                 else io.execute { savePresentation(frame, callback) }
             }
         }
@@ -668,7 +675,8 @@ class MeetingCoordinator(
                 HttpMeetingServerClient.validatePresentationRequestSize(candidate, frame.offsetMs(), frame.jpeg())
             } catch (invalidSize: IOException) {
                 logFailure("检查演示截图大小", invalidSize)
-                presentationFailure(callback, "演示截图超出1MiB传输预算，请缩小图片；字幕会议继续")
+                presentationFailure(callback, MeetingErrorCode.PRESENTATION_TOO_LARGE,
+                    "演示截图超出1MiB传输预算，请缩小图片；字幕会议继续")
                 return
             }
             try {
@@ -680,7 +688,8 @@ class MeetingCoordinator(
             } catch (failure: Exception) {
                 if (failure !is IOException && failure !is RuntimeException) throw failure
                 logFailure("保存演示截图", failure)
-                presentationFailure(callback, "演示截图保存未确认；字幕会议继续")
+                presentationFailure(callback, MeetingErrorCode.PRESENTATION_SAVE_FAILED,
+                    "演示截图保存未确认；字幕会议继续")
             }
         }
         private fun savePendingPresentation() {
@@ -691,8 +700,10 @@ class MeetingCoordinator(
             LOG.fine("演示截图保存已确认 sequence=$number")
         }
         /** 图片失败独立提示，不阻断已保存的文字正常停止。 */
-        private fun presentationFailure(callback: MeetingClient.Callback<Void?>, message: String) {
-            enqueue { if (!done) publish(message); notifyListener { callback.onError(message) } }
+        private fun presentationFailure(callback: MeetingClient.Callback<Void?>,
+            code: MeetingErrorCode, message: String) {
+            LOG.warning(message)
+            enqueue { if (!done) { publish(errorCode = code); notifyListener { callback.onError(MeetingError(code)) } } }
         }
         override fun swapDisplayColumns() {
             enqueue { if (!done && active && display.isBilingual()) { display.swapColumns(); showDisplay() } }
@@ -703,7 +714,7 @@ class MeetingCoordinator(
                 stopRequested = true; audioLevelActive = false; canStop = false
                 phase = MeetingSessionState.Phase.STOPPING
                 if (display.flushPendingLanguages()) showDisplay()
-                cancelDeadline(); publish("正在等待模型最终字幕…")
+                cancelDeadline(); publish()
                 // 只在用户确认停止时重试已失败的原输入，不增加定时任务或无限重试。
                 pendingTextTranslations.values.toList().forEach(::submitTextTranslation)
                 if (stopInputSent) { maybeComplete(); return@enqueue }
@@ -718,7 +729,7 @@ class MeetingCoordinator(
                 try { model!!.stopInput(); enqueue { stopInputSent = true; maybeComplete() } }
                 catch (failure: RuntimeException) {
                     logFailure("停止模型输入", failure)
-                    enqueue { canStop = true; publish("停止模型输入失败，请再次确认停止") }
+                    enqueue { canStop = true; publish(notice = MeetingNotice.STOP_RETRY_REQUIRED) }
                 }
             }
         }
@@ -730,14 +741,14 @@ class MeetingCoordinator(
                 return
             }
             completionQueued = true; phase = MeetingSessionState.Phase.FINALIZING
-            publish("正在保存本场最终结果…")
+            publish()
             var input: SummaryInput? = null
             if (!audioFailed && available.contains(MeetingCapabilityState.SUMMARY) && options.summaryEnabled()) {
                 try { input = finals.input(options.sourceLanguage()) }
                 catch (empty: IllegalArgumentException) {
                     // 静音／短会无有效 final 时不伪造总结、不请求模型，继续用量／录音／Stop。
                     LOG.info("本场没有有效最终字幕，跳过纪要并继续正常停止")
-                    publish("没有最终字幕，无法生成纪要；继续结束会议")
+                    publish(notice = MeetingNotice.NO_FINAL_TRANSCRIPT)
                 }
             }
             val summaryInput = input
@@ -829,7 +840,7 @@ class MeetingCoordinator(
             done = true; active = false; phase = MeetingSessionState.Phase.READY; readyResult = finalResult
             cleanupRecovery()
             notifyListener { listener.onResult(finalResult) }
-            publish("本场结果已就绪"); LOG.info("会议结果已就绪")
+            publish(); LOG.info("会议结果已就绪")
         }
         private fun readAudioArtifactOnce() {
             if (!audioArtifactRead) {
@@ -849,21 +860,24 @@ class MeetingCoordinator(
         }
         private fun completionFailed(message: String) {
             if (done) return
-            completionQueued = false; canStop = true; phase = MeetingSessionState.Phase.STOP_PENDING; publish(message)
+            completionQueued = false; canStop = true; phase = MeetingSessionState.Phase.STOP_PENDING
+            LOG.warning("本场停止未完成：$message")
+            publish(notice = MeetingNotice.STOP_RETRY_REQUIRED)
         }
         private fun endWithoutDelivery(message: String) {
             if (done) return
             done = true; active = false; phase = MeetingSessionState.Phase.ENDED
             cleanupRecovery()
-            publish(message); LOG.info("会议已停止，未主动交付结果")
+            LOG.info("会议已停止，未主动交付结果：$message")
+            publish()
         }
-        private fun failStart(message: String) {
+        private fun failStart(code: MeetingErrorCode) {
             if (done) return
             audioLevelActive = false; done = true; active = false; canStop = false; phase = MeetingSessionState.Phase.FAILED
             cancelDeadline()
             cleanupRecovery()
             model?.let { modelControl.execute(it::close) }
-            publish(message)
+            publish(errorCode = code)
         }
         override fun resultActionAccess(): ResultActionAccess = object : ResultActionAccess {
             override fun readContent(callback: MeetingClient.Callback<MeetingResultContent?>) {
@@ -879,7 +893,10 @@ class MeetingCoordinator(
             enqueue {
                 if (closed || cancelled) return@enqueue
                 val result = readyResult
-                if (result == null) { notifyListener { callback.onError("本场结果尚未就绪") }; return@enqueue }
+                if (result == null) {
+                    notifyListener { callback.onError(MeetingError(MeetingErrorCode.RESULT_NOT_READY)) }
+                    return@enqueue
+                }
                 io.execute {
                     if (closed || cancelled) return@execute
                     try {
@@ -889,7 +906,7 @@ class MeetingCoordinator(
                     } catch (failure: Exception) {
                         if (failure !is IOException && failure !is RuntimeException) throw failure
                         logFailure(step, failure)
-                        notifyListener { callback.onError("${step}失败，请再次执行") }
+                        notifyListener { callback.onError(MeetingError(MeetingErrorCode.STEP_FAILED)) }
                     }
                 }
             }

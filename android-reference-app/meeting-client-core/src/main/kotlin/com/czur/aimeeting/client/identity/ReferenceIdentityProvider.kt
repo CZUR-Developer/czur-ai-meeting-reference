@@ -10,6 +10,6 @@ class ReferenceIdentityProvider @JvmOverloads constructor(accessToken: String = 
     override fun clearSession() { session = null }
     override fun currentIdentity(): IdentityResult {
         val current = session
-        return if (current == null) IdentityResult.loginRequired("请先登录") else IdentityResult.loggedIn(current)
+        return if (current == null) IdentityResult.loginRequired("") else IdentityResult.loggedIn(current)
     }
 }
