@@ -651,7 +651,8 @@ class MeetingCoordinatorTest {
             assertResumeDidNotRestartBusiness(server, freshRuntime, currentIdentityReads)
             assertEquals("已 ACK 的总结不重新请求", 1, Collections.frequency(server.steps, "summaryGrant"))
             assertEquals(1, Collections.frequency(server.steps, "summary"))
-            assertEquals(listOf(1000L), server.usages)
+            // 停止续办在发布前补交同场同值用量：正常停止已交过一次，服务端按幂等处理。
+            assertEquals(listOf(1000L, 1000L), server.usages)
         }
     }
 
@@ -869,8 +870,13 @@ class MeetingCoordinatorTest {
             exchange.getRequestBody().readAllBytes()
             val code = if ("Bearer renewed-scene-token" == authorization) 200 else 401
             if (path.endsWith(":stop")) stopKeys.add(exchange.getRequestHeaders().getFirst("Idempotency-Key"))
-            val body = if (path.endsWith("/manifest")) "{\"status\":\"READY\",\"title\":\"原场\",\"artifacts\":[]}"
-                    else if (path.endsWith(":stop")) "{\"inputState\":\"INPUT_ACCEPTED\",\"manifestState\":\"READY\"}" else "{}"
+            val body = when {
+                path.endsWith("/usage:submit") ->
+                    "{\"meetingId\":\"mtg_test\",\"audioDurationMs\":1000,\"accepted\":true}"
+                path.endsWith("/manifest") -> "{\"status\":\"READY\",\"title\":\"原场\",\"artifacts\":[]}"
+                path.endsWith(":stop") -> "{\"inputState\":\"INPUT_ACCEPTED\",\"manifestState\":\"READY\"}"
+                else -> "{}"
+            }
             val bytes = body.toByteArray(StandardCharsets.UTF_8)
             exchange.sendResponseHeaders(code, bytes.size.toLong())
             exchange.getResponseBody().use { output -> output.write(bytes); }
@@ -920,7 +926,8 @@ class MeetingCoordinatorTest {
                 assertEquals("original-stable-key", actual.stableStopKey())
                 assertEquals(777L, actual.genTime()!!.toLong())
                 assertEquals(listOf("original-stable-key"), stopKeys)
-                assertEquals(listOf("/v1/meetings/mtg_test/publication:prepare|Bearer expired-scene-token",
+                assertEquals(listOf("/v1/meetings/mtg_test/usage:submit|Bearer expired-scene-token",
+                        "/v1/meetings/mtg_test/usage:submit|Bearer renewed-scene-token",
                         "/v1/meetings/mtg_test/publication:prepare|Bearer renewed-scene-token",
                         "/v1/meetings/mtg_test:stop|Bearer renewed-scene-token",
                         "/v1/meetings/mtg_test/manifest|Bearer renewed-scene-token"), requests)

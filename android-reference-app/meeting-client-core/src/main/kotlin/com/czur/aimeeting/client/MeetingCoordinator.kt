@@ -157,6 +157,12 @@ class MeetingCoordinator(
                     original.clientIdentity(), config.profile(), config.callbackExecutor())
                 val server = servers.apply(frozenConfig)
                 LOG.info("原场停止收尾续办开始 phase=${checkpoint.phase()}")
+                if (checkpoint.phase() == StoppedMeetingCheckpoint.Phase.PUBLISH_PENDING) {
+                    // 恢复流程先写停止记录、后提交冻结用量；若在这之间被打断，续办时快照会
+                    // 一直缺用量并 409。这里补交同场同值事实，正常停止已提交过时由服务端幂等处理。
+                    LOG.info("原场停止收尾补交冻结采音用量 durationMs=${checkpoint.context().frozenAudioDurationMs()}")
+                    server.submitUsage(checkpoint.checkpointId(), checkpoint.context().frozenAudioDurationMs())
+                }
                 result = finishSavedFinalization(checkpoint, store.get(), server, config.artifactPublisher(),
                     BooleanSupplier { closed }, wallClockMs, Runnable {})
             } catch (failure: Exception) {
