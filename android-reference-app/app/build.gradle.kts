@@ -169,10 +169,10 @@ dependencies {
     if (meetingRuntime == "sdk") {
         // 业务 AAR 以工程依赖接入；它自带 core、契约、设备能力和模型传输。
         implementation(project(":meeting-android"))
-        implementation("com.squareup.okhttp3:okhttp:4.12.0")
+        implementation("com.squareup.okhttp3:okhttp:5.3.2")
         implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
     }
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
-    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+    testImplementation("com.squareup.okhttp3:mockwebserver:5.3.2")
 }
