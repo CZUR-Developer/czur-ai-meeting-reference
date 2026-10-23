@@ -14,8 +14,7 @@
 ```bash
 python3 tools/android-device/build-lan-apk.py \
   --host '192.0.2.10' --backend-port 8443 --web-port 8090 \
-  --sdk-aar /absolute/path/ai-meeting-sdk-0.5.0-release.aar \
-  --ui-aar /absolute/path/ai-meeting-ui-0.2.0-release.aar \
+  --device-aar /absolute/path/ai-meeting-device-0.5.0-release.aar \
   --debug-ca /absolute/path/ca.pem
 ```
 
@@ -29,8 +28,8 @@ TLS 证书 IP SAN 一致。默认生成后端 `https://<host>:8443` 和结果页
 请直接在 Android 工程目录运行 Gradle，无需经过此 LAN helper。
 
 `--dry-run` 只打印构建目录与实际参数，不运行 Gradle。默认 `--runtime sdk`，必须提供
-匹配的主 SDK 和 UI AAR；不会因材料缺失退回 Mock。显式 `--runtime mock` 可验证基础
-构建且无须 AAR，也可额外传 UI AAR。本工具只构建 Debug，不安装 APK、启动服务、运行
+匹配的设备 AAR；业务 AAR 由工程内 `meeting-android` 构建，不会因材料缺失退回假运行。
+本工具只构建 Debug，不安装 APK、启动服务、运行
 Docker、生成证书或修改 SDK；CA 只转发既有 Debug 构建参数。TLS 准备见
 [`本机 HTTPS 指南`](../../docs/local-lan-https.md)。
 
@@ -229,8 +228,7 @@ PC 后端。现有登录客户端允许这个开发入口；直接构建 `http:/
 python3 tools/android-device/build-lan-apk.py \
   --backend-url 'http://127.0.0.1:8080' \
   --web-url 'http://192.0.2.10:8090/index.html' \
-  --sdk-aar /absolute/path/ai-meeting-sdk-0.5.0-release.aar \
-  --ui-aar /absolute/path/ai-meeting-ui-0.2.0-release.aar
+  --device-aar /absolute/path/ai-meeting-device-0.5.0-release.aar
 python3 tools/android-device/meeting-device.py reverse --device-port 8080 --host-port 38169
 python3 tools/android-device/meeting-device.py setup-start --username 'meeting-user'
 python3 tools/android-device/meeting-device.py remove-reverse --device-port 8080

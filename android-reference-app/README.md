@@ -21,7 +21,7 @@ Gradle 8.7 和 Android Gradle Plugin 8.5.2，目标 JVM 为 17。Android 自有�
 | `meeting-client-core/` | 共享 Server 协议、会议编排、Adapter 注册和显示规则 |
 | 配套设备 AAR（闭源） | 系统／标准 MIC 音源、同源录音及截图能力、native；不含 core 或契约 |
 | `meeting-android/`（业务 AAR） | 模型连接与会议门面；构建时注入设备 AAR，产物是宿主唯一依赖的业务 AAR |
-| 配套 UI AAR | 可选字幕控件、窗口基础管理及默认窗口实现 |
+| 设备 AAR 内置 UI | `com.czur.aimeeting.ui.SubtitleTextView` 字幕文字显示控件 |
 
 设备 AAR 和 UI 工具由配套交付包提供；业务 AAR 由本仓 `meeting-android/` 源码构建，
 构建时用 `-PdeviceSdkAar` 指向交付的设备 AAR。无需访问 CZUR 产品源码仓；AAR、模型 Key、
@@ -52,49 +52,31 @@ cp deployment.properties.example deployment.local.properties
   -PreferenceResultWebUrl=https://results.example.invalid/index.html
 ```
 
-以上默认构建为 Mock；真实会议还需下节的 SDK 参数。局域网可从仓库根使用
+构建需要交付的设备 AAR（下节）。局域网可从仓库根使用
 [`build-lan-apk.py`](../tools/android-device/build-lan-apk.py)，显式注入可达的 PC 地址和
 配套 AAR。工具不会启动服务或生成证书；命令及 HTTPS 准备见
 [构建／启动工具](../tools/android-device/README.md)和[局域网 HTTPS 指南](../docs/local-lan-https.md)。
 设备上的 `127.0.0.1` 指设备自身；局域网运行应填写设备可达的服务地址。
 
-## 选择运行模式并构建
+## 构建
 
-所有命令在本目录执行。默认 `mock` 可在干净检出后构建，提供固定字幕修订和结果演示，
-不占用 MIC、不领取真实模型材料、不验证真实模型协议。Mock 中的演示截图入口禁用。
-
-```bash
-./gradlew :app:assembleDebug :app:testDebugUnitTest
-```
-
-真实会议使用 `sdk`，完整默认窗口和字幕控件同时注入匹配的 UI AAR：
+所有命令在本目录执行。参考 App 只有一条构建路径：业务 AAR 工程 + 交付的设备 AAR。
 
 ```bash
 ./gradlew :app:assembleDebug :app:testDebugUnitTest \
-  -PmeetingRuntime=sdk \
   -PdeviceSdkAar=/absolute/path/ai-meeting-device-0.5.0-release.aar \
-  -PmeetingUiAar=/absolute/path/ai-meeting-ui-0.2.0-release.aar
+  -PreferenceBackendUrl=https://api.example.invalid \
+  -PreferenceResultWebUrl=https://results.example.invalid/index.html
 ```
 
 最小混淆验证：传 `-PreferenceMinify` 会开启 debug／release 的 R8，用来检查业务 AAR 的
 消费端规则；局域网自签 CA 只在 debug 变体信任，验 JNI 和业务规则用 debug 变体，release
 只用于已有可信 HTTPS 的部署。
 
-`sdk` 缺少设备 AAR 时配置失败。`sdk` 模式依赖 `:meeting-android`（业务 AAR 的源码
-模块），它把设备 AAR、公共 core、契约和模型传输一起打包；App 不再单独依赖 core 或
-契约 Module。Mock 模式才从工程内引用这两个 Module。设备 AAR 只提供 MIC/Broker 采集、
-投屏截图和 native，业务层的模型/服务端通信在本模块源码里，可修改后重新构建。
-
-UI AAR 独立选择，也可用于 Mock：
-
-```bash
-./gradlew :app:assembleDebug :app:testDebugUnitTest \
-  -PmeetingUiAar=/absolute/path/ai-meeting-ui-0.2.0-release.aar
-```
-
-不提供 UI AAR 时编译 `basic-ui` 工厂，提供基本文字和单一窗口，供最小构建／开发使用；
-它不包含完整窗口形态和最近文字裁切。提供 UI AAR 时编译 `meeting-ui` 工厂。
-两者互斥，无反射加载，也不在源码仓保存 AAR。
+缺少设备 AAR 时配置失败。App 依赖 `:meeting-android`（业务 AAR 源码模块），它把设备
+AAR、公共 core、契约和模型传输一起打包。设备 AAR 提供 MIC/Broker 采集、投屏截图、native
+和 `com.czur.aimeeting.ui.SubtitleTextView`；业务层的模型/服务端通信在开放模块里可改。
+参考页面的字幕/占位直接使用 SDK 的 `SubtitleTextView`，不再单独引入 UI AAR。
 
 ## 默认参考功能与接入边界
 
@@ -103,8 +85,8 @@ UI AAR 独立选择，也可用于 Mock：
 后端只声明 `transcript.realtime` 时，页面隐藏未装配的总结和互译入口，仍可完成字幕会议。
 界面语言列表直接使用后端发现的 `languages`；部署者须配置实际模型支持的语种子集。
 
-SDK 模式默认装配同源录音和 `HttpMeetingArtifactPublisher`，并设置 `retainAudio=true`；
-Mock 无真实音源，设置为 `false`。录音在停止后上传到参考后端，实时音频仍由设备直达模型。
+参考 App 固定 SDK 模式，装配同源录音和 `HttpMeetingArtifactPublisher`，并设置
+`retainAudio=true`。录音在停止后上传到参考后端，实时音频仍由设备直达模型。
 是否生成总结、翻译、演示产物和跨会议身份，取决于实际装配、声明、用户选择及本场授权。
 用户已选的互译／总结能力无法授予时，该场不会启动。
 
@@ -114,7 +96,7 @@ Mock 无真实音源，设置为 `false`。录音在停止后上传到参考后�
 
 当前功能的验证范围和硬件专项边界见[验证范围](../docs/validation-scope.md)。合作伙伴
 更换模型、账户、语言、存储或设备后，应按[从零指南](../docs/partner-getting-started.md)
-验证自己的部署。Mock、构建和 SDK 截图 API 的验证分别说明其范围，不替代实际模型／
+验证自己的部署。构建和 SDK 截图 API 的验证分别说明其范围，不替代实际模型／
 硬件场景及完整演示会议产物验证。
 
 ## 页面、登录与集中装配
@@ -152,8 +134,7 @@ MeetingAppAssembly.registerPageFactory { activity ->
 
 ## 完整会议入口与平台扩展点
 
-`src/sdk/.../MeetingRuntimeFactory` 创建 `AiMeetingClient` 和同源录音输出；Mock 为同一
-`MeetingCoordinator` 注入固定运行端口。Activity 的会前客户端和 Service 的会议客户端
+`src/main/.../MeetingRuntimeFactory` 创建 `AiMeetingClient` 和同源录音输出。Activity 的会前客户端和 Service 的会议客户端
 分别创建，共享身份与装配。每个客户端同时持有一场未完成会议，关闭后不可重用。
 
 模型 Adapter 在创建客户端之前登记，每场创建新实例。地址、材料和本场 `adapterId`
@@ -221,8 +202,8 @@ SDK 不申请权限；App 开始入口申请 `RECORD_AUDIO`，Service 不从后�
 ## Service、计时与正常停止
 
 `MeetingService` 持有会议句柄、前台通知、跨应用窗口、计时和截图时序。页面离开只解除
-观察，重新打开订阅同一场状态；SDK 持有音源、模型和标准事件队列。SDK 模式从前台入口
-启动 `microphone` 类型服务，有截图时同时声明 `mediaProjection`；Mock 使用 `dataSync`。
+观察，重新打开订阅同一场状态；SDK 持有音源、模型和标准事件队列。参考 App 从前台入口
+启动 `microphone` 类型服务，有截图时同时声明 `mediaProjection`。
 录音和悬浮窗权限由 App 在创建会议前申请；悬浮窗权限通过系统设置授予，未授权时不建会。
 
 默认开始成功后，Service 挂载 `TYPE_APPLICATION_OVERLAY` 真悬浮窗，会前设置 Activity
@@ -268,30 +249,16 @@ READY 的顺序收口。未登录、网络或后端失败时现场保留，下�
 协议实现。长期未收口的会议是否、以及多久标记为中断，是各部署自己的产品策略，
 公共协议不规定，参考实现也不替伙伴做决定。
 
-## 可选字幕／窗口UI工具：构建期注入
+## 字幕显示
 
-`SubtitleViewFactory` 的 `meeting-ui` 实现直接调用 UI AAR；基础实现使用 TextView。
-工厂消费 `DisplaySnapshotPresentation` 投影的片段、文字、源侧／交换和各段 final 状态，
-不持有第二份文字账本。页面展示完整历史；普通窗口通过 `renderParts`／`setParts`
-交付完整输入，由控件裁最近可见行。宿主用明确 px 设置字号和行高，重排不会改变会议快照。
+页面通过 `SubtitleViewFactory` 直接使用设备 AAR 内的
+`com.czur.aimeeting.ui.SubtitleTextView`：控件接收宿主投影好的片段、文字和 final 状态，
+负责部分透明度、行高、最大行数和最近可见行裁切，不持有第二份文字账本，也不判断语种、
+方向或左右栏。宿主用明确 px 设置字号和行高，重排不会改变会议快照。
 
-### 窗口工厂：默认四形态与一个形态的替换例
-
-UI AAR 的 `DefaultMeetingOverlay` 提供字幕、普通互译、大互译和 Mini 四形态。
-普通窗口显示最近 3 行，简洁模式 2 行；大窗两侧独立滚动；Mini 点击恢复此前形态。
-隐藏／切换窗口只改变 UI，仍继续采音、识别和计费。提醒卡片、权限和窗口尺寸由 App 管理。
-
-`MeetingOverlayFactory.Window` 是 App 最小句柄；`meeting-ui/.../ui/OverlayViewFactory.kt`
-提供可编辑的布局例。伙伴只需一种形态，可复用公开的 `SingleFormOverlayFactory`：
-
-```kotlin
-MeetingAppAssembly.registerOverlayFactory(SingleFormOverlayFactory())
-// 恢复默认：MeetingAppAssembly.registerOverlayFactory(OverlayViewFactory())
-```
-
-工具层还提供 `OverlayController.ContentFactory`／`Content`／`LayoutPolicy`／`WindowSpec`／
-`StateListener`。替换工厂仅影响随后创建的窗口，不改变音源、Adapter、显示路由或会议收尾。
-结束时 dismiss 释放窗口，无需额外停止一次会议。
+窗口层（悬浮窗、Mini／大窗、权限、提醒、Service）仍由参考 App 自己的 `basic-ui`
+实现；设备 AAR 不再提供 `OverlayController`／`DefaultMeetingOverlay` 等窗口工具。
+伙伴可以只用 `SubtitleTextView`，窗口和页面交互自行实现。
 
 ## 独立SDK截图与参考演示帧
 

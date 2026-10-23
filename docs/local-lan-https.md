@@ -92,11 +92,10 @@ curl --cacert "$REFERENCE_TLS_DIR/ca.pem" "https://$PC_LAN_IP:8443/v1/capabiliti
 python3 tools/android-device/build-lan-apk.py \
   --host "$PC_LAN_IP" --backend-port 8443 --web-port 8090 \
   --device-aar /absolute/path/ai-meeting-device-0.5.0-release.aar \
-  --ui-aar /absolute/path/ai-meeting-ui-0.2.0-release.aar \
   --debug-ca "$REFERENCE_TLS_DIR/ca.pem"
 ```
 
-设备 AAR 与 UI AAR 必须版本匹配；业务 AAR 由工程内模块构建。省略 `--host` 时工具根据本机路由选址；证书仍须与最终主机
+设备 AAR 是唯一需要的外部二进制；业务 AAR 由工程内模块构建。省略 `--host` 时工具根据本机路由选址；证书仍须与最终主机
 匹配，多网卡时应显式指定。已有 Web 在其他端口时传 `--web-port`，后端使用独立的
 `--backend-port`；已有完整地址时可传 `--backend-url`／`--web-url` 原样覆盖。增加
 `--dry-run` 可只查看 Gradle 参数，不执行构建。工具不启动服务、生成证书或安装 APK。
@@ -104,20 +103,17 @@ python3 tools/android-device/build-lan-apk.py \
 也可在 Android 工程目录直接配置：默认复制 `deployment.properties.example` 为已忽略的
 `deployment.local.properties`，或传 `-PreferenceDeploymentFile=/absolute/path/deployment.properties`。
 显式 `-PreferenceBackendUrl`／`-PreferenceResultWebUrl` 优先于文件中的同名键；公开模板
-只包含示例域名。等价的 SDK＋UI 手动构建命令为：
+只包含示例域名。等价的 SDK 手动构建命令为：
 
 ```bash
 cd android-reference-app
 ./gradlew :app:assembleDebug \
-  -PmeetingRuntime=sdk \
   -PdeviceSdkAar=/absolute/path/ai-meeting-device-0.5.0-release.aar \
-  -PmeetingUiAar=/absolute/path/ai-meeting-ui-0.2.0-release.aar \
   -PreferenceBackendUrl="https://$PC_LAN_IP:8443" \
   -PreferenceResultWebUrl="http://$PC_LAN_IP:8090/index.html" \
   -PreferenceDebugCaCertificate="$REFERENCE_TLS_DIR/ca.pem"
 ```
 
-Mock 基础构建须显式选择 `-PmeetingRuntime=mock`，或在工具上加 `--runtime mock`，
 不要求闭源 AAR；它不代签真实采音／模型。无配置仍可构建，页面提示联系应用提供方，
 不让终端用户补填地址。配置来源与身份保存边界见 [Android 说明](../android-reference-app/README.md#构建期部署地址)。
 

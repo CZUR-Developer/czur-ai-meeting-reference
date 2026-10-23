@@ -42,9 +42,7 @@ def parser():
     cli.add_argument("--web-port", type=int, default=8090)
     cli.add_argument("--backend-url", help="完整后端URL；提供时不再拼接对应host／port")
     cli.add_argument("--web-url", help="完整结果页URL；原样传递，保留路径／query／fragment")
-    cli.add_argument("--runtime", choices=("sdk", "mock"), default="sdk")
-    cli.add_argument("--device-aar", type=existing_file, help="匹配版本的设备 AAR，sdk模式必填；业务 AAR 由工程内 meeting-android 构建")
-    cli.add_argument("--ui-aar", type=existing_file, help="匹配版本的UI AAR，sdk模式必填")
+    cli.add_argument("--device-aar", type=existing_file, help="匹配版本的设备 AAR，必填；业务 AAR 由工程内 meeting-android 构建")
     cli.add_argument("--debug-ca", type=existing_file, help="可选的公开开发CA，仅用于Debug构建")
     cli.add_argument("--dry-run", action="store_true", help="打印实际Gradle参数，不运行Gradle")
     return cli
@@ -57,17 +55,16 @@ def build_command(args):
     均已提供时不做路由探测。显式 -P 地址按 App 构建约定覆盖本地 properties 文件。
     返回 argv 数组，由 subprocess 直接调用，不经 shell 展开。
     """
-    if args.runtime == "sdk" and (args.device_aar is None or args.ui_aar is None):
-        raise ValueError("sdk模式需要 --device-aar 与 --ui-aar；请提供同一版本的配套制品")
+    if args.device_aar is None:
+        raise ValueError("需要 --device-aar；业务 AAR 由工程内 meeting-android 构建")
     host = args.host
     if not (args.backend_url and args.web_url):
         host = host or detect_lan_host()
     backend = args.backend_url or f"https://{host}:{args.backend_port}"
     web = args.web_url or f"http://{host}:{args.web_port}/index.html"
     command = [str(ANDROID_PROJECT / "gradlew"), ":app:assembleDebug",
-               "-PmeetingRuntime=" + args.runtime,
                "-PreferenceBackendUrl=" + backend, "-PreferenceResultWebUrl=" + web]
-    for value, key in ((args.device_aar, "deviceSdkAar"), (args.ui_aar, "meetingUiAar"),
+    for value, key in ((args.device_aar, "deviceSdkAar"),
                        (args.debug_ca, "referenceDebugCaCertificate")):
         if value is not None:
             command.append("-P" + key + "=" + str(value))
