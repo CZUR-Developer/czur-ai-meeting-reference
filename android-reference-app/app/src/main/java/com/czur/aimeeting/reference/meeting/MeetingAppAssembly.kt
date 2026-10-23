@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.czur.aimeeting.client.ClientIdentity
 import com.czur.aimeeting.client.MeetingClient
+import com.czur.aimeeting.client.MeetingError
 import com.czur.aimeeting.client.MeetingClientConfig
 import com.czur.aimeeting.client.HttpMeetingArtifactPublisher
 import com.czur.aimeeting.client.MeetingProfile
@@ -235,8 +236,8 @@ object MeetingAppAssembly {
                             Log.i(TAG, "原场停止收尾续办完成 meetingId=$meetingId")
                             finished.countDown()
                         }
-                        override fun onError(message: String) {
-                            Log.w(TAG, "原场停止收尾续办未完成 meetingId=$meetingId")
+                        override fun onError(error: MeetingError) {
+                            Log.w(TAG, "原场停止收尾续办未完成 meetingId=$meetingId code=${error.code}")
                             finished.countDown()
                         }
                     })
@@ -261,7 +262,8 @@ object MeetingAppAssembly {
                             recovered = true
                             finished.countDown()
                         }
-                        override fun onError(message: String) {
+                        override fun onError(error: MeetingError) {
+                            Log.w(TAG, "原场现场续办未完成 meetingId=$meetingId code=${error.code}")
                             finished.countDown()
                         }
                     })

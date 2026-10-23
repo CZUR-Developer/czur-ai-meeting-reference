@@ -4,6 +4,7 @@ import com.czur.aimeeting.client.ClientIdentity
 import com.czur.aimeeting.client.MeetingArtifactPublisher
 import com.czur.aimeeting.client.MeetingCapabilityState
 import com.czur.aimeeting.client.MeetingClient
+import com.czur.aimeeting.client.MeetingError
 import com.czur.aimeeting.client.MeetingClientConfig
 import com.czur.aimeeting.client.MeetingDiscovery
 import com.czur.aimeeting.client.MeetingListener
@@ -128,7 +129,7 @@ class AiMeetingClientTest {
                                         notifications.add("capture-ack"); stopContinuations.incrementAndGet()
                                         notifications.add("stop-continuation"); continuation.run()
                                     }
-                                    override fun onError(message: String) {
+                                    override fun onError(error: MeetingError) {
                                         thread(); captureErrors.incrementAndGet(); stopContinuations.incrementAndGet()
                                         notifications.add("stop-continuation"); continuation.run()
                                     }
@@ -291,7 +292,7 @@ class AiMeetingClientTest {
     private fun <T> callback(future: CompletableFuture<T>, threads: MutableList<String>): MeetingClient.Callback<T> =
         object : MeetingClient.Callback<T> {
             override fun onSuccess(result: T) { threads.add(Thread.currentThread().name); future.complete(result) }
-            override fun onError(message: String) { future.completeExceptionally(IOException(message)) }
+            override fun onError(error: MeetingError) { future.completeExceptionally(IOException(error.code.name)) }
         }
 
     private class PartnerAdapter : ModelAdapter {

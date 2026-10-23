@@ -112,7 +112,7 @@ class ResultActionRegistryTest {
         val outcome = CompletableFuture<ResultActionOutcome>()
         registry.execute(prepared, context, object : MeetingClient.Callback<ResultActionOutcome> {
             override fun onSuccess(result: ResultActionOutcome) { outcome.complete(result) }
-            override fun onError(message: String) { fail(message) }
+            override fun onError(error: MeetingError) { fail(error.code.name) }
         })
         return outcome.get(2, TimeUnit.SECONDS)
     }

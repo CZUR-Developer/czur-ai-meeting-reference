@@ -51,7 +51,7 @@ class ResultActionRegistry(plugins: List<ResultActionPlugin>) {
                     callback.onSuccess(ResultActionOutcome(action.id(), result.status(), result.message()))
                 }
             }
-            override fun onError(message: String) { onSuccess(ResultActionOutcome.failure(action.id(), message)) }
+            override fun onError(error: MeetingError) { onSuccess(ResultActionOutcome.failure(action.id(), error.code.name)) }
         }
         context.uiExecutor().execute {
             if (!context.result().artifactTypes().containsAll(action.requiredArtifactTypes())) {

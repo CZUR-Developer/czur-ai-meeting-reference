@@ -661,7 +661,7 @@ class MeetingCoordinator(
         override fun submitPresentation(offsetMs: Long, jpeg: ByteArray) {
             submitPresentation(offsetMs, jpeg, object : MeetingClient.Callback<Void?> {
                 override fun onSuccess(result: Void?) {}
-                override fun onError(message: String) {}
+                override fun onError(error: MeetingError) {}
             })
         }
         override fun submitPresentation(offsetMs: Long, jpeg: ByteArray, callback: MeetingClient.Callback<Void?>) {

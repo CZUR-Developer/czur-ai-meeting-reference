@@ -41,11 +41,15 @@ interface MeetingClient : AutoCloseable {
     interface Callback<T> {
         fun onSuccess(result: T)
         /**
-         * 旧入口：保留给宿主插件传递自己的错误文本；SDK 自身不再调用，
-         * SDK 只通过 [onError(error: MeetingError)] 回稳定错误码。
+         * 稳定入口：宿主按 [MeetingError.code] 映射自己的文案和交互。
+         * SDK 不返回面向终端用户的句子，也不把 HTTP／模型正文交出来。
          */
-        fun onError(message: String)
-        /** 宿主应重写本方法；默认转旧入口，保证既有实现仍能收到通知。 */
-        fun onError(error: MeetingError) { onError(error.code.name) }
+        fun onError(error: MeetingError)
+        /**
+         * 兼容入口：仅保留给宿主插件传递自己的错误文本；SDK 自身不再调用。
+         * 新宿主应重写 [onError(error)]；默认实现只保留 UNKNOWN，不携带文本。
+         */
+        @Deprecated("Use onError(error: MeetingError) and map MeetingErrorCode")
+        fun onError(message: String) { onError(MeetingError(MeetingErrorCode.UNKNOWN)) }
     }
 }

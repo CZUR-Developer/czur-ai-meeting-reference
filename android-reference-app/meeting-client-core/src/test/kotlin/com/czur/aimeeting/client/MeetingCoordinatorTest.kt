@@ -1377,7 +1377,7 @@ class MeetingCoordinatorTest {
     private fun identityCallback(results: BlockingQueue<IdentityResult>): MeetingClient.Callback<IdentityResult> =
         object : MeetingClient.Callback<IdentityResult> {
             override fun onSuccess(result: IdentityResult) { results.add(result) }
-            override fun onError(message: String) { fail(message) }
+            override fun onError(error: MeetingError) { fail(error.code.name) }
         }
 
     @Test fun mockMinutesSharesCoordinatorAndKeepsSummaryCapabilityAndFinalCaptureOrder() {
@@ -1514,7 +1514,7 @@ class MeetingCoordinatorTest {
                 f.session.submitPresentation(1000, byteArrayOf(1),
                     object : MeetingClient.Callback<Void?> {
                         override fun onSuccess(ignored: Void?) { continuation.run(); }
-                        override fun onError(message: String) {
+                        override fun onError(error: MeetingError) {
                             captureErrors.incrementAndGet()
                             continuation.run()
                         }

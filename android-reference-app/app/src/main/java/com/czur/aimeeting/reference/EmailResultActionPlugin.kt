@@ -4,6 +4,8 @@ import android.content.Context
 import android.widget.EditText
 import android.widget.LinearLayout
 import com.czur.aimeeting.client.MeetingClient
+import com.czur.aimeeting.client.MeetingError
+import android.util.Log
 import com.czur.aimeeting.client.MeetingOptions
 import com.czur.aimeeting.client.result.ResultActionPlugin.Preparation
 import com.czur.aimeeting.client.result.ResultActionOutcome
@@ -39,7 +41,10 @@ class EmailResultActionPlugin @JvmOverloads constructor(
                 WebResultActionPlugin.resultUrl(url, context.result().meetingId(), context.result().genTime()),
                 object : MeetingClient.Callback<Void?> {
                     override fun onSuccess(ignored: Void?) { callback.onSuccess(ResultActionOutcome.success(id(), "结果链接已发送到邮箱")) }
-                    override fun onError(message: String) { callback.onError("邮件发送失败，请再次执行") }
+                    override fun onError(error: MeetingError) {
+                        Log.w("AiMeetingReference", "邮件结果发送失败 code=${error.code}")
+                        callback.onError("邮件发送失败，请再次执行")
+                    }
                 })
         }
     }

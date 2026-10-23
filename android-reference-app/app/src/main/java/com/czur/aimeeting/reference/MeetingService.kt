@@ -23,6 +23,7 @@ import android.util.Log
 import android.widget.Toast
 import com.czur.aimeeting.client.*
 import com.czur.aimeeting.client.result.ResultActionContext
+import com.czur.aimeeting.reference.meeting.userText
 import com.czur.aimeeting.client.result.ResultActionOutcome
 import com.czur.aimeeting.client.display.MeetingDisplaySnapshot
 import com.czur.aimeeting.model.AudioInputErrorCode
@@ -435,9 +436,9 @@ class MeetingService : Service() {
                                     if (!destroyed && presentation === current && session === currentSession) completed?.run()
                                 }
                             }
-                            override fun onError(message: String) {
+                            override fun onError(error: MeetingError) {
                                 try {
-                                    if (presentation === current && session === currentSession) presentationFailed(message)
+                                    if (presentation === current && session === currentSession) presentationFailed(error.userText())
                                 } finally {
                                     frame.close()
                                     if (!destroyed && presentation === current && session === currentSession) completed?.run()
@@ -530,7 +531,7 @@ class MeetingService : Service() {
                 }
                 publish()
             }
-            override fun onError(message: String) = onSuccess(ResultActionOutcome.failure(action.id(), message))
+            override fun onError(error: MeetingError) = onSuccess(ResultActionOutcome.failure(action.id(), error.userText()))
         })
     }
     fun endResultInteraction() {

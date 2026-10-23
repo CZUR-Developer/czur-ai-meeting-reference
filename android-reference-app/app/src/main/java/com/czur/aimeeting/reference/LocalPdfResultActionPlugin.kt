@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.util.Log
 import com.czur.aimeeting.client.MeetingClient
+import com.czur.aimeeting.client.MeetingError
 import com.czur.aimeeting.client.MeetingOptions
 import com.czur.aimeeting.client.MeetingResult
 import com.czur.aimeeting.client.MeetingResultContent
@@ -54,7 +55,10 @@ class LocalPdfResultActionPlugin private constructor(private val app: Context?) 
                     }
                 }
             }
-            override fun onError(message: String) { callback.onError("读取本场正文失败，请再次执行") }
+            override fun onError(error: MeetingError) {
+                Log.w("AiMeetingReference", "PDF读取正文失败 code=${error.code}")
+                callback.onError("读取本场正文失败，请再次执行")
+            }
         })
     }
 }

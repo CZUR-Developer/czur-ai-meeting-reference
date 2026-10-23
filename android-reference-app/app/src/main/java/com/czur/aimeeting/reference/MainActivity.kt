@@ -27,6 +27,7 @@ import android.widget.*
 import com.czur.aimeeting.client.MeetingClient
 import com.czur.aimeeting.client.MeetingError
 import com.czur.aimeeting.client.MeetingErrorCode
+import com.czur.aimeeting.reference.meeting.userText
 import com.czur.aimeeting.client.MeetingDiscovery
 import com.czur.aimeeting.client.MeetingCapabilityState
 import com.czur.aimeeting.client.result.ResultOptions
@@ -272,12 +273,8 @@ class MainActivity : Activity() {
             }
             override fun onError(error: MeetingError) {
                 setConfigurationEnabled(true)
-                // 参考宿主自己决定展示话术；SDK 只回错误码。
-                loginMessage(if (error.code == MeetingErrorCode.LOGIN_FAILED) "登录失败" else "登录失败")
+                loginMessage(error.userText())
                 Log.w(TAG, "参考账号登录失败 code=${error.code}")
-            }
-            override fun onError(message: String) {
-                setConfigurationEnabled(true); loginMessage("登录失败"); Log.w(TAG, "参考账号登录失败 message=$message")
             }
         })
     }
@@ -304,7 +301,7 @@ class MainActivity : Activity() {
                 renderIdentity(identity)
                 if (identity.status() == IdentityResult.Status.LOGGED_IN && reloadCapabilities) discoverCapabilities()
             }
-            override fun onError(message: String) { statusView.text = message }
+            override fun onError(error: MeetingError) { statusView.text = error.userText() }
         })
     }
     private fun renderIdentity(identity: IdentityResult) {
@@ -345,9 +342,9 @@ class MainActivity : Activity() {
                     }
                 }
             }
-            override fun onError(message: String) {
+            override fun onError(error: MeetingError) {
                 setConfigurationEnabled(!meetingBusy); startButton.isEnabled = false
-                if (!meetingBusy && !hasReadyResult) statusView.text = "登录成功；$message"
+                if (!meetingBusy && !hasReadyResult) statusView.text = "登录成功；${error.userText()}"
             }
         })
     }
@@ -523,7 +520,7 @@ class MainActivity : Activity() {
                 renderIdentity(identity)
                 if (identity.status() == IdentityResult.Status.LOGGED_IN) continueStartMeeting()
             }
-            override fun onError(message: String) { statusView.text = message }
+            override fun onError(error: MeetingError) { statusView.text = error.userText() }
         })
     }
     /** 页面检查后 SDK 在真实建会前仍重新读取身份，避免沿用会前过时凭据。 */

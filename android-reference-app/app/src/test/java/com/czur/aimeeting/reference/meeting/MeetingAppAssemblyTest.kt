@@ -180,7 +180,7 @@ class MeetingAppAssemblyTest {
     }
     private fun callback(outcome: AtomicReference<ResultActionOutcome>) = object : MeetingClient.Callback<ResultActionOutcome> {
         override fun onSuccess(result: ResultActionOutcome) { outcome.set(result) }
-        override fun onError(message: String) { fail(message) }
+        override fun onError(error: MeetingError) { fail(error.code.name) }
     }
     private fun execute(prepared: MeetingAppAssembly.PreparedMeeting, ready: MeetingResult, access: ResultActionAccess, ui: Executor): ResultActionOutcome {
         val outcome = AtomicReference<ResultActionOutcome>()

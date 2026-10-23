@@ -6,6 +6,7 @@ import android.os.Bundle
 import android.util.Log
 import android.widget.TextView
 import com.czur.aimeeting.client.MeetingClient
+import com.czur.aimeeting.client.MeetingError
 import com.czur.aimeeting.client.MeetingResultContent
 import com.czur.aimeeting.client.result.ResultActionAccess
 import com.czur.aimeeting.client.result.ResultActionContext
@@ -95,7 +96,7 @@ class LocalPdfProbeActivity : Activity() {
                             }
                         }
                     }
-                    override fun onError(message: String) = failed("本地 PDF 插件执行失败")
+                    override fun onError(error: MeetingError) = failed("本地 PDF 插件执行失败 code=${error.code}")
                 })
             } catch (failure: Exception) { ui.execute { failed("结果读取失败 type=${failure.javaClass.simpleName}") } }
         }

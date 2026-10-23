@@ -329,13 +329,18 @@ class LocalHtmlAction(
                         )
                     }
                 }
-                override fun onError(message: String) {
+                override fun onError(error: MeetingError) {
+                    // SDK 只回稳定错误码；宿主映射自己的文案。
                     callback.onError("读取本场正文失败")
                 }
             })
         }
 }
 ```
+
+`MeetingClient.Callback` 的稳定错误入口是 `onError(error: MeetingError)`；宿主按
+`MeetingErrorCode` 映射自己的文案，SDK 不返回终端句子。`onError(message: String)`
+仅为旧宿主插件保留，SDK 自身不调用。
 
 文件读写／渲染交给 `workExecutor()`，页面操作交给 `uiExecutor()`；注入函数不能
 捕获已销毁的 Activity，异步动作最终只回调一次成功或失败。正文读取、文件生成或

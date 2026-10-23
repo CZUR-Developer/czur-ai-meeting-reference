@@ -6,6 +6,7 @@ import android.os.Looper
 import android.widget.Button
 import android.widget.FrameLayout
 import com.czur.aimeeting.client.MeetingClient
+import com.czur.aimeeting.client.MeetingError
 import com.czur.aimeeting.client.MeetingResult
 import com.czur.aimeeting.client.MeetingResultContent
 import com.czur.aimeeting.client.result.ResultActionAccess
@@ -91,7 +92,7 @@ class WebResultActionPluginTest {
         execution.execute(ResultActionContext(ready, access, emptySet(), { it.run() }, { pending += it }),
             object : MeetingClient.Callback<ResultActionOutcome> {
                 override fun onSuccess(result: ResultActionOutcome) = fail("尚未消费UI操作，不提前报告动作完成")
-                override fun onError(message: String) = fail(message)
+                override fun onError(error: MeetingError) = fail(error.code.name)
             })
         return pending
     }
