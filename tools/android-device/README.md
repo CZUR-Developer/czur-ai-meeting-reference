@@ -27,7 +27,7 @@ TLS 证书 IP SAN 一致。默认生成后端 `https://<host>:8443` 和结果页
 工具始终把最终两个地址作为显式 `-P` 传入，覆盖本地部署文件；若要完全采用文件原值，
 请直接在 Android 工程目录运行 Gradle，无需经过此 LAN helper。
 
-`--dry-run` 只打印构建目录与实际参数，不运行 Gradle。默认 `--runtime sdk`，必须提供
+`--dry-run` 只打印构建目录与实际参数，不运行 Gradle。必须提供
 匹配的设备 AAR；业务 AAR 由工程内 `meeting-android` 构建，不会因材料缺失退回假运行。
 本工具只构建 Debug，不安装 APK、启动服务、运行
 Docker、生成证书或修改 SDK；CA 只转发既有 Debug 构建参数。TLS 准备见
