@@ -19,19 +19,18 @@ plugins {
  * 再结合开源的 meeting-client-core 与 model-runtime-contract，产出宿主唯一依赖的
  * 业务 AAR。宿主需要改模型传输或门面时，改本模块源码重新构建即可，不用动设备 AAR。
  */
-val deviceSdkAar = providers.gradleProperty("deviceSdkAar").orNull
-require(deviceSdkAar == null || file(deviceSdkAar).isFile) {
-    "deviceSdkAar 必须指向已构建的 ai-meeting-device AAR"
+// 设备 AAR 固定放在本模块 libs 下；参考仓自带一份，构建不再接受 -PdeviceSdkAar。
+val deviceAar = file("libs/ai-meeting-device.aar")
+require(deviceAar.isFile) {
+    "请把设备 AAR 放到 meeting-android/libs/ai-meeting-device.aar"
 }
 
 // AGP 不允许 Android library 直接依赖本地 .aar 再产出 AAR；把设备 AAR 的
 // classes.jar 与 jni 解包成本模块的普通文件依赖，业务 AAR 才能把设备能力一起打包。
 val deviceUnpacked = layout.buildDirectory.dir("device-aar")
-val unpackDeviceAar = deviceSdkAar?.let { path ->
-    tasks.register<Sync>("unpackDeviceAar") {
-        from(zipTree(file(path))) { include("classes.jar", "jni/**", "proguard.txt") }
-        into(deviceUnpacked)
-    }
+val unpackDeviceAar = tasks.register<Sync>("unpackDeviceAar") {
+    from(zipTree(deviceAar)) { include("classes.jar", "jni/**", "proguard.txt") }
+    into(deviceUnpacked)
 }
 
 android {
@@ -41,10 +40,8 @@ android {
     defaultConfig {
         // 与设备 AAR 和现有 CZUR App 保持一致；参考 App 的 34 由应用自身决定。
         minSdk = 31
-        if (unpackDeviceAar != null) {
-            // 设备 AAR 的 JNI 保留规则必须作为消费端规则继续传递给宿主；只解包不打包等于丢了。
-            consumerProguardFiles(deviceUnpacked.map { it.file("proguard.txt") })
-        }
+        // 设备 AAR 的 JNI 保留规则必须作为消费端规则继续传递给宿主；只解包不打包等于丢了。
+        consumerProguardFiles(deviceUnpacked.map { it.file("proguard.txt") })
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -59,20 +56,16 @@ android {
         unitTests.isReturnDefaultValues = true
         unitTests.isIncludeAndroidResources = true
     }
-    if (unpackDeviceAar != null) {
-        sourceSets.getByName("main").jniLibs.srcDir(deviceUnpacked.map { it.dir("jni") })
-        tasks.matching { it.name.contains("JniLibFolders") }.configureEach {
-            dependsOn(unpackDeviceAar)
-        }
+    sourceSets.getByName("main").jniLibs.srcDir(deviceUnpacked.map { it.dir("jni") })
+    tasks.matching { it.name.contains("JniLibFolders") }.configureEach {
+        dependsOn(unpackDeviceAar)
     }
 }
 
 dependencies {
     api(files(coreJar))
     api(files(contractJar))
-    if (unpackDeviceAar != null) {
-        api(files(unpackDeviceAar.map { it.destinationDir.resolve("classes.jar") }))
-    }
+    api(files(unpackDeviceAar.map { it.destinationDir.resolve("classes.jar") }))
     implementation("com.squareup.okhttp3:okhttp:5.3.2")
 
     testImplementation("junit:junit:4.13.2")

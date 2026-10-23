@@ -1,14 +1,6 @@
-import java.io.File
-
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
-}
-
-// 参考 App 只有一条构建路径：业务 AAR 工程依赖 + 交付的设备 AAR。
-val deviceSdkAar = providers.gradleProperty("deviceSdkAar").orNull
-require(!deviceSdkAar.isNullOrBlank() && file(deviceSdkAar).isFile) {
-    "需要 -PdeviceSdkAar=/absolute/path/ai-meeting-device-0.5.0-release.aar"
 }
 
 android {
