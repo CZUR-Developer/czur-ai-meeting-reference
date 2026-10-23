@@ -271,7 +271,9 @@ class AiMeetingClientTest {
                         if (request.requestUrl!!.encodedPath.endsWith("/manifest"))
                             assertEquals(result.genTime().toString(), request.requestUrl!!.queryParameter("genTime"))
                     }
-                    assertEquals(listOf(base + ":stop", base + "/manifest", base + "/manifest"), paths)
+                    // 续办在发布前补交冻结用量；随后才是 Stop 与两次 READY 读取。
+                    assertEquals(listOf(base + "/usage:submit", base + ":stop",
+                        base + "/manifest", base + "/manifest"), paths)
                     assertEquals("original-stop-key", fixture.request(base + ":stop").getHeader("Idempotency-Key"))
                     assertEquals(1, reads.get()); assertEquals(1, publications.get())
                     assertEquals(0, identityReads.get()); assertEquals(0, modelOpens.get()); assertEquals(0, summaries.get())
@@ -359,7 +361,10 @@ class AiMeetingClientTest {
                             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) { webSocket.close(1000, null) }
                         })
                         "/v1/meetings/mtg_facade:stop" -> json(200, """{"inputState":"INPUT_ACCEPTED","finalizationReceipt":"fixture-receipt","manifestState":"GENERATING"}""")
-                        "/v1/meetings/mtg_facade/usage:submit" -> json(201, """{"meetingId":"mtg_facade","audioDurationMs":200,"accepted":true}""")
+                        "/v1/meetings/mtg_facade/usage:submit" -> {
+                            val submitted = JSONObject(request.body.clone().readUtf8()).getLong("audioDurationMs")
+                            json(201, """{"meetingId":"mtg_facade","audioDurationMs":$submitted,"accepted":true}""")
+                        }
                         "/v1/meetings/mtg_facade:sendResultEmail" -> json(200, "{}")
                         "/v1/meetings/mtg_facade/manifest" -> {
                             if (++manifests == 1) json(202, """{"meetingId":"mtg_facade","state":"FINALIZING","inputState":"INPUT_ACCEPTED","finalizationReceipt":"fixture-receipt","manifestState":"GENERATING","updatedAt":"2026-10-07T00:00:00Z"}""")
