@@ -13,7 +13,13 @@ import android.widget.CheckBox
  */
 class CzurReferenceSwitch(context: Context, attributes: AttributeSet?) : CheckBox(context, attributes) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-    init { buttonDrawable = null }
+
+    // 整行是一个可点区域，开关本体画在行尾；系统主题给 CheckBox 的 40dp 圆形 ripple
+    // 会落在行中心而不是手指处，看起来像凭空出现的灰白圆点，这里直接去掉背景。
+    init {
+        buttonDrawable = null
+        background = null
+    }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
