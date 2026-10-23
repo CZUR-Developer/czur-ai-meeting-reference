@@ -20,7 +20,7 @@
 | --- | --- | --- |
 | Android 参考 App | 登录、会前选项、字幕／互译、悬浮窗、停止和结果入口 | 本仓 `android-reference-app/`，Kotlin First |
 | 设备 AAR（闭源） | 音源探测、采音、截图和 native；不含 core／契约 | 从配套交付包取得，公开仓库不携带闭源二进制 |
-| 业务 AAR（源码） | 模型连接、数据归一化及通用会议门面 | 本仓 `android-reference-app/meeting-android/`，构建时用 `-PdeviceSdkAar` 注入设备 AAR |
+| 业务 AAR（源码） | 模型连接、数据归一化及通用会议门面 | 本仓 `android-reference-app/meeting-android/`，设备 AAR 已随仓在 `meeting-android/libs/ai-meeting-device.aar` |
 | 字幕显示控件 | 设备 AAR 内置的 `com.czur.aimeeting.ui.SubtitleTextView` | 随设备 AAR 交付，不再单独提供 UI AAR |
 | 公共服务端核心 | 会议流程、标准协议、能力协商、持久化与扩展端口 | 本仓 `backend-core/`，构建成普通 JAR |
 | 参考后端 | 可启动的 HTTP 服务，装配示例登录、模型发行器和结果存储 | 本仓 `backend-reference/` |
@@ -220,28 +220,20 @@ bash tools/run-reference-web.sh
 
 ### 第 5 步：构建并安装真实 SDK 版本 App
 
-从 SDK 交付包取得设备 AAR，业务 AAR 由本仓 `meeting-android` 自行构建。
-替换以下占位路径后在仓库根目录执行：
+设备 AAR 已随参考仓放在 `meeting-android/libs/ai-meeting-device.aar`；业务 AAR 由本仓
+`meeting-android` 自行构建。构建不需要任何参数：
 
 ```bash
-python3 tools/android-device/build-lan-apk.py \
-  --host '192.0.2.10' --backend-port 8443 --web-port 8090 \
-  --device-aar /absolute/path/ai-meeting-device-0.5.0-release.aar \
-  --debug-ca /absolute/path/ca.pem
-
-adb install -r android-reference-app/app/build/outputs/apk/debug/app-debug.apk
+cd android-reference-app
+./gradlew :app:assembleDebug
+adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-`--host` 必须与第 4 步证书中的 IP 一致；`--debug-ca` 指向该步骤生成的公开 CA 证书，
-不能传 CA 私钥。已有正式可信 HTTPS 时可不传此参数，并用 `--backend-url`／`--web-url`
-指定完整地址。自定义端口、手动 Gradle、构建地址文件和自动化操作见[工具说明](../tools/android-device/README.md)。
-
-构建工具默认显式选择 `sdk`。直接执行未带参数的 `./gradlew :app:assembleDebug`
-缺少设备 AAR 时配置失败；取得配套设备 AAR 后再执行本步骤。
-
-地址在打包时确定，终端用户没有手填 IP 的步骤。App 会保存当前后端的有效登录状态；
-保留数据覆盖安装或重开后可恢复登录。退出会清除会话，更换后端的 APK 不复用旧后端身份。
-
+后端和结果页地址在
+`app/src/main/java/com/czur/aimeeting/reference/meeting/ReferenceDeployment.kt`；
+调试 CA 在 `app/src/debug/res/raw/reference_debug_ca.pem`（开发自签，运维提供正式 CA
+后替换）。地址在打包时确定，终端用户没有手填 IP 的步骤。App 保存当前后端的有效登录；
+保留数据覆盖安装或重开后可恢复登录，退出会清除会话，更换后端的 APK 不复用旧身份。
 ### 第 6 步：登录、开会、停止并看结果
 
 1. 在设备上打开参考 App，使用第 1 步设置的参考用户名／密码登录。

@@ -84,47 +84,24 @@ curl --cacert "$REFERENCE_TLS_DIR/ca.pem" "https://$PC_LAN_IP:8443/v1/capabiliti
 不使用 `curl -k` 或绕过证书校验。生产部署使用部署方自己的 HTTPS 域名／证书和
 正式反向代理；本脚本不属于必须交付的产品镜像。
 
-## 3. 构建时注入部署地址，仅 Debug 信任该 CA
+## 3. 构建（代码即配置）
 
-在参考仓根目录使用轻量构建入口，地址与 CA 都由开发者在 PC 上准备：
+参考 App 的地址和调试 CA 已经在代码/资源里：
 
-```bash
-python3 tools/android-device/build-lan-apk.py \
-  --host "$PC_LAN_IP" --backend-port 8443 --web-port 8090 \
-  --device-aar /absolute/path/ai-meeting-device-0.5.0-release.aar \
-  --debug-ca "$REFERENCE_TLS_DIR/ca.pem"
-```
+- 后端/结果页：`android-reference-app/app/src/main/java/com/czur/aimeeting/reference/meeting/ReferenceDeployment.kt`
+- 调试 CA：`android-reference-app/app/src/debug/res/raw/reference_debug_ca.pem`
 
-设备 AAR 是唯一需要的外部二进制；业务 AAR 由工程内模块构建。省略 `--host` 时工具根据本机路由选址；证书仍须与最终主机
-匹配，多网卡时应显式指定。已有 Web 在其他端口时传 `--web-port`，后端使用独立的
-`--backend-port`；已有完整地址时可传 `--backend-url`／`--web-url` 原样覆盖。增加
-`--dry-run` 可只查看 Gradle 参数，不执行构建。工具不启动服务、生成证书或安装 APK。
-
-也可在 Android 工程目录直接配置：默认复制 `deployment.properties.example` 为已忽略的
-`deployment.local.properties`，或传 `-PreferenceDeploymentFile=/absolute/path/deployment.properties`。
-显式 `-PreferenceBackendUrl`／`-PreferenceResultWebUrl` 优先于文件中的同名键；公开模板
-只包含示例域名。等价的 SDK 手动构建命令为：
+构建不需要任何 `-P` 参数：
 
 ```bash
 cd android-reference-app
-./gradlew :app:assembleDebug \
-  -PdeviceSdkAar=/absolute/path/ai-meeting-device-0.5.0-release.aar \
-  -PreferenceBackendUrl="https://$PC_LAN_IP:8443" \
-  -PreferenceResultWebUrl="http://$PC_LAN_IP:8090/index.html" \
-  -PreferenceDebugCaCertificate="$REFERENCE_TLS_DIR/ca.pem"
+./gradlew :app:assembleDebug
 ```
 
-不要求闭源 AAR；它不代签真实采音／模型。无配置仍可构建，页面提示联系应用提供方，
-不让终端用户补填地址。配置来源与身份保存边界见 [Android 说明](../android-reference-app/README.md#构建期部署地址)。
-
-构建在 `app/build/generated/referenceDebugTls/res/` 生成 CA raw 资源和网络安全配置，
-Debug Manifest 引用该配置；Release 不引用配置、不打包 CA，SDK 也没有改动。
-系统 CA 继续有效，额外 CA 仅在可调试构建中加入；TLS 链和 IP／主机名校验仍正常执行，
-没有 trust-all、全局禁用校验或设备系统证书安装步骤。
-
-不传该属性时，Debug 保持系统 CA 信任，并移除上次生成的本机 CA 资源；原有
-cleartext 调试设置保留，SDK 登录地址仍只接受 HTTPS 或诊断用 loopback。
-可直接运行 `:app:generateReferenceDebugTlsResources` 检查生成结果，无须安装设备。
+设备 AAR 随仓在 `meeting-android/libs/ai-meeting-device.aar`，不再需要命令行路径。
+Debug 构建自动信任上面的开发 CA；Release 不信任它，正式部署使用部署方自己的受信任
+HTTPS 证书。运维提供正式 CA 后，替换调试 CA 文件或改走系统信任。页面不提供终端用户
+填写地址的入口；配置来源与身份边界见[Android 说明](../android-reference-app/README.md)。
 
 ## 4. 安装后正常登录与 Web 配置
 

@@ -19,64 +19,39 @@ Gradle 8.7 和 Android Gradle Plugin 8.5.2，目标 JVM 为 17。Android 自有�
 | `app/` | 可编辑的页面、身份与结果插件、权限、前台 Service、计时和截图时序 |
 | `model-runtime-contract/` | 模型 Adapter、会话材料、音源状态和标准事件契约 |
 | `meeting-client-core/` | 共享 Server 协议、会议编排、Adapter 注册和显示规则 |
-| 配套设备 AAR（闭源） | 系统／标准 MIC 音源、同源录音及截图能力、native；不含 core 或契约 |
+| `meeting-android/libs/ai-meeting-device.aar` | 随仓交付的闭源设备 AAR：系统／标准 MIC 音源、同源录音及截图能力、native；不含 core 或契约 |
 | `meeting-android/`（业务 AAR） | 模型连接与会议门面；构建时注入设备 AAR，产物是宿主唯一依赖的业务 AAR |
 | 设备 AAR 内置 UI | `com.czur.aimeeting.ui.SubtitleTextView` 字幕文字显示控件 |
 
-设备 AAR 和 UI 工具由配套交付包提供；业务 AAR 由本仓 `meeting-android/` 源码构建，
-构建时用 `-PdeviceSdkAar` 指向交付的设备 AAR。无需访问 CZUR 产品源码仓；AAR、模型 Key、
-真实会话材料和本地配置均不提交到本公开源码仓。具体功能、版本配套与供应商账户
+设备 AAR 随本仓放在 `meeting-android/libs/ai-meeting-device.aar`；业务 AAR 由本仓
+`meeting-android/` 源码构建。构建不需要任何 `-P` 参数。无需访问 CZUR 产品源码仓；
+模型 Key、真实会话材料和账号密码不放进构建配置。具体功能、版本配套与供应商账户
 准备方式见[从零指南](../docs/partner-getting-started.md)。
 
-## 构建期部署地址
+## 部署配置与构建（代码即配置）
 
-后端和默认 Web 结果页地址由开发者在 PC 上配置，编译为 App 的 `BuildConfig`。
-终端用户只需登录和使用会议功能，无需填写 IP 或网址。模型地址和短期材料由后端下发，
-这份构建配置不包含模型 Key 或账号密码。
+后端和结果页地址只有一处：
 
-在 Android Studio 打开本目录后，复制模板并填写两个地址。实际文件已被 Git 忽略：
+`app/src/main/java/com/czur/aimeeting/reference/meeting/ReferenceDeployment.kt`
 
-```bash
-cp deployment.properties.example deployment.local.properties
-# 编辑 referenceBackendUrl 和 referenceResultWebUrl。
-```
+合作伙伴直接修改这个文件；构建不接受任何 `-P` 参数，终端用户不需要在设备上填写。
+当前参考局域网值是 `BACKEND_URL` 和 `RESULT_WEB_URL`。模型地址和短期材料由后端下发，
+这里不包含模型 Key 或账号密码。
 
-取值优先级为显式 Gradle `-PreferenceBackendUrl`／`-PreferenceResultWebUrl`、选定
-`.properties` 文件中的同名键、空值。默认文件为本工程根目录下的
-`deployment.local.properties`；可用 `-PreferenceDeploymentFile=/absolute/path/deployment.properties`
-选择仓外文件，相对路径按 Android Gradle 根目录解析。地址缺失时 App 会提示联系应用提供方。
+调试 CA 在 `app/src/debug/res/raw/reference_debug_ca.pem`，是开发用自签 CA，Debug 构建
+自动信任。运维提供正式 CA 后，替换该文件或改走系统信任；Release 不信任这个开发 CA。
 
 ```bash
-./gradlew :app:assembleDebug \
-  -PreferenceBackendUrl=https://api.example.invalid \
-  -PreferenceResultWebUrl=https://results.example.invalid/index.html
+./gradlew :app:assembleDebug :app:testDebugUnitTest
 ```
 
-构建需要交付的设备 AAR（下节）。局域网可从仓库根使用
-[`build-lan-apk.py`](../tools/android-device/build-lan-apk.py)，显式注入可达的 PC 地址和
-配套 AAR。工具不会启动服务或生成证书；命令及 HTTPS 准备见
-[构建／启动工具](../tools/android-device/README.md)和[局域网 HTTPS 指南](../docs/local-lan-https.md)。
-设备上的 `127.0.0.1` 指设备自身；局域网运行应填写设备可达的服务地址。
+设备 AAR 已随仓放在 `meeting-android/libs/ai-meeting-device.aar`；`:meeting-android` 在构建时
+解包它的 `classes.jar`、`jni/` 和 `proguard.txt` 一起打进业务 AAR，版本握手保持。最小混淆
+验证固定用 `./gradlew :app:assembleMinifiedDebug`，不再传参数。
 
-## 构建
-
-所有命令在本目录执行。参考 App 只有一条构建路径：业务 AAR 工程 + 交付的设备 AAR。
-
-```bash
-./gradlew :app:assembleDebug :app:testDebugUnitTest \
-  -PdeviceSdkAar=/absolute/path/ai-meeting-device-0.5.0-release.aar \
-  -PreferenceBackendUrl=https://api.example.invalid \
-  -PreferenceResultWebUrl=https://results.example.invalid/index.html
-```
-
-最小混淆验证：传 `-PreferenceMinify` 会开启 debug／release 的 R8，用来检查业务 AAR 的
-消费端规则；局域网自签 CA 只在 debug 变体信任，验 JNI 和业务规则用 debug 变体，release
-只用于已有可信 HTTPS 的部署。
-
-缺少设备 AAR 时配置失败。App 依赖 `:meeting-android`（业务 AAR 源码模块），它把设备
-AAR、公共 core、契约和模型传输一起打包。设备 AAR 提供 MIC/Broker 采集、投屏截图、native
-和 `com.czur.aimeeting.ui.SubtitleTextView`；业务层的模型/服务端通信在开放模块里可改。
-参考页面的字幕/占位直接使用 SDK 的 `SubtitleTextView`，不再单独引入 UI AAR。
+干净上下文只需要：仓库（含设备 AAR 和调试 CA）、Android SDK/JDK、可访问的后端和结果页、
+参考账号；设备在 PC 所在局域网内。没有这些运行时条件，APK 仍然能编译，但会因发现不到
+能力和语言而无法开会。
 
 ## 默认参考功能与接入边界
 

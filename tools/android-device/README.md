@@ -1,37 +1,17 @@
-# Android 参考 App 启动校验工具
+# Android 参考 App 设备侧工具
 
-## 开发者先构建带部署地址的 APK
+## 构建 APK
 
-后端和结果页地址由合作伙伴开发者在 PC 上配置，随 APK 构建确定。终端用户只需登录和
-选择会议功能，设备端没有连接设置或填写 IP 的步骤。正式部署可使用
-[`deployment.properties.example`](../../android-reference-app/deployment.properties.example)
-提供的键：复制为同目录已忽略的 `deployment.local.properties` 后填写实际值，或用
-`-PreferenceDeploymentFile=/absolute/path/deployment.properties` 选择仓外文件。
-显式 `-PreferenceBackendUrl=...`／`-PreferenceResultWebUrl=...` 优先于文件中的同名键。
-
-局域网联调提供轻量构建入口，从仓库根目录执行：
+参考 App 的部署地址和调试 CA 都在代码/资源里，构建不需要任何参数：
 
 ```bash
-python3 tools/android-device/build-lan-apk.py \
-  --host '192.0.2.10' --backend-port 8443 --web-port 8090 \
-  --device-aar /absolute/path/ai-meeting-device-0.5.0-release.aar \
-  --debug-ca /absolute/path/ca.pem
+cd android-reference-app
+./gradlew :app:assembleDebug
 ```
 
-`192.0.2.10` 为文档占位值，替换为设备可达的 PC 地址。省略 `--host` 时，仅根据本机
-路由选取出口 IPv4，不向远端发请求；多网卡或网络隔离时请显式指定，并核对它与已准备的
-TLS 证书 IP SAN 一致。默认生成后端 `https://<host>:8443` 和结果页
-`http://<host>:8090/index.html`；端口独立可配，例如已有 Web 运行在 8091 时传
-`--web-port 8091`。已有域名／路径可直接传 `--backend-url` 和 `--web-url`，完整 URL
-原样交给 Gradle，保留 query／fragment；两者都提供时不探测主机地址。
-工具始终把最终两个地址作为显式 `-P` 传入，覆盖本地部署文件；若要完全采用文件原值，
-请直接在 Android 工程目录运行 Gradle，无需经过此 LAN helper。
-
-`--dry-run` 只打印构建目录与实际参数，不运行 Gradle。必须提供
-匹配的设备 AAR；业务 AAR 由工程内 `meeting-android` 构建，不会因材料缺失退回假运行。
-本工具只构建 Debug，不安装 APK、启动服务、运行
-Docker、生成证书或修改 SDK；CA 只转发既有 Debug 构建参数。TLS 准备见
-[`本机 HTTPS 指南`](../../docs/local-lan-https.md)。
+设备 AAR 已随仓位于 `meeting-android/libs/ai-meeting-device.aar`。要改后端/结果页时编辑
+`app/src/main/java/com/czur/aimeeting/reference/meeting/ReferenceDeployment.kt`；调试 CA 在
+`app/src/debug/res/raw/reference_debug_ca.pem`，运维提供正式 CA 后替换。
 
 ## 独立截图 API 回归（SDK Debug）
 
@@ -224,11 +204,9 @@ PC 后端。现有登录客户端允许这个开发入口；直接构建 `http:/
 以下例子将设备的 `127.0.0.1:8080` 映射到 PC 后端的 `38169` 端口，Web 仍走局域网：
 
 ```bash
-# 开发者先构建并安装这个诊断APK；真实LAN验收仍使用HTTPS入口。
-python3 tools/android-device/build-lan-apk.py \
-  --backend-url 'http://127.0.0.1:8080' \
-  --web-url 'http://192.0.2.10:8090/index.html' \
-  --device-aar /absolute/path/ai-meeting-device-0.5.0-release.aar
+# 开发者先把 ReferenceDeployment.BACKEND_URL 临时改成 http://127.0.0.1:8080，
+# 再构建并安装这个诊断APK；真实LAN验收仍使用HTTPS入口。
+cd android-reference-app && ./gradlew :app:assembleDebug
 python3 tools/android-device/meeting-device.py reverse --device-port 8080 --host-port 38169
 python3 tools/android-device/meeting-device.py setup-start --username 'meeting-user'
 python3 tools/android-device/meeting-device.py remove-reverse --device-port 8080
