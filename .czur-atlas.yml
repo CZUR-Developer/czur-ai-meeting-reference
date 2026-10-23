@@ -1,0 +1,11 @@
+version: 1
+kind: repository
+atlas:
+  id: atlas
+  remote: git@gitee.com:czur_dl/atlas.git
+repository:
+  id: czur-ai-meeting-reference
+  doc: repositories/czur-ai-meeting-reference/README.md
+read_before_work:
+- docs-index.md
+- repositories/czur-ai-meeting-reference/README.md
