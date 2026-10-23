@@ -457,19 +457,41 @@ class MeetingDevice:
         self.evidence()
         self.emit("PASS", action=action, windows=windows, **current)
 
+    def classify_meeting_state(self, state):
+        """把进程/日志/UI拆成可判定的会议状态，避免进程存在就冒充会议在跑。"""
+        if not state.get("processRunning"):
+            return "UNKNOWN"
+        phase = state.get("phase")
+        meeting_id = state.get("meetingId")
+        ui = state.get("ui") or {}
+        if phase in ("PREPARING", "RUNNING", "STOPPING", "STOP_ACCEPTED") or "stop_meeting" in ui:
+            return "MEETING_RUNNING"
+        if phase == "READY":
+            return "MEETING_READY"
+        if meeting_id is None and "start_meeting" in ui:
+            return "APP_RUNNING_NO_MEETING"
+        return "UNKNOWN"
+
     def status(self):
         self.stage = "status"
-        root = self.dump()
         state = self.log_state()
-        if not state.get("processRunning"):
-            raise ToolError("参考 App 未运行，请先安装并执行 open；当前状态不作为会议验证通过")
-        state["ui"] = {name: {key: node.get(key, "") for key in
-                             ("text", "enabled", "checked")}
-                       for name in ("account_button", "status", "start_meeting", "stop_meeting",
-                                    "transcript_mode", "translation_mode", "presentation_capture")
-                       if (node := by_id(root, name)) is not None}
-        self.evidence()
-        self.emit("PASS", **state)
+        state["ui"] = {}
+        if state.get("processRunning"):
+            try:
+                root = self.dump()
+                state["ui"] = {name: {key: node.get(key, "") for key in
+                                      ("text", "enabled", "checked")}
+                               for name in ("account_button", "status", "start_meeting", "stop_meeting",
+                                            "transcript_mode", "translation_mode", "presentation_capture")
+                               if (node := by_id(root, name)) is not None}
+            except UiSnapshotUnavailable:
+                # 动态界面偶尔取不到层级；日志里的会议状态仍然有效，不把它误判成失败。
+                state["ui"] = {}
+        state["meetingState"] = self.classify_meeting_state(state)
+        if state.get("processRunning") and state["ui"]:
+            self.evidence()
+        # status 的 status 字段直接给会议状态，避免进程存在被自动化误读成会议 PASS。
+        self.emit(state["meetingState"], **state)
 
 
 def parser():

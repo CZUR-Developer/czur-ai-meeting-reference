@@ -136,12 +136,13 @@ class MeetingDeviceTests(unittest.TestCase):
         adb.run.assert_called_once_with("shell", "input", "keyevent", "KEYCODE_LANGUAGE_SWITCH")
         self.assertEqual(tool.fill_once.call_count, 2)
 
-    def test_status_does_not_report_an_absent_process_as_pass(self):
+    def test_status_reports_absent_process_as_unknown_not_pass(self):
         tool = device.MeetingDevice(Mock())
-        tool.dump = Mock(return_value=hierarchy())
-        tool.log_state = Mock(return_value={"processRunning": False})
-        with self.assertRaises(device.ToolError):
-            tool.status()
+        tool.log_state = Mock(return_value={"processRunning": False, "meetingId": None, "phase": None})
+        tool.emit = Mock()
+        tool.status()
+        self.assertEqual("UNKNOWN", tool.emit.call_args.args[0])
+        self.assertEqual("UNKNOWN", tool.emit.call_args.kwargs["meetingState"])
 
     def test_logged_in_switch_still_submits_requested_user(self):
         adb = Mock()
@@ -231,6 +232,42 @@ class MeetingDeviceTests(unittest.TestCase):
         self.assertFalse(tool.optional_check("summary_enabled", False))
         with self.assertRaises(device.ToolError):
             tool.optional_check("summary_enabled", True)
+
+
+    def status_tool(self, state, root=None):
+        tool = device.MeetingDevice(Mock())
+        tool.log_state = Mock(return_value=state)
+        tool.dump = Mock(return_value=root if root is not None else hierarchy(("start_meeting", {})))
+        tool.emit = Mock()
+        tool.evidence = Mock()
+        return tool
+
+    def test_status_running_process_without_meeting_is_not_pass_meeting(self):
+        tool = self.status_tool({"processRunning": True, "meetingId": None, "phase": None})
+        tool.status()
+        self.assertEqual("APP_RUNNING_NO_MEETING", tool.emit.call_args.kwargs["meetingState"])
+
+    def test_status_running_meeting(self):
+        tool = self.status_tool({"processRunning": True, "meetingId": "mtg_1", "phase": "RUNNING"})
+        tool.status()
+        self.assertEqual("MEETING_RUNNING", tool.emit.call_args.kwargs["meetingState"])
+
+    def test_status_ready_meeting(self):
+        tool = self.status_tool({"processRunning": True, "meetingId": "mtg_1", "phase": "READY"})
+        tool.status()
+        self.assertEqual("MEETING_READY", tool.emit.call_args.kwargs["meetingState"])
+
+    def test_status_unrecognized_state_is_unknown(self):
+        tool = self.status_tool({"processRunning": True, "meetingId": "mtg_1", "phase": None},
+                                root=hierarchy(("status", {})))
+        tool.status()
+        self.assertEqual("UNKNOWN", tool.emit.call_args.kwargs["meetingState"])
+
+    def test_stop_without_meeting_is_explicit_error(self):
+        tool = device.MeetingDevice(Mock())
+        tool.log_state = Mock(return_value={"processRunning": True, "meetingId": None, "phase": None})
+        with self.assertRaises(device.ToolError):
+            tool.stop()
 
 
 if __name__ == "__main__":

@@ -135,7 +135,10 @@ WindowManager 的 `APPLICATION_OVERLAY` 实际尺寸；Activity 的 `BASE_APPLIC
 明确失败，不使用历史坐标代签通过；Release 包请手动操作。悬浮窗权限首次需在系统设置中授予，
 此工具不代替用户修改该权限；返回 App 后继续正常开始。
 
-每个阶段输出一行 JSON：`stage`、`status`（PASS／PROGRESS／FAIL）和必要回执。
+每个阶段输出一行 JSON：`stage`、`status` 和必要回执。`status` 命令的 `status`
+直接是会议状态：`APP_RUNNING_NO_MEETING`、`MEETING_RUNNING`、`MEETING_READY`、
+`UNKNOWN`，同时回执里也带 `meetingState`；其他命令是 PASS／PROGRESS／FAIL。
+进程存在但没有会议时不会再报 PASS；没有可停止会议时 `stop` 直接失败。
 登录 PASS 确认真实登录与能力加载后开始按钮可用；开始 PASS 确认**本场 App RUNNING
 日志**，不以 ADB 点击回执代替业务成功。动态字幕和音量动画会影响 UI dump，所以开始后
 无需继续找停止按钮。`status` 可读取页面可见信息、当前 PID 的会议 ID／阶段、实际音源模式

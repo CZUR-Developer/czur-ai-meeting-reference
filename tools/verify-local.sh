@@ -11,6 +11,7 @@ cd "${REPO_DIR}"
 ./gradlew checkStructure
 mvn -B -f pom.xml test
 python3 tools/contract-fixtures/validate.py
+python3 -m unittest discover -s tools/android-device -p 'test_*.py'
 npm --prefix web-reference run check
 npm --prefix web-reference run build
 
