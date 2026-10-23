@@ -25,6 +25,8 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.*
 import com.czur.aimeeting.client.MeetingClient
+import com.czur.aimeeting.client.MeetingError
+import com.czur.aimeeting.client.MeetingErrorCode
 import com.czur.aimeeting.client.MeetingDiscovery
 import com.czur.aimeeting.client.MeetingCapabilityState
 import com.czur.aimeeting.client.result.ResultOptions
@@ -268,7 +270,15 @@ class MainActivity : Activity() {
                 // 登录前无法续办的原场，登录成功后立即补一次。
                 resumeInterruptedMeetingsInBackground()
             }
-            override fun onError(message: String) { setConfigurationEnabled(true); loginMessage(message); Log.w(TAG, "参考账号登录失败") }
+            override fun onError(error: MeetingError) {
+                setConfigurationEnabled(true)
+                // 参考宿主自己决定展示话术；SDK 只回错误码。
+                loginMessage(if (error.code == MeetingErrorCode.LOGIN_FAILED) "登录失败" else "登录失败")
+                Log.w(TAG, "参考账号登录失败 code=${error.code}")
+            }
+            override fun onError(message: String) {
+                setConfigurationEnabled(true); loginMessage("登录失败"); Log.w(TAG, "参考账号登录失败 message=$message")
+            }
         })
     }
 

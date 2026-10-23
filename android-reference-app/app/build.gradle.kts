@@ -76,24 +76,10 @@ abstract class GenerateReferenceDebugTlsResources : DefaultTask() {
     }
 }
 
-val meetingRuntime = providers.gradleProperty("meetingRuntime").orElse("mock").get()
-require(meetingRuntime == "mock" || meetingRuntime == "sdk") {
-    "meetingRuntime must be mock or sdk"
-}
-
-// UI 与音源/会议 SDK 独立选择；干净 Mock 不需要任何闭源 AAR。
-val meetingUiAar = providers.gradleProperty("meetingUiAar").orNull
-if (meetingUiAar != null) {
-    require(meetingUiAar.isNotBlank() && file(meetingUiAar).isFile) {
-        "meetingUiAar requires /absolute/path/ai-meeting-ui-0.2.0-release.aar"
-    }
-}
-val subtitleUiSource = if (meetingUiAar == null) "basic-ui" else "meeting-ui"
+// 参考 App 只有一条构建路径：业务 AAR 工程依赖 + 交付的设备 AAR。
 val deviceSdkAar = providers.gradleProperty("deviceSdkAar").orNull
-if (meetingRuntime == "sdk") {
-    require(!deviceSdkAar.isNullOrBlank() && file(deviceSdkAar).isFile) {
-        "sdk mode requires -PdeviceSdkAar=/absolute/path/ai-meeting-device-0.5.0-release.aar"
-    }
+require(!deviceSdkAar.isNullOrBlank() && file(deviceSdkAar).isFile) {
+    "需要 -PdeviceSdkAar=/absolute/path/ai-meeting-device-0.5.0-release.aar"
 }
 
 android {
@@ -129,17 +115,11 @@ android {
         }
     }
 
-    sourceSets.getByName("main").java.srcDir("src/$meetingRuntime/java")
-    sourceSets.getByName("test").java.srcDir("src/test/$meetingRuntime/java")
-    if (meetingRuntime == "sdk") {
-        // 公开 API 探针只进 SDK Debug，不进入 Release 或干净 Mock 交付。
-        sourceSets.getByName("debug").java.srcDir("src/sdk-debug/java")
-        sourceSets.getByName("debug").manifest.srcFile("src/sdk-debug/AndroidManifest.xml")
-    }
-    // 同名薄工厂互斥编译，不反射加载 UI，不复制会议编排。
-    sourceSets.getByName("main").java.srcDir("src/$subtitleUiSource/java")
-    sourceSets.getByName("test").java.srcDir("src/test/$subtitleUiSource/java")
-    testOptions { unitTests.isIncludeAndroidResources = meetingUiAar != null }
+    // 单一路径：字幕/浮窗源码只保留 basic-ui；公开 API 探针只进 Debug。
+    sourceSets.getByName("main").java.srcDir("src/basic-ui/java")
+    sourceSets.getByName("debug").java.srcDir("src/sdk-debug/java")
+    sourceSets.getByName("debug").manifest.srcFile("src/sdk-debug/AndroidManifest.xml")
+    testOptions { unitTests.isIncludeAndroidResources = true }
 }
 
 // 使用 AGP 的生成资源接缝让 Debug 资源任务自动加入构建依赖；不写 main/res。
@@ -170,22 +150,12 @@ dependencies {
     implementation("com.github.penfeizhou.android.animation:apng:3.0.5")
     // APNG 的父类实现 Animatable2Compat，但其 POM 只声明运行依赖；显式补齐编译可见性。
     implementation("androidx.vectordrawable:vectordrawable-animated:1.1.0")
-    if (meetingUiAar != null) {
-        // 裸 UI AAR 不带 core/contract/native；Kotlin 插件提供所需的标准库运行依赖。
-        implementation(files(meetingUiAar))
-        testImplementation("org.robolectric:robolectric:4.16.1")
-    }
-    if (meetingRuntime == "mock") {
-        implementation(project(":model-runtime-contract"))
-        implementation(project(":meeting-client-core"))
-    }
-    if (meetingRuntime == "sdk") {
-        // 业务 AAR 以工程依赖接入；它自带 core、契约、设备能力和模型传输。
-        implementation(project(":meeting-android"))
-        implementation("com.squareup.okhttp3:okhttp:5.3.2")
-        implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
-    }
+    // 业务 AAR 以工程依赖接入；它自带 core、契约、设备能力和模型传输（含 SDK TextView）。
+    implementation(project(":meeting-android"))
+    implementation("com.squareup.okhttp3:okhttp:5.3.2")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.16.1")
     testImplementation("org.json:json:20240303")
     testImplementation("com.squareup.okhttp3:mockwebserver:5.3.2")
 }
