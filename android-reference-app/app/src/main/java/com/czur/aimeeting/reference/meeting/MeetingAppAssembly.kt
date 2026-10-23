@@ -16,7 +16,6 @@ import com.czur.aimeeting.client.result.ResultActionPlugin
 import com.czur.aimeeting.client.result.ResultOptions
 import com.czur.aimeeting.reference.AppResultActionPlugin
 import com.czur.aimeeting.reference.WebResultActionPlugin
-import com.czur.aimeeting.reference.BuildConfig
 import com.czur.aimeeting.reference.MeetingPageViews
 import com.czur.aimeeting.reference.ui.MeetingOverlayFactory
 import com.czur.aimeeting.reference.ui.OverlayViewFactory
@@ -60,7 +59,7 @@ object MeetingAppAssembly {
     private var stoppedStore: ReferenceStoppedMeetingStore? = null
 
     /**
-     * 页面首次启动时调用一次，以当前 APK 的 BuildConfig 装配后端和结果 Web。
+     * 页面首次启动时调用一次，以 ReferenceDeployment 的代码配置装配后端和结果 Web。
      *
      * 旧 backend_url 只用于判断已保存身份属于哪个后端，不能覆盖编译值；同一后端
      * 保留有效登录，切换后端时清除旧会话。旧的结果页设置完全不参与装配，单独更换
@@ -75,8 +74,8 @@ object MeetingAppAssembly {
         stoppedStore = ReferenceStoppedMeetingStore(application)
         preferences = application.getSharedPreferences("czur_reference_settings", Context.MODE_PRIVATE)
         identityProvider = PersistentReferenceIdentityProvider(application)
-        applyBackend(BuildConfig.REFERENCE_BACKEND_URL, preferences?.getString(KEY_BACKEND_URL, "").orEmpty())
-        resultWebUrl = BuildConfig.REFERENCE_RESULT_WEB_URL
+        applyBackend(ReferenceDeployment.BACKEND_URL, preferences?.getString(KEY_BACKEND_URL, "").orEmpty())
+        resultWebUrl = ReferenceDeployment.RESULT_WEB_URL
         initialized = true
     }
 

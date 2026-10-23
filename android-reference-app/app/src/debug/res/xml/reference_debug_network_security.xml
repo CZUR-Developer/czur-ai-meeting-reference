@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  仅 Debug 使用：开发用自签 CA，不是生产信任链。
+  运维提供正式 CA 后，替换 raw/reference_debug_ca.pem，或把调试地址改成系统信任的证书；
+  Release 不引用本文件，也不会信任这个开发 CA。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+    <debug-overrides>
+        <trust-anchors>
+            <certificates src="@raw/reference_debug_ca" />
+        </trust-anchors>
+    </debug-overrides>
+</network-security-config>

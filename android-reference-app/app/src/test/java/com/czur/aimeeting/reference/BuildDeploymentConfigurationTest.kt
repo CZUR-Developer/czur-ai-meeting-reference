@@ -11,6 +11,7 @@ import com.czur.aimeeting.client.identity.IdentityResult
 import com.czur.aimeeting.client.identity.IdentitySession
 import com.czur.aimeeting.reference.identity.PersistentReferenceIdentityProvider
 import com.czur.aimeeting.reference.meeting.MeetingAppAssembly
+import com.czur.aimeeting.reference.meeting.ReferenceDeployment
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
@@ -44,30 +45,30 @@ class BuildDeploymentConfigurationTest {
 
     @Test fun compiledEndpointsReplaceOldInputsAndDoNotReuseAnotherBackendIdentity() {
         settings.edit()
-            .putString("backend_url", BuildConfig.REFERENCE_BACKEND_URL + "/different-old-backend")
+            .putString("backend_url", ReferenceDeployment.BACKEND_URL + "/different-old-backend")
             .putString("result_web_url", "https://old-result.example.test/ignored.html")
             .commit()
         saveLogin()
 
         MeetingAppAssembly.initialize(context)
 
-        assertEquals(BuildConfig.REFERENCE_BACKEND_URL, MeetingAppAssembly.serverUrl())
-        assertEquals(BuildConfig.REFERENCE_RESULT_WEB_URL, MeetingAppAssembly.resultWebUrl())
-        assertEquals(BuildConfig.REFERENCE_BACKEND_URL, settings.getString("backend_url", null))
+        assertEquals(ReferenceDeployment.BACKEND_URL, MeetingAppAssembly.serverUrl())
+        assertEquals(ReferenceDeployment.RESULT_WEB_URL, MeetingAppAssembly.resultWebUrl())
+        assertEquals(ReferenceDeployment.BACKEND_URL, settings.getString("backend_url", null))
         assertEquals(IdentityResult.Status.LOGIN_REQUIRED, restoredIdentity().currentIdentity().status())
     }
 
     @Test fun sameBackendKeepsValidLoginWhenOnlyTheWebAddressOrTrailingSlashChanges() {
         settings.edit()
-            .putString("backend_url", BuildConfig.REFERENCE_BACKEND_URL.trimEnd('/') + "/")
+            .putString("backend_url", ReferenceDeployment.BACKEND_URL.trimEnd('/') + "/")
             .putString("result_web_url", "https://old-result.example.test/ignored.html")
             .commit()
         saveLogin()
 
         MeetingAppAssembly.initialize(context)
 
-        assertEquals(BuildConfig.REFERENCE_BACKEND_URL, MeetingAppAssembly.serverUrl())
-        assertEquals(BuildConfig.REFERENCE_RESULT_WEB_URL, MeetingAppAssembly.resultWebUrl())
+        assertEquals(ReferenceDeployment.BACKEND_URL, MeetingAppAssembly.serverUrl())
+        assertEquals(ReferenceDeployment.RESULT_WEB_URL, MeetingAppAssembly.resultWebUrl())
         val identity = restoredIdentity().currentIdentity()
         assertEquals(IdentityResult.Status.LOGGED_IN, identity.status())
         assertEquals("saved-session-fixture", identity.session()!!.accessToken())
