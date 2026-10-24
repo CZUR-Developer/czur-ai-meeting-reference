@@ -7,6 +7,7 @@ import com.czur.reference.application.http.HttpErrorMapper;
 import com.czur.reference.application.http.ReferenceDevSessionLoginEndpoint;
 import com.czur.reference.application.identity.referencedev.ReferenceDevIdentityProvider;
 import com.czur.reference.application.model.ModelSessionIssuer;
+import com.czur.reference.application.model.ModelSessionIssuerRegistry;
 import com.czur.reference.application.model.SummarySessionIssuer;
 import com.czur.reference.application.model.SampleJsonWsModelSessionIssuer;
 import com.czur.reference.application.model.TingwuModelSessionIssuer;
@@ -128,11 +129,33 @@ public final class ReferenceMeetingHttpAssembly extends MeetingHttpAssembly {
      * Adapter 装配到公共核心，不把供应商协议下沉到核心。客户端直连
      * 进程和旧 WSS 兼容进程共用这一选择规则。</p>
      */
+    /**
+     * 内置发行器的注册表。合作伙伴可以在此之上继续 register 自己的实现，
+     * 再把 AI_MEETING_MODEL_ADAPTER 写成同一个 ID，无需修改这里的装配分支。
+     */
+    public static ModelSessionIssuerRegistry defaultRegistry(MeetingDeploymentConfig config, Clock clock) {
+        ModelSessionIssuerRegistry registry = new ModelSessionIssuerRegistry();
+        config.sampleJsonWsEndpoint().ifPresent(endpoint -> registry.register(
+                SampleJsonWsModelSessionIssuer.ADAPTER_ID,
+                context -> new SampleJsonWsModelSessionIssuer(endpoint, context.clock())));
+        config.tingwuModelSession().ifPresent(tingwu -> registry.register(
+                "tingwu-realtime", context -> new TingwuModelSessionIssuer(tingwu, context.clock())));
+        return registry;
+    }
+
+    /** 兼容旧调用：只用内置注册表；自定义 ID 未注册时返回 null，由调用方报明确错误。 */
     static ModelSessionIssuer defaultIssuer(MeetingDeploymentConfig config, Clock clock) {
-        return config.sampleJsonWsEndpoint().<ModelSessionIssuer>map(endpoint ->
-                new SampleJsonWsModelSessionIssuer(endpoint, clock)).orElseGet(() ->
-                config.tingwuModelSession().<ModelSessionIssuer>map(value ->
-                        new TingwuModelSessionIssuer(value, clock)).orElse(null));
+        ModelSessionIssuerRegistry registry = defaultRegistry(config, clock);
+        return issuerFor(config, clock, registry);
+    }
+
+    /** 按部署配置的 Adapter ID 从注册表取发行器；未注册返回 null。 */
+    public static ModelSessionIssuer issuerFor(MeetingDeploymentConfig config, Clock clock,
+            ModelSessionIssuerRegistry registry) {
+        String adapterId = config.modelAdapterId();
+        return registry.contains(adapterId)
+                ? registry.create(adapterId, new ModelSessionIssuerRegistry.Context(Map.of(), clock))
+                : null;
     }
 
     /** 将原有Mock音频链原样注册；只读取已有数据源，不建立新池或新增后台线程。 */

@@ -101,6 +101,7 @@ public class MeetingDeploymentConfig {
     private final boolean realtimeRenewEnabled;
     private final Duration resultLinkTtl;
     private final ResultEmailConfig resultEmail;
+    private final String modelAdapterId;
     private final TingwuModelSessionConfig tingwuModelSession;
     private final URI sampleJsonWsEndpoint;
     private final BailianSummarySessionConfig bailianSummarySession;
@@ -114,7 +115,7 @@ public class MeetingDeploymentConfig {
             UsageEstimate trustedEstimate, TrustedCreateRuntimeLimits runtimeLimits,
             byte[] pageTokenSecret, URI wssOrigin, Duration wssTokenTtl,
             boolean createEnabled, boolean realtimeRenewEnabled, Duration resultLinkTtl,
-            ResultEmailConfig resultEmail,
+            ResultEmailConfig resultEmail, String modelAdapterId,
             TingwuModelSessionConfig tingwuModelSession, URI sampleJsonWsEndpoint,
             BailianSummarySessionConfig bailianSummarySession, List<String> modelLanguages) {
         this.database = database;
@@ -134,6 +135,7 @@ public class MeetingDeploymentConfig {
         this.realtimeRenewEnabled = realtimeRenewEnabled;
         this.resultLinkTtl = resultLinkTtl;
         this.resultEmail = resultEmail;
+        this.modelAdapterId = modelAdapterId;
         this.tingwuModelSession = tingwuModelSession;
         this.sampleJsonWsEndpoint = sampleJsonWsEndpoint;
         this.bailianSummarySession = bailianSummarySession;
@@ -159,6 +161,7 @@ public class MeetingDeploymentConfig {
         this.realtimeRenewEnabled = config.realtimeRenewEnabled;
         this.resultLinkTtl = config.resultLinkTtl;
         this.resultEmail = config.resultEmail;
+        this.modelAdapterId = config.modelAdapterId;
         this.tingwuModelSession = config.tingwuModelSession;
         this.sampleJsonWsEndpoint = config.sampleJsonWsEndpoint;
         this.bailianSummarySession = config.bailianSummarySession;
@@ -346,24 +349,25 @@ public class MeetingDeploymentConfig {
                 throw invalid(RESULT_LINK_TTL_MS);
             }
             String adapter = environment.get(MODEL_ADAPTER);
+            // 未配置时沿用听悟默认；其它 ID 一律视为自定义 Adapter，由启动时的注册表解析。
+            // 这里只保留 ID，不再把未知名字当成配置错误——是否可用由装配阶段判定。
+            String adapterId = (adapter == null || adapter.isBlank()) ? "tingwu-realtime" : adapter;
             TingwuModelSessionConfig tingwu = null;
             URI sampleEndpoint = null;
-            if ("sample-json-ws".equals(adapter)) {
+            if ("sample-json-ws".equals(adapterId)) {
                 sampleEndpoint = sampleJsonWsEndpoint(environment);
-            } else if (adapter == null || "tingwu-realtime".equals(adapter)) {
+            } else if ("tingwu-realtime".equals(adapterId)) {
                 tingwu = TingwuModelSessionConfig.fromEnvironment(environment);
-                if ("tingwu-realtime".equals(adapter) && tingwu == null) {
+                if (adapter != null && tingwu == null) {
                     throw invalid(MODEL_ADAPTER);
                 }
-            } else {
-                throw invalid(MODEL_ADAPTER);
             }
             BailianSummarySessionConfig bailian =
                     BailianSummarySessionConfig.fromEnvironment(environment);
             return new MeetingDeploymentConfig(database, scope,
                     audience, clientId, profile, entitlement, mock, limits, estimate,
                     runtimeLimits, secret, wssOrigin, tokenTtl,
-                    enabled, renewEnabled, resultLinkTtl, resultEmail,
+                    enabled, renewEnabled, resultLinkTtl, resultEmail, adapterId,
                     tingwu, sampleEndpoint, bailian, modelLanguages(environment));
         } finally {
             Arrays.fill(secret, (byte) 0);
@@ -396,6 +400,9 @@ public class MeetingDeploymentConfig {
     /** 只有部署方显式配置邮件 SMTP 时开放邮箱结果方式。 */
     public Optional<ResultEmailConfig> resultEmail() { return Optional.ofNullable(resultEmail); }
     /** 只有显式配置听悟凭据才开放独立模型会话路由。 */
+    /** 本部署使用的模型 Adapter ID；未配置时为听悟默认值。 */
+    public String modelAdapterId() { return modelAdapterId; }
+
     public Optional<TingwuModelSessionConfig> tingwuModelSession() {
         return Optional.ofNullable(tingwuModelSession);
     }

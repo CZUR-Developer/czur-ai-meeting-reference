@@ -99,6 +99,52 @@ class ReferenceMeetingDeploymentConfigTest {
     }
 
     @Test
+    void customAdapterIdIsAcceptedForPartnerRegisteredIssuer() {
+        Map<String, String> values = valid();
+        values.put(ReferenceMeetingDeploymentConfig.MODEL_ADAPTER, "my-asr");
+
+        var config = ReferenceMeetingDeploymentConfig.fromEnvironment(values);
+
+        // 自定义 ID 只作为选择依据保留；内置厂商配置不解析，是否可用由启动时的注册表判定。
+        assertEquals("my-asr", config.modelAdapterId());
+        assertTrue(config.tingwuModelSession().isEmpty());
+        assertTrue(config.sampleJsonWsEndpoint().isEmpty());
+    }
+
+    @Test
+    void assemblyResolvesRegisteredCustomIssuerByAdapterId() {
+        Map<String, String> values = valid();
+        values.put(ReferenceMeetingDeploymentConfig.MODEL_ADAPTER, "my-asr");
+        var config = ReferenceMeetingDeploymentConfig.fromEnvironment(values);
+        Clock clock = Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), ZoneOffset.UTC);
+        var registry = com.czur.reference.application.bootstrap.ReferenceMeetingHttpAssembly
+                .defaultRegistry(config, clock)
+                .register("my-asr", ctx -> request -> new com.czur.reference.application.model
+                        .ModelSessionIssuer.Session("my-asr", "wss://example.invalid", clock.instant(), Map.of()));
+
+        var issuer = com.czur.reference.application.bootstrap.ReferenceMeetingHttpAssembly
+                .issuerFor(config, clock, registry);
+
+        assertEquals("my-asr", issuer.issue(null).adapterId());
+    }
+
+    @Test
+    void unsetAdapterKeepsTheTingwuDefaultId() {
+        var config = ReferenceMeetingDeploymentConfig.fromEnvironment(valid());
+
+        assertEquals("tingwu-realtime", config.modelAdapterId());
+    }
+
+    @Test
+    void explicitBuiltInAdapterStillRequiresItsCredentials() {
+        Map<String, String> values = valid();
+        values.put(ReferenceMeetingDeploymentConfig.MODEL_ADAPTER, "tingwu-realtime");
+
+        assertThrows(IllegalArgumentException.class,
+                () -> ReferenceMeetingDeploymentConfig.fromEnvironment(values));
+    }
+
+    @Test
     void externalIdentityUsesTrustedInputsWithoutAnyDevCredentialOrLogin() {
         Map<String, String> values = valid();
         values.keySet().removeIf(key -> key.startsWith("REFERENCE_DEV_"));

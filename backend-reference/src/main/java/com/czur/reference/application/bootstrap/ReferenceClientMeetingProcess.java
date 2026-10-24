@@ -7,6 +7,7 @@ import com.czur.reference.application.http.MeetingJdkHttpServer;
 import com.czur.reference.application.http.ReferenceDevSessionLoginEndpoint;
 import com.czur.reference.application.identity.referencedev.ReferenceDevIdentityProvider;
 import com.czur.reference.application.model.ModelSessionIssuer;
+import com.czur.reference.application.model.ModelSessionIssuerRegistry;
 import com.czur.reference.application.model.SampleJsonTranslationSessionIssuer;
 import com.czur.reference.application.model.TextTranslationModelSessionIssuer;
 import com.czur.reference.application.port.artifact.ArtifactStore;
@@ -60,6 +61,16 @@ public final class ReferenceClientMeetingProcess implements AutoCloseable {
      */
     public static ReferenceClientMeetingProcess start(Map<String, String> environment,
             Clock clock) throws IOException, ArtifactStoreException {
+        return start(environment, clock, null);
+    }
+
+    /**
+     * 允许宿主注入模型发行器注册表：注册自己的 Adapter ID 后即可用配置选择，
+     * 不必修改参考实现的配置校验或装配分支。传 null 时只用内置实现。
+     */
+    public static ReferenceClientMeetingProcess start(Map<String, String> environment,
+            Clock clock, ModelSessionIssuerRegistry registry)
+            throws IOException, ArtifactStoreException {
         Objects.requireNonNull(environment, "environment");
         Objects.requireNonNull(clock, "clock");
         Map<String, String> values = Map.copyOf(environment);
@@ -75,10 +86,16 @@ public final class ReferenceClientMeetingProcess implements AutoCloseable {
             var identity = new ReferenceDevIdentityProvider(config.identity(), clock);
             var policy = new FixedEntitlementPolicy(config.entitlement(), clock,
                     new ReferenceMeetingHttpAssembly.RandomEntitlementIds());
-            ModelSessionIssuer issuer = ReferenceMeetingHttpAssembly.defaultIssuer(config, clock);
+            ModelSessionIssuerRegistry issuers = registry != null
+                    ? registry : ReferenceMeetingHttpAssembly.defaultRegistry(config, clock);
+            ModelSessionIssuer issuer = issuers.contains(config.modelAdapterId())
+                    ? issuers.create(config.modelAdapterId(),
+                            new ModelSessionIssuerRegistry.Context(values, clock))
+                    : null;
             if (issuer == null) {
                 throw new IllegalArgumentException(
-                        "客户端直连参考服务必须配置可用的模型 Adapter");
+                        "客户端直连参考服务必须配置可用的模型 Adapter: "
+                                + config.modelAdapterId() + " 未注册；已注册: " + issuers.adapterIds());
             }
             var textTranslation = SampleJsonTranslationSessionIssuer.fromEnvironment(values, clock);
             if (textTranslation != null) {
