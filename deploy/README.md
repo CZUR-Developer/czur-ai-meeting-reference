@@ -83,17 +83,17 @@ bash ../tools/run-reference-web.sh
 ```
 
 App Web 结果构建地址使用 `http://<PC_LAN_IP>:8090/index.html`；Web 的
-`config.json` 中 `apiBaseUrl` 必须从设备浏览器可达。`npm run build` 会清空 `dist/`，
-本机可用 `web-reference/config.local.json`（已忽略）或 `REFERENCE_API_BASE_URL` 让构建直接
-生成该文件；两者都没有时不生成，由部署方注入。Web 使用开发 HTTPS 上游时，
+`config.json` 中 `apiBaseUrl` 必须从设备浏览器可达。它不再手工注入：`npm run build` 会读
+`web-reference/deployment.local.json`（已忽略）并在 `dist/` 里生成，缺配置则构建直接失败；
+测试／生产用 `REFERENCE_WEB_DEPLOYMENT_FILE` 切换。Web 使用开发 HTTPS 上游时，
 浏览器也要信任该 CA，Debug APK 的信任配置不会替浏览器安装证书。生产 HTTPS 页面
 应使用同样可达的 HTTPS API，避免混合内容。仓库只交付后端应用镜像，不新增 Web
 或数据库镜像。
 
-Android 的部署参数在 `android-reference-app/app/src/main/java/com/czur/aimeeting/reference/meeting/ReferenceDeployment.kt`
-里（代码即配置）：`BACKEND_URL` 填设备可达的 HTTPS 后端，`RESULT_WEB_URL` 填结果页地址。
-仓库预置的是参考部署地址（`192.168.0.116`），部署到别的网络必须替换。Debug 联调的自签 CA 放在
-`app/src/debug/res/raw/reference_debug_ca.pem`（已被 Git 忽略）。
+Android 的部署参数在 `android-reference-app/deployment.local.properties`
+（已被 Git 忽略，模板为同目录 `.example`）：`backendUrl` 填设备可达的 HTTPS 后端，
+`resultWebUrl` 填结果页地址，构建时注入；缺配置时 `./gradlew` 直接失败。
+Debug 联调的自签 CA 放在 `app/src/debug/res/raw/reference_debug_ca.pem`（已被 Git 忽略）。
 完整命令见 [Android 构建／启动工具](../tools/android-device/README.md)。
 
 ## 本机常驻运行（可选）

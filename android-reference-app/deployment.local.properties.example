@@ -1,0 +1,9 @@
+# 部署地址模板：复制为同目录的 deployment.local.properties（已被 Git 忽略）后填写。
+# 多环境可以另存为 deployment.prod.properties 等，用环境变量选择：
+#   REFERENCE_DEPLOYMENT_FILE=deployment.prod.properties ./gradlew :app:assembleDebug
+# 缺少本文件时构建会直接失败，并提示参考文档位置。
+
+# 设备可达的 HTTPS 后端根地址，不带尾部斜杠
+backendUrl=https://your-backend.example:8443
+# 结果页地址
+resultWebUrl=https://your-result-web.example/index.html

@@ -6,11 +6,35 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-// 部署参数只在一处：app/src/main/java/.../meeting/ReferenceDeployment.kt（代码即配置）。
-// 这里只做两件构建期的事：占位值时提醒、Debug 自签 CA 存在时生成网络安全配置。
-val deploymentSourceFile = file("src/main/java/com/czur/aimeeting/reference/meeting/ReferenceDeployment.kt")
-val deploymentSource = if (deploymentSourceFile.isFile) deploymentSourceFile.readText() else ""
-// Debug 信任的自签 CA 走固定路径，存在即生效，不再需要额外配置项。
+// 部署地址来自仓外本地配置：默认 android-reference-app/deployment.local.properties，
+// 多环境可用 REFERENCE_DEPLOYMENT_FILE 指定另一个文件（例如 deployment.prod.properties）。
+// 两个文件都被 Git 忽略；缺失或缺键时直接让构建失败，并在错误里指出该看哪份文档。
+val deploymentFileName = System.getenv("REFERENCE_DEPLOYMENT_FILE")?.trim()
+    ?.takeIf { it.isNotEmpty() } ?: "deployment.local.properties"
+val deploymentFile = rootProject.file(deploymentFileName)
+val deployment = Properties().apply {
+    if (deploymentFile.isFile) deploymentFile.inputStream().use { load(it) }
+}
+
+fun requiredDeployment(key: String): String =
+    deployment.getProperty(key)?.trim()?.takeIf { it.isNotEmpty() }
+        ?: throw GradleException(
+            """
+            缺少部署配置：$key
+            文件：${deploymentFile.absolutePath}${if (deploymentFile.isFile) "" else "（不存在）"}
+
+            请先复制模板并填写：
+              cp android-reference-app/deployment.local.properties.example android-reference-app/deployment.local.properties
+            需要 backendUrl（设备可达的 HTTPS 后端根地址）与 resultWebUrl（结果页地址）。
+            多环境可保留多个文件，用 REFERENCE_DEPLOYMENT_FILE=deployment.prod.properties 选择。
+
+            详见 docs/partner-getting-started.md 第 3.3 节「两个本地配置文件」。
+            """.trimIndent()
+        )
+
+val deploymentBackendUrl = requiredDeployment("backendUrl")
+val deploymentResultWebUrl = requiredDeployment("resultWebUrl")
+// Debug 信任的自签 CA 走固定路径，存在即生效。
 val localDebugCa = file("src/debug/res/raw/reference_debug_ca.pem").takeIf { it.isFile }
 
 android {
@@ -24,6 +48,8 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
+        buildConfigField("String", "BACKEND_URL", "\"$deploymentBackendUrl\"")
+        buildConfigField("String", "RESULT_WEB_URL", "\"$deploymentResultWebUrl\"")
     }
 
     compileOptions {
@@ -68,14 +94,10 @@ android {
                 "    </base-config>\n" +
                 overrides +
                 "</network-security-config>\n")
-        logger.lifecycle("部署配置来源=ReferenceDeployment.kt debugCa=${localDebugCa?.name ?: "无"}")
-        if (deploymentSource.contains("replace-with-your-backend")) {
-            logger.warn(
-                "部署地址仍是占位值：修改 " +
-                    "app/src/main/java/com/czur/aimeeting/reference/meeting/ReferenceDeployment.kt " +
-                    "里的 BACKEND_URL 与 RESULT_WEB_URL 后重新构建；本次产物会提示未配置，不能直接联调。"
-            )
-        }
+        logger.lifecycle(
+            "部署配置 ${deploymentFileName} backend=$deploymentBackendUrl result=$deploymentResultWebUrl " +
+                "debugCa=${localDebugCa?.name ?: "无"}"
+        )
     }
 
     sourceSets.getByName("main").java.srcDir("src/basic-ui/java")

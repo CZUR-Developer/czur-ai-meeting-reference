@@ -34,14 +34,14 @@ kotlinx-coroutines-android 1.11.0。无需访问 CZUR 产品源码仓；模型 K
 
 ## 部署配置与构建（代码即配置）
 
-后端和结果页地址只有一处：
+后端和结果页地址来自仓外本地配置：
 
-`app/src/main/java/com/czur/aimeeting/reference/meeting/ReferenceDeployment.kt`（只读
-`BuildConfig`，值来自下面的本地文件）
-
-构建不接受任何 `-P` 参数，终端用户不需要在设备上填写。部署参数就是这个文件里的两个
-常量：`BACKEND_URL`、`RESULT_WEB_URL`；改完重新构建。仓库预置的是参考部署地址
-（`192.168.0.116`），在别的网络里必须替换，否则设备连不上。模型地址和短期材料由后端下发，这里不包含模型 Key 或账号密码。
+`deployment.local.properties`（模板是同目录的 `.example`，真实文件已被 Git 忽略），
+两个键 `backendUrl`、`resultWebUrl`，构建时注入 `BuildConfig` 由
+`ReferenceDeployment.kt` 读取。构建不接受 `-P` 参数，终端用户不需要在设备上填写。
+缺文件或缺键时构建直接失败，不会产出指向占位地址的包；多环境用
+`REFERENCE_DEPLOYMENT_FILE` 选择另一份文件。模型地址和短期材料由后端下发，
+这里不包含模型 Key 或账号密码。
 
 Debug 构建如需信任本机自签 CA，把 PEM 放到
 `app/src/debug/res/raw/reference_debug_ca.pem`（已被 Git 忽略，生成方式见

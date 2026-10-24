@@ -4,7 +4,7 @@
 
 本文面向首次接触本项目的 Android／后端开发者。读完后，您可以准备所需资源，
 在自己的环境中完成“登录 → 真实语音字幕 → 停止 → 网页回看”，再按需加入互译、
-总结、人物识别和演示截图。仓库里预置的是参考部署地址（`192.168.0.116`），换到您的环境前必须替换。
+总结、人物识别和演示截图。部署地址不进仓库，由本地文件提供（见 3.3 节）；缺少时构建直接失败。
 
 建议按顺序阅读：
 
@@ -105,16 +105,22 @@ Maven 的开发环境中打开。
 
 ### 3.3 两个本地配置文件（都不在仓库里）
 
-仓库里预置的是参考部署地址（`192.168.0.116`，作者本机的开发环境）。换到您的环境必须
-替换，否则设备连不上；替换位置只有下面两处。
+部署地址不进仓库，由本地文件提供；Android 和 Web 各一份，都已被 `.gitignore` 忽略。
+缺少时**构建直接失败**，不会产出连不上后端的包或页面。
 
-| 文件 | 从哪来 | 作用 | 忘了会怎样 |
+| 文件 | 从哪来 | 作用 | 缺了会怎样 |
 | --- | --- | --- | --- |
-| `android-reference-app/.../ReferenceDeployment.kt` | 仓库自带，直接改两个常量 | APK 的后端地址与结果页地址（代码即配置） | 构建时打印警告；装在设备上提示"部署地址未配置" |
-| `web-reference/config.local.json` | 自己新建，写 `{"apiBaseUrl":"..."}` | 结果页读的后端地址（也可用 `REFERENCE_API_BASE_URL` 环境变量在构建时注入） | 结果页提示"结果页缺少后端配置"，`dist/config.json` 为 404 |
+| `android-reference-app/deployment.local.properties` | 复制同目录的 `.example` | APK 的后端地址与结果页地址，构建时注入 `BuildConfig` | `./gradlew` 直接失败，提示填 `backendUrl`／`resultWebUrl` |
+| `web-reference/deployment.local.json` | 复制同目录的 `.example` | 结果页的后端地址，构建时生成 `dist/config.json` | `npm run build` 直接失败，提示填 `apiBaseUrl` |
 
-两个文件都已被 `.gitignore` 忽略，不会误提交。换机器、重新 clone、清理工作区后都要
-重新建一遍；内容就是各自那一两个字段，不会随仓库走。
+要区分测试与生产，就多留几份文件，用环境变量选择：
+
+```bash
+REFERENCE_DEPLOYMENT_FILE=deployment.prod.properties ./gradlew :app:assembleDebug
+REFERENCE_WEB_DEPLOYMENT_FILE=deployment.prod.json npm --prefix web-reference run build
+```
+
+换机器、重新 clone、清理工作区后都要重新建一遍；内容就是各自那一两个字段，不会随仓库走。
 
 ## 4. 按步骤完成第一场真实会议
 
@@ -239,18 +245,21 @@ bash tools/run-reference-web.sh
 设备 AAR 已随参考仓放在 `meeting-android/libs/ai-meeting-device.aar`；业务 AAR 由本仓
 `meeting-android` 自行构建，构建不需要任何参数。
 
-先给地址：修改 `android-reference-app/app/src/main/java/com/czur/aimeeting/reference/meeting/ReferenceDeployment.kt`
-里的两个常量（代码即配置，仓库预置的是参考部署地址）：
+先给地址：复制模板并填写（已被 Git 忽略），构建时注入 APK：
 
-```kotlin
-const val BACKEND_URL = "https://<PC_LAN_IP>:8443"
-const val RESULT_WEB_URL = "http://<PC_LAN_IP>:8090/index.html"
+```bash
+cd android-reference-app
+cp deployment.local.properties.example deployment.local.properties
+# 编辑 deployment.local.properties：
+#   backendUrl=https://<PC_LAN_IP>:8443
+#   resultWebUrl=http://<PC_LAN_IP>:8090/index.html
 ```
 
 Debug 联调还要让 APK 信任步骤 4 生成的开发 CA：把 PEM 命名为 `reference_debug_ca.pem`
 放到 `android-reference-app/app/src/debug/res/raw/`（已被 Git 忽略，
 生成方式见 [本机局域网 HTTPS 指南](local-lan-https.md)）；不放到时会只信任系统 CA。
-不替换也能构建成功，但 APK 指向作者本机地址，在您的网络里连不上。
+没建这份配置文件时 `./gradlew` 会直接失败，提示缺 `backendUrl`／`resultWebUrl`——不会
+产出一个指向作者本机地址的包。测试／生产各留一份，用 `REFERENCE_DEPLOYMENT_FILE` 切换。
 
 再构建并安装：
 

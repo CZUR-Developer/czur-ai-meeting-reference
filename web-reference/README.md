@@ -113,12 +113,13 @@ npm test
 npm run build             # 生成 web-reference/dist/
 ```
 
-将 `config.example.json` 复制为部署目录中的 `config.json` 并填写浏览器可访问的
-后端地址；同源部署可填空字符串。静态 Web 与后端不在同一来源时，需要部署侧
-允许结果接口跨域读取。该配置由宿主服务器注入，不要把真实地址或令牌提交到 Git。
+构建前先准备本地配置：复制 `deployment.local.example.json` 为 `deployment.local.json`
+（已被 Git 忽略），把 `apiBaseUrl` 填成浏览器可达的后端地址；`npm run build` 一步把页面和
+生成的 `dist/config.json` 一起放进产物。缺少这份文件或字段为空时构建直接失败，不会产出
+打开就报"缺少后端配置"的页面。测试／生产各留一份，用 `REFERENCE_WEB_DEPLOYMENT_FILE` 切换。
 
-构建会重建 `dist/`，请在**每次构建完成后**注入 `config.json`。配置不在源码中，
-部署系统应保管其原件。HTTPS 后端需使用浏览器／设备实际信任的证书。
+静态 Web 与后端不在同一来源时，需要部署侧允许结果接口跨域读取。不要把真实地址或令牌
+提交到 Git；HTTPS 后端需使用浏览器／设备实际信任的证书。
 
 ## 验证
 

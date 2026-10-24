@@ -1,0 +1,4 @@
+{
+  "_说明": "复制为同目录的 deployment.local.json（已被 Git 忽略）后填写。多环境可另存为 deployment.prod.json 等，用 REFERENCE_WEB_DEPLOYMENT_FILE 选择。缺少本文件时构建会直接失败，并提示参考文档位置。",
+  "apiBaseUrl": "https://your-backend.example:8443"
+}

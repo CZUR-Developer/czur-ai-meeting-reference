@@ -97,6 +97,12 @@ tmp/
 .classpath
 .settings/
 # 本机结果页后端地址覆盖（构建时可选注入）
-/web-reference/config.local.json
 # 本机 Debug 自签 CA（存在即被构建信任，不进仓库）
 /android-reference-app/app/src/debug/res/raw/reference_debug_ca.pem
+# Android 本地部署地址（多环境可派生 deployment.*.properties）
+/android-reference-app/deployment.local.properties
+/android-reference-app/deployment.*.properties
+# 结果页本地后端地址（多环境可派生 deployment.*.json）
+/web-reference/deployment.local.json
+/web-reference/deployment.*.json
+!/web-reference/deployment.local.example.json
