@@ -13,7 +13,7 @@
     <color name="reference_setup_muted">#68758C</color>
     <color name="reference_setup_border">#E1E7F3</color>
     <string name="reference_setup_title">AI会议纪要</string>
-    <string name="reference_account">账号登录</string>
+    <string name="reference_account">登录</string>
     <string name="reference_deployment_not_configured">部署尚未配置，请联系应用提供方。</string>
     <string name="reference_source">语言</string>
     <string name="reference_target">目标语言</string>
