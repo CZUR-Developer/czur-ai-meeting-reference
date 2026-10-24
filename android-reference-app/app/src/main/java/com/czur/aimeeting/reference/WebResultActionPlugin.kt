@@ -4,9 +4,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.util.Log
-import android.util.TypedValue
-import android.widget.Button
-import android.widget.LinearLayout
 import com.czur.aimeeting.reference.meeting.MeetingAppAssembly
 import com.czur.aimeeting.client.MeetingOptions
 import com.czur.aimeeting.client.result.ResultActionPlugin.Preparation
@@ -41,9 +38,9 @@ class WebResultActionPlugin private constructor(
             app.startActivity(Intent(app, ResultActivity::class.java)
                 .putExtra(ResultActivity.EXTRA_RESULT_URL, url).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         }
-        val previousResult = PreviousResultButton(pageContext, preferences, opener)
+        // 历史结果统一走会议记录列表，会前不再单独放“查看上场结果”按钮。
         // freeze 只引用应用 Context 对应的 opener、普通偏好和地址，不引用按钮／Activity。
-        return Settings(previousResult) {
+        return Settings(null) {
             WebResultActionPlugin(MeetingAppAssembly.resultWebUrl(), opener, preferences)
         }
     }
@@ -65,39 +62,6 @@ class WebResultActionPlugin private constructor(
                     callback.onSuccess(ResultActionOutcome.success(id(), "已打开本场网页结果"))
                 } catch (failure: RuntimeException) { callback.onError("无法打开网页结果，请再次执行") }
             })
-        }
-    }
-
-    /**
-     * 会前显示由 Web 插件自己维护。只在挂载期间监听偏好，离开时解除监听；
-     * 重新挂载时重读链接，因此同一个设置页和新建页面都能看到刚结束的会议。
-     * 点击时使用保存的完整原链接，不用当前连接地址重拼，避免指向另一部署或场次。
-     */
-    private class PreviousResultButton(context: Context, private val preferences: SharedPreferences,
-        private val opener: Consumer<String>) : Button(context, null, 0, R.style.ReferenceSetupSecondaryButton) {
-        private val changed = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-            if (key == KEY_LAST_READY_LINK) refreshAvailability()
-        }
-        init {
-            id = R.id.view_previous_web_result
-            text = "查看上场结果"; contentDescription = text
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, ReferenceUiScale.px(context, 52)).apply {
-                topMargin = ReferenceUiScale.px(context, 16)
-            }
-            setTextSize(TypedValue.COMPLEX_UNIT_PX, ReferenceUiScale.px(context, 22).toFloat())
-            setOnClickListener { preferences.getString(KEY_LAST_READY_LINK, null)?.let(opener::accept) }
-            refreshAvailability()
-        }
-        private fun refreshAvailability() { isEnabled = !preferences.getString(KEY_LAST_READY_LINK, null).isNullOrBlank() }
-        override fun onAttachedToWindow() {
-            super.onAttachedToWindow()
-            preferences.registerOnSharedPreferenceChangeListener(changed)
-            refreshAvailability()
-        }
-        override fun onDetachedFromWindow() {
-            preferences.unregisterOnSharedPreferenceChangeListener(changed)
-            super.onDetachedFromWindow()
         }
     }
 

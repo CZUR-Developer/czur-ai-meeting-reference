@@ -31,58 +31,33 @@ import org.robolectric.annotation.Config
 class WebResultActionPluginTest {
     @After fun clearWebConfiguration() = MeetingAppAssembly.configureResultWeb("")
 
-    @Test fun remembersReadyLinkBeforeUiAndNewSettingsOpenOriginalMeetingWithoutSession() {
+    @Test fun remembersReadyLinkWithoutSessionAndOpensItWhenConsumed() {
         val app = RuntimeEnvironment.getApplication()
         MeetingAppAssembly.configureResultWeb("https://result.example.test/index.html?x=1#section")
         val settings = WebResultActionPlugin().createSettings(app)
-        assertFalse(settings.view()!!.isEnabled)
+        assertNull("会前不再提供查看上场结果入口，历史回看走会议记录", settings.view())
         val execution = settings.freeze().get().prepare(MeetingSetup.transcript("zh-CN", "").toOptions()).execution()!!
         MeetingAppAssembly.configureResultWeb("https://another.example.test/")
-        val pending = execute(execution, "mtg_original", 555)
+        val pending = execute(execution, "mtg_original", 555, allowCompletion = true)
         assertEquals(1, pending.size)
         assertNull("后台动作没有强拉页面", shadowOf(app).nextStartedActivity)
         val expected = "https://result.example.test/index.html?x=1&meetingId=mtg_original&genTime=555#section"
         assertEquals(mapOf("last_ready_link" to expected),
             app.getSharedPreferences("czur_reference_web_results", Context.MODE_PRIVATE).all)
 
-        // 丢弃尚未消费的 UI 操作，用新插件与新设置模拟页面／进程重新装配。
-        pending.clear()
-        val recreated = WebResultActionPlugin().createSettings(app).view()!!
-        assertTrue(recreated.isEnabled)
-        recreated.performClick()
+        // 消费挂起的 UI 操作：应打开 READY 当时的原链接，不受此后部署地址变化影响。
+        pending.single().run()
         val opened = shadowOf(app).nextStartedActivity
         assertEquals(ResultActivity::class.java.name, opened.component!!.className)
         assertEquals(expected, opened.getStringExtra(ResultActivity.EXTRA_RESULT_URL))
     }
 
-    @Test fun attachedSettingsRefreshAfterReadyAndAgainWhenTheSameViewReturns() {
-        val host = Robolectric.buildActivity(Activity::class.java).create().start().resume().visible()
-        val activity = host.get()
-        MeetingAppAssembly.configureResultWeb("https://result.example.test/")
-        val settings = WebResultActionPlugin().createSettings(activity)
-        val previous = settings.view()!! as Button
-        activity.setContentView(previous)
-        val execution = settings.freeze().get().prepare(MeetingSetup.transcript("zh-CN", "").toOptions()).execution()!!
-        try {
-            assertFalse(previous.isEnabled)
-            execute(execution, "mtg_first", 111)
-            shadowOf(Looper.getMainLooper()).idle()
-            assertTrue("同一个会前设置页收到READY链接后启用回看", previous.isEnabled)
-            previous.performClick()
-            assertEquals("https://result.example.test/?meetingId=mtg_first&genTime=111",
-                shadowOf(RuntimeEnvironment.getApplication()).nextStartedActivity.getStringExtra(ResultActivity.EXTRA_RESULT_URL))
-
-            activity.setContentView(FrameLayout(activity))
-            execute(execution, "mtg_latest", 222)
-            activity.setContentView(previous)
-            previous.performClick()
-            assertEquals("https://result.example.test/?meetingId=mtg_latest&genTime=222",
-                shadowOf(RuntimeEnvironment.getApplication()).nextStartedActivity.getStringExtra(ResultActivity.EXTRA_RESULT_URL))
-        } finally { host.pause().stop().destroy() }
-    }
-
-    /** 保留真实 UiOperation 队列，不执行它；本测试没有 Service／Session 或网络正文。 */
-    private fun execute(execution: ResultActionPlugin.Execution, meetingId: String, genTime: Long): MutableList<Runnable> {
+    /**
+     * 保留真实 UiOperation 队列，不执行它；本测试没有 Service／Session 或网络正文。
+     * [allowCompletion] 为真时接受 UI 操作消费后的完成回调，用于验证“消费后打开原链接”。
+     */
+    private fun execute(execution: ResultActionPlugin.Execution, meetingId: String, genTime: Long,
+        allowCompletion: Boolean = false): MutableList<Runnable> {
         val pending = mutableListOf<Runnable>()
         val access = object : ResultActionAccess {
             override fun readContent(callback: MeetingClient.Callback<MeetingResultContent?>) = fail("Web回看不读取正文")
@@ -91,7 +66,9 @@ class WebResultActionPluginTest {
         val ready = MeetingResult(meetingId, "本场标题不会持久化", genTime, MeetingResult.Status.READY, emptySet(), null)
         execution.execute(ResultActionContext(ready, access, emptySet(), { it.run() }, { pending += it }),
             object : MeetingClient.Callback<ResultActionOutcome> {
-                override fun onSuccess(result: ResultActionOutcome) = fail("尚未消费UI操作，不提前报告动作完成")
+                override fun onSuccess(result: ResultActionOutcome) {
+                    if (!allowCompletion) fail("尚未消费UI操作，不提前报告动作完成")
+                }
                 override fun onError(error: MeetingError) = fail(error.code.name)
             })
         return pending
