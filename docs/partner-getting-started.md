@@ -120,7 +120,9 @@ REFERENCE_DEPLOYMENT_FILE=deployment.prod.properties ./gradlew :app:assembleDebu
 REFERENCE_WEB_DEPLOYMENT_FILE=deployment.prod.json npm --prefix web-reference run build
 ```
 
-换机器、重新 clone、清理工作区后都要重新建一遍；内容就是各自那一两个字段，不会随仓库走。
+复制模板但忘了改也会被拦下：两条构建都会把模板里的占位域名（`your-backend.example` 等）
+当成未配置，直接失败。换机器、重新 clone、清理工作区后都要重新建一遍；内容就是各自
+那一两个字段，不会随仓库走。
 
 ## 4. 按步骤完成第一场真实会议
 

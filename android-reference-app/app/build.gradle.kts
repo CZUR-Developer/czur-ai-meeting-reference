@@ -34,6 +34,24 @@ fun requiredDeployment(key: String): String =
 
 val deploymentBackendUrl = requiredDeployment("backendUrl")
 val deploymentResultWebUrl = requiredDeployment("resultWebUrl")
+
+// 复制模板但忘了改，跟没配置是一回事，同样在构建期拦下来。
+fun rejectPlaceholder(key: String, value: String) {
+    val placeholders = listOf("your-backend.example", "your-result-web.example")
+    if (placeholders.any { value.contains(it) }) {
+        throw GradleException(
+            """
+            $key 还是模板里的占位值：$value
+            文件：${deploymentFile.absolutePath}
+
+            请把它改成设备实际可达的地址后重新构建。
+            详见 docs/partner-getting-started.md 第 3.3 节「两个本地配置文件」。
+            """.trimIndent()
+        )
+    }
+}
+rejectPlaceholder("backendUrl", deploymentBackendUrl)
+rejectPlaceholder("resultWebUrl", deploymentResultWebUrl)
 // Debug 信任的自签 CA 走固定路径，存在即生效。
 val localDebugCa = file("src/debug/res/raw/reference_debug_ca.pem").takeIf { it.isFile }
 
