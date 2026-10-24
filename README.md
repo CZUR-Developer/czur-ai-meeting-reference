@@ -70,8 +70,9 @@ MySQL 5.7 的独立能力探针见 [`tools/mysql57-compatibility/`](tools/mysql5
 
 合作伙伴开发者在 PC 上配置后端与结果页地址，打包后交给终端用户；App 不提供填写 IP／
 网址的入口。部署参数只有一处：`android-reference-app/app/src/main/java/com/czur/aimeeting/reference/meeting/ReferenceDeployment.kt`
-里的 `BACKEND_URL` 与 `RESULT_WEB_URL`，改完重新构建即可。仓库里保留占位值：不修改也能
-构建成功，但 APK 指向占位域名，装到设备上会提示"部署地址未配置"。
+里的 `BACKEND_URL` 与 `RESULT_WEB_URL`，改完重新构建即可。仓库预置的是参考部署地址
+（`192.168.0.116`）：在别的网络里必须替换，否则设备连不上；改回占位域名时构建会警告、
+App 提示"部署地址未配置"。
 
 Debug 构建如需信任本机自签 CA，把 PEM 放到
 `app/src/debug/res/raw/reference_debug_ca.pem`（已被 Git 忽略），构建自动生成对应的

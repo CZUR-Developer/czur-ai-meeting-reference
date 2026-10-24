@@ -92,7 +92,7 @@ App Web 结果构建地址使用 `http://<PC_LAN_IP>:8090/index.html`；Web 的
 
 Android 的部署参数在 `android-reference-app/app/src/main/java/com/czur/aimeeting/reference/meeting/ReferenceDeployment.kt`
 里（代码即配置）：`BACKEND_URL` 填设备可达的 HTTPS 后端，`RESULT_WEB_URL` 填结果页地址。
-仓库只保留占位值，不改也能构建，但 APK 会指向占位域名。Debug 联调的自签 CA 放在
+仓库预置的是参考部署地址（`192.168.0.116`），部署到别的网络必须替换。Debug 联调的自签 CA 放在
 `app/src/debug/res/raw/reference_debug_ca.pem`（已被 Git 忽略）。
 完整命令见 [Android 构建／启动工具](../tools/android-device/README.md)。
 

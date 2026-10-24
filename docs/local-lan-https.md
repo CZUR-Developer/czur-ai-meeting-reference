@@ -86,7 +86,7 @@ curl --cacert "$REFERENCE_TLS_DIR/ca.pem" "https://$PC_LAN_IP:8443/v1/capabiliti
 
 ## 3. 构建
 
-参考 App 的地址和调试 CA 由仓外本地文件注入，仓库里只有占位值：
+参考 App 的地址在 `ReferenceDeployment.kt` 里（代码即配置），调试 CA 由仓外文件提供：
 
 - 修改 `android-reference-app/app/src/main/java/com/czur/aimeeting/reference/meeting/ReferenceDeployment.kt`
   里的 `BACKEND_URL` 为 `https://<PC_LAN_IP>:8443`，`RESULT_WEB_URL` 为结果页地址；

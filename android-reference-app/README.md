@@ -40,8 +40,8 @@ kotlinx-coroutines-android 1.11.0。无需访问 CZUR 产品源码仓；模型 K
 `BuildConfig`，值来自下面的本地文件）
 
 构建不接受任何 `-P` 参数，终端用户不需要在设备上填写。部署参数就是这个文件里的两个
-常量：`BACKEND_URL`、`RESULT_WEB_URL`；改完重新构建。仓库只保留占位值，不改也能构建，
-但 APK 指向占位域名。模型地址和短期材料由后端下发，这里不包含模型 Key 或账号密码。
+常量：`BACKEND_URL`、`RESULT_WEB_URL`；改完重新构建。仓库预置的是参考部署地址
+（`192.168.0.116`），在别的网络里必须替换，否则设备连不上。模型地址和短期材料由后端下发，这里不包含模型 Key 或账号密码。
 
 Debug 构建如需信任本机自签 CA，把 PEM 放到
 `app/src/debug/res/raw/reference_debug_ca.pem`（已被 Git 忽略，生成方式见

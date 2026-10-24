@@ -2,7 +2,7 @@
 
 本文面向首次接触本项目的 Android／后端开发者。读完后，您可以准备所需资源，
 在自己的环境中完成“登录 → 真实语音字幕 → 停止 → 网页回看”，再按需加入互译、
-总结、人物识别和演示截图。示例域名和地址均为占位值，需要替换为您自己的部署信息。
+总结、人物识别和演示截图。仓库里预置的是参考部署地址（`192.168.0.116`），换到您的环境前必须替换。
 
 建议按顺序阅读：
 
@@ -103,8 +103,8 @@ Maven 的开发环境中打开。
 
 ### 3.3 两个本地配置文件（都不在仓库里）
 
-地址类配置刻意不进仓库：仓库只放占位值，真实地址由你和你的部署环境填。忘了填不会
-构建失败，但产物不能用——两边都会明确提示。
+仓库里预置的是参考部署地址（`192.168.0.116`，作者本机的开发环境）。换到您的环境必须
+替换，否则设备连不上；替换位置只有下面两处。
 
 | 文件 | 从哪来 | 作用 | 忘了会怎样 |
 | --- | --- | --- | --- |
@@ -238,7 +238,7 @@ bash tools/run-reference-web.sh
 `meeting-android` 自行构建，构建不需要任何参数。
 
 先给地址：修改 `android-reference-app/app/src/main/java/com/czur/aimeeting/reference/meeting/ReferenceDeployment.kt`
-里的两个常量（代码即配置，仓库里是占位值）：
+里的两个常量（代码即配置，仓库预置的是参考部署地址）：
 
 ```kotlin
 const val BACKEND_URL = "https://<PC_LAN_IP>:8443"
@@ -248,7 +248,7 @@ const val RESULT_WEB_URL = "http://<PC_LAN_IP>:8090/index.html"
 Debug 联调还要让 APK 信任步骤 4 生成的开发 CA：把 PEM 命名为 `reference_debug_ca.pem`
 放到 `android-reference-app/app/src/debug/res/raw/`（已被 Git 忽略，
 生成方式见 [本机局域网 HTTPS 指南](local-lan-https.md)）；不放到时会只信任系统 CA。
-不改常量也能构建成功，但 APK 指向占位域名，装上会提示"部署地址未配置"。
+不替换也能构建成功，但 APK 指向作者本机地址，在您的网络里连不上。
 
 再构建并安装：
 

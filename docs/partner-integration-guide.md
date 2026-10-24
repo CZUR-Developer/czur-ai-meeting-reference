@@ -66,8 +66,9 @@ SDK构建顺序见[从零指南第4节](partner-getting-started.md#4-按步骤�
 
 Android 部署参数只有一处：`android-reference-app/app/src/main/java/com/czur/aimeeting/reference/meeting/ReferenceDeployment.kt`
 里的 `BACKEND_URL`（设备可达的 HTTPS 后端根地址）与 `RESULT_WEB_URL`（结果页地址），
-改完重新构建。仓库只保留占位值，未修改也能构建，但 APK 会指向占位域名并提示
-"部署地址未配置"；设备端没有手输地址界面或地址回退来源。
+改完重新构建。仓库预置的是参考部署地址（`192.168.0.116`），换到别的环境必须替换，
+否则设备连不上；设备端没有手输地址界面或地址回退来源。把值改回占位域名时，构建会打印
+警告、App 提示"部署地址未配置"。
 构建与设备启动命令见 [工具说明](../tools/android-device/README.md)。
 
 数据库统一使用 MySQL 5.7。先由部署方创建隔离数据库，再执行仓库中当前唯一的
