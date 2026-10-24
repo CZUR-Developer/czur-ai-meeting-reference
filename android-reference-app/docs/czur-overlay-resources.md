@@ -44,7 +44,8 @@ tvdpi 或默认 drawable 密度二次缩放。动画放入 `raw/`。
 
 参考工程不引入原产品基础业务库、系统账号、Launcher 或平台专属联动。
 伙伴可以改资源和这两种`OverlayViewFactory`；SDK的窗口管理、会议停止及模型接口
-无需随 UI 修改。完整四形态使用UI AAR；不带UI AAR的基础构建只提供当前字幕／普通双栏。
+无需随 UI 修改。当前没有独立 UI AAR：设备 AAR 只提供 `SubtitleTextView`，参考 App 的
+basic-ui 提供字幕普通/Mini、互译普通/大窗/Mini；窗口、权限、Service 和文案都留在 App。
 
 ## 许可与交付范围
 

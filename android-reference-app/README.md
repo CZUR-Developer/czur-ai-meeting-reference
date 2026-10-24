@@ -13,6 +13,8 @@
 最低支持 **Android 14（API 34）**。工程使用 compile／target SDK 35、Kotlin 2.4.21、
 Gradle 8.7 和 Android Gradle Plugin 8.5.2，目标 JVM 为 17。Android 自有应用层、
 公共会议核心、模型契约和测试使用 Kotlin。Lint 使用 9.4.0，配置见 `gradle.properties`。
+这是当前验证矩阵；Gradle 8.7 已被后续 Kotlin 版本标记为过时，AGP 8.5.2 对 compileSdk 35
+有上游警告，升级构建链需重新跑单测和真机回归。
 
 | 模块或交付物 | 职责 |
 | --- | --- |
@@ -23,10 +25,12 @@ Gradle 8.7 和 Android Gradle Plugin 8.5.2，目标 JVM 为 17。Android 自有�
 | `meeting-android/`（业务 AAR） | 模型连接与会议门面；构建时注入设备 AAR，产物是宿主唯一依赖的业务 AAR |
 | 设备 AAR 内置 UI | `com.czur.aimeeting.ui.SubtitleTextView` 字幕文字显示控件 |
 
-设备 AAR 随本仓放在 `meeting-android/libs/ai-meeting-device.aar`；业务 AAR 由本仓
-`meeting-android/` 源码构建。构建不需要任何 `-P` 参数。无需访问 CZUR 产品源码仓；
-模型 Key、真实会话材料和账号密码不放进构建配置。具体功能、版本配套与供应商账户
-准备方式见[从零指南](../docs/partner-getting-started.md)。
+设备 AAR 随本仓放在 `meeting-android/libs/ai-meeting-device.aar`：版本 0.5.0，
+SHA-256 `150f5a52294036b7e273a91d4d59afa7df212021bb6825e9199384023cd28053`，ABI `arm64-v8a`／`armeabi-v7a`，含 `classes.jar`、`jni/`、`proguard.txt`；
+业务 AAR 由本仓 `meeting-android/` 源码构建。构建不需要任何 `-P` 参数。设备 AAR 与业务
+模块初始化时做版本握手；宿主直接使用裸业务 AAR 时，还需显式提供 OkHttp 5.3.2 和
+kotlinx-coroutines-android 1.11.0。无需访问 CZUR 产品源码仓；模型 Key、真实会话材料和
+账号密码不放进构建配置。具体功能、版本配套与供应商账户准备方式见[从零指南](../docs/partner-getting-started.md)。
 
 ## 部署配置与构建（代码即配置）
 
