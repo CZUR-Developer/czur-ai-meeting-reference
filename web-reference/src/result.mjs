@@ -335,7 +335,9 @@ async function showResult() {
   }
   try {
     const configResponse = await fetch('./config.json');
-    if (!configResponse.ok) throw new Error('结果页缺少后端配置');
+    if (!configResponse.ok) throw new Error(
+      '结果页缺少后端配置（dist/config.json）：部署方需在静态站目录放置该文件，'
+      + '或在构建时设置 REFERENCE_API_BASE_URL／web-reference/config.local.json');
     const config = await configResponse.json();
     const base = (config.apiBaseUrl || '').replace(/\/+$/, '');
     const discoveryResponse = await fetch(`${base}/v1/capabilities`);

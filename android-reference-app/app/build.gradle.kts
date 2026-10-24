@@ -15,7 +15,8 @@ val localDeployment = Properties().apply {
 fun deploymentValue(key: String, fallback: String): String =
     localDeployment.getProperty(key)?.trim()?.takeIf { it.isNotEmpty() } ?: fallback
 
-val deploymentBackendUrl = deploymentValue("backendUrl", "https://replace-with-your-backend.example")
+val placeholderBackend = "https://replace-with-your-backend.example"
+val deploymentBackendUrl = deploymentValue("backendUrl", placeholderBackend)
 val deploymentResultWebUrl = deploymentValue("resultWebUrl", "https://replace-with-your-result-web.example/index.html")
 // Debug 构建要信任的自签 CA 由本地文件提供；仓内不再携带任何证书。
 val localDebugCa = localDeployment.getProperty("debugCaFile")?.trim()?.takeIf { it.isNotEmpty() }
@@ -81,6 +82,13 @@ android {
                 overrides +
                 "</network-security-config>\n")
         logger.lifecycle("部署地址 backend=$deploymentBackendUrl result=$deploymentResultWebUrl debugCa=${localDebugCa?.name ?: "无"}")
+        if (deploymentBackendUrl == placeholderBackend) {
+            logger.warn(
+                "部署地址仍是占位值：复制 android-reference-app/deployment.local.properties.example " +
+                    "为同目录的 deployment.local.properties，填写 backendUrl/resultWebUrl 后重新构建；" +
+                    "本次产物会提示未配置，不能直接联调。"
+            )
+        }
     }
 
     sourceSets.getByName("main").java.srcDir("src/basic-ui/java")

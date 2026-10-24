@@ -212,7 +212,7 @@ class MainActivity : Activity() {
         setContentView(page.root)
         // 普通 Activity 使用系统分配的完整内容区，不设置浮动尺寸或点击外围关闭。
         // 开始成功后仍由原 Service 挂载真悬浮窗，并按既有流程退出本页。
-        if (MeetingAppAssembly.serverUrl().isEmpty()) statusView.setText(R.string.reference_deployment_not_configured)
+        if (!MeetingAppAssembly.isBackendConfigured()) statusView.setText(R.string.reference_deployment_not_configured)
     }
 
     /**
@@ -223,7 +223,7 @@ class MainActivity : Activity() {
      * 或增加第二份账号状态。伙伴自定义 AppLoginEntry 不会经过本默认菜单。
      */
     private fun showDefaultAccountEntry() {
-        if (MeetingAppAssembly.serverUrl().isEmpty()) {
+        if (!MeetingAppAssembly.isBackendConfigured()) {
             statusView.setText(R.string.reference_deployment_not_configured)
             return
         }
@@ -293,7 +293,7 @@ class MainActivity : Activity() {
 
     /** 进入页面或伙伴登录返回时读取身份，页面不直接读取 token 或 Provider 私有字段。 */
     private fun refreshIdentity(reloadCapabilities: Boolean) {
-        if (MeetingAppAssembly.serverUrl().isEmpty()) {
+        if (!MeetingAppAssembly.isBackendConfigured()) {
             statusView.setText(R.string.reference_deployment_not_configured)
             startButton.isEnabled = false
             return

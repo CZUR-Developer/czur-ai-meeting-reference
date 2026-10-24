@@ -39,6 +39,7 @@ import java.util.concurrent.Executor
 object MeetingAppAssembly {
     private const val TAG = "MeetingAppAssembly"
     private var serverUrl = ""
+    private const val PLACEHOLDER_BACKEND_HOST = "replace-with-your-backend"
     private var resultWebUrl = ""
     private var identityProvider: IdentityProvider = ReferenceIdentityProvider()
     private var loginEntry: AppLoginEntry = DefaultAppLoginEntry
@@ -111,6 +112,10 @@ object MeetingAppAssembly {
     @JvmStatic @Synchronized fun registerLoginEntry(entry: AppLoginEntry) { loginEntry = entry }
     @JvmStatic @Synchronized fun loginEntry() = loginEntry
     @JvmStatic @Synchronized fun serverUrl() = serverUrl
+
+    /** 占位地址等同于未配置：构建脚本会警告，页面也要给出可执行的提示而不是普通网络错误。 */
+    @JvmStatic @Synchronized fun isBackendConfigured(): Boolean =
+        serverUrl.isNotBlank() && !serverUrl.contains(PLACEHOLDER_BACKEND_HOST)
     @JvmStatic @Synchronized fun registerResultActions(plugins: List<AppResultActionPlugin>) {
         resultActions = java.util.List.copyOf(plugins)
         resultRegistry = ResultActionRegistry(resultActions)

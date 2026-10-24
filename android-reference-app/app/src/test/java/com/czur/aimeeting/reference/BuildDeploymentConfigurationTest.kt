@@ -84,13 +84,30 @@ class BuildDeploymentConfigurationTest {
                 .apply { isAccessible = true }.invoke(activity, false)
             activity.findViewById<View>(R.id.account_button).performClick()
 
-            assertEquals("部署尚未配置，请联系应用提供方。", activity.findViewById<TextView>(R.id.status).text.toString())
+            assertEquals("部署地址未配置：请按接入文档填写本地部署配置后重新构建。", activity.findViewById<TextView>(R.id.status).text.toString())
             assertFalse(activity.findViewById<View>(R.id.start_meeting).isEnabled)
             assertNull(ShadowAlertDialog.getLatestAlertDialog())
             for (name in listOf("settings_button", "backend_url", "web_url"))
                 assertEquals(0, activity.resources.getIdentifier(name, "id", activity.packageName))
             val activities = activity.packageManager.getPackageInfo(activity.packageName, PackageManager.GET_ACTIVITIES).activities
             assertTrue(activities.orEmpty().none { it.name.endsWith(".ConnectionSettingsActivity") })
+        } finally {
+            controller.destroy()
+        }
+    }
+
+    @Test fun placeholderBackendIsTreatedAsNotConfigured() {
+        val controller = Robolectric.buildActivity(MainActivity::class.java).create()
+        try {
+            val activity = controller.get()
+            // 仓内默认地址是占位值；伙伴忘了填本地配置时，页面必须给出可执行的提示。
+            MeetingAppAssembly.configureBackend("https://replace-with-your-backend.example")
+            MainActivity::class.java.getDeclaredMethod("refreshIdentity", Boolean::class.javaPrimitiveType)
+                .apply { isAccessible = true }.invoke(activity, false)
+
+            assertEquals("部署地址未配置：请按接入文档填写本地部署配置后重新构建。",
+                activity.findViewById<TextView>(R.id.status).text.toString())
+            assertFalse(activity.findViewById<View>(R.id.start_meeting).isEnabled)
         } finally {
             controller.destroy()
         }
@@ -118,7 +135,7 @@ class BuildDeploymentConfigurationTest {
             MainActivity::class.java.getDeclaredMethod("refreshIdentity", Boolean::class.javaPrimitiveType)
                 .apply { isAccessible = true }.invoke(activity, false)
             bindIdleService()
-            assertEquals("部署尚未配置，请联系应用提供方。", status.text.toString())
+            assertEquals("部署地址未配置：请按接入文档填写本地部署配置后重新构建。", status.text.toString())
         } finally {
             activityController.destroy()
             serviceController.destroy()

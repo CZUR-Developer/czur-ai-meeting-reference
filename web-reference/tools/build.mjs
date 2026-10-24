@@ -24,5 +24,8 @@ if (apiBaseUrl) {
 } else if (existsSync(localConfig)) {
   await cp(localConfig, resolve(output, 'config.json'));
   console.log('WEB_CONFIG_INJECTED source=config.local.json');
+} else {
+  // 交付约定如此：产物不带地址。这里只提示一次，免得本机忘了注入又去看 404。
+  console.log('WEB_CONFIG_ABSENT 未注入 config.json（交付约定）；本机联调可设 REFERENCE_API_BASE_URL 或写 config.local.json');
 }
 console.log(`WEB_BUILD_OK output=${output}`);
