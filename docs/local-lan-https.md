@@ -84,12 +84,15 @@ curl --cacert "$REFERENCE_TLS_DIR/ca.pem" "https://$PC_LAN_IP:8443/v1/capabiliti
 不使用 `curl -k` 或绕过证书校验。生产部署使用部署方自己的 HTTPS 域名／证书和
 正式反向代理；本脚本不属于必须交付的产品镜像。
 
-## 3. 构建（代码即配置）
+## 3. 构建
 
-参考 App 的地址和调试 CA 已经在代码/资源里：
+参考 App 的地址和调试 CA 由仓外本地文件注入，仓库里只有占位值：
 
-- 后端/结果页：`android-reference-app/app/src/main/java/com/czur/aimeeting/reference/meeting/ReferenceDeployment.kt`
-- 调试 CA：`android-reference-app/app/src/debug/res/raw/reference_debug_ca.pem`
+- 复制 `android-reference-app/deployment.local.properties.example` 为同目录的
+  `deployment.local.properties`（已被 Git 忽略）；
+- `backendUrl` 填 `https://<PC_LAN_IP>:8443`，`resultWebUrl` 填结果页地址；
+- `debugCaFile` 指向本节生成的 CA，例如 `local-tls/reference_debug_ca.pem`
+  （路径相对 `android-reference-app/`）。
 
 构建不需要任何 `-P` 参数：
 

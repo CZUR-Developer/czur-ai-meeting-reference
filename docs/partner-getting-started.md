@@ -19,7 +19,7 @@
 | 组成 | 作用 | 获得方式 |
 | --- | --- | --- |
 | Android 参考 App | 登录、会前选项、字幕／互译、悬浮窗、停止和结果入口 | 本仓 `android-reference-app/`，Kotlin First |
-| 设备 AAR（闭源） | 音源探测、采音、截图、native 和 SubtitleTextView；不含 core／契约 | 本仓 `android-reference-app/meeting-android/libs/ai-meeting-device.aar`（0.5.0，SHA-256 `150f5a52294036b7e273a91d4d59afa7df212021bb6825e9199384023cd28053`，arm64-v8a／armeabi-v7a） |
+| 设备 AAR（闭源） | 音源探测、采音、截图、native 和 SubtitleTextView；不含 core／契约 | 本仓 `android-reference-app/meeting-android/libs/ai-meeting-device.aar`（0.5.0，SHA-256 `150f5a52294036b7e273a91d4d59afa7df212021bb6825e9199384023cd28053`，实际包含 arm64-v8a／armeabi-v7a／x86／x86_64，产品保证只有 ARM 两种） |
 | 业务 AAR（源码） | 模型连接、数据归一化及通用会议门面 | 本仓 `android-reference-app/meeting-android/`，设备 AAR 已随仓在 `meeting-android/libs/ai-meeting-device.aar` |
 | 字幕显示控件 | 设备 AAR 内置的 `com.czur.aimeeting.ui.SubtitleTextView` | 随设备 AAR 交付，不再单独提供 UI AAR |
 | 公共服务端核心 | 会议流程、标准协议、能力协商、持久化与扩展端口 | 本仓 `backend-core/`，构建成普通 JAR |
@@ -29,7 +29,7 @@
 
 AAR 是 Android 库包。参考 App 固定使用设备 AAR + 本仓业务 AAR 构建；字幕/占位使用
 设备 AAR 内的 `SubtitleTextView`，不再单独引入 UI AAR。设备 AAR 版本 0.5.0，
-SHA-256 `150f5a52294036b7e273a91d4d59afa7df212021bb6825e9199384023cd28053`，ABI `arm64-v8a`／`armeabi-v7a`；业务 AAR 初始化时校验设备 AAR 版本。
+SHA-256 `150f5a52294036b7e273a91d4d59afa7df212021bb6825e9199384023cd28053`，ABI 实际包含 `arm64-v8a`、`armeabi-v7a`、`x86`、`x86_64`，产品保证只有 ARM 两种；业务 AAR 初始化时校验设备 AAR 版本。
 宿主直接使用裸业务 AAR 时，还需显式提供 OkHttp 5.3.2 和 kotlinx-coroutines-android 1.11.0。
 
 参考方案独立部署，不依赖 CZUR 的账号、业务服务、内部域名或现成的模型额度。
@@ -222,7 +222,22 @@ bash tools/run-reference-web.sh
 ### 第 5 步：构建并安装真实 SDK 版本 App
 
 设备 AAR 已随参考仓放在 `meeting-android/libs/ai-meeting-device.aar`；业务 AAR 由本仓
-`meeting-android` 自行构建。构建不需要任何参数：
+`meeting-android` 自行构建，构建不需要任何参数。
+
+先给地址。复制 `deployment.local.properties.example` 为同目录的
+`deployment.local.properties`（已被 Git 忽略），填写步骤 4 得到的两个地址：
+
+```dotenv
+backendUrl=https://<PC_LAN_IP>:8443
+resultWebUrl=http://<PC_LAN_IP>:8090/index.html
+```
+
+Debug 联调还要让 APK 信任步骤 4 生成的开发 CA：在同一文件里加
+`debugCaFile=local-tls/reference_debug_ca.pem`（路径相对 `android-reference-app/`，
+证书按 [本机局域网 HTTPS 指南](local-lan-https.md) 生成；仓库不携带任何证书）。
+不建这个文件也能构建成功，但 APK 指向占位域名，装上会提示联系应用提供方。
+
+再构建并安装：
 
 ```bash
 cd android-reference-app
@@ -230,10 +245,7 @@ cd android-reference-app
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-后端和结果页地址在
-`app/src/main/java/com/czur/aimeeting/reference/meeting/ReferenceDeployment.kt`；
-调试 CA 在 `app/src/debug/res/raw/reference_debug_ca.pem`（开发自签，运维提供正式 CA
-后替换）。地址在打包时确定，终端用户没有手填 IP 的步骤。App 保存当前后端的有效登录；
+地址在打包时确定，终端用户没有手填 IP 的步骤。App 保存当前后端的有效登录；
 保留数据覆盖安装或重开后可恢复登录，退出会清除会话，更换后端的 APK 不复用旧身份。
 ### 第 6 步：登录、开会、停止并看结果
 

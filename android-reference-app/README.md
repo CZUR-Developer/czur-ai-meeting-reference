@@ -26,7 +26,7 @@ Gradle 8.7 和 Android Gradle Plugin 8.5.2，目标 JVM 为 17。Android 自有�
 | 设备 AAR 内置 UI | `com.czur.aimeeting.ui.SubtitleTextView` 字幕文字显示控件 |
 
 设备 AAR 随本仓放在 `meeting-android/libs/ai-meeting-device.aar`：版本 0.5.0，
-SHA-256 `150f5a52294036b7e273a91d4d59afa7df212021bb6825e9199384023cd28053`，ABI `arm64-v8a`／`armeabi-v7a`，含 `classes.jar`、`jni/`、`proguard.txt`；
+SHA-256 `150f5a52294036b7e273a91d4d59afa7df212021bb6825e9199384023cd28053`，ABI 实际打包 `arm64-v8a`、`armeabi-v7a`、`x86`、`x86_64`（产品保证只有 ARM 两种），含 `classes.jar`、`jni/`、`proguard.txt`；
 业务 AAR 由本仓 `meeting-android/` 源码构建。构建不需要任何 `-P` 参数。设备 AAR 与业务
 模块初始化时做版本握手；宿主直接使用裸业务 AAR 时，还需显式提供 OkHttp 5.3.2 和
 kotlinx-coroutines-android 1.11.0。无需访问 CZUR 产品源码仓；模型 Key、真实会话材料和
@@ -36,14 +36,19 @@ kotlinx-coroutines-android 1.11.0。无需访问 CZUR 产品源码仓；模型 K
 
 后端和结果页地址只有一处：
 
-`app/src/main/java/com/czur/aimeeting/reference/meeting/ReferenceDeployment.kt`
+`app/src/main/java/com/czur/aimeeting/reference/meeting/ReferenceDeployment.kt`（只读
+`BuildConfig`，值来自下面的本地文件）
 
-合作伙伴直接修改这个文件；构建不接受任何 `-P` 参数，终端用户不需要在设备上填写。
-当前参考局域网值是 `BACKEND_URL` 和 `RESULT_WEB_URL`。模型地址和短期材料由后端下发，
+构建不接受任何 `-P` 参数，终端用户不需要在设备上填写。合作伙伴复制
+`deployment.local.properties.example` 为同目录的 `deployment.local.properties`（已被
+Git 忽略），填写 `backendUrl`、`resultWebUrl`；构建时注入 APK。仓库只保留占位值，
+没有这个文件也能构建，但 APK 指向占位域名。模型地址和短期材料由后端下发，
 这里不包含模型 Key 或账号密码。
 
-调试 CA 在 `app/src/debug/res/raw/reference_debug_ca.pem`，是开发用自签 CA，Debug 构建
-自动信任。运维提供正式 CA 后，替换该文件或改走系统信任；Release 不信任这个开发 CA。
+Debug 构建如需信任本机自签 CA，在同一文件里用 `debugCaFile` 指向自己生成的 PEM
+（生成方式见 [`../docs/local-lan-https.md`](../docs/local-lan-https.md)）；仓库不携带
+任何证书，`build.gradle.kts` 只在本地文件存在时才生成 `debug-overrides`。
+Release 不信任开发 CA。
 
 ```bash
 ./gradlew :app:assembleDebug :app:testDebugUnitTest
@@ -53,7 +58,7 @@ kotlinx-coroutines-android 1.11.0。无需访问 CZUR 产品源码仓；模型 K
 解包它的 `classes.jar`、`jni/` 和 `proguard.txt` 一起打进业务 AAR，版本握手保持。最小混淆
 验证固定用 `./gradlew :app:assembleMinifiedDebug`，不再传参数。
 
-干净上下文只需要：仓库（含设备 AAR 和调试 CA）、Android SDK/JDK、可访问的后端和结果页、
+干净上下文只需要：仓库（含设备 AAR）、Android SDK/JDK、可访问的后端和结果页、
 参考账号；设备在 PC 所在局域网内。没有这些运行时条件，APK 仍然能编译，但会因发现不到
 能力和语言而无法开会。
 

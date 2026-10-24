@@ -1,0 +1,10 @@
+# 部署地址模板：复制为同目录的 deployment.local.properties 后填写真实值（该文件已被 Git 忽略）。
+# 构建时由 Gradle 注入 BuildConfig；仓库里只保留占位值，不填也能构建，但 APK 会指向占位域名。
+#
+# 设备可达的 HTTPS 后端根地址，不带尾部斜杠
+backendUrl=https://your-backend.example:8443
+# 设备可达的结果页地址
+resultWebUrl=https://your-result-web.example/index.html
+# 可选：Debug 构建额外信任的本机自签 CA（PEM 路径，相对 android-reference-app/）。
+# 生成方式见 docs/local-lan-https.md；仓库不携带任何证书。
+#debugCaFile=local-tls/reference_debug_ca.pem
