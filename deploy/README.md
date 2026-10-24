@@ -95,6 +95,61 @@ Android 默认读取已忽略的 `android-reference-app/deployment.local.propert
 独立后端／Web 端口，复用配套 AAR 和公开 Debug CA；它不启动任何服务或 Docker。
 完整命令见 [Android 构建／启动工具](../tools/android-device/README.md)。
 
+## 本机常驻运行（可选）
+
+反复重启上面三个服务、或希望它们脱离终端存活时，可以用 systemd 用户单元托管。
+下面三条命令只引用仓外／已忽略的配置文件路径，命令里不出现凭据值。
+
+```bash
+REPO="$(git rev-parse --show-toplevel)"
+ENV_FILE="$HOME/.config/ai-meeting/reference-client.env"   # 放仓外，按 tools/reference-client.env.example 填写
+
+# 1. 业务后端（18171）：脚本自己 source 配置后再 exec java
+systemd-run --user --unit=ai-meeting-reference-backend \
+  --property=WorkingDirectory="$REPO" \
+  --property=Restart=on-failure --property=RestartSec=5s \
+  --property=CollectMode=inactive-or-failed \
+  --setenv=REFERENCE_ENV_FILE="$ENV_FILE" \
+  /bin/bash -c 'exec ./tools/run-reference-client-backend.sh'
+
+# 2. 局域网 HTTPS 入口（8443）：证书仍是仓外文件，见 local-lan-https；
+#    下面的 BIND 是文档占位地址，换成开发机局域网 IP
+systemd-run --user --unit=ai-meeting-reference-https \
+  --property=WorkingDirectory="$REPO" \
+  --property=Restart=on-failure --property=RestartSec=5s \
+  --property=CollectMode=inactive-or-failed \
+  --setenv=REFERENCE_TLS_CERT="$HOME/certs/server.pem" \
+  --setenv=REFERENCE_TLS_KEY="$HOME/certs/server.key" \
+  --setenv=REFERENCE_TLS_BIND=192.0.2.10 --setenv=REFERENCE_TLS_PORT=8443 \
+  --setenv=REFERENCE_TLS_UPSTREAM=http://127.0.0.1:18171 \
+  "$(command -v node)" tools/run-reference-lan-https.mjs
+
+# 3. 静态 Web（8091）：先用 npm --prefix web-reference run build 构建 dist
+systemd-run --user --unit=ai-meeting-reference-web \
+  --property=WorkingDirectory="$REPO" \
+  --property=Restart=on-failure --property=RestartSec=5s \
+  --property=CollectMode=inactive-or-failed \
+  "$(command -v python3)" -m http.server 8091 --bind 0.0.0.0 --directory web-reference/dist
+```
+
+- 配置文件放仓外（例如 `~/.config/ai-meeting/`）：`tools/check-public-boundary.py` 按工作区
+  扫描而不是按 git 跟踪扫描，放在仓库里即使被 `.gitignore` 忽略也会判失败。
+  `run-reference-client-backend.sh` 用 `REFERENCE_ENV_FILE` 指向仓外路径即可。
+- `--user` 单元跟随登录会话；希望退出登录后仍在，执行一次
+  `loginctl enable-linger "$(id -un)"`。
+- 这些是瞬态单元（`/run/user/<uid>/systemd/transient/`），**机器重启后不会自动恢复**，
+  重跑上面三步即可。
+- 启停和日志：`systemctl --user restart ai-meeting-reference-backend`、
+  `journalctl --user -u ai-meeting-reference-backend -f`；需要落文件时追加
+  `--property=StandardOutput=append:/path/to/backend.log`
+  `--property=StandardError=append:/path/to/backend.log`。
+- `tools/run-reference-client-backend.sh` 默认每次启动都跑一遍 Maven 构建；已构建过可加
+  `--setenv=SKIP_BUILD=1` 跳过，前提是 `backend-core` 已 install 到本机 `~/.m2`，
+  否则 `main` 会 `NoClassDefFoundError`。
+- 写 `bash -c '...'` 时不要在里面用 `${VAR}`：systemd 在 exec 前会替换 ExecStart
+  参数里的 `${...}`，变量名对不上就被替换成空串。传值用 `--setenv`，命令里只留
+  不带花括号的 `$VAR` 或相对路径。
+
 ## 模型、身份和结果
 
 `REFERENCE_DEV_*` 仅是单账号示例登录；合作伙伴可替换 Identity／Login Provider，
