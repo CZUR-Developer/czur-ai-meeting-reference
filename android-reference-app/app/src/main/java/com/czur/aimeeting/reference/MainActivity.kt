@@ -145,6 +145,8 @@ class MainActivity : Activity() {
                 statusView.visibility = if (s.isNullOrBlank()) View.GONE else View.VISIBLE
             }
         })
+        // 注册时文本可能已经是空的，监听不会补发，这里同步一次初始状态。
+        statusView.visibility = if (statusView.text.isNullOrBlank()) View.GONE else View.VISIBLE
         capabilityView = page.capabilities; sourceLanguageView = page.sourceLanguage; targetLanguageView = page.targetLanguage
         presentationCaptureView = page.presentation; summaryEnabledView = page.summary
         transcriptModeView = page.transcriptMode; translationModeView = page.translationMode
