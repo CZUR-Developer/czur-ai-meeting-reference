@@ -317,6 +317,15 @@ cp config.example.json dist/config.json
 
 编辑 `dist/config.json` 的 `apiBaseUrl` 为浏览器可达的 API；正式 HTTPS 站点使用
 HTTPS API，配置相应跨域读取或同源路由。再以正式后端和结果站点地址重建 App。
+
+`npm run build` 每次都会重建 `dist/`，手工拷进去的 `config.json` 会被清掉。本机反复构建时，
+可以在 `web-reference/config.local.json`（已被忽略）里写 `{"apiBaseUrl":"..."}`，或用环境变量：
+
+```bash
+REFERENCE_API_BASE_URL='https://your-backend:8443' npm run build
+```
+
+两者都没有时构建照旧不生成 `config.json`，保持"产物不带地址、由部署方注入"的交付约定。
 生产 Release 使用部署方正式证书，不携带本机 Debug CA。完整说明见[部署文档](../deploy/README.md)。
 
 数据库交付只有一份 MySQL V001；仓库不交付 MySQL 镜像／数据卷，也不提供 Web 镜像。

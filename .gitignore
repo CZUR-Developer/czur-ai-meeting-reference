@@ -97,3 +97,5 @@ tmp/
 .project
 .classpath
 .settings/
+# 本机结果页后端地址覆盖（构建时可选注入）
+/web-reference/config.local.json
