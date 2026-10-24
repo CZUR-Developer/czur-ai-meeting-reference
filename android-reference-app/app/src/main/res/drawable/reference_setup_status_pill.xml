@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 底部状态行做成浅色胶囊，和正文区分开，避免状态与提示文字糊在一起。 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <solid android:color="#E7EDFF" />
+    <corners android:radius="20dp" />
+</shape>
