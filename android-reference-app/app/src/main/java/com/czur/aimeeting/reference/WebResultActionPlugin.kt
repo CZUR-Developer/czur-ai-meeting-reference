@@ -74,15 +74,16 @@ class WebResultActionPlugin private constructor(
      * 点击时使用保存的完整原链接，不用当前连接地址重拼，避免指向另一部署或场次。
      */
     private class PreviousResultButton(context: Context, private val preferences: SharedPreferences,
-        private val opener: Consumer<String>) : Button(context, null, 0, R.style.ReferenceSecondaryButton) {
+        private val opener: Consumer<String>) : Button(context, null, 0, R.style.ReferenceSetupSecondaryButton) {
         private val changed = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
             if (key == KEY_LAST_READY_LINK) refreshAvailability()
         }
         init {
             id = R.id.view_previous_web_result
             text = "查看上场结果"; contentDescription = text
-            layoutParams = LinearLayout.LayoutParams(ReferenceUiScale.px(context, 240), ReferenceUiScale.px(context, 46)).apply {
-                topMargin = ReferenceUiScale.px(context, 8)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, ReferenceUiScale.px(context, 52)).apply {
+                topMargin = ReferenceUiScale.px(context, 16)
             }
             setTextSize(TypedValue.COMPLEX_UNIT_PX, ReferenceUiScale.px(context, 22).toFloat())
             setOnClickListener { preferences.getString(KEY_LAST_READY_LINK, null)?.let(opener::accept) }

@@ -95,7 +95,7 @@
                                 android:text="会议中可把字幕收成右上角 Mini 悬浮窗，点击恢复原形态。" />
                         </LinearLayout>
                         <!-- 结果服务仍由插件提供，本页不写死结果类型，也不挪动插件设置入口。 -->
-                        <LinearLayout android:id="@+id/result_settings_card" android:layout_width="0dp" android:layout_height="wrap_content"
+                        <LinearLayout android:id="@+id/result_settings_card" android:layout_width="0dp" android:layout_height="match_parent"
                             android:elevation="2dp"
                             android:layout_weight="1" android:layout_marginStart="24dp" android:orientation="vertical"
                             android:padding="36dp" android:background="@drawable/reference_setup_section">
@@ -108,11 +108,18 @@
                             <TextView android:id="@+id/result_description" style="@style/ReferenceSetupHint" android:layout_width="match_parent"
                                 android:layout_height="wrap_content" android:layout_marginTop="16dp" android:padding="20dp"
                                 android:background="@drawable/reference_setup_result_hint" android:text="@string/reference_result_description" />
+                            <!-- 弹性留白放在说明之后：操作按钮组统一贴卡片底部。 -->
+                            <Space android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" />
                             <LinearLayout android:id="@+id/result_settings_host" android:layout_width="match_parent" android:layout_height="wrap_content"
                                 android:layout_marginTop="20dp" android:orientation="vertical" />
                             <Button android:id="@+id/records_button" style="@style/ReferenceSetupSecondaryButton"
-                                android:layout_width="wrap_content" android:layout_height="46dp" android:minWidth="240dp"
+                                android:layout_width="match_parent" android:layout_height="52dp"
                                 android:layout_marginTop="8dp" android:text="会议记录" />
+                            <LinearLayout android:id="@+id/setup_action_slot" android:layout_width="match_parent" android:layout_height="wrap_content"
+                                android:layout_marginTop="24dp" android:orientation="horizontal" android:gravity="end">
+                                <Button android:id="@+id/start_meeting" style="@style/ReferenceSetupPrimaryButton" android:layout_width="match_parent"
+                                    android:layout_height="72dp" android:textSize="26sp" android:text="开始" android:enabled="false" />
+                            </LinearLayout>
                         </LinearLayout>
                     </LinearLayout>
                 </ScrollView>
@@ -128,12 +135,7 @@
                         <TextView style="@style/ReferenceSetupHint" android:layout_width="wrap_content" android:layout_height="wrap_content"
                             android:layout_marginTop="10dp" android:text="持续 5 分钟无字幕，自动停止" />
                     </LinearLayout>
-                    <!-- 主操作槽也用于收尾失败后的停止确认；由页面接线切换，不叠放第二套会议状态。 -->
-                    <LinearLayout android:id="@+id/setup_action_slot" android:layout_width="wrap_content" android:layout_height="wrap_content"
-                        android:orientation="horizontal" android:gravity="center_vertical">
-                        <Button android:id="@+id/start_meeting" style="@style/ReferenceSetupPrimaryButton" android:layout_width="240dp" android:layout_height="64dp"
-                            android:text="开始" android:enabled="false" />
-                    </LinearLayout>
+                    <!-- 主操作槽已移入会后结果卡片底部；页脚只保留状态与提示。 -->
                 </LinearLayout>
                 <LinearLayout android:id="@+id/result_retry_bar" android:layout_width="match_parent" android:layout_height="wrap_content"
                     android:orientation="horizontal" android:gravity="end">
