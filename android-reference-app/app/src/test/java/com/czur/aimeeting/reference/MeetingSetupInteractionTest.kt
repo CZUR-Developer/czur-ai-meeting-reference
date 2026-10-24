@@ -31,6 +31,9 @@ class MeetingSetupInteractionTest {
         context.getSharedPreferences("czur_reference_meeting_setup", Context.MODE_PRIVATE).edit().clear().commit()
         MeetingAppAssembly.initialize(context)
         MeetingAppAssembly.configureBackend("")
+        // 默认 Web 动作需要部署结果页地址；页面测试使用一个固定的有效地址，
+        // 不改变被测的开始规则，也不依赖测试执行顺序。
+        MeetingAppAssembly.configureResultWeb("https://result.reference.test/index.html")
         MeetingAppAssembly.registerResultActions(listOf(WebResultActionPlugin()))
     }
 
@@ -38,6 +41,7 @@ class MeetingSetupInteractionTest {
         RuntimeEnvironment.getApplication().getSharedPreferences("czur_reference_meeting_setup", Context.MODE_PRIVATE)
             .edit().clear().commit()
         MeetingAppAssembly.configureBackend("")
+        MeetingAppAssembly.configureResultWeb("")
     }
 
     @Test fun languageSwapAndIndependentModePreferencesSurvivePageRecreation() {

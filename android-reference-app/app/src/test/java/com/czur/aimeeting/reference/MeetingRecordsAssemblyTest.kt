@@ -60,11 +60,16 @@ class MeetingRecordsAssemblyTest {
         assertEquals(server.url("/").toString(), MeetingAppAssembly.serverUrl())
         val activity = Robolectric.buildActivity(MeetingRecordsActivity::class.java).create().get()
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
-        while (server.requestCount == 0 && System.nanoTime() < deadline) {
+        var request: RecordedRequest? = null
+        while (System.nanoTime() < deadline) {
             org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
-            Thread.sleep(50)
+            val candidate = server.takeRequest(100, TimeUnit.MILLISECONDS) ?: continue
+            // 历史页先做匿名发现再拉列表；测试只关心最终列表请求。
+            if (candidate.path?.startsWith("/v1/meetings") == true) {
+                request = candidate
+                break
+            }
         }
-        val request = if (server.requestCount > 0) server.takeRequest(1, TimeUnit.SECONDS) else null
         assertTrue("历史会议页应使用集中装配后的后端地址，实际 status=" +
             activity.window.decorView.findViewById<android.widget.TextView>(R.id.records_status)?.text,
             request != null)
