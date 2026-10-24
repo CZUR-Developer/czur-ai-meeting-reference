@@ -3,7 +3,7 @@
 ## 定位
 
 - **设备 AAR**（starry 仓 `base/aiMeetingSdk`）闭源，只提供 MIC／Broker 采集、投屏截图、native 和 AIDL。
-- **本模块**开源，承接模型 WebSocket／HTTP、总结／翻译调用和会议门面，是宿主唯一需要依赖的 AAR。
+- **本模块**开源，承接模型 WebSocket／HTTP、总结／翻译调用和会议门面，是宿主唯一需要集成的会议 AAR；运行时仍需宿主提供 OkHttp 5.3.2 和 kotlinx-coroutines-android 1.11.0。
 - 依赖设备 AAR、`meeting-client-core` 和 `model-runtime-contract`；业务 AAR 自带设备类、core、契约和 `.so`。
 - 参考 App 的 sdk 模式用本模块的工程依赖；Starry App 使用预编译的 `apps/transcription/libs/ai-meeting-business-0.5.0.aar`。
 
@@ -15,11 +15,16 @@
 也不需要访问 Starry 私有仓：
 
 ```bash
+cd android-reference-app
 ./gradlew :meeting-android:assembleRelease
 
 # 产物
 meeting-android/build/outputs/aar/meeting-android-release.aar
 ```
+
+只构建业务 AAR 不需要 `deployment.local.properties`：`settings.gradle.kts` 只有在该文件
+存在时才纳入 `:app`，所以干净 clone 不会因为缺少参考 App 的部署配置而失败。需要构建参考
+App 时，先复制 `android-reference-app/deployment.local.properties.example`。
 
 要换成更新版本的设备 AAR，直接替换 `libs/ai-meeting-device.aar` 即可；
 Gradle 只读这个路径，不接受 `-PdeviceSdkAar` 之类的构建参数。

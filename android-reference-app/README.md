@@ -22,7 +22,7 @@ Gradle 8.7 和 Android Gradle Plugin 8.5.2，目标 JVM 为 17。Android 自有�
 | `model-runtime-contract/` | 模型 Adapter、会话材料、音源状态和标准事件契约 |
 | `meeting-client-core/` | 共享 Server 协议、会议编排、Adapter 注册和显示规则 |
 | `meeting-android/libs/ai-meeting-device.aar` | 随仓交付的闭源设备 AAR：系统／标准 MIC 音源、同源录音及截图能力、native；不含 core 或契约 |
-| `meeting-android/`（业务 AAR） | 模型连接与会议门面；构建时注入设备 AAR，产物是宿主唯一依赖的业务 AAR |
+| `meeting-android/`（业务 AAR） | 模型连接与会议门面；构建时注入设备 AAR，产物是宿主唯一需要集成的会议 AAR；运行时仍需宿主提供 OkHttp 与 coroutines（见下） |
 | 设备 AAR 内置 UI | `com.czur.aimeeting.ui.SubtitleTextView` 字幕文字显示控件 |
 
 设备 AAR 随本仓放在 `meeting-android/libs/ai-meeting-device.aar`：版本 0.5.0，
@@ -55,6 +55,17 @@ Debug 构建如需信任本机自签 CA，把 PEM 放到
 设备 AAR 已随仓放在 `meeting-android/libs/ai-meeting-device.aar`；`:meeting-android` 在构建时
 解包它的 `classes.jar`、`jni/` 和 `proguard.txt` 一起打进业务 AAR，版本握手保持。最小混淆
 验证固定用 `./gradlew :app:assembleMinifiedDebug`，不再传参数。
+
+只构建业务 AAR 时不需要 `deployment.local.properties`：
+
+```bash
+cd android-reference-app
+./gradlew :meeting-android:assembleRelease
+```
+
+`settings.gradle.kts` 只有在 `deployment.local.properties`（或
+`REFERENCE_DEPLOYMENT_FILE` 指定的文件）存在时才纳入 `:app`，所以干净 clone 不会被参考
+App 的部署校验拦住；需要构建 App 时再复制模板并填写两个地址。
 
 干净上下文只需要：仓库（含设备 AAR）、Android SDK/JDK、可访问的后端和结果页、
 参考账号；设备在 PC 所在局域网内。没有这些运行时条件，APK 仍然能编译，但会因发现不到
