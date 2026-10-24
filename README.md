@@ -11,7 +11,7 @@
 | 3 | [扩展开发手册](docs/partner-integration-guide.md) | 登录保持、鉴权、模型Adapter、存储、权益、结果动作和SDK工具的扩展边界 |
 
 首次接入按第1份文档的真实字幕主线推进；默认Mock构建和JSON协议样例只用于模拟／接线，
-不替代真实音源与模型。参考仓不携带闭源SDK AAR，真实运行先取得匹配的SDK交付包。
+不替代真实音源与模型。设备 AAR 随参考仓交付（`android-reference-app/meeting-android/libs/ai-meeting-device.aar`），干净 clone 即可构建。
 
 ## 工程结构
 
@@ -69,16 +69,14 @@ MySQL 5.7 的独立能力探针见 [`tools/mysql57-compatibility/`](tools/mysql5
 ## Android 部署地址随构建注入
 
 合作伙伴开发者在 PC 上配置后端与结果页地址，打包后交给终端用户；App 不提供填写 IP／
-网址的入口。复制 `android-reference-app/deployment.properties.example` 为同目录的
-`deployment.local.properties` 后填写实际地址，该本地文件已被 Git 忽略。也可通过
-`-PreferenceDeploymentFile` 选择仓外 `.properties`，或用显式
-`-PreferenceBackendUrl`／`-PreferenceResultWebUrl` 覆盖文件同名键。默认未配置时仍可构建，
-App 提示联系应用提供方，设备端没有手输地址入口。
+网址的入口。复制 `android-reference-app/deployment.local.properties.example` 为同目录的
+`deployment.local.properties`（已被 Git 忽略）后填写 `backendUrl`、`resultWebUrl`，
+构建时注入 APK。仓库里只保留占位值：不建这个文件也能构建成功，但 APK 指向占位域名，
+装到设备上会提示联系应用提供方。
 
-局域网测试使用 [`build-lan-apk.py`](tools/android-device/build-lan-apk.py) 检测 PC 地址或
-显式传入主机、后端／Web 端口及配套 AAR／Debug CA。它只组合已有 Gradle 输入，不启动
-Docker 或操作设备；部署服务与匹配 TLS 证书需预先准备。随后设备工具只负责正常
-`open → login → options → start`。配置优先级和命令见
+Debug 构建如需信任本机自签 CA，在同一文件里用 `debugCaFile` 指向自己的 PEM（证书按
+[本机局域网 HTTPS 联调](docs/local-lan-https.md) 现场生成，仓库不携带任何证书）。
+设备端没有手输地址界面；构建期配置说明见
 [`Android 说明`](android-reference-app/README.md#构建期部署地址)及
 [`构建与启动工具`](tools/android-device/README.md)。
 

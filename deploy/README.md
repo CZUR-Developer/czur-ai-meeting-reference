@@ -88,11 +88,10 @@ App Web 结果构建地址使用 `http://<PC_LAN_IP>:8090/index.html`；Web 的
 应使用同样可达的 HTTPS API，避免混合内容。仓库只交付后端应用镜像，不新增 Web
 或数据库镜像。
 
-Android 默认读取已忽略的 `android-reference-app/deployment.local.properties`；可通过
-`-PreferenceDeploymentFile` 指向仓外 `.properties`。显式 `-PreferenceBackendUrl`／
-`-PreferenceResultWebUrl` 优先于文件同名键；模板只含示例域名。局域网构建入口
-[`build-lan-apk.py`](../tools/android-device/build-lan-apk.py) 可自动选址或显式传主机及
-独立后端／Web 端口，复用配套 AAR 和公开 Debug CA；它不启动任何服务或 Docker。
+Android 构建时读取已忽略的 `android-reference-app/deployment.local.properties`
+（模板 `deployment.local.properties.example`）：`backendUrl` 填设备可达的 HTTPS 后端，
+`resultWebUrl` 填结果页地址，Debug 联调可选 `debugCaFile` 指向自己生成的自签 CA。
+仓库只保留占位值，不建这个文件也能构建，但 APK 会指向占位域名。
 完整命令见 [Android 构建／启动工具](../tools/android-device/README.md)。
 
 ## 本机常驻运行（可选）
@@ -104,7 +103,7 @@ Android 默认读取已忽略的 `android-reference-app/deployment.local.propert
 REPO="$(git rev-parse --show-toplevel)"
 ENV_FILE="$HOME/.config/ai-meeting/reference-client.env"   # 放仓外，按 tools/reference-client.env.example 填写
 
-# 1. 业务后端（18171）：脚本自己 source 配置后再 exec java
+# 1. 业务后端（端口取自配置文件的 AI_MEETING_HTTP_BIND，模板默认 8080）
 systemd-run --user --unit=ai-meeting-reference-backend \
   --property=WorkingDirectory="$REPO" \
   --property=Restart=on-failure --property=RestartSec=5s \
@@ -121,20 +120,22 @@ systemd-run --user --unit=ai-meeting-reference-https \
   --setenv=REFERENCE_TLS_CERT="$HOME/certs/server.pem" \
   --setenv=REFERENCE_TLS_KEY="$HOME/certs/server.key" \
   --setenv=REFERENCE_TLS_BIND=192.0.2.10 --setenv=REFERENCE_TLS_PORT=8443 \
-  --setenv=REFERENCE_TLS_UPSTREAM=http://127.0.0.1:18171 \
+  --setenv=REFERENCE_TLS_UPSTREAM=http://127.0.0.1:8080 \
   "$(command -v node)" tools/run-reference-lan-https.mjs
 
-# 3. 静态 Web（8091）：先用 npm --prefix web-reference run build 构建 dist
+# 3. 静态 Web（8090）：先用 npm --prefix web-reference run build 构建 dist
 systemd-run --user --unit=ai-meeting-reference-web \
   --property=WorkingDirectory="$REPO" \
   --property=Restart=on-failure --property=RestartSec=5s \
   --property=CollectMode=inactive-or-failed \
-  "$(command -v python3)" -m http.server 8091 --bind 0.0.0.0 --directory web-reference/dist
+  "$(command -v python3)" -m http.server 8090 --bind 0.0.0.0 --directory web-reference/dist
 ```
 
 - 配置文件放仓外（例如 `~/.config/ai-meeting/`）：`tools/check-public-boundary.py` 按工作区
   扫描而不是按 git 跟踪扫描，放在仓库里即使被 `.gitignore` 忽略也会判失败。
   `run-reference-client-backend.sh` 用 `REFERENCE_ENV_FILE` 指向仓外路径即可。
+- 后端端口以配置文件里的 `AI_MEETING_HTTP_BIND` 为准（模板默认 `0.0.0.0:8080`），
+  必须和 `REFERENCE_TLS_UPSTREAM` 指向的端口一致，否则 HTTPS 入口会 502。
 - `--user` 单元跟随登录会话；希望退出登录后仍在，执行一次
   `loginctl enable-linger "$(id -un)"`。
 - 这些是瞬态单元（`/run/user/<uid>/systemd/transient/`），**机器重启后不会自动恢复**，

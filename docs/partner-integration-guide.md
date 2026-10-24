@@ -61,16 +61,15 @@ SDK构建顺序见[从零指南第4节](partner-getting-started.md#4-按步骤�
 后端。开发者在 PC 上为 App 构建注入设备可达的 HTTPS 后端地址和独立结果页地址，
 终端用户只需正常登录，不配置 IP／网址。设备自己的 `127.0.0.1` 不表示开发电脑。
 开发电脑尚无 HTTPS 入口时，按[本机局域网 HTTPS 联调](local-lan-https.md)
-生成仓外证书、启动 Node 流式 TLS 入口，并通过可选 Gradle 属性让 Debug APK 信任该 CA。
+生成仓外证书、启动 Node 流式 TLS 入口，并在 `deployment.local.properties` 里用 `debugCaFile` 让 Debug APK 信任该 CA。
 正式 Release 不携带开发 CA，沿用部署方的正式 HTTPS 证书；`adb reverse` 仅用于诊断。
 
-Android 默认读取 `android-reference-app/deployment.local.properties`，公开模板为同目录的
-`deployment.properties.example`，真实本地文件已忽略。也可用 `-PreferenceDeploymentFile`
-选择仓外 `.properties`；显式 `-PreferenceBackendUrl`／`-PreferenceResultWebUrl` 优先于
-文件中的同名键。未配置时 App 提示联系应用提供方；设备端没有手输地址界面或
-地址回退来源。局域网开发可用 [`build-lan-apk.py`](../tools/android-device/build-lan-apk.py)
-自动选择 PC 地址或显式传主机、独立端口／完整 URL 及配套 AAR／公开 Debug CA。
-构建与无地址步骤的设备启动命令见 [工具说明](../tools/android-device/README.md)。
+Android 构建时读取 `android-reference-app/deployment.local.properties`（已被 Git 忽略），
+模板是同目录的 `deployment.local.properties.example`。要填两个键：`backendUrl`（设备可达的
+HTTPS 后端根地址）、`resultWebUrl`（结果页地址）；Debug 联调可选 `debugCaFile` 指向自己
+生成的自签 CA。仓库只保留占位值，没有本地文件也能构建，但 APK 会指向占位域名并提示
+联系应用提供方；设备端没有手输地址界面或地址回退来源。
+构建与设备启动命令见 [工具说明](../tools/android-device/README.md)。
 
 数据库统一使用 MySQL 5.7。先由部署方创建隔离数据库，再执行仓库中当前唯一的
 `deploy/migrations/V001__initial_schema.sql`（或运行 `deploy/migrate.sh`）。该脚本只新增

@@ -11,16 +11,18 @@
 
 ### 合作伙伴路径
 
-合作伙伴从 SDK 交付包取得 `ai-meeting-device-*.aar`，不需要访问 Starry 私有仓：
+设备 AAR 已随参考仓放在本模块 `libs/ai-meeting-device.aar`，构建不需要任何参数，
+也不需要访问 Starry 私有仓：
 
 ```bash
-# 设备 AAR 路径必填；产物是宿主唯一依赖的业务 AAR
-./gradlew :meeting-android:assembleRelease \
-  -PdeviceSdkAar=/absolute/path/ai-meeting-device-0.5.0-release.aar
+./gradlew :meeting-android:assembleRelease
 
 # 产物
 meeting-android/build/outputs/aar/meeting-android-release.aar
 ```
+
+要换成更新版本的设备 AAR，直接替换 `libs/ai-meeting-device.aar` 即可；
+Gradle 只读这个路径，不接受 `-PdeviceSdkAar` 之类的构建参数。
 
 ### 内部维护路径
 
@@ -43,7 +45,7 @@ AGP 不允许 Android library 直接依赖本地 `.aar` 再产出 AAR；构建�
 ## 版本与依赖
 
 - 契约 0.4.0、SDK 0.5.0；设备 AAR 与业务 AAR 成对升级。设备 AAR 固定放在
-  `libs/ai-meeting-device.aar`，版本 0.5.0，SHA-256 `150f5a52294036b7e273a91d4d59afa7df212021bb6825e9199384023cd28053`，ABI `arm64-v8a`／`armeabi-v7a`。
+  `libs/ai-meeting-device.aar`，版本 0.5.0，SHA-256 `150f5a52294036b7e273a91d4d59afa7df212021bb6825e9199384023cd28053`，ABI：实际打包 `arm64-v8a`、`armeabi-v7a`、`x86`、`x86_64`，产品保证只有 ARM 两种。
 - 业务 AAR 构造时校验设备 AAR 的 `AiMeetingSdkVersion.VALUE` 与自身编译版本；混用不同
   设备 AAR 会在初始化直接失败，而不是等到运行中出现 JNI／ABI 错误。
 - OkHttp 与宿主对齐：Starry 5.3.2，参考 App 5.3.2；裸 AAR 不传递 POM，宿主需显式提供
