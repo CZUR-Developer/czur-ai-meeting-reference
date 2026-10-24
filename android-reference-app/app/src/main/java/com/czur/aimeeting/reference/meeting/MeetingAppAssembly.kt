@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.czur.aimeeting.client.ClientIdentity
 import com.czur.aimeeting.client.MeetingClient
+import com.czur.aimeeting.client.identity.IdentityResult
 import com.czur.aimeeting.client.MeetingError
 import com.czur.aimeeting.client.MeetingClientConfig
 import com.czur.aimeeting.client.HttpMeetingArtifactPublisher
@@ -40,6 +41,7 @@ object MeetingAppAssembly {
     private const val TAG = "MeetingAppAssembly"
     private var serverUrl = ""
     private const val PLACEHOLDER_BACKEND_HOST = "replace-with-your-backend"
+    private const val PLACEHOLDER_RESULT_WEB_HOST = "replace-with-your-result-web"
     private var resultWebUrl = ""
     private var identityProvider: IdentityProvider = ReferenceIdentityProvider()
     private var loginEntry: AppLoginEntry = DefaultAppLoginEntry
@@ -113,9 +115,34 @@ object MeetingAppAssembly {
     @JvmStatic @Synchronized fun loginEntry() = loginEntry
     @JvmStatic @Synchronized fun serverUrl() = serverUrl
 
+    /**
+     * 只读页面（历史会议等）统一从这里取身份，不再自己 new 一个 Provider。
+     * 伙伴替换的 IdentityProvider 因此对历史回看同样生效。
+     */
+    @JvmStatic @Synchronized fun currentIdentity(): IdentityResult =
+        identityProvider?.currentIdentity() ?: IdentityResult.loginRequired("请先登录")
+
     /** 占位地址等同于未配置：构建脚本会警告，页面也要给出可执行的提示而不是普通网络错误。 */
     @JvmStatic @Synchronized fun isBackendConfigured(): Boolean =
         serverUrl.isNotBlank() && !serverUrl.contains(PLACEHOLDER_BACKEND_HOST)
+
+    /** 结果页地址同样是部署配置；缺了它要开会前就提示，而不是等点击结果才发现。 */
+    @JvmStatic @Synchronized fun isResultWebConfigured(): Boolean =
+        resultWebUrl.isNotBlank()
+            && (resultWebUrl.startsWith("http://") || resultWebUrl.startsWith("https://"))
+            && !resultWebUrl.contains(PLACEHOLDER_RESULT_WEB_HOST)
+
+    /**
+     * 部署状态统一检查：返回 {@link DeploymentIssue#BACKEND}／{@link DeploymentIssue#RESULT_WEB}，
+     * 都正常时返回 null。页面据此给出同一条可执行提示，不再各自判断其中一项。
+     */
+    @JvmStatic @Synchronized fun deploymentIssue(): DeploymentIssue? = when {
+        !isBackendConfigured() -> DeploymentIssue.BACKEND
+        !isResultWebConfigured() -> DeploymentIssue.RESULT_WEB
+        else -> null
+    }
+
+    enum class DeploymentIssue { BACKEND, RESULT_WEB }
     @JvmStatic @Synchronized fun registerResultActions(plugins: List<AppResultActionPlugin>) {
         resultActions = java.util.List.copyOf(plugins)
         resultRegistry = ResultActionRegistry(resultActions)

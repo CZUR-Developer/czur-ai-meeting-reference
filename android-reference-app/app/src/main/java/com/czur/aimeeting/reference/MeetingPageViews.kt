@@ -194,7 +194,9 @@ class MeetingPageViews(@JvmField val root: FrameLayout) {
         root.keepScreenOn = active
         setupCard.visibility = if (active) View.GONE else View.VISIBLE
         meetingPanel.visibility = if (active) View.VISIBLE else View.GONE
-        status.visibility = if (active) View.GONE else View.VISIBLE
+        // 状态行由控件自己按文本决定显隐；这里只处理"会中不显示"，
+        // 不能在切回会前页时把空文本强制显示成一块空胶囊。
+        status.visibility = if (active || status.text.isNullOrBlank()) View.GONE else View.VISIBLE
     }
     /**
      * 仅投影 SDK 提供的停止能力，不在 UI 推断会议状态或自动补发停止请求。

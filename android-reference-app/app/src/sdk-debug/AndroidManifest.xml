@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- SDK Debug 专用接缝；保留普通 Debug 的网络信任与音频诊断入口。 -->
-    <application android:networkSecurityConfig="@xml/reference_debug_network_security">
+    <application android:networkSecurityConfig="@xml/reference_debug_network_security"
+        android:usesCleartextTraffic="true">
         <activity android:name=".AudioDiagnosticActivity" android:exported="true" />
         <activity android:name=".LocalPdfProbeActivity" android:exported="true" />
         <activity android:name=".ScreenCaptureProbeActivity" android:exported="true"

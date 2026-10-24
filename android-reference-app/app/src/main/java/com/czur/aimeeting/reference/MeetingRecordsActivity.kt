@@ -9,8 +9,7 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.czur.aimeeting.client.identity.IdentityResult
-import com.czur.aimeeting.reference.identity.PersistentReferenceIdentityProvider
-import com.czur.aimeeting.reference.meeting.ReferenceDeployment
+import com.czur.aimeeting.reference.meeting.MeetingAppAssembly
 import java.io.IOException
 import java.time.Instant
 import java.time.ZoneId
@@ -64,7 +63,8 @@ class MeetingRecordsActivity : Activity() {
 
     private fun load(pageToken: String?) {
         if (loading) return
-        val identity = PersistentReferenceIdentityProvider(this).currentIdentity()
+        // 身份、后端地址和结果页地址都来自集中装配，替换 Provider／地址后历史回看同样生效。
+        val identity = MeetingAppAssembly.currentIdentity()
         val session = if (identity.status() == IdentityResult.Status.LOGGED_IN) identity.session() else null
         if (session == null) {
             renderMessage("请先登录后查看会议记录")
@@ -75,7 +75,7 @@ class MeetingRecordsActivity : Activity() {
         loadMore.isEnabled = false
         if (list.childCount == 0) renderMessage("正在加载…")
         val url = buildString {
-            append(ReferenceDeployment.BACKEND_URL).append("/v1/meetings?pageSize=20")
+            append(MeetingAppAssembly.serverUrl().trimEnd('/')).append("/v1/meetings?pageSize=20")
             if (!pageToken.isNullOrBlank()) {
                 append("&pageToken=").append(java.net.URLEncoder.encode(pageToken, "UTF-8"))
             }
@@ -149,7 +149,7 @@ class MeetingRecordsActivity : Activity() {
     private fun openResult(meetingId: String) {
         if (meetingId.isBlank()) return
         val url = WebResultActionPlugin.resultUrl(
-            ReferenceDeployment.RESULT_WEB_URL, meetingId, System.currentTimeMillis())
+            MeetingAppAssembly.resultWebUrl(), meetingId, System.currentTimeMillis())
         startActivity(Intent(this, ResultActivity::class.java)
             .putExtra(ResultActivity.EXTRA_RESULT_URL, url))
     }

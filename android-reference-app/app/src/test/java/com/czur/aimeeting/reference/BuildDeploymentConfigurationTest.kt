@@ -113,6 +113,26 @@ class BuildDeploymentConfigurationTest {
         }
     }
 
+    @Test fun missingResultWebShowsItsOwnHintAndBlocksStart() {
+        val controller = Robolectric.buildActivity(MainActivity::class.java).create()
+        try {
+            val activity = controller.get()
+            MeetingAppAssembly.configureBackend("https://backend.example.test:8443")
+            MeetingAppAssembly.configureResultWeb("")
+            MainActivity::class.java.getDeclaredMethod("refreshIdentity", Boolean::class.javaPrimitiveType)
+                .apply { isAccessible = true }.invoke(activity, false)
+
+            assertEquals("结果页地址未配置：请在本地部署配置里填写 resultWebUrl 后重新构建。",
+                activity.findViewById<TextView>(R.id.status).text.toString())
+            assertFalse(activity.findViewById<View>(R.id.start_meeting).isEnabled)
+            assertEquals(MeetingAppAssembly.DeploymentIssue.RESULT_WEB,
+                MeetingAppAssembly.deploymentIssue())
+        } finally {
+            MeetingAppAssembly.configureResultWeb("")
+            controller.destroy()
+        }
+    }
+
     @Test fun idleServiceBindingKeepsTheActivityLoginAndDeploymentMessages() {
         val activityController = Robolectric.buildActivity(MainActivity::class.java).create()
         val serviceController = Robolectric.buildService(MeetingService::class.java).create()

@@ -15,6 +15,7 @@
     <string name="reference_setup_title">AI会议纪要</string>
     <string name="reference_account">登录</string>
     <string name="reference_deployment_not_configured">部署地址未配置：请按接入文档填写本地部署配置后重新构建。</string>
+    <string name="reference_result_web_not_configured">结果页地址未配置：请在本地部署配置里填写 resultWebUrl 后重新构建。</string>
     <string name="reference_source">语言</string>
     <string name="reference_target">目标语言</string>
     <string name="reference_result_description">会议结束后自动打开网页，查看本场字幕、译文及已提供的会议产物。</string>

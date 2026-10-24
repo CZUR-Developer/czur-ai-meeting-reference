@@ -212,7 +212,7 @@ class MainActivity : Activity() {
         setContentView(page.root)
         // 普通 Activity 使用系统分配的完整内容区，不设置浮动尺寸或点击外围关闭。
         // 开始成功后仍由原 Service 挂载真悬浮窗，并按既有流程退出本页。
-        if (!MeetingAppAssembly.isBackendConfigured()) statusView.setText(R.string.reference_deployment_not_configured)
+        renderDeploymentIssue()
     }
 
     /**
@@ -223,10 +223,7 @@ class MainActivity : Activity() {
      * 或增加第二份账号状态。伙伴自定义 AppLoginEntry 不会经过本默认菜单。
      */
     private fun showDefaultAccountEntry() {
-        if (!MeetingAppAssembly.isBackendConfigured()) {
-            statusView.setText(R.string.reference_deployment_not_configured)
-            return
-        }
+        if (renderDeploymentIssue()) return
         // 账号操作只有登录与退出登录；已登录时按钮直接退出，不提供“切换账号”。
         showLoginDialog()
     }
@@ -291,10 +288,23 @@ class MainActivity : Activity() {
         }.start()
     }
 
+    /**
+     * 部署配置缺失时给出同一条可执行提示，并拦住开始；返回 true 表示已提示。
+     * 后端地址和结果页地址都在这里统一判断，替换装配后也不会出现“能开会但看不了结果”。
+     */
+    private fun renderDeploymentIssue(): Boolean = when (MeetingAppAssembly.deploymentIssue()) {
+        null -> false
+        MeetingAppAssembly.DeploymentIssue.BACKEND -> {
+            statusView.setText(R.string.reference_deployment_not_configured); true
+        }
+        MeetingAppAssembly.DeploymentIssue.RESULT_WEB -> {
+            statusView.setText(R.string.reference_result_web_not_configured); true
+        }
+    }
+
     /** 进入页面或伙伴登录返回时读取身份，页面不直接读取 token 或 Provider 私有字段。 */
     private fun refreshIdentity(reloadCapabilities: Boolean) {
-        if (!MeetingAppAssembly.isBackendConfigured()) {
-            statusView.setText(R.string.reference_deployment_not_configured)
+        if (renderDeploymentIssue()) {
             startButton.isEnabled = false
             return
         }
