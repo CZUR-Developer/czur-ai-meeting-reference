@@ -27,7 +27,6 @@ target/
 # Android
 local.properties
 # 部署地址由开发者在构建前配置，实际域名／本机IP不进入公开仓库。
-/android-reference-app/deployment.local.properties
 *.apk
 *.aar
 *.aab
@@ -99,3 +98,5 @@ tmp/
 .settings/
 # 本机结果页后端地址覆盖（构建时可选注入）
 /web-reference/config.local.json
+# 本机 Debug 自签 CA（存在即被构建信任，不进仓库）
+/android-reference-app/app/src/debug/res/raw/reference_debug_ca.pem

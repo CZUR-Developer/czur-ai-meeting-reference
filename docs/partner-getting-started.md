@@ -108,7 +108,7 @@ Maven 的开发环境中打开。
 
 | 文件 | 从哪来 | 作用 | 忘了会怎样 |
 | --- | --- | --- | --- |
-| `android-reference-app/deployment.local.properties` | 复制同目录的 `.example` | APK 的后端地址与结果页地址；Debug 联调可选 `debugCaFile` | 构建时打印警告；装在设备上提示"部署地址未配置" |
+| `android-reference-app/.../ReferenceDeployment.kt` | 仓库自带，直接改两个常量 | APK 的后端地址与结果页地址（代码即配置） | 构建时打印警告；装在设备上提示"部署地址未配置" |
 | `web-reference/config.local.json` | 自己新建，写 `{"apiBaseUrl":"..."}` | 结果页读的后端地址（也可用 `REFERENCE_API_BASE_URL` 环境变量在构建时注入） | 结果页提示"结果页缺少后端配置"，`dist/config.json` 为 404 |
 
 两个文件都已被 `.gitignore` 忽略，不会误提交。换机器、重新 clone、清理工作区后都要
@@ -237,18 +237,18 @@ bash tools/run-reference-web.sh
 设备 AAR 已随参考仓放在 `meeting-android/libs/ai-meeting-device.aar`；业务 AAR 由本仓
 `meeting-android` 自行构建，构建不需要任何参数。
 
-先给地址。复制 `deployment.local.properties.example` 为同目录的
-`deployment.local.properties`（已被 Git 忽略），填写步骤 4 得到的两个地址：
+先给地址：修改 `android-reference-app/app/src/main/java/com/czur/aimeeting/reference/meeting/ReferenceDeployment.kt`
+里的两个常量（代码即配置，仓库里是占位值）：
 
-```dotenv
-backendUrl=https://<PC_LAN_IP>:8443
-resultWebUrl=http://<PC_LAN_IP>:8090/index.html
+```kotlin
+const val BACKEND_URL = "https://<PC_LAN_IP>:8443"
+const val RESULT_WEB_URL = "http://<PC_LAN_IP>:8090/index.html"
 ```
 
-Debug 联调还要让 APK 信任步骤 4 生成的开发 CA：在同一文件里加
-`debugCaFile=local-tls/reference_debug_ca.pem`（路径相对 `android-reference-app/`，
-证书按 [本机局域网 HTTPS 指南](local-lan-https.md) 生成；仓库不携带任何证书）。
-不建这个文件也能构建成功，但 APK 指向占位域名，装上会提示联系应用提供方。
+Debug 联调还要让 APK 信任步骤 4 生成的开发 CA：把 PEM 命名为 `reference_debug_ca.pem`
+放到 `android-reference-app/app/src/debug/res/raw/`（已被 Git 忽略，
+生成方式见 [本机局域网 HTTPS 指南](local-lan-https.md)）；不放到时会只信任系统 CA。
+不改常量也能构建成功，但 APK 指向占位域名，装上会提示"部署地址未配置"。
 
 再构建并安装：
 

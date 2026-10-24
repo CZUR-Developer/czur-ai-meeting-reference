@@ -90,10 +90,10 @@ App Web 结果构建地址使用 `http://<PC_LAN_IP>:8090/index.html`；Web 的
 应使用同样可达的 HTTPS API，避免混合内容。仓库只交付后端应用镜像，不新增 Web
 或数据库镜像。
 
-Android 构建时读取已忽略的 `android-reference-app/deployment.local.properties`
-（模板 `deployment.local.properties.example`）：`backendUrl` 填设备可达的 HTTPS 后端，
-`resultWebUrl` 填结果页地址，Debug 联调可选 `debugCaFile` 指向自己生成的自签 CA。
-仓库只保留占位值，不建这个文件也能构建，但 APK 会指向占位域名。
+Android 的部署参数在 `android-reference-app/app/src/main/java/com/czur/aimeeting/reference/meeting/ReferenceDeployment.kt`
+里（代码即配置）：`BACKEND_URL` 填设备可达的 HTTPS 后端，`RESULT_WEB_URL` 填结果页地址。
+仓库只保留占位值，不改也能构建，但 APK 会指向占位域名。Debug 联调的自签 CA 放在
+`app/src/debug/res/raw/reference_debug_ca.pem`（已被 Git 忽略）。
 完整命令见 [Android 构建／启动工具](../tools/android-device/README.md)。
 
 ## 本机常驻运行（可选）

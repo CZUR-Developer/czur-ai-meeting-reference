@@ -6,21 +6,12 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-// 部署覆盖：仓内只保留占位地址，本机用被忽略的 deployment.local.properties 注入。
-// 干净 clone 构建出占位包，提醒伙伴必须替换地址；本机联调不受影响。
-val localDeploymentFile = rootProject.file("deployment.local.properties")
-val localDeployment = Properties().apply {
-    if (localDeploymentFile.isFile) localDeploymentFile.inputStream().use { load(it) }
-}
-fun deploymentValue(key: String, fallback: String): String =
-    localDeployment.getProperty(key)?.trim()?.takeIf { it.isNotEmpty() } ?: fallback
-
-val placeholderBackend = "https://replace-with-your-backend.example"
-val deploymentBackendUrl = deploymentValue("backendUrl", placeholderBackend)
-val deploymentResultWebUrl = deploymentValue("resultWebUrl", "https://replace-with-your-result-web.example/index.html")
-// Debug 构建要信任的自签 CA 由本地文件提供；仓内不再携带任何证书。
-val localDebugCa = localDeployment.getProperty("debugCaFile")?.trim()?.takeIf { it.isNotEmpty() }
-    ?.let { rootProject.file(it) }?.takeIf { it.isFile }
+// 部署参数只在一处：app/src/main/java/.../meeting/ReferenceDeployment.kt（代码即配置）。
+// 这里只做两件构建期的事：占位值时提醒、Debug 自签 CA 存在时生成网络安全配置。
+val deploymentSourceFile = file("src/main/java/com/czur/aimeeting/reference/meeting/ReferenceDeployment.kt")
+val deploymentSource = if (deploymentSourceFile.isFile) deploymentSourceFile.readText() else ""
+// Debug 信任的自签 CA 走固定路径，存在即生效，不再需要额外配置项。
+val localDebugCa = file("src/debug/res/raw/reference_debug_ca.pem").takeIf { it.isFile }
 
 android {
     namespace = "com.czur.aimeeting.reference"
@@ -33,8 +24,6 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
-        buildConfigField("String", "BACKEND_URL", "\"$deploymentBackendUrl\"")
-        buildConfigField("String", "RESULT_WEB_URL", "\"$deploymentResultWebUrl\"")
     }
 
     compileOptions {
@@ -61,9 +50,7 @@ android {
     run {
         generatedDebugRes.deleteRecursively()
         val xmlDir = File(generatedDebugRes, "xml").apply { mkdirs() }
-        val rawDir = File(generatedDebugRes, "raw").apply { mkdirs() }
         val overrides = if (localDebugCa != null) {
-            File(rawDir, "reference_debug_ca.pem").writeBytes(localDebugCa.readBytes())
             "    <debug-overrides>\n" +
                 "        <trust-anchors>\n" +
                 "            <certificates src=\"@raw/reference_debug_ca\" />\n" +
@@ -81,12 +68,12 @@ android {
                 "    </base-config>\n" +
                 overrides +
                 "</network-security-config>\n")
-        logger.lifecycle("部署地址 backend=$deploymentBackendUrl result=$deploymentResultWebUrl debugCa=${localDebugCa?.name ?: "无"}")
-        if (deploymentBackendUrl == placeholderBackend) {
+        logger.lifecycle("部署配置来源=ReferenceDeployment.kt debugCa=${localDebugCa?.name ?: "无"}")
+        if (deploymentSource.contains("replace-with-your-backend")) {
             logger.warn(
-                "部署地址仍是占位值：复制 android-reference-app/deployment.local.properties.example " +
-                    "为同目录的 deployment.local.properties，填写 backendUrl/resultWebUrl 后重新构建；" +
-                    "本次产物会提示未配置，不能直接联调。"
+                "部署地址仍是占位值：修改 " +
+                    "app/src/main/java/com/czur/aimeeting/reference/meeting/ReferenceDeployment.kt " +
+                    "里的 BACKEND_URL 与 RESULT_WEB_URL 后重新构建；本次产物会提示未配置，不能直接联调。"
             )
         }
     }

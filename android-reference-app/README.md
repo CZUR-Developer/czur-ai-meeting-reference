@@ -39,16 +39,14 @@ kotlinx-coroutines-android 1.11.0。无需访问 CZUR 产品源码仓；模型 K
 `app/src/main/java/com/czur/aimeeting/reference/meeting/ReferenceDeployment.kt`（只读
 `BuildConfig`，值来自下面的本地文件）
 
-构建不接受任何 `-P` 参数，终端用户不需要在设备上填写。合作伙伴复制
-`deployment.local.properties.example` 为同目录的 `deployment.local.properties`（已被
-Git 忽略），填写 `backendUrl`、`resultWebUrl`；构建时注入 APK。仓库只保留占位值，
-没有这个文件也能构建，但 APK 指向占位域名。模型地址和短期材料由后端下发，
-这里不包含模型 Key 或账号密码。
+构建不接受任何 `-P` 参数，终端用户不需要在设备上填写。部署参数就是这个文件里的两个
+常量：`BACKEND_URL`、`RESULT_WEB_URL`；改完重新构建。仓库只保留占位值，不改也能构建，
+但 APK 指向占位域名。模型地址和短期材料由后端下发，这里不包含模型 Key 或账号密码。
 
-Debug 构建如需信任本机自签 CA，在同一文件里用 `debugCaFile` 指向自己生成的 PEM
-（生成方式见 [`../docs/local-lan-https.md`](../docs/local-lan-https.md)）；仓库不携带
-任何证书，`build.gradle.kts` 只在本地文件存在时才生成 `debug-overrides`。
-Release 不信任开发 CA。
+Debug 构建如需信任本机自签 CA，把 PEM 放到
+`app/src/debug/res/raw/reference_debug_ca.pem`（已被 Git 忽略，生成方式见
+[`../docs/local-lan-https.md`](../docs/local-lan-https.md)）；`build.gradle.kts` 只在
+该文件存在时才生成 `debug-overrides`。Release 不信任开发 CA。
 
 ```bash
 ./gradlew :app:assembleDebug :app:testDebugUnitTest

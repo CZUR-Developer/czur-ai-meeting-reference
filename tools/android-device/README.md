@@ -10,8 +10,9 @@ cd android-reference-app
 ```
 
 设备 AAR 已随仓位于 `meeting-android/libs/ai-meeting-device.aar`。要改后端/结果页地址或让
-Debug 构建信任本机自签 CA，编辑 `deployment.local.properties`（复制
-`deployment.local.properties.example`，该文件已被 Git 忽略）；仓库不携带证书。
+地址在 `android-reference-app/app/src/main/java/com/czur/aimeeting/reference/meeting/ReferenceDeployment.kt`
+里改（代码即配置）；Debug 构建信任本机自签 CA 的方式是把 PEM 放到
+`app/src/debug/res/raw/reference_debug_ca.pem`（已被 Git 忽略），仓库不携带证书。
 
 ## 独立截图 API 回归（SDK Debug）
 

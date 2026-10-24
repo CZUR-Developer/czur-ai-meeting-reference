@@ -69,13 +69,14 @@ MySQL 5.7 的独立能力探针见 [`tools/mysql57-compatibility/`](tools/mysql5
 ## Android 部署地址随构建注入
 
 合作伙伴开发者在 PC 上配置后端与结果页地址，打包后交给终端用户；App 不提供填写 IP／
-网址的入口。复制 `android-reference-app/deployment.local.properties.example` 为同目录的
-`deployment.local.properties`（已被 Git 忽略）后填写 `backendUrl`、`resultWebUrl`，
-构建时注入 APK。仓库里只保留占位值：不建这个文件也能构建成功，但 APK 指向占位域名，
-装到设备上会提示联系应用提供方。
+网址的入口。部署参数只有一处：`android-reference-app/app/src/main/java/com/czur/aimeeting/reference/meeting/ReferenceDeployment.kt`
+里的 `BACKEND_URL` 与 `RESULT_WEB_URL`，改完重新构建即可。仓库里保留占位值：不修改也能
+构建成功，但 APK 指向占位域名，装到设备上会提示"部署地址未配置"。
 
-Debug 构建如需信任本机自签 CA，在同一文件里用 `debugCaFile` 指向自己的 PEM（证书按
-[本机局域网 HTTPS 联调](docs/local-lan-https.md) 现场生成，仓库不携带任何证书）。
+Debug 构建如需信任本机自签 CA，把 PEM 放到
+`app/src/debug/res/raw/reference_debug_ca.pem`（已被 Git 忽略），构建自动生成对应的
+网络安全配置；文件不存在时只信任系统 CA（生成方式见
+[本机局域网 HTTPS 联调](docs/local-lan-https.md)）。
 设备端没有手输地址界面；构建期配置说明见
 [`Android 说明`](android-reference-app/README.md#构建期部署地址)及
 [`构建与启动工具`](tools/android-device/README.md)。
@@ -98,7 +99,7 @@ Compose路径使用 `deploy/.env`；两份文件各自从对应模板复制。�
 
 禁止提交生产地址、密钥、证书、用户数据、AOSP Framework/vendor/HAL、
 设备签名配置、CZUR 云端代码和闭源 SDK 二进制。所有本地配置放在未跟踪的
-`.env`、已忽略的 `deployment.local.properties` 或外部密钥管理系统中；公开模板仅包含占位值。
+`.env` 或外部密钥管理系统中；仓内模板仅包含占位值。
 
 合作伙伴的准备清单和实际接入步骤见[从零接入指南](docs/partner-getting-started.md)；
 全部模型及能力缺失行为见[模型与能力配置指南](docs/model-and-capability-guide.md)；
