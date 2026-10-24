@@ -6,6 +6,7 @@ import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.czur.aimeeting.client.MeetingClient
@@ -197,9 +198,38 @@ class MeetingRecordsActivity : Activity() {
 
     private fun executeResult(plugin: com.czur.aimeeting.client.result.ResultActionPlugin,
                               result: MeetingResult, current: MeetingDiscovery) {
+        if (plugin.id() == "email") {
+            promptEmail(plugin, result, current)
+            return
+        }
+        performResult(plugin, result, current, emptyList())
+    }
+
+    /** 历史页没有会前邮箱设置，选邮件动作时现场补收件人；最终格式仍由插件校验。 */
+    private fun promptEmail(plugin: com.czur.aimeeting.client.result.ResultActionPlugin,
+                            result: MeetingResult, current: MeetingDiscovery) {
+        val input = EditText(this).apply { hint = "收件邮箱，多个用逗号分隔（最多10个）" }
+        AlertDialog.Builder(this)
+            .setTitle("邮箱通知")
+            .setView(input)
+            .setPositiveButton("发送") { _, _ ->
+                val emails = input.text.toString()
+                    .split(Regex("[,，;；\\s]+"))
+                    .filter { it.isNotBlank() }
+                performResult(plugin, result, current, emails)
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun performResult(plugin: com.czur.aimeeting.client.result.ResultActionPlugin,
+                              result: MeetingResult, current: MeetingDiscovery,
+                              emails: List<String>) {
+        val delivery = if (plugin.id() == "email") MeetingOptions.ResultDelivery.EMAIL
+        else MeetingOptions.ResultDelivery.WEB
         val options = MeetingOptions(
             MeetingOptions.Mode.MEETING_MINUTES, "zh-CN", "en-US", false,
-            MeetingOptions.ResultDelivery.WEB, MeetingAppAssembly.resultWebUrl(), emptyList(), true
+            delivery, MeetingAppAssembly.resultWebUrl(), emails, true
         )
         val preparation = MeetingAppAssembly.resultRegistry().prepare(plugin.id(), options, current)
         val action = preparation.action() ?: run {
