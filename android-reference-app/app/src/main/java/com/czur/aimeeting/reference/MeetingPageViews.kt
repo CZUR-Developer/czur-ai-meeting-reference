@@ -45,6 +45,8 @@ class MeetingPageViews(@JvmField val root: FrameLayout) {
     @JvmField val leftTitle: TextView = root.findViewById(R.id.left_language_title)
     @JvmField val rightTitle: TextView = root.findViewById(R.id.right_language_title)
     @JvmField val account: Button = root.findViewById(R.id.account_button)
+    /** 已登录时显示账号名；未登录隐藏，不额外做登录态提示条。 */
+    @JvmField val accountName: TextView = root.findViewById(R.id.account_name)
     @JvmField val close: Button = root.findViewById(R.id.setup_close)
     @JvmField val start: Button = root.findViewById(R.id.start_meeting)
     /** 停止已退窗但 SDK 仍允许确认时使用；点击行为由 Activity 接回原 requestStop。 */

@@ -89,59 +89,36 @@ class DefaultAccountEntryTest {
         await { !form.isShowing && page(activity).start.isEnabled }
 
         assertSession("new-session-fixture", "new-user")
-        assertEquals("切换账号", page(activity).account.text.toString())
+        assertEquals("退出登录", page(activity).account.text.toString())
+        assertEquals("new-user", page(activity).accountName.text.toString())
+        assertEquals(android.view.View.VISIBLE, page(activity).accountName.visibility)
     }
 
-    @Test fun cancellingTheAccountMenuKeepsTheSavedSessionAndStartRule() {
-        val activity = openActivity(loggedIn = true)
-        page(activity).account.performClick()
-        latestDialog().cancel()
-
-        assertOriginalSessionAndStart(activity)
-    }
-
-    @Test fun cancellingTheSwitchFormKeepsTheSavedSessionAndStartRule() {
-        val activity = openActivity(loggedIn = true)
-        val form = openSwitchForm(activity)
-        form.findViewById<android.view.View>(R.id.login_close).performClick()
-
-        assertFalse(form.isShowing)
-        assertOriginalSessionAndStart(activity)
-    }
-
-    @Test fun failedSwitchKeepsTheSavedSessionAndStartRule() {
-        val activity = openActivity(loggedIn = true)
-        val form = openSwitchForm(activity)
+    @Test fun failedLoginKeepsLoggedOutStateAndStartDisabled() {
+        val activity = openActivity(loggedIn = false)
+        val form = openLoginForm(activity)
         submit(form, "bad-user")
         await { form.findViewById<TextView>(R.id.login_message).text.toString().contains("登录失败") }
 
         assertTrue(form.isShowing)
-        assertTrue(form.findViewById<android.view.View>(R.id.login_submit).isEnabled)
-        assertOriginalSessionAndStart(activity)
+        assertFalse(page(activity).start.isEnabled)
+        assertEquals(IdentityResult.Status.LOGIN_REQUIRED, identity.currentIdentity().status())
+        assertEquals("登录", page(activity).account.text.toString())
         form.cancel()
-        assertOriginalSessionAndStart(activity)
-    }
-
-    @Test fun successfulSwitchReplacesTheSavedSessionWithoutAnIntermediateLogout() {
-        val activity = openActivity(loggedIn = true)
-        val form = openSwitchForm(activity)
-        // 菜单与表单只负责交互；提交前原身份和部署能力一直有效。
-        assertOriginalSessionAndStart(activity)
-        submit(form, "new-user")
-        await { !form.isShowing && displayedAccount(activity) == "new-user" && page(activity).start.isEnabled }
-
-        assertSession("new-session-fixture", "new-user")
+        assertEquals(IdentityResult.Status.LOGIN_REQUIRED, identity.currentIdentity().status())
     }
 
     @Test fun explicitLogoutClearsTheSavedSessionAndDisablesStart() {
         val activity = openActivity(loggedIn = true)
+        // 已登录时账号按钮只有一个动作：退出登录，不再弹出账号菜单。
         page(activity).account.performClick()
-        shadowOf(latestDialog()).clickOnItem(1)
+        await { page(activity).account.text.toString() == "登录" }
 
         assertEquals(IdentityResult.Status.LOGIN_REQUIRED, identity.currentIdentity().status())
         assertEquals(IdentityResult.Status.LOGIN_REQUIRED, restoredIdentity().currentIdentity().status())
-        assertEquals("账号登录", page(activity).account.text.toString())
+        assertEquals("登录", page(activity).account.text.toString())
         assertFalse(page(activity).start.isEnabled)
+        assertEquals(android.view.View.GONE, page(activity).accountName.visibility)
     }
 
     private fun openActivity(loggedIn: Boolean): MainActivity {
@@ -151,13 +128,12 @@ class DefaultAccountEntryTest {
         val activity = host.get()
         MainActivity::class.java.getDeclaredMethod("refreshIdentity", Boolean::class.javaPrimitiveType)
             .apply { isAccessible = true }.invoke(activity, true)
-        await { if (loggedIn) page(activity).start.isEnabled else page(activity).account.text.toString() == "账号登录" }
+        await { if (loggedIn) page(activity).start.isEnabled else page(activity).account.text.toString() == "登录" }
         return activity
     }
 
-    private fun openSwitchForm(activity: MainActivity): AlertDialog {
+    private fun openLoginForm(activity: MainActivity): AlertDialog {
         page(activity).account.performClick()
-        shadowOf(latestDialog()).clickOnItem(0)
         return latestDialog().also { assertNotNull(it.findViewById<EditText>(R.id.login_username)) }
     }
 
@@ -165,12 +141,6 @@ class DefaultAccountEntryTest {
         form.findViewById<EditText>(R.id.login_username).setText(username)
         form.findViewById<EditText>(R.id.login_password).setText("fixture-password")
         form.findViewById<android.view.View>(R.id.login_submit).performClick()
-    }
-
-    private fun assertOriginalSessionAndStart(activity: MainActivity) {
-        assertSession("old-session-fixture", "old-user")
-        assertEquals("old-user", displayedAccount(activity))
-        assertTrue(page(activity).start.isEnabled)
     }
 
     private fun assertSession(token: String, account: String) {
@@ -183,7 +153,6 @@ class DefaultAccountEntryTest {
     }
 
     private fun restoredIdentity() = PersistentReferenceIdentityProvider(RuntimeEnvironment.getApplication())
-    private fun displayedAccount(activity: MainActivity) = (field(activity, "displayedIdentity") as? IdentitySession)?.displayName()
     private fun page(activity: MainActivity) = field(activity, "page") as MeetingPageViews
     private fun field(activity: MainActivity, name: String): Any? = MainActivity::class.java.getDeclaredField(name).run {
         isAccessible = true

@@ -103,6 +103,7 @@ class MainActivity : Activity() {
     private lateinit var overlayButton: Button
     private lateinit var swapColumnsButton: Button
     private lateinit var loginButton: Button
+    private lateinit var accountNameView: TextView
     /** 只用于页面入口，开始会议仍重新读取 Provider 的真实凭据。 */
     private var displayedIdentity: IdentitySession? = null
     private var meetingBusy = false
@@ -132,16 +133,29 @@ class MainActivity : Activity() {
         page.records.setOnClickListener {
             startActivity(Intent(this, MeetingRecordsActivity::class.java))
         }
-        loginButton = page.account; resultGroup = page.results
+        loginButton = page.account; accountNameView = page.accountName; resultGroup = page.results
         transcriptView = page.placeholder; meetingTitle = page.meetingTitle; transcriptList = page.transcriptList
         leftLanguageTitle = page.leftTitle; rightLanguageTitle = page.rightTitle; elapsedView = page.elapsed
         audioLevelBar = page.level; audioLevelView = page.levelText; statusView = page.status
+        // 状态行没有内容时整行隐藏，避免只剩一块空的胶囊底色。
+        statusView.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+            override fun afterTextChanged(s: android.text.Editable?) {
+                statusView.visibility = if (s.isNullOrBlank()) View.GONE else View.VISIBLE
+            }
+        })
         capabilityView = page.capabilities; sourceLanguageView = page.sourceLanguage; targetLanguageView = page.targetLanguage
         presentationCaptureView = page.presentation; summaryEnabledView = page.summary
         transcriptModeView = page.transcriptMode; translationModeView = page.translationMode
         startButton = page.start; stopButton = page.stop; overlayButton = page.overlay
         swapColumnsButton = page.swapColumns; retryActionButton = page.retry; endResultButton = page.endResult
         loginButton.setOnClickListener {
+            // 已登录只有一个动作：退出登录；不再提供“切换账号”。
+            if (displayedIdentity != null) {
+                logout()
+                return@setOnClickListener
+            }
             MeetingAppAssembly.loginEntry().open(this,
                 defaultEntry = { showDefaultAccountEntry() },
                 onIdentityChanged = {
@@ -220,16 +234,8 @@ class MainActivity : Activity() {
             statusView.setText(R.string.reference_deployment_not_configured)
             return
         }
-        if (displayedIdentity == null) {
-            showLoginDialog()
-            return
-        }
-        AlertDialog.Builder(this)
-            .setTitle("账号操作")
-            .setItems(arrayOf("切换账号", "退出登录")) { _, which ->
-                if (which == 0) showLoginDialog() else logout()
-            }
-            .show()
+        // 账号操作只有登录与退出登录；已登录时按钮直接退出，不提供“切换账号”。
+        showLoginDialog()
     }
 
     /**
@@ -241,7 +247,7 @@ class MainActivity : Activity() {
         ReferenceUiScale.bindDialog(fields)
         usernameView = fields.findViewById(R.id.login_username)
         passwordView = fields.findViewById(R.id.login_password)
-        fields.findViewById<TextView>(R.id.login_title).text = if (displayedIdentity == null) "账号登录" else "切换账号"
+        fields.findViewById<TextView>(R.id.login_title).text = "登录"
         val dialog = AlertDialog.Builder(this).setView(fields).create()
         loginDialog = dialog
         fields.findViewById<View>(R.id.login_close).setOnClickListener { dialog.dismiss() }
@@ -311,7 +317,10 @@ class MainActivity : Activity() {
     private fun renderIdentity(identity: IdentityResult) {
         displayedIdentity = identity.session()
         val loggedIn = identity.status() == IdentityResult.Status.LOGGED_IN
-        loginButton.text = if (loggedIn) "切换账号" else "账号登录"
+        loginButton.text = if (loggedIn) "退出登录" else "登录"
+        val displayName = identity.session()?.displayName().orEmpty()
+        accountNameView.text = displayName
+        accountNameView.visibility = if (loggedIn && displayName.isNotBlank()) View.VISIBLE else View.GONE
         setConfigurationEnabled(!meetingBusy)
         if (!loggedIn) {
             deploymentCapabilities = emptySet(); discovery = null; refreshLanguageOptions(emptyList())
@@ -342,13 +351,14 @@ class MainActivity : Activity() {
                         !deploymentCapabilities.contains(MeetingCapabilityState.TRANSCRIPT) ->
                             "当前部署未提供实时字幕能力，暂时无法开始会议"
                         deploymentLanguages.isEmpty() -> "当前部署尚未声明会议语言"
-                        else -> "登录成功，可开始会议"
+                        // 登录态由头部按钮与账号名表达，不再单独写一行状态提示。
+                        else -> ""
                     }
                 }
             }
             override fun onError(error: MeetingError) {
                 setConfigurationEnabled(!meetingBusy); startButton.isEnabled = false
-                if (!meetingBusy && !hasReadyResult) statusView.text = "登录成功；${error.userText()}"
+                if (!meetingBusy && !hasReadyResult) statusView.text = error.userText()
             }
         })
     }
@@ -356,8 +366,10 @@ class MainActivity : Activity() {
         preMeetingClient?.close(); preMeetingClient = null
         MeetingAppAssembly.clearReferenceSession(); displayedIdentity = null
         deploymentCapabilities = emptySet(); discovery = null; refreshLanguageOptions(emptyList())
-        refreshResultAvailability(); refreshModeAvailability(); loginButton.text = "账号登录"
-        startButton.isEnabled = false; statusView.text = "已退出，请重新登录"
+        refreshResultAvailability(); refreshModeAvailability()
+        startButton.isEnabled = false
+        // 退出后由身份刷新统一渲染按钮文字与提示，不手写登录态文案。
+        refreshIdentity(false)
         Log.i(TAG, "参考账号已退出")
     }
     private fun refreshModeAvailability() {
