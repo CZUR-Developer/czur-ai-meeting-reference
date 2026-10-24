@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 前景：白色对话气泡 + 蓝/黄两行字幕线，对应 App 里的原文与译文配色。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 气泡主体：24..84 横向、30..66 纵向，圆角 12 -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M36,30 L72,30 A12,12 0 0 1 84,42 L84,54 A12,12 0 0 1 72,66 L36,66 A12,12 0 0 1 24,54 L24,42 A12,12 0 0 1 36,30 Z" />
+    <!-- 左下角小尾巴 -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M38,64 L33,79 L52,64 Z" />
+    <!-- 原文行 -->
+    <path
+        android:fillColor="#FF4C6BE8"
+        android:pathData="M38,42 L66,42 A2.5,2.5 0 0 1 66,47 L38,47 A2.5,2.5 0 0 1 38,42 Z" />
+    <!-- 译文行 -->
+    <path
+        android:fillColor="#FFFFC53D"
+        android:pathData="M38,53 L56,53 A2.5,2.5 0 0 1 56,58 L38,58 A2.5,2.5 0 0 1 38,53 Z" />
+</vector>
