@@ -10,6 +10,8 @@ const output = resolve(root, 'dist');
 
 const configFileName = (process.env.REFERENCE_WEB_DEPLOYMENT_FILE || '').trim() || 'deployment.local.json';
 const configPath = resolve(root, configFileName);
+// 直接给值的入口：本机脚本和 CI 不必先落一个文件；优先级高于文件。
+const directApiBaseUrl = (process.env.REFERENCE_API_BASE_URL || '').trim();
 
 function fail(reason) {
   console.error(`WEB_CONFIG_MISSING ${reason}`);
@@ -24,12 +26,14 @@ function fail(reason) {
   process.exit(1);
 }
 
-let apiBaseUrl;
-try {
-  const raw = await readFile(configPath, 'utf8');
-  apiBaseUrl = (JSON.parse(raw).apiBaseUrl || '').trim();
-} catch (error) {
-  fail('文件不存在或不是合法 JSON');
+let apiBaseUrl = directApiBaseUrl;
+if (!apiBaseUrl) {
+  try {
+    const raw = await readFile(configPath, 'utf8');
+    apiBaseUrl = (JSON.parse(raw).apiBaseUrl || '').trim();
+  } catch (error) {
+    fail('文件不存在或不是合法 JSON');
+  }
 }
 if (!apiBaseUrl) fail('apiBaseUrl 为空');
 if (apiBaseUrl.includes('your-backend.example')) fail('apiBaseUrl 还是模板里的占位值');
@@ -39,5 +43,5 @@ await mkdir(output, { recursive: true });
 await cp(resolve(root, 'src'), output, { recursive: true });
 await writeFile(resolve(output, 'config.json'),
   JSON.stringify({ apiBaseUrl }) + '\n', 'utf8');
-console.log(`WEB_CONFIG ${configFileName} apiBaseUrl=${apiBaseUrl}`);
+console.log(`WEB_CONFIG ${directApiBaseUrl ? 'REFERENCE_API_BASE_URL' : configFileName} apiBaseUrl=${apiBaseUrl}`);
 console.log(`WEB_BUILD_OK output=${output}`);

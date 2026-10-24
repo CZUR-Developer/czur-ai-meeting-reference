@@ -10,12 +10,6 @@ command -v node >/dev/null 2>&1 || { printf '[ERROR] 未找到 Node.js\n' >&2; e
 command -v python3 >/dev/null 2>&1 || { printf '[ERROR] 未找到 Python 3\n' >&2; exit 1; }
 
 cd "${REPO_DIR}/web-reference"
-npm run build
-python3 - "${API_BASE_URL}" dist/config.json <<'PY'
-import json
-import sys
-from pathlib import Path
-
-Path(sys.argv[2]).write_text(json.dumps({"apiBaseUrl": sys.argv[1]}, ensure_ascii=False), encoding="utf-8")
-PY
+# 地址直接交给构建生成 config.json：不再"先构建、后补文件"，构建也能给出明确报错。
+REFERENCE_API_BASE_URL="${API_BASE_URL}" npm run build
 exec python3 -m http.server "${WEB_PORT}" --bind "${WEB_BIND}" --directory dist
