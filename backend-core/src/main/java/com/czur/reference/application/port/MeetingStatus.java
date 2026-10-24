@@ -38,10 +38,15 @@ public record MeetingStatus(
         return finalization.finalizationReceipt();
     }
 
-    /** 将详情状态投影为不含 receipt 的列表摘要。 */
-    public MeetingSummary summary(Instant createdAt) {
+    /**
+     * 将详情状态投影为不含 receipt 的列表摘要。
+     *
+     * <p>{@code title} 由查询适配器从服务端已发布的总结标题里取；没有总结时传 {@code null}，
+     * 不在这一层猜测或从正文派生。</p>
+     */
+    public MeetingSummary summary(Instant createdAt, String title) {
         return new MeetingSummary(
-                meetingId, null, state, inputState(), manifestState, createdAt, updatedAt);
+                meetingId, title, state, inputState(), manifestState, createdAt, updatedAt);
     }
 
     /** 隐藏 receipt 正文；状态日志只能看到是否具备接管事实。 */

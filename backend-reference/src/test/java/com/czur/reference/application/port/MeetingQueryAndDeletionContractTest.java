@@ -66,7 +66,7 @@ class MeetingQueryAndDeletionContractTest {
         assertEquals(InputState.INPUT_ACCEPTED, status.inputState());
         assertEquals(ManifestStatus.GENERATING, status.manifestState());
         assertEquals(RECEIPT, status.finalizationReceipt());
-        assertEquals(MeetingState.FINALIZING, status.summary(CREATED).state());
+        assertEquals(MeetingState.FINALIZING, status.summary(CREATED, null).state());
         assertThrows(NullPointerException.class,
                 () -> new MeetingStatus(MEETING, null,
                         FinalizationFact.pending(InputState.INPUT_OPEN),

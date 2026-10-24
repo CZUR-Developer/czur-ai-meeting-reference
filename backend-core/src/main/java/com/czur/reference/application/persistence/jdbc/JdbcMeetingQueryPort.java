@@ -11,6 +11,9 @@ import com.czur.reference.application.port.MeetingSummary;
 import com.czur.reference.domain.meeting.MeetingAggregate;
 import com.czur.reference.domain.meeting.MeetingState;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -55,27 +58,31 @@ public final class JdbcMeetingQueryPort implements MeetingQueryPort {
             """;
 
     private static final String LIST_FIRST_PAGE_SQL = """
-            SELECT meeting_id, state, input_state, finalization_receipt_id,
-                   manifest_state, created_at, updated_at
-              FROM %s
-             WHERE deployment_scope = ?
-               AND subject_scope = ?
-               AND subject_scope <> 'LEGACY_UNOWNED'
-             ORDER BY created_at DESC, meeting_id DESC
+            SELECT m.meeting_id, m.state, m.input_state, m.finalization_receipt_id,
+                   m.manifest_state, m.created_at, m.updated_at, s.summary_json
+              FROM %s m
+              LEFT JOIN %s s ON s.meeting_id = m.meeting_id
+             WHERE m.deployment_scope = ?
+               AND m.subject_scope = ?
+               AND m.subject_scope <> 'LEGACY_UNOWNED'
+             ORDER BY m.created_at DESC, m.meeting_id DESC
              LIMIT ?
             """;
 
     private static final String LIST_AFTER_CURSOR_SQL = """
-            SELECT meeting_id, state, input_state, finalization_receipt_id,
-                   manifest_state, created_at, updated_at
-              FROM %s
-             WHERE deployment_scope = ?
-               AND subject_scope = ?
-               AND subject_scope <> 'LEGACY_UNOWNED'
-               AND (created_at < ? OR (created_at = ? AND meeting_id < ?))
-             ORDER BY created_at DESC, meeting_id DESC
+            SELECT m.meeting_id, m.state, m.input_state, m.finalization_receipt_id,
+                   m.manifest_state, m.created_at, m.updated_at, s.summary_json
+              FROM %s m
+              LEFT JOIN %s s ON s.meeting_id = m.meeting_id
+             WHERE m.deployment_scope = ?
+               AND m.subject_scope = ?
+               AND m.subject_scope <> 'LEGACY_UNOWNED'
+               AND (m.created_at < ? OR (m.created_at = ? AND m.meeting_id < ?))
+             ORDER BY m.created_at DESC, m.meeting_id DESC
              LIMIT ?
             """;
+
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     private final DataSource dataSource;
     private final JdbcDatabaseEngine engine;
@@ -213,7 +220,8 @@ public final class JdbcMeetingQueryPort implements MeetingQueryPort {
             MeetingCommandContext context,
             Optional<HmacMeetingPageTokenCodec.Cursor> cursor,
             int queryLimit) throws SQLException {
-        String sql = (cursor.isPresent() ? LIST_AFTER_CURSOR_SQL : LIST_FIRST_PAGE_SQL).formatted(table());
+        String sql = (cursor.isPresent() ? LIST_AFTER_CURSOR_SQL : LIST_FIRST_PAGE_SQL)
+                .formatted(table(), JdbcDatabaseTable.MEETING_CLIENT_SUMMARY.physicalName(engine));
         List<ListRow> result = new ArrayList<>();
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             JdbcValues.setText(statement, 1, engine, context.deploymentScope());
@@ -281,7 +289,7 @@ public final class JdbcMeetingQueryPort implements MeetingQueryPort {
             Instant createdAt = requiredInstant(rows, "created_at");
             Instant updatedAt = requiredInstant(rows, "updated_at");
             MeetingStatus status = readStatus(rows, meetingId, state, updatedAt);
-            return new ListRow(status.summary(createdAt), createdAt);
+            return new ListRow(status.summary(createdAt, summaryTitle(rows)), createdAt);
         } catch (IllegalArgumentException | NullPointerException failure) {
             throw new CorruptMeetingReadModel();
         }
@@ -299,6 +307,29 @@ public final class JdbcMeetingQueryPort implements MeetingQueryPort {
                 requiredText(rows, "manifest_state"));
         return new MeetingStatus(
                 meetingId, state, finalization, manifestState, updatedAt);
+    }
+
+    /**
+     * 列表标题来自服务端已发布的总结标题（收口时写进总结事实的 {@code title}）。
+     * 没有总结、字段缺失或历史格式异常时返回 {@code null}，由调用方显示「未命名」，
+     * 不在这里从正文猜名字。
+     */
+    private static String summaryTitle(ResultSet rows) throws SQLException {
+        return summaryTitleFromJson(JdbcValues.text(rows, "summary_json"));
+    }
+
+    /** 拆出来便于单测：只认显式标题，空值、缺字段、非法 JSON 一律返回 null。 */
+    static String summaryTitleFromJson(String json) {
+        if (json == null || json.isBlank()) return null;
+        try {
+            JsonNode node = JSON.readTree(json);
+            JsonNode title = node == null ? null : node.get("title");
+            if (title == null || !title.isTextual()) return null;
+            String value = title.asText().trim();
+            return value.isEmpty() ? null : value;
+        } catch (java.io.IOException | RuntimeException invalid) {
+            return null;
+        }
     }
 
     private static MeetingState readMeetingState(ResultSet rows) throws SQLException {
