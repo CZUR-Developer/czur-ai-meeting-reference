@@ -77,13 +77,13 @@
 
 ### 3.4 设备
 
-产品级能力优先用 **StarryHub 系列**（参考实现当前验证机型是 StarryHub Studio50，
-Android 14／API 34）。设备 AAR 里的系统级采音、投屏截图和窗口排除依赖这套固件与系统接口，
+产品级能力优先用 **CZUR StarryHub 系列设备**（Android 14／API 34）。
+设备 AAR 里的系统级采音、投屏截图和窗口排除依赖这套固件与系统接口，
 换成普通 Android 14 手机也能跑基础链路，但那些系统级能力不保证。
 
 | 依赖 | 说明 |
 | --- | --- |
-| 测试设备 | 优先 StarryHub（Studio50 已验证）；普通 Android 14／API 34 设备只能验证基础字幕链路 |
+| 测试设备 | 优先 StarryHub 系列设备；普通 Android 14／API 34 设备只能验证基础字幕链路 |
 | 设备 AAR | 已随仓：`meeting-android/libs/ai-meeting-device.aar`（0.5.0），与设备固件成对。换版本时替换该文件，Gradle 只读这个路径 |
 | 系统能力 | 录音、悬浮窗；演示截图另需屏幕采集授权。系统共享音源（`CZUR_BROKER`）与系统级窗口排除只在兼容的 StarryHub 固件上提供，普通设备回退到标准麦克风 |
 | 机型差异 | 音频来源用 `AudioInputMode` 反映：`MIC`（普通 Android 或旧固件）、`CZUR_BROKER`（兼容 CZUR 共享音频）、`DEBUG_WAV`（调试） |
