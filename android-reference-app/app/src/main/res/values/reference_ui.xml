@@ -83,8 +83,13 @@
     <style name="ReferenceSetupBackButton" parent="ReferenceButton">
         <item name="android:background">@drawable/reference_setup_back_button</item>
         <item name="android:textColor">@color/reference_setup_muted</item>
-        <item name="android:textSize">24sp</item>
+        <item name="android:textSize">22sp</item>
         <item name="android:textStyle">normal</item>
+        <item name="android:drawableStart">@drawable/ic_reference_back</item>
+        <item name="android:drawablePadding">6dp</item>
+        <item name="android:paddingStart">14dp</item>
+        <item name="android:paddingEnd">18dp</item>
+        <item name="android:gravity">center_vertical</item>
     </style>
     <style name="ReferenceSetupModeButton" parent="ReferenceModeButton">
         <item name="android:background">@drawable/reference_setup_mode_button</item>
