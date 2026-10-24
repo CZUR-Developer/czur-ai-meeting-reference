@@ -65,12 +65,60 @@ public final class MyModelSessionIssuer implements ModelSessionIssuer {
 
 可参考 `backend-reference/src/main/java/com/czur/reference/application/model/SampleJsonWsModelSessionIssuer.java`（40 行，含完整 import 和参数校验，建议直接对照它写）。
 
-**装配位置**：默认发行器在 `backend-reference/.../bootstrap/ReferenceMeetingHttpAssembly.java:131` 的 `defaultIssuer()` 里按配置选择。你有两条路：
+**注册到注册表**：后端按 Adapter ID 从 `ModelSessionIssuerRegistry` 取发行器。内置仍只有
+听悟和样例两个，合作伙伴在启动前注册自己的实现即可，不需要改配置校验或装配分支：
 
-- 改 `defaultIssuer()`，加一个分支返回你的发行器；
-- 不改它，在 `ReferenceClientMeetingProcess.java:78` 或 `ReferenceMeetingHttpAssembly.startClientModel(..., issuer, ...)` 处直接注入自己的实例。
+```java
+import com.czur.reference.application.bootstrap.ReferenceClientMeetingProcess;
+import com.czur.reference.application.bootstrap.ReferenceMeetingDeploymentConfig;
+import com.czur.reference.application.bootstrap.ReferenceMeetingHttpAssembly;
+import com.czur.reference.application.model.ModelSessionIssuerRegistry;
 
-**一个必须知道的坑**：`MeetingDeploymentConfig.java:348-359` 会校验 `AI_MEETING_MODEL_ADAPTER` 的取值，目前只接受 `tingwu-realtime`、`sample-json-ws` 和不填。你把环境变量写成 `my-asr` 而后端没加对应分支时，**启动会直接报错**（`IllegalArgumentException: 参考会议部署配置 AI_MEETING_MODEL_ADAPTER 非法`）。这不是配置写错，是校验还没认这个名字——要么改校验，要么走上面的注入接缝。
+import java.net.URI;
+import java.time.Clock;
+import java.time.ZoneOffset;
+import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+
+/** 伙伴自己的后端入口：注册自定义发行器后，用与参考入口相同的方式启动。 */
+public final class MyBackendMain {
+    public static void main(String[] args) throws Exception {
+        Map<String, String> env = System.getenv();
+        Clock clock = Clock.tickMillis(ZoneOffset.UTC);
+        // 先拿内置注册表，再追加自己的实现；同 ID 重复注册会报错，不会静默覆盖。
+        ModelSessionIssuerRegistry issuers = ReferenceMeetingHttpAssembly.defaultRegistry(
+                ReferenceMeetingDeploymentConfig.fromEnvironment(env), clock)
+            .register("my-asr", context -> new MySessionIssuer(
+                URI.create(context.environment().get("MY_MODEL_ENDPOINT")),
+                context.environment().get("MY_MODEL_API_KEY"),
+                context.clock()));
+
+        try (ReferenceClientMeetingProcess process =
+                     ReferenceClientMeetingProcess.start(env, clock, issuers)) {
+            CountDownLatch stopping = new CountDownLatch(1);
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                try { process.close(); } finally { stopping.countDown(); }
+            }));
+            stopping.await();
+        }
+    }
+}
+```
+
+配合配置：
+
+```dotenv
+AI_MEETING_MODEL_ADAPTER=my-asr
+MY_MODEL_ENDPOINT=wss://your-model.example/asr
+MY_MODEL_API_KEY=replace-with-your-key
+```
+
+这样你的代码是"新增一个类 + 一个 main"，参考实现里的文件一行不改；以后同步上游也不会冲突。
+
+**启动时报错对照**：如果 `AI_MEETING_MODEL_ADAPTER` 写了某个 ID 但没有注册，启动会失败并列出
+已注册的 ID（`未注册的模型 Adapter: my-asr；已注册: [sample-json-ws, tingwu-realtime]`）。
+这通常说明忘了注册，或者注册用的 ID 与配置不一致。内置的两个仍要求各自的凭据：写
+`tingwu-realtime` 却不填听悟密钥，会在配置阶段就失败。
 
 ## 三、Android：实现 `ModelAdapter`
 
@@ -173,7 +221,7 @@ AI_MEETING_ENTITLEMENT_SUPPORTED_CAPABILITIES=transcript.realtime
 
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
-| 后端启动报 `AI_MEETING_MODEL_ADAPTER` | `MeetingDeploymentConfig` 不认这个 ID | 改校验或注入自己的发行器（见第二节） |
+| 后端启动报“未注册的模型 Adapter” | 配了 ID 但没注册，或注册的 ID 不一致 | 在启动前 `register(id, factory)`，ID 与配置完全一致 |
 | 开会报“Adapter 与本场模型授权不匹配” | 后端 `Session.adapterId` 与 Android `id()` 不一致 | 两处写成同一个常量 |
 | 一直不收音频 | 没返回 `AUDIO_READY`，或返回了但消息类型判断没命中 | 检查 `ready` 消息分支 |
 | 字幕时间整体偏移 | Adapter 自己加了会议偏移 | 只报本次任务内的相对时间 |
