@@ -83,7 +83,7 @@ bash ../tools/run-reference-web.sh
 ```
 
 App Web 结果构建地址使用 `http://<PC_LAN_IP>:8090/index.html`；Web 的
-`config.json` 中 `apiBaseUrl` 必须从设备浏览器可达。它不再手工注入：`npm run build` 会读
+`config.json` 中 `apiBaseUrl` 必须从设备浏览器可达。Debug 构建才允许明文 HTTP；Release 构建按 Android 网络安全策略只走 HTTPS，正式结果页必须配 HTTPS 地址。它不再手工注入：`npm run build` 会读
 `web-reference/deployment.local.json`（已忽略）并在 `dist/` 里生成，缺配置则构建直接失败；
 测试／生产用 `REFERENCE_WEB_DEPLOYMENT_FILE` 切换。Web 使用开发 HTTPS 上游时，
 浏览器也要信任该 CA，Debug APK 的信任配置不会替浏览器安装证书。生产 HTTPS 页面

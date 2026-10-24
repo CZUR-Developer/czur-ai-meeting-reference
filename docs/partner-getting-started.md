@@ -336,25 +336,24 @@ Compose 将容器 `8080` 映射到宿主 `API_PORT`（默认 `8080`），并为�
 持久卷。容器内的数据库地址须能访问外部 MySQL，容器 `127.0.0.1` 不代表宿主机。
 同一 `.env` 还需供宿主初始化使用，宜采用双方都可达的数据库地址。
 
-Web 单独构建，将 `web-reference/dist/` 放到静态站点，并配置 `config.json`：
+Web 单独构建，一条命令同时产出页面和配置：
 
 ```bash
 cd ../web-reference
+cp deployment.local.example.json deployment.local.json   # 一次；填浏览器可达的 apiBaseUrl
 npm run build
-cp config.example.json dist/config.json
 ```
 
-编辑 `dist/config.json` 的 `apiBaseUrl` 为浏览器可达的 API；正式 HTTPS 站点使用
-HTTPS API，配置相应跨域读取或同源路由。再以正式后端和结果站点地址重建 App。
+`deployment.local.json` 的 `apiBaseUrl` 填浏览器可达的 API；正式 HTTPS 站点使用 HTTPS API，
+配置相应跨域读取或同源路由。再以正式后端和结果站点地址重建 App。
 
-`npm run build` 每次都会重建 `dist/`，手工拷进去的 `config.json` 会被清掉。本机反复构建时，
-可以在 `web-reference/config.local.json`（已被忽略）里写 `{"apiBaseUrl":"..."}`，或用环境变量：
+这份文件缺了或没填，`npm run build` 会直接失败并指出缺哪个文件，不会产出打开就报“缺少后端配置”
+的页面。测试／生产各留一份，用 `REFERENCE_WEB_DEPLOYMENT_FILE=deployment.prod.json` 切换；
+临时验证也可以直接给值，不必落文件：
 
 ```bash
 REFERENCE_API_BASE_URL='https://your-backend:8443' npm run build
 ```
-
-两者都没有时构建照旧不生成 `config.json`，保持"产物不带地址、由部署方注入"的交付约定。
 生产 Release 使用部署方正式证书，不携带本机 Debug CA。完整说明见[部署文档](../deploy/README.md)。
 
 数据库交付只有一份 MySQL V001；仓库不交付 MySQL 镜像／数据卷，也不提供 Web 镜像。
@@ -371,7 +370,7 @@ REFERENCE_API_BASE_URL='https://your-backend:8443' npm run build
 | 跨会议声纹 | `SpeakerIdentityProvider` | 可选讯飞插件和人员映射，未启用时其余链正常 |
 | 结果交付／页面 | `ResultActionPlugin`、Manifest／Artifact 渲染 | 默认 Web；本地离线 HTML、邮件、小程序等由伙伴开发／装配 |
 | 开会前检查 | App 会前 Hook | 可注入自有条件；参考代码不提供扫码接收端／小程序 |
-| 悬浮窗／字幕 UI | SDK UI 工具及 App 页面／窗口工厂 | 基础能力与默认实现，伙伴可以按产品替换窗口形态 |
+| 字幕控件与悬浮窗 | 设备 AAR 提供 `SubtitleTextView`；悬浮窗、Mini／大窗、权限和 Service 由参考 App 的 `basic-ui` 实现 | 窗口交互是可编辑的默认实现，不是 SDK 固定能力 |
 
 具体接口、线程与生命周期见[扩展开发手册](partner-integration-guide.md)、
 [Android 说明](../android-reference-app/README.md)、[公共核心说明](../backend-core/README.md)。

@@ -2,7 +2,7 @@
 
 ## 构建 APK
 
-参考 App 的部署地址和调试 CA 都在代码/资源里，构建不需要任何参数：
+构建前先准备 `deployment.local.properties`（见下文），构建本身不需要任何 `-P` 参数：
 
 ```bash
 cd android-reference-app

@@ -297,6 +297,7 @@ import com.czur.aimeeting.client.MeetingClient
 import com.czur.aimeeting.client.MeetingOptions
 import com.czur.aimeeting.client.MeetingResult
 import com.czur.aimeeting.client.MeetingResultContent
+import com.czur.aimeeting.client.MeetingError
 import com.czur.aimeeting.client.result.ResultActionOutcome
 import com.czur.aimeeting.client.result.ResultActionPlugin
 import java.io.File

@@ -63,7 +63,7 @@ public final class MyModelSessionIssuer implements ModelSessionIssuer {
 }
 ```
 
-可参考 `backend-reference/src/main/java/com/czur/reference/application/model/SampleJsonWsModelSessionIssuer.java`（40 行）。
+可参考 `backend-reference/src/main/java/com/czur/reference/application/model/SampleJsonWsModelSessionIssuer.java`（40 行，含完整 import 和参数校验，建议直接对照它写）。
 
 **装配位置**：默认发行器在 `backend-reference/.../bootstrap/ReferenceMeetingHttpAssembly.java:131` 的 `defaultIssuer()` 里按配置选择。你有两条路：
 
@@ -82,9 +82,9 @@ public final class MyModelSessionIssuer implements ModelSessionIssuer {
 | `startMessage(grant): String` | 连接建立后发的第一条协议消息（例如 `{"type":"start"}`） |
 | `onServerMessage(message, listeners…): ModelSignal` | 解析模型消息，回调标准事件，返回 `AUDIO_READY` / `FINISHED` / `NONE` |
 
-**按需覆盖**的四个：`connectionRequest(grant)`（改握手头，比如 `x-api-key`）、`stopMessage(grant)`、`mayEmitDeferredSourceLanguage()`、`supportsSessionReconnect()` 和 `drainConfirmedOnDisconnect(listener)`。
+**按需覆盖**的五个：`connectionRequest(grant)`（改握手头，比如 `x-api-key`）、`stopMessage(grant)`、`mayEmitDeferredSourceLanguage()`、`supportsSessionReconnect()` 和 `drainConfirmedOnDisconnect(listener)`。
 
-骨架（照 `meeting-client-core/.../provider/SampleJsonModelAdapter.kt`，37 行）：
+骨架（照 `meeting-client-core/.../provider/SampleJsonModelAdapter.kt`，37 行；下面省略了 `com.czur.aimeeting.model.*`、`org.json.JSONObject` 等 import 和错误处理，是可编译版本的精简示意，完整文件以仓库里的样例为准）：
 
 ```kotlin
 class MyModelAdapter : ModelAdapter {

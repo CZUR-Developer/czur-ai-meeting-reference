@@ -19,16 +19,16 @@
 | 开发环境 | JDK、Android SDK、Node、Python 等 | 构建阶段就失败 |
 | 设备 | Android 14 真机、SDK 对应的设备 AAR | App 装不上或没有真实音源 |
 
-## 二、最小可跑组合：一条真实字幕会议
+## 二、最小基础设施组合
 
-只要下面五项，就能完成“登录 → 真实语音字幕 → 停止 → 网页回看”：
+下面五项是最容易被漏掉的基础设施，凑齐它们才具备跑第一场会的前提。登录账号、会话密钥、TLS 入口、可写的结果存储和结果页地址同样是必需运行配置，见第三节；不要以为只准备这五项就能直接开会：
 
 | # | 依赖 | 说明 | 对应位置 |
 | --- | --- | --- | --- |
 | 1 | 源码 | 本仓库完整目录，含 `meeting-android/libs/ai-meeting-device.aar` | — |
 | 2 | MySQL 5.7 兼容实例 | 一个专用库和可初始化／读写的账号 | `DATABASE_URL`／`DATABASE_USER`／`DATABASE_PASSWORD` |
 | 3 | 一台设备可达的主机 | 跑后端和静态 Web；设备能访问它的局域网地址 | `AI_MEETING_HTTP_BIND`、静态站端口 |
-| 4 | 一个实时语音模型 | 听悟，或你自己的模型，或第四节的样例模型 | `AI_MEETING_MODEL_ADAPTER` 及其配套密钥 |
+| 4 | 一个实时语音模型 | 换凭据用听悟即可；换成自己的协议要另写 Adapter（见[教程](custom-model-adapter.md)）；还没模型时先用第四节的样例模型验证接线 | `AI_MEETING_MODEL_ADAPTER` 及其配套密钥 |
 | 5 | Android 14 设备 | 麦克风、网络、ADB；与设备 AAR 版本匹配 | `deployment.local.properties` 里的后端地址 |
 
 下面这些**第一场会可以先不准备**：总结（百炼）、跨会议声纹（讯飞）、对象存储／OSS、

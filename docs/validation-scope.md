@@ -70,7 +70,7 @@ HDMI-IN、投屏、外设音源和实体方向角依赖匹配的系统能力及�
 
 ## 交付与发布边界
 
-参考仓不含真实模型 Key、运行配置、设备签名或闭源 SDK 二进制；配套 AAR 另行取得。
+参考仓不含真实模型 Key、运行配置或设备签名；设备 AAR 随仓交付（`android-reference-app/meeting-android/libs/ai-meeting-device.aar`，版本与 SHA-256 见 Android 说明）。
 Debug 开发 CA 仅用于本机联调，不进入 Release 信任配置。Release 的签名、公开域名、
 第三方服务资源和最终产品验收由部署方负责。后端交付 Docker 应用镜像和外部配置入口，
 数据库只交付唯一初始化 SQL，Web 交付静态资源。
