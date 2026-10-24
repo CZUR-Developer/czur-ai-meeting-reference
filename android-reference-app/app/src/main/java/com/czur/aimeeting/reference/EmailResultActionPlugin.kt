@@ -19,6 +19,7 @@ class EmailResultActionPlugin @JvmOverloads constructor(
     private val configuredEmails = emails?.toList()
     override fun id() = "email"
     override fun displayName() = "邮箱通知"
+    override fun requiresResultWebUrl() = true
     override fun requiredServiceCapabilities() = setOf(ResultActionRegistry.RESULT_LINK, ResultActionRegistry.RESULT_EMAIL)
     override fun createSettings(pageContext: Context): Settings {
         val layout = LinearLayout(pageContext).apply { orientation = LinearLayout.VERTICAL }

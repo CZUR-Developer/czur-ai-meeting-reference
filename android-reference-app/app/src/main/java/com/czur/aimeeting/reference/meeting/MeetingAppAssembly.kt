@@ -133,12 +133,19 @@ object MeetingAppAssembly {
             && !resultWebUrl.contains(PLACEHOLDER_RESULT_WEB_HOST)
 
     /**
+     * 只有全部已注册结果动作都依赖网页地址时，缺失 resultWebUrl 才阻止登录。
+     * 本地 PDF、本地 HTML、纯提示等自定义动作不依赖该地址。
+     */
+    @JvmStatic @Synchronized fun isResultWebRequired(): Boolean =
+        resultActions.isNotEmpty() && resultActions.all { it.requiresResultWebUrl() }
+
+    /**
      * 部署状态统一检查：返回 {@link DeploymentIssue#BACKEND}／{@link DeploymentIssue#RESULT_WEB}，
      * 都正常时返回 null。页面据此给出同一条可执行提示，不再各自判断其中一项。
      */
     @JvmStatic @Synchronized fun deploymentIssue(): DeploymentIssue? = when {
         !isBackendConfigured() -> DeploymentIssue.BACKEND
-        !isResultWebConfigured() -> DeploymentIssue.RESULT_WEB
+        isResultWebRequired() && !isResultWebConfigured() -> DeploymentIssue.RESULT_WEB
         else -> null
     }
 

@@ -30,6 +30,7 @@ class WebResultActionPlugin private constructor(
 
     override fun id() = "web"
     override fun displayName() = "网页查看"
+    override fun requiresResultWebUrl() = true
     override fun requiredServiceCapabilities() = setOf(ResultActionRegistry.RESULT_LINK)
     override fun createSettings(pageContext: Context): Settings {
         val app = pageContext.applicationContext

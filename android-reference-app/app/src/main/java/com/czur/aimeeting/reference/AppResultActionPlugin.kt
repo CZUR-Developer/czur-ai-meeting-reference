@@ -10,6 +10,12 @@ import java.util.function.Supplier
  * 冻结参数和 applicationContext，不得捕获 Activity/View。Service 只消费准备好的闭包。
  */
 interface AppResultActionPlugin : ResultActionPlugin {
+    /**
+     * 该动作是否依赖部署的网页结果地址。默认不依赖；默认 Web／邮件动作返回 true。
+     * 只有所有已注册动作都依赖时，缺失 resultWebUrl 才应该阻止登录和能力发现。
+     */
+    fun requiresResultWebUrl(): Boolean = false
+
     /** 主线程创建设置；无输入动作可以返回 null View。 */
     fun createSettings(pageContext: Context): Settings
 

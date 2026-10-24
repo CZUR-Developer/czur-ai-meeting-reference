@@ -462,9 +462,15 @@ class MainActivity : Activity() {
         override fun onNothingSelected(parent: AdapterView<*>) = Unit
     }
 
+    /** 未注册任何结果动作时使用 NO_ACTIVE_DELIVERY；有动作时仍必须选中一个可用动作。 */
+    private fun hasNoResultActions(): Boolean = MeetingAppAssembly.resultActions().isEmpty()
+
+    private fun hasUsableResultAction(): Boolean =
+        hasNoResultActions() || resultActionIds[resultGroup.checkedRadioButtonId] in availableResultActions
+
     private fun canStartMeeting(): Boolean = setupSelection.canStart(displayedIdentity != null,
         meetingBusy || pendingPresentationMeeting != null, deploymentCapabilities, deploymentLanguages,
-        discovery != null && resultActionIds[resultGroup.checkedRadioButtonId] in availableResultActions)
+        discovery != null && hasUsableResultAction())
 
     /** 页面恢复、会前改动、Service 状态和实际开始入口共用此规则。 */
     private fun updateStartAvailability() { startButton.isEnabled = canStartMeeting() }
@@ -483,7 +489,13 @@ class MainActivity : Activity() {
         }.apply { setDropDownViewResource(R.layout.reference_language_choice) }
     private fun refreshResultAvailability() {
         val current = discovery
-        val available = if (current == null) emptySet() else MeetingAppAssembly.resultRegistry().available(current).map { it.id() }.toSet()
+        val appActionsById = MeetingAppAssembly.resultActions().associateBy { it.id() }
+        val available = if (current == null) emptySet() else MeetingAppAssembly.resultRegistry().available(current)
+            .filter { plugin ->
+                !(appActionsById[plugin.id()]?.requiresResultWebUrl() ?: false)
+                    || MeetingAppAssembly.isResultWebConfigured()
+            }
+            .map { it.id() }.toSet()
         availableResultActions = available
         var first: Int? = null
         for ((id, action) in resultActionIds) {
@@ -552,7 +564,7 @@ class MainActivity : Activity() {
                 deploymentLanguages.isEmpty() -> "当前部署尚未声明会议语言"
                 setupSelection.mode == MeetingSetup.Mode.LIVE_TRANSLATION &&
                     setupSelection.sourceLanguage == setupSelection.targetLanguage -> "请选择两种不同的会议语言"
-                discovery == null || resultActionIds[resultGroup.checkedRadioButtonId] !in availableResultActions ->
+                discovery == null || !hasUsableResultAction() ->
                     "当前部署没有可用的已装配结果动作"
                 else -> "本场选择的字幕／互译或纪要功能当前不可用"
             }
@@ -600,9 +612,15 @@ class MainActivity : Activity() {
         }
     }
     private fun selectedSetup(): MeetingSetup {
+        val actionId = resultActionIds[resultGroup.checkedRadioButtonId]
+        val resultOptions = when {
+            actionId != null && actionId in availableResultActions -> ResultOptions.action(actionId)
+            hasNoResultActions() -> ResultOptions.noActiveDelivery()
+            else -> ResultOptions.action(actionId.orEmpty())
+        }
         return MeetingSetup(setupSelection.mode, setupSelection.sourceLanguage, setupSelection.targetLanguage,
             setupSelection.mode == MeetingSetup.Mode.LIVE_TRANSCRIPT && ScreenCaptureSourceFactory.isSupported() && presentationCaptureView.isChecked,
-            ResultOptions.action(resultActionIds[resultGroup.checkedRadioButtonId]!!), "", emptyList(), setupSelection.summaryEnabled)
+            resultOptions, "", emptyList(), setupSelection.summaryEnabled)
     }
 
     /** Service 推送不可变状态，Activity 重建直接重绘整场字幕，不重订模型事件。 */
