@@ -13,8 +13,8 @@ package com.czur.aimeeting.reference.meeting
  */
 object ReferenceDeployment {
     /** 设备可达的后端根地址，不带尾部斜杠。 */
-    const val BACKEND_URL = "https://replace-with-your-backend.example"
+    const val BACKEND_URL = "https://192.168.0.116:8443"
 
     /** 会议结果网页地址。 */
-    const val RESULT_WEB_URL = "https://replace-with-your-result-web.example/index.html"
+    const val RESULT_WEB_URL = "http://192.168.0.116:8091/index.html"
 }
