@@ -152,6 +152,8 @@ Android 端通过 `ModelAdapter` 接收 Provider 数据，将原文、译文、�
 4. 在部署配置中声明支持的语言和能力；
 5. 用现有 Adapter 契约测试验证 partial/final、修订和停止时序。
 
+完整骨架、注册代码、时间基准和常见错误见[自定义模型 Adapter 教程](custom-model-adapter.md)。
+
 模型原始 JSON 和厂商短码留在对应 Adapter／Issuer 内部；永久密钥只由后端发行器的
 外部配置持有，不放入 Android Adapter、APK 或 Web。设备直连模型时，后端接收
 归一化的标准事件和用量事实，另按本场策略接收留存录音／截图。

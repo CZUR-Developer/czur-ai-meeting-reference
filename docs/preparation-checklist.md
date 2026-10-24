@@ -100,7 +100,8 @@ AI_MEETING_SAMPLE_JSON_WS_ENDPOINT=ws://<开发机局域网 IP>:19091
 
 然后按[从零接入指南](partner-getting-started.md)第 2–6 步走完建库、起后端、起 HTTPS、
 装 APK、开会。看到字幕刷出来，说明“音源 → 模型 → 归一化 → 界面 → 结果页”这条路是通的；
-接下来把 Adapter 和密钥换成自己的模型即可，替换边界见
+接下来把 Adapter 和密钥换成自己的模型即可。写自己的 Adapter 见
+[自定义模型 Adapter 教程](custom-model-adapter.md)，替换边界见
 [模型与能力配置指南第 5 节](model-and-capability-guide.md#5-更换模型时修改边界是什么)
 和[扩展开发手册第 4 节](partner-integration-guide.md#4-模型和能力扩展)。
 

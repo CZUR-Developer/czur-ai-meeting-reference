@@ -239,7 +239,8 @@ Web 根据最终 `MeetingManifest`（本场结果清单）里的 READY `Artifact
 
 按供应商实际接口适配握手、请求、事件／响应和停止时序，声明相同 Adapter ID、
 能力和语言；更换已有实现的地址／凭据可以用配置，新增 API 格式须增加实现，
-不能把任意厂商名称填进 `AI_MEETING_MODEL_ADAPTER` 就自动接通。
+不能把任意厂商名称填进 `AI_MEETING_MODEL_ADAPTER` 就自动接通。两侧怎么落地见
+[自定义模型 Adapter 教程](custom-model-adapter.md)：接口路径、最小骨架、注册位置和排错对照。
 厂商 JSON、语言短码与字段差异留在 Adapter／Provider，公共核心与页面只看标准结果。
 
 默认结果 Web、本地离线 HTML 或自有结果平台也可独立替换，具体扩展见
