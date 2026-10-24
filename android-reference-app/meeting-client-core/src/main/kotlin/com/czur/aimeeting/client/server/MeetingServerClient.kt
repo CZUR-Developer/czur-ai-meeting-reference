@@ -1,5 +1,6 @@
 package com.czur.aimeeting.client.server
 
+import com.czur.aimeeting.client.MeetingHistoryPage
 import com.czur.aimeeting.client.MeetingOptions
 import com.czur.aimeeting.client.MeetingResult
 import com.czur.aimeeting.model.*
@@ -9,6 +10,10 @@ import java.io.IOException
 interface MeetingServerClient {
     /** 匿名发现；实际场次授权以 Create 为准。 */
     @Throws(IOException::class) fun discover(): DeploymentOptions
+    /** 只读历史会议列表；默认端口未实现，HTTP 实现覆盖。 */
+    @Throws(IOException::class) fun listMeetings(pageToken: String?, pageSize: Int): MeetingHistoryPage {
+        throw IOException("当前后端端口未实现会议列表")
+    }
     @Throws(IOException::class) fun createMeeting(setup: MeetingOptions): CreatedMeeting
     /** 声明本场由 App 提交标准事件。 */
     @Throws(IOException::class) fun startClient(meetingId: String)

@@ -1,34 +1,46 @@
 package com.czur.aimeeting.reference
 
 import android.app.Activity
-import android.content.Intent
+import android.app.AlertDialog
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.czur.aimeeting.client.MeetingClient
+import com.czur.aimeeting.client.MeetingDiscovery
+import com.czur.aimeeting.client.MeetingError
+import com.czur.aimeeting.client.MeetingErrorCode
+import com.czur.aimeeting.client.MeetingHistoryClient
+import com.czur.aimeeting.client.MeetingHistoryItem
+import com.czur.aimeeting.client.MeetingHistoryPage
+import com.czur.aimeeting.client.MeetingOptions
+import com.czur.aimeeting.client.MeetingResult
+import com.czur.aimeeting.client.MeetingResultContent
 import com.czur.aimeeting.client.identity.IdentityResult
+import com.czur.aimeeting.client.result.ResultActionAccess
+import com.czur.aimeeting.client.result.ResultActionContext
+import com.czur.aimeeting.client.result.ResultActionOutcome
+import com.czur.aimeeting.client.result.ResultActionRegistry
+import com.czur.aimeeting.client.server.DeploymentOptions
 import com.czur.aimeeting.reference.meeting.MeetingAppAssembly
-import java.io.IOException
+import com.czur.aimeeting.reference.meeting.MeetingRuntimeFactory
+import java.time.Duration
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
-import java.util.concurrent.TimeUnit
-import okhttp3.Call
-import okhttp3.Callback
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
-import org.json.JSONObject
+import java.util.concurrent.Executor
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 /**
- * 只读的历史会议列表：用当前登录身份分页查询 `/v1/meetings`，点一条用当前时间
- * 现生成结果链接打开既有结果页。不创建、不删除、不改变任何会议状态。
+ * 只读的历史会议列表。列表、结果清单和结果动作全部走统一客户端／插件装配：
+ * 页面不创建 HTTP 客户端、不拼协议 JSON、不直接打开结果 Activity。
  *
  * <p>结果链接的 genTime 只是链接生成时间，服务端按 genTime + TTL 判过期，
- * 因此历史会议也能用“现在”生成一个有效链接。凭据只在进程内用于本次请求，
- * 不写入 Intent、不落盘、不打印。</p>
+ * 因此历史会议也能用“现在”生成一个有效链接。凭据只在本进程的 history client
+ * 内使用，不写入 Intent、不落盘、不打印。</p>
  */
 class MeetingRecordsActivity : Activity() {
     private lateinit var list: LinearLayout
@@ -37,10 +49,9 @@ class MeetingRecordsActivity : Activity() {
     private lateinit var loadMore: Button
     private var nextPageToken: String? = null
     private var loading = false
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
-        .build()
+    private var historyClient: MeetingHistoryClient? = null
+    private var workExecutor: Executor? = null
+    private var discovery: DeploymentOptions? = null
     private val timeFormat: DateTimeFormatter =
         DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").withZone(ZoneId.systemDefault())
 
@@ -58,12 +69,13 @@ class MeetingRecordsActivity : Activity() {
             load(pageToken = null)
         }
         loadMore.setOnClickListener { load(pageToken = nextPageToken) }
-        load(pageToken = null)
-    }
 
-    private fun load(pageToken: String?) {
-        if (loading) return
-        // 身份、后端地址和结果页地址都来自集中装配，替换 Provider／地址后历史回看同样生效。
+        MeetingAppAssembly.initialize(applicationContext)
+        if (!MeetingAppAssembly.isBackendConfigured()) {
+            renderMessage("后端地址尚未配置")
+            empty.visibility = View.GONE
+            return
+        }
         val identity = MeetingAppAssembly.currentIdentity()
         val session = if (identity.status() == IdentityResult.Status.LOGGED_IN) identity.session() else null
         if (session == null) {
@@ -71,50 +83,46 @@ class MeetingRecordsActivity : Activity() {
             empty.visibility = View.GONE
             return
         }
+        val config = MeetingAppAssembly.clientConfig { runOnUiThread(it) }.forSession(session)
+        historyClient = MeetingRuntimeFactory.createHistory(config)
+        workExecutor = Executors.newSingleThreadExecutor()
+        // 只读发现用于结果动作的服务能力；失败不阻塞历史列表浏览。
+        historyClient?.discover(object : MeetingClient.Callback<DeploymentOptions> {
+            override fun onSuccess(result: DeploymentOptions) { discovery = result }
+            override fun onError(error: MeetingError) { discovery = null }
+        })
+        load(pageToken = null)
+    }
+
+    override fun onDestroy() {
+        historyClient?.close()
+        historyClient = null
+        (workExecutor as? ExecutorService)?.shutdownNow()
+        workExecutor = null
+        super.onDestroy()
+    }
+
+    private fun load(pageToken: String?) {
+        if (loading) return
+        val client = historyClient ?: return
         loading = true
         loadMore.isEnabled = false
         if (list.childCount == 0) renderMessage("正在加载…")
-        val url = buildString {
-            append(MeetingAppAssembly.serverUrl().trimEnd('/')).append("/v1/meetings?pageSize=20")
-            if (!pageToken.isNullOrBlank()) {
-                append("&pageToken=").append(java.net.URLEncoder.encode(pageToken, "UTF-8"))
-            }
-        }
-        val request = Request.Builder()
-            .url(url)
-            .header("Authorization", "Bearer " + session.accessToken())
-            .get()
-            .build()
-        client.newCall(request).enqueue(object : Callback {
-            override fun onFailure(call: Call, failure: IOException) {
-                runOnUiThread { renderFailure("网络不可用：" + (failure.message ?: "请稍后重试")) }
+        client.list(pageToken, 20, object : MeetingClient.Callback<MeetingHistoryPage> {
+            override fun onSuccess(result: MeetingHistoryPage) {
+                loading = false
+                renderPage(result)
             }
 
-            override fun onResponse(call: Call, response: Response) {
-                val body = response.body.string()
-                runOnUiThread {
-                    if (!response.isSuccessful) {
-                        renderFailure("加载失败（HTTP " + response.code + "）")
-                    } else {
-                        runCatching { renderPage(JSONObject(body)) }
-                            .getOrElse { renderFailure("返回内容无法解析") }
-                    }
-                }
+            override fun onError(error: MeetingError) {
+                renderFailure("加载失败，请稍后重试")
             }
         })
     }
 
-    private fun renderPage(page: JSONObject) {
-        loading = false
-        val items = page.optJSONArray("items")
-        val count = items?.length() ?: 0
-        for (index in 0 until count) {
-            val item = items!!.optJSONObject(index) ?: continue
-            list.addView(recordRow(item))
-        }
-        // org.json 把 JSON null 读成字符串 "null"，必须先用 isNull 区分。
-        nextPageToken = if (page.isNull("nextPageToken")) null
-        else page.optString("nextPageToken", "").takeIf { it.isNotBlank() }
+    private fun renderPage(page: MeetingHistoryPage) {
+        for (item in page.items) list.addView(recordRow(item))
+        nextPageToken = page.nextPageToken
         loadMore.visibility = if (nextPageToken == null) View.GONE else View.VISIBLE
         loadMore.isEnabled = true
         empty.visibility = if (list.childCount == 0) View.VISIBLE else View.GONE
@@ -132,26 +140,113 @@ class MeetingRecordsActivity : Activity() {
         status.text = message
     }
 
-    private fun recordRow(item: JSONObject): View {
+    private fun recordRow(item: MeetingHistoryItem): View {
         val row = LayoutInflater.from(this).inflate(R.layout.reference_record_item, list, false)
-        val meetingId = item.optString("meetingId", "")
-        val title = (if (item.isNull("title")) "" else item.optString("title", "")).ifBlank { "未命名会议" }
-        row.findViewById<TextView>(R.id.record_title).text = title
+        row.findViewById<TextView>(R.id.record_title).text = item.title ?: "未命名会议"
         row.findViewById<TextView>(R.id.record_meta).text = listOfNotNull(
-            stateText(item.optString("state", ""), item.optString("manifestState", "")),
-            formatTime(item.optString("createdAt", "")),
-            formatDuration(item.optString("createdAt", ""), item.optString("updatedAt", ""))
+            stateText(item.state, item.manifestState.orEmpty()),
+            formatTime(item.createdAt.orEmpty()),
+            formatDuration(item.createdAt, item.updatedAt)
         ).joinToString(" · ")
-        row.setOnClickListener { openResult(meetingId) }
+        row.setOnClickListener { openResult(item) }
         return row
     }
 
-    private fun openResult(meetingId: String) {
-        if (meetingId.isBlank()) return
-        val url = WebResultActionPlugin.resultUrl(
-            MeetingAppAssembly.resultWebUrl(), meetingId, System.currentTimeMillis())
-        startActivity(Intent(this, ResultActivity::class.java)
-            .putExtra(ResultActivity.EXTRA_RESULT_URL, url))
+    private fun openResult(item: MeetingHistoryItem) {
+        if (item.meetingId.isBlank()) return
+        if (discovery == null) {
+            renderMessage("结果服务尚未就绪，请稍后重试")
+            return
+        }
+        val client = historyClient ?: return
+        renderMessage("正在读取本场结果…")
+        client.readResult(item.meetingId, System.currentTimeMillis(), false,
+            object : MeetingClient.Callback<MeetingResult> {
+                override fun onSuccess(result: MeetingResult) { showResultActions(result) }
+                override fun onError(error: MeetingError) {
+                    renderMessage("本场结果尚未就绪，请稍后重试")
+                }
+            })
+    }
+
+    /** 结果动作由注册表按产物和服务能力筛选，页面不写死 Web／PDF／邮件。 */
+    private fun showResultActions(result: MeetingResult) {
+        val current = discovery ?: return
+        val snapshot = MeetingDiscovery(current, emptySet())
+        val appActionsById = MeetingAppAssembly.resultActions().associateBy { it.id() }
+        val available = MeetingAppAssembly.resultRegistry().available(snapshot)
+            .filter { plugin ->
+                plugin.requiredArtifactTypes().isEmpty()
+                    || result.artifactTypes().containsAll(plugin.requiredArtifactTypes())
+            }
+            .filter { plugin ->
+                appActionsById[plugin.id()]?.requiresResultWebUrl() != true
+                    || MeetingAppAssembly.isResultWebConfigured()
+            }
+        when {
+            available.isEmpty() -> renderMessage("本场没有可用的结果动作")
+            available.size == 1 -> executeResult(available.single(), result, snapshot)
+            else -> AlertDialog.Builder(this)
+                .setTitle("查看结果")
+                .setItems(available.map { it.displayName() }.toTypedArray()) { _, which ->
+                    executeResult(available[which], result, snapshot)
+                }
+                .show()
+        }
+    }
+
+    private fun executeResult(plugin: com.czur.aimeeting.client.result.ResultActionPlugin,
+                              result: MeetingResult, current: MeetingDiscovery) {
+        val options = MeetingOptions(
+            MeetingOptions.Mode.MEETING_MINUTES, "zh-CN", "en-US", false,
+            MeetingOptions.ResultDelivery.WEB, MeetingAppAssembly.resultWebUrl(), emptyList(), true
+        )
+        val preparation = MeetingAppAssembly.resultRegistry().prepare(plugin.id(), options, current)
+        val action = preparation.action() ?: run {
+            renderMessage(preparation.message())
+            return
+        }
+        val work = workExecutor ?: return
+        val context = ResultActionContext(
+            result,
+            HistoryResultAccess(result.meetingId(), result.genTime()),
+            ResultActionRegistry.serviceCapabilities(current),
+            work,
+            Executor { runOnUiThread(it) }
+        )
+        MeetingAppAssembly.resultRegistry().execute(action, context,
+            object : MeetingClient.Callback<ResultActionOutcome> {
+                override fun onSuccess(outcome: ResultActionOutcome) { renderMessage(outcome.message()) }
+                override fun onError(error: MeetingError) { renderMessage("结果动作失败，请稍后重试") }
+            })
+    }
+
+    /** 历史结果只读窄访问：正文和邮件仍走统一协议，不把 token 交给插件。 */
+    private inner class HistoryResultAccess(
+        private val meetingId: String,
+        private val genTime: Long
+    ) : ResultActionAccess {
+        override fun readContent(callback: MeetingClient.Callback<MeetingResultContent?>) {
+            val client = historyClient
+            if (client == null) {
+                callback.onError(MeetingError(MeetingErrorCode.UNKNOWN))
+                return
+            }
+            client.readResult(meetingId, genTime, true, object : MeetingClient.Callback<MeetingResult> {
+                override fun onSuccess(result: MeetingResult) { callback.onSuccess(result.content()) }
+                override fun onError(error: MeetingError) { callback.onError(error) }
+            })
+        }
+
+        override fun sendEmail(recipients: List<String>, resultUrl: String,
+                               callback: MeetingClient.Callback<Void?>) {
+            val client = historyClient
+            if (client == null) {
+                callback.onError(MeetingError(MeetingErrorCode.UNKNOWN))
+                return
+            }
+            client.sendEmail(meetingId, recipients, resultUrl, callback)
+        }
     }
 
     /** 只把服务端状态翻成人话；未识别的状态原样显示，方便排查。 */
@@ -172,11 +267,14 @@ class MeetingRecordsActivity : Activity() {
     }.getOrElse { raw }
 
     /** 标题在参考后端可以为空，时长用来区分同一时段的重复记录。 */
-    private fun formatDuration(createdAt: String, updatedAt: String): String? = runCatching {
-        val seconds = java.time.Duration.between(Instant.parse(createdAt), Instant.parse(updatedAt)).seconds
-        if (seconds <= 0) return@runCatching null
-        val minutes = seconds / 60
-        if (minutes <= 0) "时长 " + seconds + " 秒"
-        else "时长 " + minutes + " 分 " + (seconds % 60) + " 秒"
-    }.getOrNull()
+    private fun formatDuration(createdAt: String?, updatedAt: String?): String? {
+        if (createdAt.isNullOrBlank() || updatedAt.isNullOrBlank()) return null
+        return runCatching {
+            val seconds = Duration.between(Instant.parse(createdAt), Instant.parse(updatedAt)).seconds
+            if (seconds <= 0) return@runCatching null
+            val minutes = seconds / 60
+            if (minutes <= 0) "时长 " + seconds + " 秒"
+            else "时长 " + minutes + " 分 " + (seconds % 60) + " 秒"
+        }.getOrNull()
+    }
 }

@@ -32,6 +32,35 @@ class HttpMeetingServerClient(config: MeetingClientConfig) : MeetingServerClient
     @Throws(IOException::class)
     override fun discover(): DeploymentOptions = HttpMeetingSessionClient(baseUrl).deploymentOptions()
     @Throws(IOException::class)
+    override fun listMeetings(pageToken: String?, pageSize: Int): MeetingHistoryPage {
+        val query = StringBuilder("?pageSize=").append(pageSize.coerceIn(1, 200))
+        if (!pageToken.isNullOrBlank()) {
+            query.append("&pageToken=").append(URLEncoder.encode(pageToken, StandardCharsets.UTF_8))
+        }
+        val body = parseJson(get("/v1/meetings$query", 200).body)
+        val items = ArrayList<MeetingHistoryItem>()
+        val values = body.optJSONArray("items")
+        if (values != null) for (index in 0 until values.length()) {
+            val item = values.optJSONObject(index) ?: continue
+            val meetingId = item.optString("meetingId")
+            if (meetingId.isBlank()) continue
+            items.add(MeetingHistoryItem(
+                meetingId = meetingId,
+                title = if (item.isNull("title")) null else item.optString("title").takeIf { it.isNotBlank() },
+                state = item.optString("state"),
+                manifestState = if (item.isNull("manifestState")) null
+                    else item.optString("manifestState").takeIf { it.isNotBlank() },
+                createdAt = if (item.isNull("createdAt")) null
+                    else item.optString("createdAt").takeIf { it.isNotBlank() },
+                updatedAt = if (item.isNull("updatedAt")) null
+                    else item.optString("updatedAt").takeIf { it.isNotBlank() }
+            ))
+        }
+        val nextPageToken = if (body.isNull("nextPageToken")) null
+            else body.optString("nextPageToken").takeIf { it.isNotBlank() }
+        return MeetingHistoryPage(items, nextPageToken)
+    }
+    @Throws(IOException::class)
     override fun createMeeting(setup: MeetingOptions): CreatedMeeting {
         try {
             val body = JSONObject().put("clientSessionId", UUID.randomUUID().toString())
