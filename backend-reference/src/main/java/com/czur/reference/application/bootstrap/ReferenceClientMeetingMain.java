@@ -27,8 +27,7 @@ public final class ReferenceClientMeetingMain {
             }, "reference-client-meeting-shutdown"));
             stopping.await();
         } catch (Exception failure) {
-            LOGGER.log(Level.SEVERE, "参考客户端直连后端启动或运行失败 reason={0}",
-                    failure.getClass().getSimpleName());
+            LOGGER.log(Level.SEVERE, "参考客户端直连后端启动或运行失败", failure);
             System.exit(1);
         }
     }
