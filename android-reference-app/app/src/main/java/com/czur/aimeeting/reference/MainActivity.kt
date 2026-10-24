@@ -137,16 +137,7 @@ class MainActivity : Activity() {
         transcriptView = page.placeholder; meetingTitle = page.meetingTitle; transcriptList = page.transcriptList
         leftLanguageTitle = page.leftTitle; rightLanguageTitle = page.rightTitle; elapsedView = page.elapsed
         audioLevelBar = page.level; audioLevelView = page.levelText; statusView = page.status
-        // 状态行没有内容时整行隐藏，避免只剩一块空的胶囊底色。
-        statusView.addTextChangedListener(object : android.text.TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
-            override fun afterTextChanged(s: android.text.Editable?) {
-                statusView.visibility = if (s.isNullOrBlank()) View.GONE else View.VISIBLE
-            }
-        })
-        // 注册时文本可能已经是空的，监听不会补发，这里同步一次初始状态。
-        statusView.visibility = if (statusView.text.isNullOrBlank()) View.GONE else View.VISIBLE
+        // 状态行的空内容隐藏由 AutoHideStatusText 自己处理，这里不再重复判断。
         capabilityView = page.capabilities; sourceLanguageView = page.sourceLanguage; targetLanguageView = page.targetLanguage
         presentationCaptureView = page.presentation; summaryEnabledView = page.summary
         transcriptModeView = page.transcriptMode; translationModeView = page.translationMode
