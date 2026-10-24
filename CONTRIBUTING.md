@@ -24,3 +24,12 @@
 `Feature-[AIMeeting]: 增加参考存储端口`。每个提交保持小且可独立构建、测试和回滚。
 合并请求需说明目的、影响目录、验证命令和未解决事项；界面变更附截图。
 Gitee 为开发主仓，GitHub 仅由发布负责人审核后单向同步。
+
+## 发布前检查
+
+- 过一遍[目标环境的最小验收](docs/validation-scope.md#目标环境的最小验收)，用正式签名和
+  实际部署环境重跑，不以开发机结果代替。
+- 执行 `python3 tools/check-public-boundary.py` 与 `bash tools/check-reference-delivery.sh`；
+  前者查公开内容边界，后者查交付库存、脚本语法和证书／配置文件是否被误跟踪。
+- 核对适用许可证、依赖清单、运行配置；闭源设备 SDK 按其交付许可使用，不随源码重新公开。
+- 同步更新 [文档导航](docs/README.md) 与被改动模块的 README。
