@@ -1,5 +1,7 @@
 # 当前支持范围与验收清单
 
+> 第一次接入 · 第 4/4 篇 ｜ 上一篇 ← [本机局域网 HTTPS 联调](local-lan-https.md) ｜ 扩展开发从这里开始 → [扩展开发手册](partner-integration-guide.md)
+
 本文描述首版参考方案的当前范围。默认交付链为 Android App／SDK 直连模型、参考
 后端管理会议、MySQL 5.7 保存元数据、Web 回看实际产物。Android 最低支持
 Android 14／API 34。运行条件与命令见[从零接入指南](partner-getting-started.md)。

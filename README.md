@@ -2,16 +2,22 @@
 
 开源参考实现用于演示 AI 字幕纪要的正交插件化架构。合作伙伴需要自行提供并运营 Android 应用、后端、模型、存储、认证和计费；本仓库提供可运行的参考代码、公共协议和测试工具，不包含 CZUR 生产实现或设备签名材料。
 
-## 合作伙伴从这里开始
+## 先看这一张表
 
-| 阅读顺序 | 文档 | 解决的问题 |
-| --- | --- | --- |
-| 1 | [从零接入指南](docs/partner-getting-started.md) | 工程组成、SDK交付材料、资源与环境、配置／启动／第一场真实会议、Docker交付 |
-| 2 | [模型与能力配置指南](docs/model-and-capability-guide.md) | 听悟／百炼／讯飞分别做什么、需要哪些资源、是否可缺失、如何替换和组合 |
-| 3 | [扩展开发手册](docs/partner-integration-guide.md) | 登录保持、鉴权、模型Adapter、存储、权益、结果动作和SDK工具的扩展边界 |
+| 你的目的 | 从这里读 | 读完能做什么 | 约 |
+| --- | --- | --- | --- |
+| 第一次把真实字幕跑起来 | [从零接入指南](docs/partner-getting-started.md) | 建库、起后端、起 HTTPS、装 APK、开一场会并看结果 | 30–60 分钟 |
+| 接自己的模型、语言或能力组合 | [模型与能力配置指南](docs/model-and-capability-guide.md) | 知道每个能力要申请什么资源，缺了会有什么表现 | 20 分钟 |
+| 换登录、存模型、加结果动作 | [扩展开发手册](docs/partner-integration-guide.md) | 按端口替换插件，不改会议核心 | 40 分钟 |
+| 交付到自己的服务器 | [部署说明](deploy/README.md) | 外部 MySQL + 唯一 V001 + Docker 后端 + 静态 Web | 30 分钟 |
+| 只想嵌入会议结果页 | [Web 结果页](web-reference/README.md) | 按 Manifest 渲染结果，接人物命名等扩展 | 15 分钟 |
+| 先确认哪些验证过、哪些没有 | [支持范围与验收清单](docs/validation-scope.md) | 分清实测覆盖和需要自己验收的部分 | 10 分钟 |
 
-首次接入按第1份文档的真实字幕主线推进；默认Mock构建和JSON协议样例只用于模拟／接线，
-不替代真实音源与模型。设备 AAR 随参考仓交付（`android-reference-app/meeting-android/libs/ai-meeting-device.aar`），干净 clone 即可构建。
+全部 30+ 份文档（含各模块 README、工具说明、公共协议）见 **[文档导航](docs/README.md)**。
+
+第一次接入只走一条线：从零接入指南的第 1–6 步。里面每条命令都可直接粘贴；设备 AAR
+随参考仓交付（`android-reference-app/meeting-android/libs/ai-meeting-device.aar`），
+干净 clone 即可构建。
 
 ## 工程结构
 

@@ -1,5 +1,7 @@
 # 本机局域网 HTTPS 联调
 
+> 第一次接入 · 第 3/4 篇 ｜ 上一篇 ← [模型与能力配置指南](model-and-capability-guide.md) ｜ 下一篇 → [支持范围与验收清单](validation-scope.md)
+
 本页用于 Android 设备通过开发电脑的真实局域网地址连接参考后端。参考 SDK 的登录
 地址继续要求 HTTPS；`adb reverse` 的 loopback 例外只用于诊断，不能代替局域网验收。
 这里使用 Node.js 标准库提供临时 TLS 入口，不修改 SDK，也不依赖第三方 npm 包。
