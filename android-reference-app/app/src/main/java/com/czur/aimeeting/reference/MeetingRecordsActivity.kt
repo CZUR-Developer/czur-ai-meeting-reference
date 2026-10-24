@@ -137,9 +137,11 @@ class MeetingRecordsActivity : Activity() {
         val meetingId = item.optString("meetingId", "")
         val title = (if (item.isNull("title")) "" else item.optString("title", "")).ifBlank { "未命名会议" }
         row.findViewById<TextView>(R.id.record_title).text = title
-        row.findViewById<TextView>(R.id.record_meta).text =
-            stateText(item.optString("state", ""), item.optString("manifestState", "")) +
-                " · " + formatTime(item.optString("createdAt", ""))
+        row.findViewById<TextView>(R.id.record_meta).text = listOfNotNull(
+            stateText(item.optString("state", ""), item.optString("manifestState", "")),
+            formatTime(item.optString("createdAt", "")),
+            formatDuration(item.optString("createdAt", ""), item.optString("updatedAt", ""))
+        ).joinToString(" · ")
         row.setOnClickListener { openResult(meetingId) }
         return row
     }
@@ -168,4 +170,13 @@ class MeetingRecordsActivity : Activity() {
     private fun formatTime(raw: String): String = runCatching {
         timeFormat.format(Instant.parse(raw))
     }.getOrElse { raw }
+
+    /** 标题在参考后端可以为空，时长用来区分同一时段的重复记录。 */
+    private fun formatDuration(createdAt: String, updatedAt: String): String? = runCatching {
+        val seconds = java.time.Duration.between(Instant.parse(createdAt), Instant.parse(updatedAt)).seconds
+        if (seconds <= 0) return@runCatching null
+        val minutes = seconds / 60
+        if (minutes <= 0) "时长 " + seconds + " 秒"
+        else "时长 " + minutes + " 分 " + (seconds % 60) + " 秒"
+    }.getOrNull()
 }
