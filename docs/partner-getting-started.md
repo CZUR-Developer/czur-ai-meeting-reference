@@ -274,6 +274,10 @@ cd android-reference-app
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
+刚 clone 的机器上还要让 Gradle 找到 Android SDK：设置 `ANDROID_HOME`，或在
+`android-reference-app/local.properties` 里写 `sdk.dir=<SDK 路径>`（该文件不进仓库）。
+缺这一步会报 `SDK location not found`，与部署配置无关。
+
 地址在打包时确定，终端用户没有手填 IP 的步骤。App 保存当前后端的有效登录；
 保留数据覆盖安装或重开后可恢复登录，退出会清除会话，更换后端的 APK 不复用旧身份。
 ### 第 6 步：登录、开会、停止并看结果
