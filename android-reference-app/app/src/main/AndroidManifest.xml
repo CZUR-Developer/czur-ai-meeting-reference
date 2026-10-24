@@ -27,6 +27,10 @@
         <activity
             android:name=".LocalResultActivity"
             android:exported="false" />
+        <activity
+            android:name=".MeetingRecordsActivity"
+            android:exported="false"
+            android:theme="@style/ReferenceMeetingActivity" />
         <service
             android:name=".MeetingService"
             android:exported="false"

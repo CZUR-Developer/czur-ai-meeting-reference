@@ -104,6 +104,9 @@
                                 android:background="@drawable/reference_setup_result_hint" android:text="@string/reference_result_description" />
                             <LinearLayout android:id="@+id/result_settings_host" android:layout_width="match_parent" android:layout_height="wrap_content"
                                 android:layout_marginTop="20dp" android:orientation="vertical" />
+                            <Button android:id="@+id/records_button" style="@style/ReferenceSetupSecondaryButton"
+                                android:layout_width="match_parent" android:layout_height="56dp"
+                                android:layout_marginTop="16dp" android:text="会议记录" />
                         </LinearLayout>
                     </LinearLayout>
                 </ScrollView>

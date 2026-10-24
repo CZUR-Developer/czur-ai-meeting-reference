@@ -128,6 +128,10 @@ class MainActivity : Activity() {
         page = MeetingAppAssembly.pageFactory().create(this)
         // 关闭入口只离开设置页，会议的生命周期仍归原 Service 所有。
         page.close.setOnClickListener { finish() }
+        // 历史记录只读：离开本页也不影响在跑的会议。
+        page.records.setOnClickListener {
+            startActivity(Intent(this, MeetingRecordsActivity::class.java))
+        }
         loginButton = page.account; resultGroup = page.results
         transcriptView = page.placeholder; meetingTitle = page.meetingTitle; transcriptList = page.transcriptList
         leftLanguageTitle = page.leftTitle; rightLanguageTitle = page.rightTitle; elapsedView = page.elapsed

@@ -33,6 +33,8 @@ class MeetingPageViews(@JvmField val root: FrameLayout) {
     @JvmField val leftList: LinearLayout = root.findViewById(R.id.left_text_list)
     @JvmField val rightList: LinearLayout = root.findViewById(R.id.right_text_list)
     @JvmField val pluginSettingsHost: LinearLayout = root.findViewById(R.id.result_settings_host)
+    /** 历史会议列表入口；只读查询，不影响当前会议状态。 */
+    @JvmField val records: Button = root.findViewById(R.id.records_button)
     @JvmField val setupTitle: TextView = root.findViewById(R.id.setup_title)
     @JvmField val meetingTitle: TextView = root.findViewById(R.id.meeting_title)
     @JvmField val elapsed: TextView = root.findViewById(R.id.elapsed)
