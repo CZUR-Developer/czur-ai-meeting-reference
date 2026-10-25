@@ -104,46 +104,25 @@ class FinalizationExecutionFactJsonTest {
     }
 
     @Test
-    void fullFallbackProfileAndPlanRoundTripWithoutCurrentConfiguration() {
-        ProductProfile profile = new ProductProfile(
-                "profile/fallback-v3",
-                3,
-                Set.of(TRANSCRIPT),
-                Set.of(SUMMARY, "cap.summary-fallback"),
-                Map.of(SUMMARY, Set.of(TRANSCRIPT)),
-                Map.of(SUMMARY, ProductProfile.MissingCapabilityPolicy.USE_FALLBACK),
-                Map.of(SUMMARY, "cap.summary-fallback"),
-                Map.of(
-                        TRANSCRIPT, List.of("workflow.transcript"),
-                        SUMMARY, List.of("workflow.summary"),
-                        "cap.summary-fallback", List.of("workflow.summary-fallback")),
-                Map.of(
-                        TRANSCRIPT, List.of("transcript.final"),
-                        SUMMARY, List.of("summary.structured"),
-                        "cap.summary-fallback", List.of("summary.structured")));
-        CapabilityPlan plan = new CapabilityPlan(9, List.of(
-                decision(TRANSCRIPT, true, CapabilityDecision.Action.ENABLE,
-                        null, profile, TRANSCRIPT, 9),
-                decision(SUMMARY, false, CapabilityDecision.Action.USE_FALLBACK,
-                        "cap.summary-fallback", profile, "cap.summary-fallback", 9),
-                decision("cap.summary-fallback", false, CapabilityDecision.Action.ENABLE,
-                        null, profile, "cap.summary-fallback", 9)));
-        FinalizationExecutionFact fact = FinalizationExecutionFact.freeze(
-                "meeting-fallback-secret",
-                Instant.parse("2026-09-28T03:02:01.654321Z"),
-                "secret fallback title",
-                profile,
-                plan);
-
-        String canonical = FinalizationExecutionFactJson.encode(fact);
-        FinalizationExecutionFact decoded = FinalizationExecutionFactJson.decode(canonical);
-
-        assertEquals(fact, decoded);
-        assertEquals(fact.productProfile(), decoded.productProfile());
-        assertEquals(canonical, FinalizationExecutionFactJson.encode(decoded));
-        assertDecodeFailure(canonical.replace(
-                "\"missingPolicies\":{\"cap.summary\":\"USE_FALLBACK\"}",
-                "\"missingPolicies\":{\"cap.summary\":\"DISABLE\"}"));
+    void fallbackProfileIsRejectedBeforeJsonRoundTrip() {
+        IllegalArgumentException failure = assertThrows(IllegalArgumentException.class, () ->
+                new ProductProfile(
+                        "profile/fallback-v3",
+                        3,
+                        Set.of(TRANSCRIPT),
+                        Set.of(SUMMARY, "cap.summary-fallback"),
+                        Map.of(SUMMARY, Set.of(TRANSCRIPT)),
+                        Map.of(SUMMARY,
+                                ProductProfile.MissingCapabilityPolicy.USE_FALLBACK),
+                        Map.of(SUMMARY, "cap.summary-fallback"),
+                        Map.of(
+                                TRANSCRIPT, List.of("workflow.transcript"),
+                                SUMMARY, List.of("workflow.summary")),
+                        Map.of(
+                                TRANSCRIPT, List.of("transcript.final"),
+                                SUMMARY, List.of("summary.structured"))));
+        assertEquals("USE_FALLBACK 已移除；缺失能力请改用 DISABLE 或 FAIL_MEETING",
+                failure.getMessage());
     }
 
     @Test

@@ -122,19 +122,6 @@ class FinalizationExecutionFactTest {
         CapabilityDecision summary = valid.decisionFor(SUMMARY);
         CapabilityDecision fallback = valid.decisionFor(FALLBACK);
 
-        ProductProfile policyMismatch = new ProductProfile(
-                "secret.profile/policy-mismatch",
-                5,
-                profile.requiredCapabilities(),
-                profile.optionalCapabilities(),
-                profile.dependencies(),
-                Map.of(),
-                profile.fallbackCapabilities(),
-                profile.affectedWorkflows(),
-                profile.producedArtifacts());
-        assertFixedFailure(() -> FinalizationExecutionFact.freeze(
-                MEETING_ID, STARTED_AT, TITLE, policyMismatch, plan(policyMismatch)));
-
         assertFixedFailure(() -> FinalizationExecutionFact.freeze(
                 MEETING_ID, STARTED_AT, TITLE, profile,
                 replace(valid, TRANSCRIPT, copyDecision(
@@ -181,33 +168,6 @@ class FinalizationExecutionFactTest {
                         null,
                         transcript.affectedWorkflows(),
                         transcript.producedArtifacts()))));
-
-        ProductProfile explicitDisable = new ProductProfile(
-                "secret.profile/optional-disable",
-                5,
-                profile.requiredCapabilities(),
-                profile.optionalCapabilities(),
-                profile.dependencies(),
-                Map.of(
-                        SUMMARY, ProductProfile.MissingCapabilityPolicy.USE_FALLBACK,
-                        FALLBACK, ProductProfile.MissingCapabilityPolicy.DISABLE),
-                profile.fallbackCapabilities(),
-                profile.affectedWorkflows(),
-                profile.producedArtifacts());
-        CapabilityPlan explicitDisablePlan = plan(explicitDisable);
-        CapabilityDecision optionalFailWithDisablePolicy = new CapabilityDecision(
-                FALLBACK,
-                CapabilityDecision.Availability.UNAVAILABLE,
-                false,
-                CapabilityDecision.Action.FAIL_MEETING,
-                null,
-                explicitDisable.affectedWorkflowsOf(FALLBACK),
-                explicitDisable.producedArtifactsOf(FALLBACK),
-                "PROVIDER_CAPABILITY_MISSING",
-                explicitDisablePlan.planRevision());
-        assertFixedFailure(() -> FinalizationExecutionFact.freeze(
-                MEETING_ID, STARTED_AT, TITLE, explicitDisable,
-                replace(explicitDisablePlan, FALLBACK, optionalFailWithDisablePolicy)));
 
         CapabilityDecision disabledFallbackTarget = copyDecision(
                 fallback,
@@ -258,44 +218,6 @@ class FinalizationExecutionFactTest {
         assertFixedFailure(() -> FinalizationExecutionFact.freeze(
                 MEETING_ID, STARTED_AT, TITLE, profile,
                 replace(valid, TRANSCRIPT, malformedWarning)));
-
-        ProductProfile combinedCycleProfile = new ProductProfile(
-                "secret.profile/combined-cycle",
-                1,
-                Set.of(FALLBACK),
-                Set.of(SUMMARY),
-                Map.of(FALLBACK, Set.of(SUMMARY)),
-                Map.of(SUMMARY, ProductProfile.MissingCapabilityPolicy.USE_FALLBACK),
-                Map.of(SUMMARY, FALLBACK),
-                Map.of(
-                        SUMMARY, List.of("secret.workflow.summary"),
-                        FALLBACK, List.of("secret.workflow.fallback")),
-                Map.of(
-                        SUMMARY, List.of("secret.artifact.summary"),
-                        FALLBACK, List.of("secret.artifact.fallback")));
-        CapabilityPlan combinedCyclePlan = new CapabilityPlan(32L, List.of(
-                new CapabilityDecision(
-                        SUMMARY,
-                        CapabilityDecision.Availability.DEGRADED,
-                        false,
-                        CapabilityDecision.Action.USE_FALLBACK,
-                        FALLBACK,
-                        combinedCycleProfile.affectedWorkflowsOf(FALLBACK),
-                        combinedCycleProfile.producedArtifactsOf(FALLBACK),
-                        "PROVIDER_CAPABILITY_MISSING",
-                        32L),
-                new CapabilityDecision(
-                        FALLBACK,
-                        CapabilityDecision.Availability.AVAILABLE,
-                        true,
-                        CapabilityDecision.Action.ENABLE,
-                        null,
-                        combinedCycleProfile.affectedWorkflowsOf(FALLBACK),
-                        combinedCycleProfile.producedArtifactsOf(FALLBACK),
-                        null,
-                        32L)));
-        assertFixedFailure(() -> FinalizationExecutionFact.freeze(
-                MEETING_ID, STARTED_AT, TITLE, combinedCycleProfile, combinedCyclePlan));
 
         assertFixedFailure(() -> FinalizationExecutionFact.freeze(
                 MEETING_ID, STARTED_AT, TITLE, profile,
@@ -369,7 +291,7 @@ class FinalizationExecutionFactTest {
     }
 
     @Test
-    void acceptsNativeFallbackFailAndDisabledPlansProducedByRealPlanner() {
+    void acceptsNativeFailAndDisabledPlansProducedByRealPlanner() {
         ProductProfile profile = profile();
         CapabilityPlanner planner = new CapabilityPlanner();
         Set<String> allCapabilities = Set.of(TRANSCRIPT, SUMMARY, FALLBACK);
@@ -380,13 +302,6 @@ class FinalizationExecutionFactTest {
                 allCapabilities,
                 DeploymentLimits.NONE,
                 21L);
-        CapabilityPlan fallbackPlan = planner.plan(
-                new CapabilityDescriptor(Set.of(TRANSCRIPT, FALLBACK)),
-                profile,
-                Set.of(SUMMARY),
-                allCapabilities,
-                DeploymentLimits.NONE,
-                22L);
         CapabilityPlan requiredFailPlan = planner.plan(
                 new CapabilityDescriptor(Set.of(FALLBACK)),
                 profile,
@@ -403,14 +318,11 @@ class FinalizationExecutionFactTest {
                 24L);
 
         freeze(profile, nativePlan);
-        freeze(profile, fallbackPlan);
         freeze(profile, requiredFailPlan);
         FinalizationExecutionFact fact = freeze(profile, disabledPlan);
 
         assertEquals(CapabilityDecision.Action.ENABLE,
                 nativePlan.decisionFor(SUMMARY).action());
-        assertEquals(CapabilityDecision.Action.USE_FALLBACK,
-                fallbackPlan.decisionFor(SUMMARY).action());
         assertEquals(CapabilityDecision.Action.FAIL_MEETING,
                 requiredFailPlan.decisionFor(TRANSCRIPT).action());
         assertEquals(CapabilityDecision.Action.DISABLE,
@@ -424,10 +336,8 @@ class FinalizationExecutionFactTest {
                 profile.requiredCapabilities(),
                 profile.optionalCapabilities(),
                 profile.dependencies(),
-                Map.of(
-                        TRANSCRIPT, ProductProfile.MissingCapabilityPolicy.DISABLE,
-                        SUMMARY, ProductProfile.MissingCapabilityPolicy.USE_FALLBACK),
-                profile.fallbackCapabilities(),
+                Map.of(TRANSCRIPT, ProductProfile.MissingCapabilityPolicy.DISABLE),
+                Map.of(),
                 profile.affectedWorkflows(),
                 profile.producedArtifacts());
         CapabilityPlan explicitRequiredFailPlan = planner.plan(
@@ -440,20 +350,6 @@ class FinalizationExecutionFactTest {
         freeze(explicitRequiredDisablePolicy, explicitRequiredFailPlan);
         assertEquals(CapabilityDecision.Action.FAIL_MEETING,
                 explicitRequiredFailPlan.decisionFor(TRANSCRIPT).action());
-
-        ProductProfile requiredFallbackProfile = requiredFallbackProfile();
-        Set<String> fallbackCapabilities = Set.of(SUMMARY, FALLBACK);
-        CapabilityPlan requiredFallbackPlan = planner.plan(
-                new CapabilityDescriptor(Set.of(FALLBACK)),
-                requiredFallbackProfile,
-                Set.of(),
-                fallbackCapabilities,
-                DeploymentLimits.NONE,
-                25L);
-        freeze(requiredFallbackProfile, requiredFallbackPlan);
-        assertEquals(CapabilityDecision.Action.USE_FALLBACK,
-                requiredFallbackPlan.decisionFor(SUMMARY).action());
-        assertTrue(requiredFallbackPlan.decisionFor(SUMMARY).requiredByProfile());
 
         ProductProfile optionalFailProfile = optionalFailProfile();
         CapabilityPlan optionalFailPlan = planner.plan(
@@ -613,8 +509,10 @@ class FinalizationExecutionFactTest {
                 Set.of(TRANSCRIPT),
                 Set.of(SUMMARY, FALLBACK),
                 Map.of(SUMMARY, Set.of(TRANSCRIPT)),
-                Map.of(SUMMARY, ProductProfile.MissingCapabilityPolicy.USE_FALLBACK),
-                Map.of(SUMMARY, FALLBACK),
+                Map.of(
+                        SUMMARY, ProductProfile.MissingCapabilityPolicy.DISABLE,
+                        FALLBACK, ProductProfile.MissingCapabilityPolicy.DISABLE),
+                Map.of(),
                 Map.of(
                         TRANSCRIPT, List.of("secret.workflow.transcript"),
                         SUMMARY, List.of("secret.workflow.summary"),
@@ -639,41 +537,24 @@ class FinalizationExecutionFactTest {
                         11L),
                 new CapabilityDecision(
                         SUMMARY,
-                        CapabilityDecision.Availability.DEGRADED,
+                        CapabilityDecision.Availability.UNAVAILABLE,
                         false,
-                        CapabilityDecision.Action.USE_FALLBACK,
-                        FALLBACK,
-                        profile.affectedWorkflowsOf(FALLBACK),
-                        profile.producedArtifactsOf(FALLBACK),
+                        CapabilityDecision.Action.DISABLE,
+                        null,
+                        profile.affectedWorkflowsOf(SUMMARY),
+                        profile.producedArtifactsOf(SUMMARY),
                         "PROVIDER_CAPABILITY_MISSING",
                         11L),
                 new CapabilityDecision(
                         FALLBACK,
-                        CapabilityDecision.Availability.AVAILABLE,
+                        CapabilityDecision.Availability.UNAVAILABLE,
                         false,
-                        CapabilityDecision.Action.ENABLE,
+                        CapabilityDecision.Action.DISABLE,
                         null,
                         profile.affectedWorkflowsOf(FALLBACK),
                         profile.producedArtifactsOf(FALLBACK),
-                        null,
+                        "PROVIDER_CAPABILITY_MISSING",
                         11L)));
-    }
-
-    private static ProductProfile requiredFallbackProfile() {
-        return new ProductProfile(
-                "secret.profile/required-fallback",
-                1,
-                Set.of(SUMMARY),
-                Set.of(FALLBACK),
-                Map.of(),
-                Map.of(SUMMARY, ProductProfile.MissingCapabilityPolicy.USE_FALLBACK),
-                Map.of(SUMMARY, FALLBACK),
-                Map.of(
-                        SUMMARY, List.of("secret.workflow.summary"),
-                        FALLBACK, List.of("secret.workflow.fallback")),
-                Map.of(
-                        SUMMARY, List.of("secret.artifact.summary"),
-                        FALLBACK, List.of("secret.artifact.fallback")));
     }
 
     private static ProductProfile optionalFailProfile() {

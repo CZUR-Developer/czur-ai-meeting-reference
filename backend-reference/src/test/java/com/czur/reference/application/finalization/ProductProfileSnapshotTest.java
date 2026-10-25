@@ -46,9 +46,8 @@ class ProductProfileSnapshotTest {
         Map<String, Set<String>> dependencies = new HashMap<>();
         dependencies.put(SUMMARY, new HashSet<>(Set.of(TRANSCRIPT)));
         Map<String, ProductProfile.MissingCapabilityPolicy> policies = new HashMap<>();
-        policies.put(SUMMARY, ProductProfile.MissingCapabilityPolicy.USE_FALLBACK);
+        policies.put(SUMMARY, ProductProfile.MissingCapabilityPolicy.DISABLE);
         Map<String, String> fallbacks = new HashMap<>();
-        fallbacks.put(SUMMARY, FALLBACK);
         Map<String, List<String>> workflows = new HashMap<>();
         workflows.put(TRANSCRIPT, new ArrayList<>(List.of("secret.workflow.transcript")));
         workflows.put(SUMMARY, new ArrayList<>(List.of("secret.workflow.summary")));
@@ -173,9 +172,9 @@ class ProductProfileSnapshotTest {
                 Set.of(SUMMARY, FALLBACK),
                 Map.of(SUMMARY, Set.of(TRANSCRIPT)),
                 Map.of(
-                        SUMMARY, ProductProfile.MissingCapabilityPolicy.USE_FALLBACK,
+                        SUMMARY, ProductProfile.MissingCapabilityPolicy.DISABLE,
                         FALLBACK, ProductProfile.MissingCapabilityPolicy.DISABLE),
-                Map.of(SUMMARY, FALLBACK),
+                Map.of(),
                 Map.of(
                         TRANSCRIPT, List.of("secret.workflow.transcript"),
                         SUMMARY, List.of("secret.workflow.summary"),

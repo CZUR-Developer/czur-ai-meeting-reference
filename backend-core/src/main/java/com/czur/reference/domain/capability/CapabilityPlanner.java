@@ -293,32 +293,6 @@ public final class CapabilityPlanner {
 
         private CapabilityDecision resolveMissing(String capability, boolean required, String reason) {
             ProductProfile.MissingCapabilityPolicy policy = profile.missingPolicyOf(capability);
-            String fallback = profile.fallbackOf(capability);
-            if (policy == ProductProfile.MissingCapabilityPolicy.USE_FALLBACK) {
-                if (fallback == null) {
-                    reason = "FALLBACK_NOT_CONFIGURED";
-                } else if (!hasExecutionMapping(fallback)) {
-                    reason = "FALLBACK_MAPPING_MISSING:" + fallback;
-                } else {
-                    CapabilityDecision fallbackDecision = evaluate(fallback, true);
-                    if (isUsable(fallbackDecision)) {
-                        LOGGER.log(Level.INFO,
-                                "能力计划使用已声明的降级实现 planRevision={0}", revision);
-                        return new CapabilityDecision(
-                                capability,
-                                CapabilityDecision.Availability.DEGRADED,
-                                required,
-                                CapabilityDecision.Action.USE_FALLBACK,
-                                fallback,
-                                profile.affectedWorkflowsOf(fallback),
-                                profile.producedArtifactsOf(fallback),
-                                reason,
-                                revision);
-                    }
-                    reason = "FALLBACK_UNAVAILABLE:" + fallback;
-                }
-            }
-
             if (required || policy == ProductProfile.MissingCapabilityPolicy.FAIL_MEETING) {
                 return new CapabilityDecision(
                         capability,
@@ -343,11 +317,6 @@ public final class CapabilityPlanner {
                     revision);
         }
 
-        private boolean hasExecutionMapping(String capability) {
-            return !profile.affectedWorkflowsOf(capability).isEmpty()
-                    && !profile.producedArtifactsOf(capability).isEmpty();
-        }
-
         private boolean nativeDependencyClosureAvailable(String capability, Set<String> visiting) {
             if (!visiting.add(capability)) {
                 throw new CapabilityPlanningException(
@@ -368,8 +337,7 @@ public final class CapabilityPlanner {
         }
 
         private static boolean isUsable(CapabilityDecision decision) {
-            return decision.action() == CapabilityDecision.Action.ENABLE
-                    || decision.action() == CapabilityDecision.Action.USE_FALLBACK;
+            return decision.action() == CapabilityDecision.Action.ENABLE;
         }
     }
 }

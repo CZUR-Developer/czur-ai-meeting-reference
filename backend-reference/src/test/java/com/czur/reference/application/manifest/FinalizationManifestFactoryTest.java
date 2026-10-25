@@ -115,8 +115,8 @@ class FinalizationManifestFactoryTest {
                 Set.of("speaker.identity", "speaker.session"),
                 Map.of(),
                 Map.of("speaker.identity",
-                        ProductProfile.MissingCapabilityPolicy.USE_FALLBACK),
-                Map.of("speaker.identity", "speaker.session"),
+                        ProductProfile.MissingCapabilityPolicy.DISABLE),
+                Map.of(),
                 Map.of(TRANSCRIPT_FINAL, List.of("transcript")),
                 Map.of(TRANSCRIPT_FINAL, List.of("transcript.final")));
         CapabilityPlan plan = new CapabilityPlanner().plan(
@@ -134,14 +134,11 @@ class FinalizationManifestFactoryTest {
 
         assertEquals(ManifestStatus.READY_WITH_WARNINGS, manifest.status());
         MeetingManifest.Warning warning = manifest.warnings().getFirst();
-        assertTrue(warning.code().contains(":"));
-        assertEquals(
-                "ai_meeting.capability."
-                        + warning.code().substring(0, warning.code().indexOf(':'))
-                        .toLowerCase(java.util.Locale.ROOT),
+        assertEquals("PROVIDER_CAPABILITY_MISSING", warning.code());
+        assertEquals("ai_meeting.capability.provider_capability_missing",
                 warning.messageKey());
         assertFalse(warning.messageKey().contains("speaker.session"),
-                "冒号后的动态 fallback 标识不得进入本地化 key");
+                "动态 fallback 标识不得进入本地化 key");
         assertNull(warning.diagnosticId());
     }
 

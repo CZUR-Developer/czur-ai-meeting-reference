@@ -8,9 +8,9 @@ import java.util.Objects;
  * 本场会议针对单项能力的不可变决策。
  *
  * <p>{@link Action#ENABLE} 表示按 Provider 原生能力执行；
- * {@link Action#USE_FALLBACK} 表示使用 Profile 中明确登记的降级能力；
  * {@link Action#DISABLE} 表示关闭对应功能；{@link Action#FAIL_MEETING}
- * 表示该能力是本档位不可缺少的，会议不能继续。所有决策使用同一个
+ * 表示该能力是本档位不可缺少的，会议不能继续。{@link Action#USE_FALLBACK}
+ * 仅为历史冻结事实保留，Profile 与 Planner 都已删除该路径。所有决策使用同一个
  * {@code planRevision}，便于 Android App 和 Web 按版本幂等更新。</p>
  */
 public record CapabilityDecision(
@@ -52,6 +52,8 @@ public record CapabilityDecision(
     public enum Action {
         ENABLE,
         DISABLE,
+        /** 历史冻结事实兼容值；Planner 不再生成。 */
+        @Deprecated
         USE_FALLBACK,
         FAIL_MEETING
     }

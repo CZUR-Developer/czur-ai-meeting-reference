@@ -37,7 +37,7 @@ public record CapabilityPlan(long planRevision, List<CapabilityDecision> decisio
                 .orElse(null);
     }
 
-    /** 返回实际会执行的能力（包含显式回退目标，不包含被关闭的原能力）。 */
+    /** 返回本计划实际 ENABLE 的能力；已移除 fallback 决策。 */
     public Set<String> enabledCapabilities() {
         TreeSet<String> enabled = decisions.stream()
                 .filter(decision -> decision.action() == CapabilityDecision.Action.ENABLE)

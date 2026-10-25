@@ -105,29 +105,17 @@ class CompleteMeetingResponseAssemblerTest {
     }
 
     @Test
-    void optionalCrossMeetingIdentityUsesDeclaredFallbackWithoutInventingIdentity() {
+    void removedFallbackPolicyIsRejectedBeforeMeetingAssembly() {
         String identity = CapabilityIds.SPEAKER_IDENTITY_CROSS_MEETING;
         String diarization = CapabilityIds.SPEAKER_DIARIZATION_SESSION;
-        var fixture = fixture(Set.of(REALTIME, identity),
-                Set.of(REALTIME, identity, diarization), 60_000);
-        var profile = new ProductProfile("standard", 1, Set.of(REALTIME),
-                Set.of(identity, diarization), Map.of(),
-                Map.of(identity, ProductProfile.MissingCapabilityPolicy.USE_FALLBACK),
-                Map.of(identity, diarization),
-                Map.of(diarization, List.of("session-diarization")),
-                Map.of(diarization, List.of("speaker.diarization.session")));
-        var allocator = new CountingAllocator();
-        var response = assertInstanceOf(CompleteMeetingResponseAssembler.Success.class,
-                assembler(allocator, 120_000, 3_200).assemble(input(
-                        fixture, profile, Set.of(REALTIME, diarization),
-                        DeploymentLimits.NONE))).response();
-        var fallback = response.capabilityDecisions().stream()
-                .filter(decision -> identity.equals(decision.capability()))
-                .findFirst().orElseThrow();
-        assertEquals(CapabilityDecision.Action.USE_FALLBACK, fallback.action());
-        assertEquals(diarization, fallback.fallbackCapability());
-        assertEquals(1L, fallback.planRevision());
-        assertEquals(1, allocator.calls.get());
+        IllegalArgumentException failure = assertThrows(IllegalArgumentException.class,
+                () -> new ProductProfile("standard", 1, Set.of(REALTIME),
+                        Set.of(identity, diarization), Map.of(),
+                        Map.of(identity, ProductProfile.MissingCapabilityPolicy.USE_FALLBACK),
+                        Map.of(identity, diarization),
+                        Map.of(diarization, List.of("session-diarization")),
+                        Map.of(diarization, List.of("speaker.diarization.session"))));
+        assertTrue(failure.getMessage().contains("USE_FALLBACK 已移除"));
     }
 
     @Test

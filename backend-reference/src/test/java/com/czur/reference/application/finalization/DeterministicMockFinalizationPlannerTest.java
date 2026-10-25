@@ -185,20 +185,20 @@ class DeterministicMockFinalizationPlannerTest {
     }
 
     @Test
-    void executableMappingsDeduplicateFallbackAndIgnoreDisabledArtifacts() {
-        ProductProfile fallback = fallbackProfile();
-        CapabilityPlan fallbackPlan = new CapabilityPlanner().plan(
+    void executableMappingsDeduplicateEnabledArtifacts() {
+        ProductProfile enabled = enabledProfile();
+        CapabilityPlan enabledPlan = new CapabilityPlanner().plan(
                 new CapabilityDescriptor(
-                        "mock-fallback", Set.of(TRANSCRIPT_FINAL, "summary.fallback")),
-                fallback,
+                        "mock-enabled", Set.of(TRANSCRIPT_FINAL, "summary.primary")),
+                enabled,
                 Set.of("summary.primary"),
-                Set.of(TRANSCRIPT_FINAL, "summary.primary", "summary.fallback"),
+                Set.of(TRANSCRIPT_FINAL, "summary.primary"),
                 DeploymentLimits.NONE,
                 5L);
         FinalizationExecutionFact execution = FinalizationExecutionFact.freeze(
-                MEETING_ID, ACCEPTED_AT.minusSeconds(60), null, fallback, fallbackPlan);
+                MEETING_ID, ACCEPTED_AT.minusSeconds(60), null, enabled, enabledPlan);
 
-        var plan = derive(input("sha256:fallback"), execution, reservation("reservation-a"));
+        var plan = derive(input("sha256:enabled"), execution, reservation("reservation-a"));
 
         assertEquals(List.of("summary.structured", "transcript.final"),
                 plan.artifacts().stream().map(value -> value.spec().artifactType()).toList());
@@ -384,22 +384,20 @@ class DeterministicMockFinalizationPlannerTest {
                 ACCEPTED_AT.plusSeconds(1800));
     }
 
-    private static ProductProfile fallbackProfile() {
+    private static ProductProfile enabledProfile() {
         return new ProductProfile(
-                "fallback/mock-v1",
+                "enabled/mock-v1",
                 2,
                 Set.of(TRANSCRIPT_FINAL),
-                Set.of("summary.primary", "summary.fallback"),
+                Set.of("summary.primary"),
                 Map.of(),
-                Map.of("summary.primary", ProductProfile.MissingCapabilityPolicy.USE_FALLBACK),
-                Map.of("summary.primary", "summary.fallback"),
+                Map.of(),
+                Map.of(),
                 Map.of(
                         TRANSCRIPT_FINAL, List.of("mock-transcript-v1"),
-                        "summary.primary", List.of("mock-summary-primary-v1"),
-                        "summary.fallback", List.of("mock-summary-fallback-v1")),
+                        "summary.primary", List.of("mock-summary-primary-v1")),
                 Map.of(
                         TRANSCRIPT_FINAL, List.of("transcript.final"),
-                        "summary.primary", List.of("summary.structured"),
-                        "summary.fallback", List.of("summary.structured")));
+                        "summary.primary", List.of("summary.structured")));
     }
 }

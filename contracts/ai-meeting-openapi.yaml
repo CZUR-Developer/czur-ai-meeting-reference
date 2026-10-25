@@ -1302,7 +1302,7 @@ components:
             type: string
         capabilityDecisions:
           type: array
-          description: 本场会议最终能力计划；包含已启用、降级和不可用能力及其原因。
+          description: 本场会议最终能力计划；包含已启用、关闭和不可用能力及其原因。fallback 已删除。
           items:
             type: object
             additionalProperties: false
@@ -1318,6 +1318,8 @@ components:
                 type: boolean
               fallbackCapability:
                 type: [string, "null"]
+                deprecated: true
+                description: 历史兼容字段；当前后端不再生成降级决策，固定为 null。
         acceptedAudioProfile:
           $ref: "#/components/schemas/AudioProfile"
         realtime:

@@ -15,15 +15,21 @@ import java.util.TreeSet;
  *
  * <p>{@code requiredCapabilities} 是创建会议时必须自动纳入的能力；
  * {@code optionalCapabilities} 只能在客户端请求并且本场授权允许时纳入。
- * 依赖和回退关系也属于 Profile 的版本化配置，不能由客户端临时指定，
- * 这样同一档位的业务流程才会保持稳定。</p>
+ * 依赖关系也属于 Profile 的版本化配置，不能由客户端临时指定，
+ * 这样同一档位的业务流程才会保持稳定。fallback 已删除：新 Profile 不允许
+ * 配置降级能力，缺失能力只能用 DISABLE 或 FAIL_MEETING 处理。</p>
  */
 public final class ProductProfile {
     /** Provider 缺失能力时的产品策略。 */
     public enum MissingCapabilityPolicy {
         /** 该能力不可用时关闭对应功能，但不影响不相关流程。 */
         DISABLE,
-        /** 尝试使用 Profile 明确声明的 fallbackCapability。 */
+        /**
+         * 历史占位值，已停止支持；构造 Profile 时会明确拒绝。
+         *
+         * @deprecated 降级路径已删除，请改用 {@link #DISABLE} 或 {@link #FAIL_MEETING}。
+         */
+        @Deprecated
         USE_FALLBACK,
         /** 该能力不可用时让会议创建/运行进入失败。 */
         FAIL_MEETING
@@ -87,7 +93,15 @@ public final class ProductProfile {
         known.addAll(this.optionalCapabilities);
         this.dependencies = immutableDependencies(dependencies, known);
         this.missingPolicies = immutablePolicies(missingPolicies, known);
+        if (this.missingPolicies.containsValue(MissingCapabilityPolicy.USE_FALLBACK)) {
+            throw new IllegalArgumentException(
+                    "USE_FALLBACK 已移除；缺失能力请改用 DISABLE 或 FAIL_MEETING");
+        }
         this.fallbackCapabilities = immutableFallbacks(fallbackCapabilities, known);
+        if (!this.fallbackCapabilities.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "fallbackCapabilities 已移除；不能再登记降级能力");
+        }
         this.affectedWorkflows = immutableStringLists(affectedWorkflows, known, "affectedWorkflows");
         this.producedArtifacts = immutableStringLists(producedArtifacts, known, "producedArtifacts");
         validateDependencyCycles(this.dependencies);
@@ -153,12 +167,14 @@ public final class ProductProfile {
         return missingPolicies.getOrDefault(capability, MissingCapabilityPolicy.DISABLE);
     }
 
+    /**
+     * 历史兼容视图；新 Profile 的 fallback 映射必须为空。
+     *
+     * @deprecated fallback 已删除，仅供旧快照/JSON 读取时保持形状。
+     */
+    @Deprecated
     public Map<String, String> fallbackCapabilities() {
         return fallbackCapabilities;
-    }
-
-    public String fallbackOf(String capability) {
-        return fallbackCapabilities.get(capability);
     }
 
     public Map<String, List<String>> affectedWorkflows() {

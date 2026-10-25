@@ -26,11 +26,11 @@ import java.util.Set;
  *
  * <p>构造时会验证 Capability Plan 对 Profile 的能力集合完整覆盖且每项只出现一次，
  * {@code requiredByProfile} 与 Profile 一致，并验证 workflow/artifact 映射没有漂移
- * 或重复项。{@code USE_FALLBACK} 决策必须由 Profile 的 {@code USE_FALLBACK} 缺失
- * 策略产生、使用 Profile 明确声明的 fallback，且其映射必须来自 fallback 目标；
- * 其它动作的映射必须来自能力自身。action/availability 以及 action/Profile policy
- * 还必须是 Planner 能产生的组合：required 能力不能被关闭，optional 能力只有使用
- * {@code FAIL_MEETING} policy 时才能产生 {@code FAIL_MEETING}。{@code ENABLE} 不得携带
+ * 或重复项。{@code USE_FALLBACK} 仅用于读取旧冻结事实；当前 ProductProfile 会
+ * 拒绝 fallback 配置，Planner 也不再生成该动作。其它动作的映射必须来自能力自身。
+ * action/availability 以及 action/Profile policy 还必须是当前 Planner 能产生的
+ * 组合：required 能力不能被关闭，optional 能力只有使用 {@code FAIL_MEETING} policy
+ * 时才能产生 {@code FAIL_MEETING}。{@code ENABLE} 不得携带
  * warning，其它动作必须携带非空 warning；可用但未请求的 {@code DISABLE} 固定使用
  * {@code NOT_REQUESTED}。此外，fallback 目标以及 {@code ENABLE} 能力的全部依赖必须在
  * 同一 Plan 中可用。验证后决策按 capability 排序，使等价计划产生稳定的 canonical 表示。</p>
