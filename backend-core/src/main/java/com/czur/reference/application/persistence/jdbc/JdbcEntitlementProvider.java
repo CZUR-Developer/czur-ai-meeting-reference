@@ -321,9 +321,6 @@ public class JdbcEntitlementProvider
     @Override
     public EntitlementProviderResult<UsageOperationResult> cancelReservationWithLease(
             LeaseAwareCancelReservationRequest request) {
-        if (engine != JdbcDatabaseEngine.POSTGRESQL) {
-            throw new UnsupportedOperationException("MySQL client model does not expose lease cleanup");
-        }
         if (request == null) {
             return failure(EntitlementProviderError.Code.INVALID_REQUEST, false,
                     "CANCEL_LEASE_REQUEST_MISSING");
@@ -347,6 +344,7 @@ public class JdbcEntitlementProvider
                 Optional<JdbcUsageReservationStore.LockedReservation> lockedOptional =
                         JdbcUsageReservationStore.lockReservationForOwnedCreation(
                                 connection,
+                                engine,
                                 cancel.deploymentScope(),
                                 cancel.subjectScope(),
                                 cancel.reservationId());
@@ -394,7 +392,7 @@ public class JdbcEntitlementProvider
                     cancelled = current.cancel(
                             cancel.reasonCode(), persistedCancelledAt, cancel.expectedVersion());
                     if (!JdbcUsageReservationStore.cancelWithLease(
-                            connection, current, cancelled, lease, cancelledAt)) {
+                            connection, engine, current, cancelled, lease, cancelledAt)) {
                         connection.rollback();
                         return failure(EntitlementProviderError.Code.RESERVATION_STATE_CONFLICT,
                                 false, "CANCEL_LEASE_CAS_REJECTED");
@@ -410,7 +408,7 @@ public class JdbcEntitlementProvider
 
                 UsageOperationResult candidate = identity.terminalResult(cancelled);
                 if (!JdbcUsageReservationStore.insertOperation(
-                        connection, candidate, persistedOperationTime(cancelledAt))) {
+                        connection, engine, candidate, persistedOperationTime(cancelledAt))) {
                     return rollbackAndReadWinner(connection, identity);
                 }
                 connection.commit();

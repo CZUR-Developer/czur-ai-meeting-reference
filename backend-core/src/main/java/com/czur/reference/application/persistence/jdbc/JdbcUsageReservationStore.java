@@ -511,7 +511,19 @@ final class JdbcUsageReservationStore {
             UsageReservation cancelled,
             ExpiredReservationStore.LeaseToken lease,
             Instant cancelledAt) throws SQLException {
+        return cancelWithLease(connection, JdbcDatabaseEngine.POSTGRESQL,
+                previous, cancelled, lease, cancelledAt);
+    }
+
+    static boolean cancelWithLease(
+            Connection connection,
+            JdbcDatabaseEngine engine,
+            UsageReservation previous,
+            UsageReservation cancelled,
+            ExpiredReservationStore.LeaseToken lease,
+            Instant cancelledAt) throws SQLException {
         Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(engine, "engine");
         Objects.requireNonNull(previous, "previous");
         Objects.requireNonNull(cancelled, "cancelled");
         Objects.requireNonNull(lease, "lease");
@@ -527,22 +539,48 @@ final class JdbcUsageReservationStore {
         if (!cancelledAt.isBefore(lease.expiresAt())) {
             return false;
         }
-        try (PreparedStatement statement = connection.prepareStatement(
-                LEASE_AWARE_CANCEL_SQL)) {
-            statement.setTimestamp(1, Timestamp.from(cancelled.cancelledAt()));
-            statement.setString(2, cancelled.cancellationReasonCode());
-            statement.setLong(3, cancelled.version());
-            statement.setTimestamp(4, Timestamp.from(cancelled.cancelledAt()));
-            statement.setString(5, previous.deploymentScope());
-            statement.setString(6, previous.subjectScope());
-            statement.setString(7, previous.reservationId());
-            statement.setString(8, previous.expectedMeetingId());
-            statement.setLong(9, previous.version());
-            statement.setString(10, lease.owner());
-            statement.setString(11, lease.token());
-            statement.setTimestamp(12, Timestamp.from(lease.expiresAt()));
-            statement.setLong(13, lease.leaseVersion());
-            statement.setTimestamp(14, Timestamp.from(cancelledAt));
+        String sql = engine == JdbcDatabaseEngine.POSTGRESQL ? LEASE_AWARE_CANCEL_SQL
+                : "UPDATE " + JdbcDatabaseTable.USAGE_RESERVATION.physicalName(engine)
+                + " SET status = 'CANCELLED', cancelled_at = ?, cancellation_reason_code = ?,"
+                + " version = ?, updated_at = ?, lease_owner = NULL,"
+                + " lease_token = NULL, lease_until = NULL"
+                + " WHERE deployment_scope = ? AND subject_scope = ? AND reservation_id = ?"
+                + " AND record_format = 'V3' AND status = 'RESERVED'"
+                + " AND bound_meeting_id IS NULL AND expected_meeting_id = ? AND version = ?"
+                + " AND lease_owner = ? AND lease_token = ? AND lease_until = ?"
+                + " AND lease_version = ? AND ? < lease_until";
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            if (engine == JdbcDatabaseEngine.MYSQL) {
+                JdbcValues.setInstant(statement, 1, cancelled.cancelledAt());
+                statement.setString(2, cancelled.cancellationReasonCode());
+                statement.setLong(3, cancelled.version());
+                JdbcValues.setInstant(statement, 4, cancelled.cancelledAt());
+                JdbcValues.setText(statement, 5, engine, previous.deploymentScope());
+                JdbcValues.setText(statement, 6, engine, previous.subjectScope());
+                JdbcValues.setText(statement, 7, engine, previous.reservationId());
+                statement.setString(8, previous.expectedMeetingId());
+                statement.setLong(9, previous.version());
+                statement.setString(10, lease.owner());
+                statement.setString(11, lease.token());
+                JdbcValues.setInstant(statement, 12, lease.expiresAt());
+                statement.setLong(13, lease.leaseVersion());
+                JdbcValues.setInstant(statement, 14, cancelledAt);
+            } else {
+                statement.setTimestamp(1, Timestamp.from(cancelled.cancelledAt()));
+                statement.setString(2, cancelled.cancellationReasonCode());
+                statement.setLong(3, cancelled.version());
+                statement.setTimestamp(4, Timestamp.from(cancelled.cancelledAt()));
+                statement.setString(5, previous.deploymentScope());
+                statement.setString(6, previous.subjectScope());
+                statement.setString(7, previous.reservationId());
+                statement.setString(8, previous.expectedMeetingId());
+                statement.setLong(9, previous.version());
+                statement.setString(10, lease.owner());
+                statement.setString(11, lease.token());
+                statement.setTimestamp(12, Timestamp.from(lease.expiresAt()));
+                statement.setLong(13, lease.leaseVersion());
+                statement.setTimestamp(14, Timestamp.from(cancelledAt));
+            }
             return statement.executeUpdate() == 1;
         }
     }

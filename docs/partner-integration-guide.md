@@ -79,6 +79,27 @@ Android 部署参数在仓外本地文件 `android-reference-app/deployment.loca
 检查，不会自动建表或修改表结构。开发机没有隔离数据库时，只能执行 Mock／模块测试，
 不能把它写成真实局域网会议验收。
 
+### MySQL client-model 的后台 Worker
+
+client-model 的 MySQL 5.7 路径现在也支持 Outbox 和过期 Reservation 清理，但不会自动启动
+线程。宿主用自己的调度器周期调用 `JdbcClientModelWorkers`：
+
+- `outboxDispatcher(context, handlerRegistrations, config)`：创建提交后 Outbox 分发器。每种
+  事件类型必须显式注册 Handler；没有注册的类型不会被领取。MySQL 5.7 使用事务内
+  `SELECT ... FOR UPDATE` 加条件 UPDATE，不依赖 `SKIP LOCKED` 或 `RETURNING`。
+- `expiredReservationCleanupWorker(context, canceller, ids, config)`：创建过期 Reservation
+  清理 Worker；`canceller` 必须传本装配的 lease-aware 权益端口，不能用普通 cancel 替代。
+
+两者都复用唯一的 `JdbcDatabaseContext` 连接池，`runOnce()` 不创建线程；宿主负责调度、
+lease owner、批次上限和在关闭上下文前停止调用。真实 MySQL 5.7 的门禁命令：
+
+```bash
+REFERENCE_TEST_MYSQL_DATABASE_URL='jdbc:mysql://127.0.0.1:3306/ai_meeting_test' \
+REFERENCE_TEST_MYSQL_DATABASE_USER=... \
+REFERENCE_TEST_MYSQL_DATABASE_PASSWORD=... \
+mvn -pl backend-reference -am -Dtest=JdbcMysqlWorkerIntegrationTest -DfailIfNoTests=false test
+```
+
 ### 模型配置
 
 `tools/reference-client.env.example` 只提供占位值。最小的确定性接线可使用

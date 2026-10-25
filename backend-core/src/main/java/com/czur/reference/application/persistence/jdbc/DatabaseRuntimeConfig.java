@@ -17,7 +17,9 @@ import java.util.Set;
  * {@link #toString()} 输出；校验失败也只报告字段和约束，不把完整 URL 或密码
  * 带入异常消息。两种引擎使用同一组字段，由显式 JDBC URL 选择；业务代码
  * 不按 hostname、profile 或数据库来源选择实现。支持连接不表示对应会议 Store
- * 已经可用，M1 的 MySQL 入口仅为 {@link JdbcDatabaseContext}。</p>
+ * 已经可用；MySQL client-model 通过 {@link JdbcDatabaseContext} 及
+ * {@link JdbcClientModelWorkers} 装配 Store/Worker 子集，完整
+ * {@link JdbcDatabaseRuntime} 仍只支持 PostgreSQL。</p>
  */
 public final class DatabaseRuntimeConfig {
     public static final String DATABASE_URL = "DATABASE_URL";

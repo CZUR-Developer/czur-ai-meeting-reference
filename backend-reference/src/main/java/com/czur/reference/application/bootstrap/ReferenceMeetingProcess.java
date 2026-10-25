@@ -2,11 +2,14 @@ package com.czur.reference.application.bootstrap;
 
 import com.czur.reference.application.artifact.filesystem.PersistentFileSystemMockArtifactStore;
 import com.czur.reference.application.artifact.s3.S3ArtifactStore;
+import com.czur.reference.application.entitlement.ExpiredReservationCleanupWorker;
 import com.czur.reference.application.finalization.MeetingInputReconciliationScan;
 import com.czur.reference.application.finalization.MockFinalizationWorker;
 import com.czur.reference.application.http.MeetingJdkHttpServer;
+import com.czur.reference.application.persistence.jdbc.JdbcClientModelWorkers;
 import com.czur.reference.application.persistence.jdbc.JdbcFinalizationCompletionUnitOfWork;
 import com.czur.reference.application.persistence.jdbc.JdbcWorkflowStepStore;
+import com.czur.reference.application.port.entitlement.LeaseAwareReservationCanceller;
 import com.czur.reference.application.port.artifact.ArtifactStoreException;
 import com.czur.reference.application.port.artifact.ArtifactStore;
 import com.czur.reference.application.wss.MeetingRealtimeWssServer;
@@ -112,6 +115,19 @@ public final class ReferenceMeetingProcess implements AutoCloseable {
                     new MockFinalizationWorker.Config("reference-" + UUID.randomUUID(), clock,
                             Duration.ofSeconds(30), Duration.ofSeconds(5),
                             Duration.ofSeconds(5), 10, 3));
+            ExpiredReservationCleanupWorker cleanup = null;
+            if (entitlement instanceof LeaseAwareReservationCanceller canceller) {
+                cleanup = JdbcClientModelWorkers.expiredReservationCleanupWorker(
+                        assembly.databaseContext(), canceller,
+                        new ReferenceMeetingHttpAssembly.RandomEntitlementIds(),
+                        ExpiredReservationCleanupWorker.Config.defaults(
+                                config.deploymentScope(),
+                                "reference-cleanup-" + UUID.randomUUID()));
+            } else {
+                LOGGER.log(Level.INFO,
+                        "权益端口不支持 lease-aware cancel，跳过 Reservation 清理 Worker");
+            }
+            final ExpiredReservationCleanupWorker cleanupWorker = cleanup;
             http = assembly.newJdkHttpServer(httpBind);
             wss = assembly.newRealtimeWssServer(wssBind, tls);
             wss.start();
@@ -123,7 +139,7 @@ public final class ReferenceMeetingProcess implements AutoCloseable {
                 thread.setDaemon(true);
                 return thread;
             });
-            scheduler.scheduleWithFixedDelay(() -> tick(scan, worker), 0,
+            scheduler.scheduleWithFixedDelay(() -> tick(scan, worker, cleanupWorker), 0,
                     TICK_SECONDS, TimeUnit.SECONDS);
             LOGGER.log(Level.INFO, "参考后端单进程已启动 httpPort="
                     + http.address().getPort() + " wssPort=" + wss.getPort());
@@ -205,7 +221,7 @@ public final class ReferenceMeetingProcess implements AutoCloseable {
     }
 
     private static void tick(MeetingInputReconciliationScan scan,
-            MockFinalizationWorker worker) {
+            MockFinalizationWorker worker, ExpiredReservationCleanupWorker cleanup) {
         try {
             scan.runOnce();
         } catch (RuntimeException failure) {
@@ -217,6 +233,14 @@ public final class ReferenceMeetingProcess implements AutoCloseable {
         } catch (RuntimeException failure) {
             LOGGER.log(Level.WARNING, "Mock 最终收口 Worker 本轮失败 reason={0}",
                     failure.getClass().getSimpleName());
+        }
+        if (cleanup != null) {
+            try {
+                cleanup.runOnce();
+            } catch (RuntimeException failure) {
+                LOGGER.log(Level.WARNING, "过期 Reservation 清理 Worker 本轮失败 reason={0}",
+                        failure.getClass().getSimpleName());
+            }
         }
     }
 

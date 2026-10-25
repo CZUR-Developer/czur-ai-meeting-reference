@@ -19,9 +19,10 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * PostgreSQL V3 到期 Reservation 领取适配器。
+ * PostgreSQL/MySQL V3 到期 Reservation 领取适配器。
  *
- * <p>claim 使用 {@code FOR UPDATE SKIP LOCKED} 按 {@code expires_at,
+ * <p>claim 在 PostgreSQL 使用 {@code FOR UPDATE SKIP LOCKED}，在 MySQL 5.7
+ * 使用事务内 {@code FOR UPDATE} 加条件 UPDATE；两者都按 {@code expires_at,
  * reservation_id} 确定顺序选择单部署范围内的到期未绑定记录。每一行独立生成
  * lease token，并以数据库 {@code lease_version + 1} 作为 fencing 版本；同一
  * worker 批次不共享 token。release 以完整范围、owner、token、version 和
@@ -83,13 +84,22 @@ public final class JdbcExpiredReservationStore implements ExpiredReservationStor
 
     private final DataSource dataSource;
     private final com.czur.reference.application.port.entitlement.EntitlementIdGenerator idGenerator;
+    private final JdbcDatabaseEngine engine;
 
     public JdbcExpiredReservationStore(
             DataSource dataSource,
             com.czur.reference.application.port.entitlement.EntitlementIdGenerator idGenerator) {
+        this(dataSource, idGenerator, JdbcDatabaseEngine.POSTGRESQL);
+    }
+
+    public JdbcExpiredReservationStore(
+            DataSource dataSource,
+            com.czur.reference.application.port.entitlement.EntitlementIdGenerator idGenerator,
+            JdbcDatabaseEngine engine) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
         this.idGenerator = Objects.requireNonNull(idGenerator, "idGenerator");
-        LOGGER.log(Level.INFO, "JDBC 到期 Reservation Store 已创建");
+        this.engine = Objects.requireNonNull(engine, "engine");
+        LOGGER.log(Level.INFO, "JDBC 到期 Reservation Store 已创建 engine={0}", engine);
     }
 
     @Override
@@ -104,11 +114,11 @@ public final class JdbcExpiredReservationStore implements ExpiredReservationStor
          * 的时间不一致。规范化后的 ClaimRequest 也让批次结果明确记录数据库实际
          * 使用的时间边界；普通的业务 cancel 不经过此路径，语义不受影响。
          */
-        Instant claimedAt = postgresTimestamp(request.now());
-        Instant leaseUntil = postgresTimestamp(request.leaseUntil());
+        Instant claimedAt = normalizedTimestamp(request.now());
+        Instant leaseUntil = normalizedTimestamp(request.leaseUntil());
         if (!leaseUntil.isAfter(claimedAt)) {
             throw new IllegalArgumentException(
-                    "leaseDuration must advance expiry at PostgreSQL microsecond precision");
+                    "leaseDuration must advance expiry at database microsecond precision");
         }
         ClaimRequest effectiveRequest = new ClaimRequest(
                 request.deploymentScope(), request.leaseOwner(), claimedAt,
@@ -118,25 +128,28 @@ public final class JdbcExpiredReservationStore implements ExpiredReservationStor
             connection.setAutoCommit(false);
             try {
                 List<ClaimedReservation> claims = new ArrayList<>();
-                try (PreparedStatement select = connection.prepareStatement(CLAIM_SQL)) {
-                    select.setString(1, effectiveRequest.deploymentScope());
-                    select.setTimestamp(2, Timestamp.from(claimedAt));
-                    select.setTimestamp(3, Timestamp.from(claimedAt));
+                try (PreparedStatement select = connection.prepareStatement(claimSql())) {
+                    JdbcValues.setText(select, 1, engine, effectiveRequest.deploymentScope());
+                    bindInstant(select, 2, claimedAt);
+                    bindInstant(select, 3, claimedAt);
                     select.setInt(4, effectiveRequest.limit());
                     try (ResultSet rows = select.executeQuery()) {
                         while (rows.next()) {
                             LeaseRow previous = readLeaseRow(rows);
                             String token = requireToken(idGenerator.newLeaseToken());
                             try (PreparedStatement update = connection.prepareStatement(
-                                    CLAIM_UPDATE_SQL)) {
+                                    claimUpdateSql())) {
                                 update.setString(1, effectiveRequest.leaseOwner());
                                 update.setString(2, token);
-                                update.setTimestamp(3, Timestamp.from(leaseUntil));
-                                update.setString(4, effectiveRequest.deploymentScope());
-                                update.setString(5, previous.reservation().subjectScope());
-                                update.setString(6, previous.reservation().reservationId());
-                                update.setTimestamp(7, Timestamp.from(claimedAt));
-                                update.setTimestamp(8, Timestamp.from(claimedAt));
+                                bindInstant(update, 3, leaseUntil);
+                                JdbcValues.setText(update, 4, engine,
+                                        effectiveRequest.deploymentScope());
+                                JdbcValues.setText(update, 5, engine,
+                                        previous.reservation().subjectScope());
+                                JdbcValues.setText(update, 6, engine,
+                                        previous.reservation().reservationId());
+                                bindInstant(update, 7, claimedAt);
+                                bindInstant(update, 8, claimedAt);
                                 if (update.executeUpdate() != 1) {
                                     throw new SQLException("expired reservation claim lost race");
                                 }
@@ -199,14 +212,14 @@ public final class JdbcExpiredReservationStore implements ExpiredReservationStor
                     connection.rollback();
                     return new ReleaseResult(ReleaseStatus.LEASE_EXPIRED, reservation);
                 }
-                try (PreparedStatement update = connection.prepareStatement(RELEASE_SQL)) {
-                    update.setString(1, lease.deploymentScope());
-                    update.setString(2, lease.subjectScope());
-                    update.setString(3, lease.reservationId());
+                try (PreparedStatement update = connection.prepareStatement(releaseSql())) {
+                    JdbcValues.setText(update, 1, engine, lease.deploymentScope());
+                    JdbcValues.setText(update, 2, engine, lease.subjectScope());
+                    JdbcValues.setText(update, 3, engine, lease.reservationId());
                     update.setString(4, lease.owner());
                     update.setString(5, lease.token());
                     update.setLong(6, lease.leaseVersion());
-                    update.setTimestamp(7, Timestamp.from(releasedAt));
+                    bindInstant(update, 7, releasedAt);
                     if (update.executeUpdate() != 1) {
                         connection.rollback();
                         return new ReleaseResult(ReleaseStatus.NOT_OWNER, reservation);
@@ -229,12 +242,12 @@ public final class JdbcExpiredReservationStore implements ExpiredReservationStor
         }
     }
 
-    private static Optional<LeaseRow> findForRelease(
+    private Optional<LeaseRow> findForRelease(
             Connection connection, LeaseToken lease) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(FIND_FOR_RELEASE_SQL)) {
-            statement.setString(1, lease.deploymentScope());
-            statement.setString(2, lease.subjectScope());
-            statement.setString(3, lease.reservationId());
+        try (PreparedStatement statement = connection.prepareStatement(findForReleaseSql())) {
+            JdbcValues.setText(statement, 1, engine, lease.deploymentScope());
+            JdbcValues.setText(statement, 2, engine, lease.subjectScope());
+            JdbcValues.setText(statement, 3, engine, lease.reservationId());
             try (ResultSet rows = statement.executeQuery()) {
                 return rows.next() ? Optional.of(readLeaseRow(rows)) : Optional.empty();
             }
@@ -256,8 +269,74 @@ public final class JdbcExpiredReservationStore implements ExpiredReservationStor
     }
 
     private static Instant nullableInstant(ResultSet rows, String column) throws SQLException {
-        Timestamp value = rows.getTimestamp(column);
-        return value == null ? null : value.toInstant();
+        return JdbcValues.instant(rows, column);
+    }
+
+    private String table() {
+        return JdbcDatabaseTable.USAGE_RESERVATION.physicalName(engine);
+    }
+
+    private String claimSql() {
+        return "SELECT reservation_id, deployment_scope, subject_scope, grant_id,"
+                + " expected_meeting_id, bound_meeting_id, bound_at, usage_unit,"
+                + " reserved_amount, actual_amount, created_at, expires_at, status,"
+                + " version, committed_at, cancelled_at, cancellation_reason_code,"
+                + " lease_owner, lease_token, lease_until, lease_version"
+                + " FROM " + table()
+                + " WHERE record_format = 'V3' AND deployment_scope = ?"
+                + " AND status = 'RESERVED' AND bound_meeting_id IS NULL"
+                + " AND expires_at <= ?"
+                + " AND (lease_until IS NULL OR lease_until <= ?)"
+                + " ORDER BY expires_at, reservation_id"
+                + (engine == JdbcDatabaseEngine.MYSQL
+                    ? " LIMIT ? FOR UPDATE" : " FOR UPDATE SKIP LOCKED LIMIT ?");
+    }
+
+    private String claimUpdateSql() {
+        return "UPDATE " + table()
+                + " SET lease_owner = ?, lease_token = ?, lease_until = ?,"
+                + " lease_version = lease_version + 1"
+                + " WHERE record_format = 'V3' AND deployment_scope = ?"
+                + " AND subject_scope = ? AND reservation_id = ?"
+                + " AND status = 'RESERVED' AND bound_meeting_id IS NULL"
+                + " AND expires_at <= ? AND (lease_until IS NULL OR lease_until <= ?)";
+    }
+
+    private String findForReleaseSql() {
+        return "SELECT reservation_id, deployment_scope, subject_scope, grant_id,"
+                + " expected_meeting_id, bound_meeting_id, bound_at, usage_unit,"
+                + " reserved_amount, actual_amount, created_at, expires_at, status,"
+                + " version, committed_at, cancelled_at, cancellation_reason_code,"
+                + " lease_owner, lease_token, lease_until, lease_version"
+                + " FROM " + table()
+                + " WHERE record_format = 'V3' AND deployment_scope = ?"
+                + " AND subject_scope = ? AND reservation_id = ?"
+                + " FOR UPDATE";
+    }
+
+    private String releaseSql() {
+        return "UPDATE " + table()
+                + " SET lease_owner = NULL, lease_token = NULL, lease_until = NULL"
+                + " WHERE record_format = 'V3' AND deployment_scope = ?"
+                + " AND subject_scope = ? AND reservation_id = ?"
+                + " AND status = 'RESERVED' AND bound_meeting_id IS NULL"
+                + " AND lease_owner = ? AND lease_token = ? AND lease_version = ?"
+                + " AND lease_until > ?";
+    }
+
+    private Instant normalizedTimestamp(Instant value) {
+        return engine == JdbcDatabaseEngine.MYSQL
+                ? value.truncatedTo(java.time.temporal.ChronoUnit.MICROS)
+                : postgresTimestamp(value);
+    }
+
+    private void bindInstant(PreparedStatement statement, int index, Instant value)
+            throws SQLException {
+        if (engine == JdbcDatabaseEngine.MYSQL) {
+            JdbcValues.setInstant(statement, index, value);
+        } else {
+            statement.setTimestamp(index, Timestamp.from(value));
+        }
     }
 
     /**

@@ -32,7 +32,7 @@ import static com.czur.reference.application.port.OutboxStore.RenewResult;
 import static com.czur.reference.application.port.OutboxStore.RenewStatus;
 
 /**
- * PostgreSQL Outbox 适配器参考实现。
+ * PostgreSQL/MySQL Outbox 适配器参考实现。
  *
  * <p>所有领取和完成操作都在数据库条件更新中校验 owner、token、版本和
  * lease 到期时间。{@code lease_version} 在每次成功领取时递增；端口的
@@ -248,7 +248,9 @@ public final class JdbcOutboxStore implements OutboxStore {
 
     @Override
     public List<ClaimedEvent> claim(ClaimRequest request) {
-        requirePostgresWorker();
+        if (engine == JdbcDatabaseEngine.MYSQL) {
+            return JdbcMysqlOutboxWorker.claim(dataSource, request);
+        }
         Objects.requireNonNull(request, "request");
         if (request.registeredEventTypes().isEmpty()) {
             return List.of();
@@ -329,7 +331,9 @@ public final class JdbcOutboxStore implements OutboxStore {
 
     @Override
     public RenewResult renew(LeaseToken lease, Instant renewedAt, Duration leaseDuration) {
-        requirePostgresWorker();
+        if (engine == JdbcDatabaseEngine.MYSQL) {
+            return JdbcMysqlOutboxWorker.renew(dataSource, lease, renewedAt, leaseDuration);
+        }
         Objects.requireNonNull(lease, "lease");
         Objects.requireNonNull(renewedAt, "renewedAt");
         Objects.requireNonNull(leaseDuration, "leaseDuration");
@@ -383,7 +387,7 @@ public final class JdbcOutboxStore implements OutboxStore {
                             new Object[]{lease.eventId(), lease.owner()});
                 } else {
                     result = classifyRenewFailure(
-                            connection, lease, effectiveRenewedAt, newExpiry);
+                            connection, engine, lease, effectiveRenewedAt, newExpiry);
                 }
                 connection.commit();
                 return result;
@@ -403,7 +407,9 @@ public final class JdbcOutboxStore implements OutboxStore {
 
     @Override
     public PublishResult markPublished(LeaseToken lease, Instant publishedAt) {
-        requirePostgresWorker();
+        if (engine == JdbcDatabaseEngine.MYSQL) {
+            return JdbcMysqlOutboxWorker.markPublished(dataSource, lease, publishedAt);
+        }
         Objects.requireNonNull(lease, "lease");
         Objects.requireNonNull(publishedAt, "publishedAt");
         Instant effectivePublishedAt = postgresTimestamp(publishedAt);
@@ -427,7 +433,7 @@ public final class JdbcOutboxStore implements OutboxStore {
                 LOGGER.log(Level.INFO, "JDBC Outbox 事件已发布 eventId={0}", lease.eventId());
                 return new PublishResult(PublishStatus.PUBLISHED, current);
             }
-            return classifyPublishFailure(connection, lease, effectivePublishedAt);
+            return classifyPublishFailure(connection, engine, lease, effectivePublishedAt);
         } catch (SQLException failure) {
             throw fail("确认 Outbox 发布失败 eventId=" + lease.eventId(), failure);
         }
@@ -436,7 +442,10 @@ public final class JdbcOutboxStore implements OutboxStore {
     @Override
     public FailureResult markFailed(LeaseToken lease, Instant failedAt,
                                     Instant nextAvailableAt, String error, int maxAttempts) {
-        requirePostgresWorker();
+        if (engine == JdbcDatabaseEngine.MYSQL) {
+            return JdbcMysqlOutboxWorker.markFailed(
+                    dataSource, lease, failedAt, nextAvailableAt, error, maxAttempts);
+        }
         Objects.requireNonNull(lease, "lease");
         Objects.requireNonNull(failedAt, "failedAt");
         Objects.requireNonNull(nextAvailableAt, "nextAvailableAt");
@@ -475,16 +484,16 @@ public final class JdbcOutboxStore implements OutboxStore {
                         new Object[]{lease.eventId(), status});
                 return new FailureResult(status, current);
             }
-            return classifyFailure(connection, lease, effectiveFailedAt);
+            return classifyFailure(connection, engine, lease, effectiveFailedAt);
         } catch (SQLException failure) {
             throw fail("记录 Outbox 失败事件失败 eventId=" + lease.eventId(), failure);
         }
     }
 
-    private static RenewResult classifyRenewFailure(
-            Connection connection, LeaseToken lease, Instant renewedAt, Instant newExpiry)
-            throws SQLException {
-        Optional<StoredEvent> found = findStored(connection, lease.eventId());
+    static RenewResult classifyRenewFailure(
+            Connection connection, JdbcDatabaseEngine engine, LeaseToken lease,
+            Instant renewedAt, Instant newExpiry) throws SQLException {
+        Optional<StoredEvent> found = findStored(connection, engine, lease.eventId(), false);
         if (found.isEmpty()) {
             return new RenewResult(RenewStatus.NOT_FOUND, null, null);
         }
@@ -508,9 +517,9 @@ public final class JdbcOutboxStore implements OutboxStore {
         return new RenewResult(RenewStatus.NOT_OWNER, current, null);
     }
 
-    private static PublishResult classifyPublishFailure(Connection connection, LeaseToken lease,
-                                                        Instant at) throws SQLException {
-        Optional<StoredEvent> found = findStored(connection, lease.eventId());
+    static PublishResult classifyPublishFailure(Connection connection, JdbcDatabaseEngine engine,
+                                                LeaseToken lease, Instant at) throws SQLException {
+        Optional<StoredEvent> found = findStored(connection, engine, lease.eventId(), false);
         if (found.isEmpty()) {
             return new PublishResult(PublishStatus.NOT_FOUND, null);
         }
@@ -531,9 +540,9 @@ public final class JdbcOutboxStore implements OutboxStore {
         return new PublishResult(PublishStatus.NOT_OWNER, current);
     }
 
-    private static FailureResult classifyFailure(Connection connection, LeaseToken lease,
-                                                 Instant at) throws SQLException {
-        Optional<StoredEvent> found = findStored(connection, lease.eventId());
+    static FailureResult classifyFailure(Connection connection, JdbcDatabaseEngine engine,
+                                         LeaseToken lease, Instant at) throws SQLException {
+        Optional<StoredEvent> found = findStored(connection, engine, lease.eventId(), false);
         if (found.isEmpty()) {
             return new FailureResult(FailureStatus.NOT_FOUND, null);
         }
@@ -569,7 +578,7 @@ public final class JdbcOutboxStore implements OutboxStore {
         return findStored(connection, JdbcDatabaseEngine.POSTGRESQL, eventId, false);
     }
 
-    private static Optional<StoredEvent> findStored(Connection connection, JdbcDatabaseEngine engine,
+    static Optional<StoredEvent> findStored(Connection connection, JdbcDatabaseEngine engine,
             String eventId, boolean currentRead) throws SQLException {
         String sql = engine == JdbcDatabaseEngine.POSTGRESQL ? FIND_SQL : """
                 SELECT event_id, aggregate_type, aggregate_id, event_type, payload,
@@ -620,12 +629,6 @@ public final class JdbcOutboxStore implements OutboxStore {
         }
     }
 
-    private void requirePostgresWorker() {
-        if (engine != JdbcDatabaseEngine.POSTGRESQL) {
-            throw new UnsupportedOperationException("MySQL client model does not expose Outbox worker");
-        }
-    }
-
     private static OutboxEvent readEvent(ResultSet rows) throws SQLException {
         return new OutboxEvent(
                 JdbcValues.text(rows, "event_id"),
@@ -643,12 +646,12 @@ public final class JdbcOutboxStore implements OutboxStore {
                 rows.getString("last_error"));
     }
 
-    private static StoredEvent readStoredEvent(ResultSet rows) throws SQLException {
+    static StoredEvent readStoredEvent(ResultSet rows) throws SQLException {
         return new StoredEvent(
                 readEvent(rows), rows.getString("lease_token"), rows.getLong("lease_version"));
     }
 
-    private static boolean leaseMatches(StoredEvent stored, LeaseToken requested) {
+    static boolean leaseMatches(StoredEvent stored, LeaseToken requested) {
         OutboxEvent current = stored.event();
         return current.status() == EventStatus.LEASED
                 && requested.owner().equals(current.leaseOwner())
@@ -662,11 +665,17 @@ public final class JdbcOutboxStore implements OutboxStore {
      * 非微秒规范值若先交给 pgjdbc 舍入，可能伪装成当前 lease_until，因此必须在
      * 绑定 SQL 前拒绝。claimedAt 只用于操作时间窗口，不擅自扩大为数据库栅栏字段。
      */
-    private static boolean hasCanonicalLeaseExpiry(LeaseToken lease) {
-        return lease.expiresAt().equals(postgresTimestamp(lease.expiresAt()));
+    private boolean hasCanonicalLeaseExpiry(LeaseToken lease) {
+        return lease.expiresAt().equals(canonicalTimestamp(lease.expiresAt()));
     }
 
-    private static OutboxEvent withLease(OutboxEvent event, String owner, java.time.Instant until) {
+    private Instant canonicalTimestamp(Instant value) {
+        return engine == JdbcDatabaseEngine.MYSQL
+                ? value.truncatedTo(java.time.temporal.ChronoUnit.MICROS)
+                : postgresTimestamp(value);
+    }
+
+    static OutboxEvent withLease(OutboxEvent event, String owner, java.time.Instant until) {
         return new OutboxEvent(event.eventId(), event.aggregateType(), event.aggregateId(), event.eventType(),
                 event.payload(), event.occurredAt(), event.availableAt(), EventStatus.LEASED,
                 event.attemptCount(), owner, until, null, event.lastError());
@@ -686,7 +695,7 @@ public final class JdbcOutboxStore implements OutboxStore {
         return Instant.ofEpochSecond(value.getEpochSecond(), roundedMicros * 1_000L);
     }
 
-    private record StoredEvent(OutboxEvent event, String leaseToken, long leaseVersion) {
+    record StoredEvent(OutboxEvent event, String leaseToken, long leaseVersion) {
     }
 
     private static void bindAppend(PreparedStatement statement, OutboxEvent event) throws SQLException {
