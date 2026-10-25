@@ -36,7 +36,20 @@ if (!apiBaseUrl) {
   }
 }
 if (!apiBaseUrl) fail('apiBaseUrl 为空');
-if (apiBaseUrl.includes('your-backend.example')) fail('apiBaseUrl 还是模板里的占位值');
+let apiUrl;
+try {
+  apiUrl = new URL(apiBaseUrl);
+} catch (error) {
+  fail('apiBaseUrl 不是合法 URL');
+}
+if (apiUrl.protocol !== 'http:' && apiUrl.protocol !== 'https:') {
+  fail('apiBaseUrl 必须是 http/https 地址');
+}
+const apiHost = apiUrl.hostname.toLowerCase();
+if (apiHost.includes('your-backend') || apiHost.endsWith('.example')
+    || apiHost === 'example.com' || apiHost.endsWith('.invalid')) {
+  fail('apiBaseUrl 还是模板或测试占位值');
+}
 
 await rm(output, { recursive: true, force: true });
 await mkdir(output, { recursive: true });

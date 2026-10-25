@@ -75,6 +75,22 @@ class WebResultActionPlugin private constructor(
             ("https".equals(uri.scheme, true) || "http".equals(uri.scheme, true)) && uri.host != null
         } catch (invalid: IllegalArgumentException) { false } catch (invalid: NullPointerException) { false }
 
+        /** 结果页只允许配置基址同源；阻止 Intent 注入或页面跳转到外部站点。 */
+        @JvmStatic fun isAllowedResultUrl(candidate: String?, base: String?): Boolean {
+            if (candidate == null || base == null || !validUrl(candidate) || !validUrl(base)) return false
+            val target = URI.create(candidate)
+            val configured = URI.create(base)
+            return target.scheme.equals(configured.scheme, true) &&
+                target.host.equals(configured.host, true) &&
+                effectivePort(target) == effectivePort(configured)
+        }
+
+        private fun effectivePort(uri: URI): Int = when {
+            uri.port >= 0 -> uri.port
+            "https".equals(uri.scheme, true) -> 443
+            else -> 80
+        }
+
         /** 保留已有参数和 fragment，替换同名会议参数，避免链接指向旧场次。 */
         @JvmStatic fun resultUrl(base: String, meetingId: String, genTime: Long): String {
             val uri = URI.create(base)

@@ -21,7 +21,19 @@ bash ./migrate.sh
 bash ./healthcheck-db.sh
 ```
 
-脚本只新增 `ai_trans_*` 会议专用表，不创建数据库／账号，不读写旧业务表。应用启动
+脚本只新增 `ai_trans_*` 会议专用表，不创建数据库／账号，不读写旧业务表。部署方先建库
+和账号；迁移账号需要一次性 DDL，应用账号只保留运行期 DML，不要复用旧业务库：
+
+```sql
+CREATE DATABASE meeting_reference CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+CREATE USER 'meeting_migrator'@'%' IDENTIFIED BY '<迁移密码>';
+GRANT CREATE, ALTER, INDEX, REFERENCES, SELECT, INSERT, UPDATE, DELETE
+  ON meeting_reference.* TO 'meeting_migrator'@'%';
+CREATE USER 'meeting_app'@'%' IDENTIFIED BY '<应用密码>';
+GRANT SELECT, INSERT, UPDATE, DELETE ON meeting_reference.* TO 'meeting_app'@'%';
+```
+
+应用启动
 只做只读 readiness；未登记 V001 时启动失败。正式部署使用部署方已有 MySQL 实例，
 不要求安装本项目提供的数据库镜像。
 

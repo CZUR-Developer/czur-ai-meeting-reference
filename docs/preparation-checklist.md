@@ -55,7 +55,7 @@
 | --- | --- | --- | --- |
 | MySQL 5.7 兼容实例 | **必需** | 参考方案只交付一份 V001 初始化；不建库、不建账号 | `DATABASE_URL` 等 |
 | 设备可达的主机 | **必需** | 后端与静态 Web 都要能被设备访问；设备自己的 `127.0.0.1` 指设备自身 | `AI_MEETING_HTTP_BIND` |
-| TLS 证书 | **必需** | App 登录入口必须是 HTTPS；开发期可自签，见 [本机局域网 HTTPS](local-lan-https.md) | `deployment.local.properties` 的 `debugCaFile` |
+| TLS 证书 | **必需** | App 登录入口必须是 HTTPS；开发期可自签，见 [本机局域网 HTTPS](local-lan-https.md) | 调试 CA 固定读取 `app/src/debug/res/raw/reference_debug_ca.pem`，不是 deployment 配置项 |
 | 结果页静态站 | **必需** | `web-reference` 构建产物 + 生成的 `config.json` | `deployment.local.properties` 的 `resultWebUrl` |
 | 存储（产物、录音） | **必需** | 本机 file 存储就够；对象存储可选 | `AI_MEETING_ARTIFACT_STORE`、`AI_MEETING_ARTIFACT_ROOT` |
 | 对象存储（S3／OSS） | 可选 | 参考实现不依赖 CZUR 的 OSS 账号 | 存储实现所在配置 |

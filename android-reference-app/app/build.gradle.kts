@@ -58,6 +58,8 @@ val localDebugCa = file("src/debug/res/raw/reference_debug_ca.pem").takeIf { it.
 android {
     namespace = "com.czur.aimeeting.reference"
     compileSdk = 35
+    useLibrary("android.test.runner")
+    useLibrary("android.test.base")
     buildFeatures { buildConfig = true }
 
     defaultConfig {
@@ -66,6 +68,7 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
+        testInstrumentationRunner = "android.test.InstrumentationTestRunner"
         buildConfigField("String", "BACKEND_URL", "\"$deploymentBackendUrl\"")
         buildConfigField("String", "RESULT_WEB_URL", "\"$deploymentResultWebUrl\"")
     }

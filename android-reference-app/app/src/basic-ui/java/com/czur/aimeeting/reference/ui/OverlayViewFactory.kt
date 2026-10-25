@@ -11,6 +11,7 @@ import android.content.res.Configuration
 import android.graphics.PixelFormat
 import android.os.IBinder
 import android.provider.Settings
+import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
@@ -138,7 +139,14 @@ class OverlayViewFactory : MeetingOverlayFactory {
                 pivotX?.let { root.pivotX = it }
                 root.pivotY = 0f
             }
-            manager.addView(root, layout)
+            try {
+                manager.addView(root, layout)
+            } catch (invalid: WindowManager.BadTokenException) {
+                Log.w("AiMeetingReference", "字幕悬浮窗附着失败，保留会话状态", invalid)
+                views = null
+                params = null
+                return
+            }
             created.render(latest, timeText, canStop, audioLevel, false)
         }
 

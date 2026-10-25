@@ -21,7 +21,7 @@ FROM eclipse-temurin:21-jre-jammy
 # 可选的跨会议声纹插件需要会后解码／切片。运行依赖随应用镜像提供，
 # 无须合作伙伴另行挂载宿主机可执行文件；模型 Key 仍只由部署配置注入。
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+    && apt-get install -y --no-install-recommends curl ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
