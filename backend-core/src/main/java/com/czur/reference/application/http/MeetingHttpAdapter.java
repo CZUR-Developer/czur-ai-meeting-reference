@@ -8,7 +8,6 @@ import com.czur.reference.application.command.StopMeetingIntent;
 import com.czur.reference.application.model.ModelSessionIssuer;
 import com.czur.reference.application.model.SummarySessionIssuer;
 import com.czur.reference.application.model.ModelSessionLanguageLookup;
-import com.czur.reference.application.model.TingwuModelSessionIssuer;
 import com.czur.reference.application.port.DeleteRequest;
 import com.czur.reference.application.port.MeetingDeletionPort;
 import com.czur.reference.application.port.MeetingManifestPort;
@@ -538,7 +537,9 @@ public final class MeetingHttpAdapter {
                     return text == null ? errors.notImplemented() : errors.translationSession(meetingId, text);
                 }
                 return errors.modelSession(meetingId, modelSessions.issue(sessionRequest));
-            } catch (TingwuModelSessionIssuer.SessionIssueException | IllegalStateException unavailable) {
+            } catch (RuntimeException unavailable) {
+                LOGGER.log(Level.FINE, "模型会话签发失败 type={0}",
+                        unavailable.getClass().getSimpleName());
                 return errors.modelSessionUnavailable();
             }
         }
@@ -570,7 +571,9 @@ public final class MeetingHttpAdapter {
                     return errors.summaryNotGranted();
                 }
                 return errors.summarySession(meetingId, summarySessions.issue());
-            } catch (SummarySessionIssuer.SessionIssueException | IllegalStateException unavailable) {
+            } catch (RuntimeException unavailable) {
+                LOGGER.log(Level.FINE, "总结会话签发失败 type={0}",
+                        unavailable.getClass().getSimpleName());
                 return errors.summarySessionUnavailable();
             }
         }

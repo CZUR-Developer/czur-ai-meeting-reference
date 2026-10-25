@@ -1,9 +1,13 @@
 package com.czur.reference.application.persistence.jdbc;
 
+import com.czur.reference.application.command.MeetingCommandResult;
+import com.czur.reference.application.port.IdempotencyStore;
 import com.czur.reference.application.port.OutboxStore;
 import com.czur.reference.application.port.entitlement.EntitlementIdGenerator;
 import com.czur.reference.application.port.entitlement.ExpiredReservationStore;
 import com.czur.reference.application.port.entitlement.UsageReservation;
+import com.czur.reference.domain.meeting.MeetingAggregate;
+import com.czur.reference.domain.meeting.MeetingState;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -193,6 +197,35 @@ class JdbcMysqlWorkerIntegrationTest {
             assertTrue(rows.next());
             assertEquals("CANCELLED", JdbcValues.text(rows, "status"));
         }
+    }
+
+    @Test
+    void legacyMysqlSaveAndIdempotencyReleaseDoNotThrow() {
+        JdbcMeetingRepository repository = new JdbcMeetingRepository(database);
+        MeetingAggregate.MeetingSnapshot legacy = MeetingAggregate.MeetingSnapshot.legacyUnowned(
+                "mtg-legacy-1", DEPLOYMENT, "client-legacy", "profile-legacy", 1,
+                MeetingState.CREATED, NOW, NOW);
+        repository.save(legacy);
+        assertEquals(MeetingState.CREATED,
+                repository.find("mtg-legacy-1").orElseThrow().state());
+
+        MeetingAggregate.MeetingSnapshot running = new MeetingAggregate.MeetingSnapshot(
+                legacy.meetingId(), legacy.deploymentScope(), legacy.clientSessionId(),
+                legacy.subjectScope(), legacy.grantId(), legacy.grantExpiresAt(),
+                legacy.usageReservationId(), legacy.profileId(), legacy.profileRevision(),
+                MeetingState.RUNNING, legacy.createdAt(), NOW.plusSeconds(5));
+        repository.save(running);
+        assertEquals(MeetingState.RUNNING,
+                repository.find("mtg-legacy-1").orElseThrow().state());
+
+        JdbcIdempotencyStore idempotency = new JdbcIdempotencyStore(database);
+        IdempotencyStore.IdempotencyRecord record = new IdempotencyStore.IdempotencyRecord(
+                DEPLOYMENT, "idem-legacy", "digest-legacy",
+                new MeetingCommandResult(MeetingCommandResult.Operation.CREATED, legacy));
+        idempotency.save(record);
+        assertTrue(idempotency.find(DEPLOYMENT, "idem-legacy").isPresent());
+        idempotency.release(record);
+        assertTrue(idempotency.find(DEPLOYMENT, "idem-legacy").isEmpty());
     }
 
     private void insertExpiredReservation(String reservationId) throws Exception {

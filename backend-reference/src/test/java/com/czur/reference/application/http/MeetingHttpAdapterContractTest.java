@@ -193,6 +193,24 @@ class MeetingHttpAdapterContractTest {
     }
 
     @Test
+    void modelSessionIssuerRuntimeExceptionMapsTo503WithoutLeakingBody() {
+        ModelSessionIssuer issuer = request -> {
+            throw new IllegalArgumentException("provider response leaked?");
+        };
+        adapter = new MeetingHttpAdapter(query, deletion, decoder,
+                new HttpErrorMapper(() -> "issuer-diagnostic"), stopService(),
+                null, null, false, null, null, null, null, null, issuer,
+                (context, meetingId) -> new ModelSessionIssuer.Request(
+                        "zh-CN", List.of(), false));
+        query.getResult = new MeetingQueryPort.Found(status(MeetingState.CREATED));
+        var response = adapter.handle(new HttpRequest("POST",
+                "/v1/meetings/mtg_detail:modelSession", Map.of(), ""), context());
+        assertEquals(503, response.status());
+        assertTrue(response.body().contains("MODEL_SESSION_UNAVAILABLE"));
+        assertFalse(response.body().contains("provider response leaked"));
+    }
+
+    @Test
     void independentTranslationRenewalUsesSameGrantWithoutCreatingAnotherAsrTask() {
         AtomicInteger asrCalls = new AtomicInteger();
         AtomicInteger textCalls = new AtomicInteger();

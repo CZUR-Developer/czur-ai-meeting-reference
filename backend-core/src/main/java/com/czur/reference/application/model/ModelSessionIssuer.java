@@ -1,8 +1,10 @@
 package com.czur.reference.application.model;
 
+import java.net.URI;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /** 后端为单场会议向模型申请临时连接材料；不接收或转发音频。 */
 public interface ModelSessionIssuer {
@@ -32,7 +34,15 @@ public interface ModelSessionIssuer {
     record Request(String sourceLanguage, List<String> targetLanguages,
                    boolean translationEnabled, String meetingId, boolean multilingualInput) {
         public Request {
+            requireText("sourceLanguage", sourceLanguage);
+            Objects.requireNonNull(targetLanguages, "targetLanguages");
             targetLanguages = List.copyOf(targetLanguages);
+            for (String targetLanguage : targetLanguages) {
+                requireText("targetLanguages element", targetLanguage);
+            }
+            if (meetingId != null) {
+                requireText("meetingId", meetingId);
+            }
         }
 
         /**
@@ -61,6 +71,26 @@ public interface ModelSessionIssuer {
     record Session(String adapterId, String endpoint, Instant expiresAt,
                    Map<String, String> initParams,
                    TranslationSessionIssuer.Session translationSession) {
+        public Session {
+            requireText("adapterId", adapterId);
+            Objects.requireNonNull(endpoint, "endpoint");
+            URI uri;
+            try {
+                uri = URI.create(endpoint);
+            } catch (IllegalArgumentException invalid) {
+                throw new IllegalArgumentException("endpoint must be a valid URI", invalid);
+            }
+            String scheme = uri.getScheme();
+            if (!("ws".equalsIgnoreCase(scheme) || "wss".equalsIgnoreCase(scheme))
+                    || uri.getHost() == null || uri.getHost().isBlank()) {
+                throw new IllegalArgumentException(
+                        "endpoint must be an absolute ws/wss URI with a host");
+            }
+            Objects.requireNonNull(expiresAt, "expiresAt");
+            Objects.requireNonNull(initParams, "initParams");
+            initParams = Map.copyOf(initParams);
+        }
+
         /** 保留原发行器的构造签名；没有独立翻译时保持原生实时模型路径。 */
         public Session(String adapterId, String endpoint, Instant expiresAt,
                 Map<String, String> initParams) {
@@ -71,6 +101,12 @@ public interface ModelSessionIssuer {
         @Override public String toString() {
             return "ModelSessionIssuer.Session[adapterId=" + adapterId
                     + ", materials=REDACTED]";
+        }
+    }
+
+    private static void requireText(String name, String value) {
+        if (value == null || value.isBlank() || !value.equals(value.trim())) {
+            throw new IllegalArgumentException(name + " must be non-blank and trimmed");
         }
     }
 }

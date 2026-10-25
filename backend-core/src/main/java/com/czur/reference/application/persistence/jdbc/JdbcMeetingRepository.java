@@ -123,6 +123,35 @@ public final class JdbcMeetingRepository implements MeetingRepository {
             """;
 
     /**
+     * MySQL 5.7 没有 ON CONFLICT ... WHERE。冲突更新必须对每一列使用同一个
+     * legacy 行守卫，避免旧命令覆盖已经绑定权益的会议；守卫不命中时 MySQL
+     * 返回 0 行，调用方按归属冲突处理。
+     */
+    private String legacySaveSql() {
+        if (engine == JdbcDatabaseEngine.POSTGRESQL) {
+            return SAVE_LEGACY_SQL;
+        }
+        String table = JdbcDatabaseTable.MEETING.physicalName(engine);
+        String guard = "subject_scope = 'LEGACY_UNOWNED' AND grant_id IS NULL"
+                + " AND grant_expires_at IS NULL AND usage_reservation_id IS NULL";
+        return "INSERT INTO " + table
+                + " (meeting_id, deployment_scope, client_session_id, subject_scope,"
+                + " profile_id, profile_revision, state, aggregate_version,"
+                + " created_at, updated_at, metadata)"
+                + " VALUES (?, ?, ?, 'LEGACY_UNOWNED', ?, ?, ?, 0, ?, ?, CAST('{}' AS JSON))"
+                + " ON DUPLICATE KEY UPDATE"
+                + " deployment_scope = IF(" + guard
+                + ", VALUES(deployment_scope), deployment_scope),"
+                + " client_session_id = IF(" + guard
+                + ", VALUES(client_session_id), client_session_id),"
+                + " profile_id = IF(" + guard + ", VALUES(profile_id), profile_id),"
+                + " profile_revision = IF(" + guard
+                + ", VALUES(profile_revision), profile_revision),"
+                + " state = IF(" + guard + ", VALUES(state), state),"
+                + " updated_at = IF(" + guard + ", VALUES(updated_at), updated_at)";
+    }
+
+    /**
      * 新归属会议只能首次插入，不能通过 UPSERT 覆盖已存在的会议归属。
      * 该 SQL 只由 connection-scoped 创建工作单元调用；三个权益引用与真实主体
      * 一次性写入，数据库的延迟外键在整个事务提交时检查 Meeting 与
@@ -317,15 +346,12 @@ public final class JdbcMeetingRepository implements MeetingRepository {
 
     @Override
     public void save(MeetingAggregate.MeetingSnapshot meeting) {
-        if (engine == JdbcDatabaseEngine.MYSQL) {
-            throw new UnsupportedOperationException("MySQL client model does not support legacy save");
-        }
         Objects.requireNonNull(meeting, "meeting");
         requireLegacySave(meeting);
         try (Connection connection = dataSource.getConnection();
-             PreparedStatement statement = connection.prepareStatement(SAVE_LEGACY_SQL)) {
-            bindSnapshot(statement, meeting);
-            requireSaved(statement.executeUpdate());
+             PreparedStatement statement = connection.prepareStatement(legacySaveSql())) {
+            bindSnapshot(statement, meeting, engine);
+            requireSaved(statement.executeUpdate(), engine);
             LOGGER.log(Level.FINE, "JDBC 会议快照已保存 meetingId={0} state={1}",
                     new Object[]{meeting.meetingId(), meeting.state()});
         } catch (SQLException failure) {
@@ -1112,6 +1138,24 @@ public final class JdbcMeetingRepository implements MeetingRepository {
     private static void bindSnapshot(
             PreparedStatement statement,
             MeetingAggregate.MeetingSnapshot meeting) throws SQLException {
+        bindSnapshot(statement, meeting, JdbcDatabaseEngine.POSTGRESQL);
+    }
+
+    private static void bindSnapshot(
+            PreparedStatement statement,
+            MeetingAggregate.MeetingSnapshot meeting,
+            JdbcDatabaseEngine engine) throws SQLException {
+        if (engine == JdbcDatabaseEngine.MYSQL) {
+            JdbcValues.setText(statement, 1, engine, meeting.meetingId());
+            JdbcValues.setText(statement, 2, engine, meeting.deploymentScope());
+            JdbcValues.setText(statement, 3, engine, meeting.clientSessionId());
+            statement.setString(4, meeting.profileId());
+            statement.setInt(5, meeting.profileRevision());
+            statement.setString(6, meeting.state().name());
+            JdbcValues.setInstant(statement, 7, meeting.createdAt());
+            JdbcValues.setInstant(statement, 8, meeting.updatedAt());
+            return;
+        }
         statement.setString(1, meeting.meetingId());
         statement.setString(2, meeting.deploymentScope());
         statement.setString(3, meeting.clientSessionId());
@@ -1183,6 +1227,18 @@ public final class JdbcMeetingRepository implements MeetingRepository {
     }
 
     private static void requireSaved(int affectedRows) throws SQLException {
+        requireSaved(affectedRows, JdbcDatabaseEngine.POSTGRESQL);
+    }
+
+    private static void requireSaved(int affectedRows, JdbcDatabaseEngine engine)
+            throws SQLException {
+        if (engine == JdbcDatabaseEngine.MYSQL) {
+            // 1=首次插入，2=合法 legacy upsert 命中；0=守卫拒绝或值未变化。
+            if (affectedRows != 1 && affectedRows != 2) {
+                throw new SQLException("会议归属事实冲突，拒绝覆盖已有快照", "23000");
+            }
+            return;
+        }
         if (affectedRows != 1) {
             throw new SQLException("会议归属事实冲突，拒绝覆盖已有快照", "23000");
         }

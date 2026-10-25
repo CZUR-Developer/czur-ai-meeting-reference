@@ -49,7 +49,8 @@ public final class ReferenceMeetingHttpAssembly extends MeetingHttpAssembly {
     }
     public static ReferenceMeetingHttpAssembly start(Map<String, String> values,
             Clock clock, ArtifactStore artifacts) {
-        return start(ReferenceMeetingDeploymentConfig.fromEnvironment(values), clock, artifacts);
+        return start(ReferenceMeetingDeploymentConfig.fromEnvironment(values),
+                clock, artifacts, values);
     }
     public static ReferenceMeetingHttpAssembly start(ReferenceMeetingDeploymentConfig config, Clock clock) {
         return start(config, clock, null);
@@ -58,7 +59,17 @@ public final class ReferenceMeetingHttpAssembly extends MeetingHttpAssembly {
     /** 默认参考实现；配置须显式启用演示身份，旧默认行为保持。 */
     public static ReferenceMeetingHttpAssembly start(ReferenceMeetingDeploymentConfig config,
             Clock clock, ArtifactStore artifacts) {
+        return start(config, clock, artifacts, Map.of());
+    }
+
+    /**
+     * 宿主从环境变量装配时保留原始环境；模型发行器工厂需要读取部署配置，
+     * 不能收到空 Map 后自行猜测默认值。
+     */
+    private static ReferenceMeetingHttpAssembly start(ReferenceMeetingDeploymentConfig config,
+            Clock clock, ArtifactStore artifacts, Map<String, String> environment) {
         Objects.requireNonNull(config, "config");
+        Objects.requireNonNull(environment, "environment");
         if (!config.identity().enabled()) {
             throw new IllegalArgumentException("外部身份配置须显式注入身份和权益策略");
         }
@@ -67,8 +78,8 @@ public final class ReferenceMeetingHttpAssembly extends MeetingHttpAssembly {
         var login = config.login().map(value ->
                 new ReferenceDevSessionLoginEndpoint(value, new HttpErrorMapper(), clock)).orElse(null);
         return new ReferenceMeetingHttpAssembly(MeetingHttpAssembly.startWithLegacy(config, clock,
-                artifacts, identity, policy, defaultIssuer(config, clock), UnaryOperator.identity(),
-                login, ReferenceMeetingHttpAssembly::legacyAudio));
+                artifacts, identity, policy, defaultIssuer(config, clock, environment),
+                UnaryOperator.identity(), login, ReferenceMeetingHttpAssembly::legacyAudio));
     }
 
     public static ReferenceMeetingHttpAssembly start(ReferenceMeetingDeploymentConfig config,
@@ -145,16 +156,27 @@ public final class ReferenceMeetingHttpAssembly extends MeetingHttpAssembly {
 
     /** 兼容旧调用：只用内置注册表；自定义 ID 未注册时返回 null，由调用方报明确错误。 */
     static ModelSessionIssuer defaultIssuer(MeetingDeploymentConfig config, Clock clock) {
+        return defaultIssuer(config, clock, Map.of());
+    }
+
+    static ModelSessionIssuer defaultIssuer(MeetingDeploymentConfig config, Clock clock,
+            Map<String, String> environment) {
         ModelSessionIssuerRegistry registry = defaultRegistry(config, clock);
-        return issuerFor(config, clock, registry);
+        return issuerFor(config, clock, registry, environment);
     }
 
     /** 按部署配置的 Adapter ID 从注册表取发行器；未注册返回 null。 */
     public static ModelSessionIssuer issuerFor(MeetingDeploymentConfig config, Clock clock,
             ModelSessionIssuerRegistry registry) {
+        return issuerFor(config, clock, registry, Map.of());
+    }
+
+    public static ModelSessionIssuer issuerFor(MeetingDeploymentConfig config, Clock clock,
+            ModelSessionIssuerRegistry registry, Map<String, String> environment) {
         String adapterId = config.modelAdapterId();
         return registry.contains(adapterId)
-                ? registry.create(adapterId, new ModelSessionIssuerRegistry.Context(Map.of(), clock))
+                ? registry.create(adapterId,
+                        new ModelSessionIssuerRegistry.Context(environment, clock))
                 : null;
     }
 

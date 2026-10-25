@@ -361,15 +361,21 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
 
     @Override
     public void release(IdempotencyRecord candidate) {
-        if (engine != JdbcDatabaseEngine.POSTGRESQL) {
-            throw new UnsupportedOperationException("MySQL client model does not expose legacy release");
-        }
         Objects.requireNonNull(candidate, "candidate");
+        String sql = engine == JdbcDatabaseEngine.POSTGRESQL ? DELETE_SQL
+                : "DELETE FROM " + JdbcDatabaseTable.IDEMPOTENCY_RECORD.physicalName(engine)
+                + " WHERE subject_scope = ? AND idempotency_key = ? AND request_hash = ?";
         try (Connection connection = dataSource.getConnection();
-             PreparedStatement statement = connection.prepareStatement(DELETE_SQL)) {
-            statement.setString(1, candidate.scope());
-            statement.setString(2, candidate.key());
-            statement.setString(3, candidate.requestDigest());
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            if (engine == JdbcDatabaseEngine.MYSQL) {
+                JdbcValues.setText(statement, 1, engine, candidate.scope());
+                JdbcValues.setText(statement, 2, engine, candidate.key());
+                statement.setString(3, candidate.requestDigest());
+            } else {
+                statement.setString(1, candidate.scope());
+                statement.setString(2, candidate.key());
+                statement.setString(3, candidate.requestDigest());
+            }
             statement.executeUpdate();
             LOGGER.log(Level.FINE, "JDBC 幂等预占已释放");
         } catch (SQLException failure) {
