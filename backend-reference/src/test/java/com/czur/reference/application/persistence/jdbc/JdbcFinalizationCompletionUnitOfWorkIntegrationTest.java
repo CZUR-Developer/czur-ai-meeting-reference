@@ -1307,7 +1307,6 @@ class JdbcFinalizationCompletionUnitOfWorkIntegrationTest {
         String meetingId = "mtg_completion_" + suffix.replace('-', '_');
         Set<String> grantedCapabilities = new HashSet<>(requestedCapabilities);
         grantedCapabilities.addAll(productProfile.requiredCapabilities());
-        grantedCapabilities.addAll(productProfile.fallbackCapabilities().values());
         MeetingGrant grant = new MeetingGrant(
                 "grant-" + suffix,
                 DEPLOYMENT,
@@ -1424,8 +1423,8 @@ class JdbcFinalizationCompletionUnitOfWorkIntegrationTest {
                 Map.of(),
                 Map.of(
                         "speaker.identity",
-                        ProductProfile.MissingCapabilityPolicy.USE_FALLBACK),
-                Map.of("speaker.identity", "speaker.session"),
+                        ProductProfile.MissingCapabilityPolicy.DISABLE),
+                Map.of(),
                 Map.of("transcript.final", List.of("transcript")),
                 Map.of("transcript.final", List.of("transcript.final")));
     }

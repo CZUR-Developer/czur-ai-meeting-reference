@@ -151,9 +151,9 @@ class CreateMeetingFactJsonTest {
 
     private static CreateMeetingResponseFact responseFact() {
         CapabilityDecision decision = new CapabilityDecision(
-                "summary.structured", CapabilityDecision.Availability.DEGRADED, true,
-                CapabilityDecision.Action.USE_FALLBACK, "transcript.final",
-                List.of("workflow.summary"), List.of("artifact.summary"), "provider.slow", 7L);
+                "summary.structured", CapabilityDecision.Availability.AVAILABLE, true,
+                CapabilityDecision.Action.ENABLE, null,
+                List.of("workflow.summary"), List.of("artifact.summary"), null, 7L);
         return new CreateMeetingResponseFact(
                 "mtg_fact_json_1", MeetingState.CREATED,
                 new CreateMeetingRequestSnapshot.ProfileRef("standard", 3),

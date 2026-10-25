@@ -90,23 +90,23 @@ class CreateMeetingPublicResponseJsonTest {
     }
 
     @Test
-    void fallbackIsProjectedWithoutInternalExecutionFields() throws Exception {
+    void legacyFallbackFieldStaysNullWithoutInternalExecutionFields() throws Exception {
         var original = fact(null);
-        var fallback = new CapabilityDecision("translation.realtime",
-                CapabilityDecision.Availability.DEGRADED, false,
-                CapabilityDecision.Action.USE_FALLBACK, "transcript.realtime",
+        var enabled = new CapabilityDecision("translation.realtime",
+                CapabilityDecision.Availability.AVAILABLE, false,
+                CapabilityDecision.Action.ENABLE, null,
                 List.of("workflow.translation"), List.of("artifact.translation"),
-                "PROVIDER_CAPABILITY_MISSING", 1L);
+                null, 1L);
         var fact = new CreateMeetingResponseFact(original.meetingId(), original.state(),
                 original.acceptedProfile(), original.grantedCapabilities(),
-                List.of(fallback), original.acceptedAudioProfile(), original.realtime(),
+                List.of(enabled), original.acceptedAudioProfile(), original.realtime(),
                 original.limits());
         JsonNode decision = JSON.readTree(CreateMeetingPublicResponseJson.encode(fact))
                 .path("capabilityDecisions").get(0);
-        assertEquals(List.of("capability", "availability", "reasonCode",
-                "requiredByProfile", "fallbackCapability"), fields(decision));
-        assertEquals("transcript.realtime", decision.path("fallbackCapability").asText());
-        assertEquals("PROVIDER_CAPABILITY_MISSING", decision.path("reasonCode").asText());
+        assertEquals(List.of("capability", "availability", "requiredByProfile"),
+                fields(decision));
+        assertFalse(decision.has("fallbackCapability"));
+        assertEquals("AVAILABLE", decision.path("availability").asText());
     }
 
     private static CreateMeetingResponseFact fact(Long maxReplayAudioMs) {
