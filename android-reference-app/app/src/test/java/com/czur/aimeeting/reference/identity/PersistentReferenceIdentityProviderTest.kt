@@ -112,7 +112,8 @@ class PersistentReferenceIdentityProviderTest {
 
     /**
      * 旧核验的 401 晚到不能清掉期间完成的新登录：核验按发起时的会话判定，
-     * 当前持久会话已经换成新令牌时忽略迟到结果并返回当前状态。
+     * 当前持久会话已经换成新令牌时，该 401 只属于旧令牌。新登录随后又核验了一次
+     * 归属，仍然 401 说明归属没有得到确认，所以续办身份仍退回原场，登录本身保留。
      */
     @Test fun lateUnauthorizedProbeDoesNotClearNewlyCompletedLogin() {
         val probeArrived = CountDownLatch(1)
@@ -150,7 +151,8 @@ class PersistentReferenceIdentityProviderTest {
 
             val identity = result.get(5, TimeUnit.SECONDS)
             assertEquals(IdentityResult.Status.LOGGED_IN, identity.status())
-            assertEquals("fresh-token", identity.session()!!.accessToken())
+            // 二次核验仍 401，归属未确认：不能把新令牌写进原场收尾记录。
+            assertEquals("expired-token", identity.session()!!.accessToken())
             assertEquals("fresh-token", provider.currentIdentity().session()!!.accessToken())
         } finally {
             releaseProbe.countDown()
@@ -189,14 +191,91 @@ class PersistentReferenceIdentityProviderTest {
     }
 
     /**
-     * 再核验本身 401 仍按迟到 401 处理：期间完成的新登录不能被误清。
+     * 再核验本身 401 说明新账号的归属仍未确认：保持 Bob 的登录，返回 Alice 原场
+     * 身份，本次续办暂缓，不能把 Bob 的会话写进原场收尾记录。
      */
-    @Test fun unauthorizedReprobeAfterAccountSwitchKeepsNewLogin() {
+    @Test fun unauthorizedReprobeAfterAccountSwitchDefersWithOriginalIdentity() {
         val identity = accountSwitchDuringProbe(reprobeStatus = 401)
 
         assertEquals(IdentityResult.Status.LOGGED_IN, identity.status())
-        assertEquals("bob-token", identity.session()!!.accessToken())
+        assertEquals(ALICE_ORIGINAL_TOKEN, identity.session()!!.accessToken())
+        assertEquals("alice", identity.session()!!.displayName())
         assertEquals("bob-token", provider.currentIdentity().session()!!.accessToken())
+        assertEquals("bob", provider.currentIdentity().session()!!.displayName())
+        assertReprobeUsedCurrentSession()
+    }
+
+    /**
+     * 再核验挂起期间又换了一次账号：即使那次核验返回 200，发起核验的会话也已经
+     * 不是当前登录，不能采用它的结果；返回 Alice 原场身份，Carol 的登录保持不变。
+     */
+    @Test fun accountSwitchDuringReprobeIsNotAdopted() {
+        val firstProbeArrived = CountDownLatch(1)
+        val releaseFirstProbe = CountDownLatch(1)
+        val reprobeArrived = CountDownLatch(1)
+        val releaseReprobe = CountDownLatch(1)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                return when (request.getHeader("Authorization")) {
+                    "Bearer stale-token" -> {
+                        firstProbeArrived.countDown()
+                        if (!releaseFirstProbe.await(5, TimeUnit.SECONDS)) {
+                            throw IllegalStateException("测试未释放旧核验")
+                        }
+                        MockResponse().setResponseCode(401).setBody("{}")
+                    }
+                    "Bearer bob-token" -> {
+                        reprobeArrived.countDown()
+                        if (!releaseReprobe.await(5, TimeUnit.SECONDS)) {
+                            throw IllegalStateException("测试未释放再核验")
+                        }
+                        MockResponse().setResponseCode(200).setBody("{}")
+                    }
+                    else -> MockResponse().setResponseCode(403).setBody("{}")
+                }
+            }
+        }
+        provider.updateSession(
+            IdentitySession("stale-token", "alice"), "2099-01-01T00:00:00Z"
+        )
+        val result = CompletableFuture<IdentityResult>()
+        val caller = Thread {
+            try {
+                result.complete(
+                    provider.identityForFinalization(
+                        "mtg_resume", IdentitySession(ALICE_ORIGINAL_TOKEN, "alice")
+                    )
+                )
+            } catch (failure: Throwable) {
+                result.completeExceptionally(failure)
+            }
+        }
+        caller.start()
+        try {
+            assertTrue("旧核验应已发出", firstProbeArrived.await(5, TimeUnit.SECONDS))
+            provider.updateSession(
+                IdentitySession("bob-token", "bob"), "2099-01-01T00:00:00Z"
+            )
+            releaseFirstProbe.countDown()
+            assertTrue("再核验应已发出", reprobeArrived.await(5, TimeUnit.SECONDS))
+            // 再核验还在路上时又换了一次账号；迟到的 200 不能采用 Carol 的会话。
+            provider.updateSession(
+                IdentitySession("carol-token", "carol"), "2099-01-01T00:00:00Z"
+            )
+            releaseReprobe.countDown()
+
+            val identity = result.get(5, TimeUnit.SECONDS)
+            assertEquals(IdentityResult.Status.LOGGED_IN, identity.status())
+            assertEquals(ALICE_ORIGINAL_TOKEN, identity.session()!!.accessToken())
+            assertEquals("alice", identity.session()!!.displayName())
+            assertEquals("carol-token", provider.currentIdentity().session()!!.accessToken())
+            // 再核验仍然用 Bob 的令牌发出，没有改用期间登录的 Carol。
+            assertReprobeUsedCurrentSession()
+        } finally {
+            releaseFirstProbe.countDown()
+            releaseReprobe.countDown()
+            caller.join(5_000)
+        }
     }
 
     @Test fun ownershipProbeFailurePropagatesSoOriginalCheckpointIsKept() {
@@ -267,7 +346,7 @@ class PersistentReferenceIdentityProviderTest {
         }
     }
 
-    /** 两次请求都打原会议详情，第二次必须换成 Bob 的令牌，证明替换前重新核验过归属。 */
+    /** 两次请求都打原会议详情，第二次必须换成 Bob 的令牌，证明用的是发起再核验时的会话。 */
     private fun assertReprobeUsedCurrentSession() {
         val first = requireNotNull(server.takeRequest(5, TimeUnit.SECONDS)) { "缺少旧核验请求" }
         val second = requireNotNull(server.takeRequest(5, TimeUnit.SECONDS)) { "缺少再核验请求" }

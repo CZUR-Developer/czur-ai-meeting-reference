@@ -24,7 +24,8 @@ import java.time.Instant
  * [identityForFinalization] 的归属核验复用后端会议详情：以当前会话读取原
  * `meetingId`，只有该账号确实能读到原会议才替换旧令牌；换账号时返回原身份，
  * 且不改写本地登录记录。核验期间再换账号时，迟到的 401 会触发一次针对当前
- * 会话的重新核验，仍未通过就保留原场身份。
+ * 会话的重新核验；只有 200 才采用新会话，401／403／404 都返回原场身份，
+ * 本次续办暂缓。
  */
 class PersistentReferenceIdentityProvider(
     context: Context,
@@ -79,8 +80,8 @@ class PersistentReferenceIdentityProvider(
      * 已不存在，返回原身份并保留原状态，让 Stop 继续用旧令牌失败而不会串号。
      * 当前会话自身 401 只作废“发起核验时的那一份”：核验是网络调用，返回时用户
      * 可能已重新登录，迟到的 401 不能清掉新会话。用户在这段时间里换了账号时，
-     * 新账号同样要再核验一次对原会议的归属，通过才替换，未通过就退回原场身份
-     * 让本次续办暂缓；再核验本身 401 仍按迟到 401 的既有规则处理，不误清新登录。
+     * 新账号同样要再核验一次对原会议的归属；这次再核验只有 200 才替换，401
+     * 说明归属仍未确认，同样返回原场身份并保留新登录，不把当前会话当作续办身份。
      * 网络或存储异常直接抛出，由上层保留原场等待下次确认，不把失败伪装成成功。</p>
      *
      * <p>本方法不打开 UI、不建新场、不改会议归属；只在尾部发布／Stop／结果阶段
@@ -119,9 +120,9 @@ class PersistentReferenceIdentityProvider(
      * <p>这里对应两类情况。用户没有换账号时，这个 401 就是当前登录失效，沿用
      * [expireProbedSession] 的清理规则。用户期间重新登录（可能是同一个人，也可能
      * 是另一个账号）时，401 只属于旧令牌，不能清掉新登录；但新令牌也不能直接当作
-     * 原会议的续办身份，必须再用它读一次原会议详情：读到才替换，读不到就返回原
-     * 身份并保留原场，让 Stop 继续用旧令牌失败而不会串号。重新核验本身返回 401
-     * 仍按迟到 401 处理，保持当前新登录不动。</p>
+     * 原会议的续办身份，必须再用它读一次原会议详情：读到才替换；读不到（403/404）
+     * 或再核验本身 401 都说明归属没有得到确认，返回原身份并保留原场，让 Stop
+     * 继续用旧令牌失败而不会串号。再核验本身 401 同样不清理当前登录。</p>
      */
     @Throws(IOException::class)
     private fun revalidateAfterLateUnauthorized(
@@ -129,21 +130,21 @@ class PersistentReferenceIdentityProvider(
         originalIdentity: IdentitySession,
         probed: StoredSession,
     ): IdentityResult {
-        val fresh = session ?: return expireProbedSession(probed)
+        val fresh = session ?: return expireProbedSession(probed, originalIdentity)
         if (fresh.accessToken == probed.accessToken) {
             // 没有换账号：这份 401 就是当前登录失效，按既有规则作废。
-            return expireProbedSession(probed)
+            return expireProbedSession(probed, originalIdentity)
         }
         if (fresh.expiresAt.isNotBlank() && isExpired(fresh.expiresAt)) {
             // 新登录本身已过期；交回既有规则统一清理，避免在这里重复实现。
-            return expireProbedSession(probed)
+            return expireProbedSession(probed, originalIdentity)
         }
         return when (ownershipOf(meetingId, fresh.accessToken)) {
             Ownership.OWNED -> adoptVerifiedSession(fresh, originalIdentity)
             // 新账号也读不到原会议：保留原场身份，本次续办暂缓，不改本地登录。
             Ownership.NOT_OWNER -> IdentityResult.loggedIn(originalIdentity)
-            // 再核验本身 401：与迟到 401 同样处理，不误清期间完成的新登录。
-            Ownership.UNAUTHORIZED -> expireProbedSession(probed)
+            // 再核验本身 401：归属仍未确认，同样返回原场身份；当前登录保持不动。
+            Ownership.UNAUTHORIZED -> IdentityResult.loggedIn(originalIdentity)
         }
     }
 
@@ -170,19 +171,24 @@ class PersistentReferenceIdentityProvider(
      * 401 只作废发起核验时的那份持久会话。
      *
      * <p>核验期间用户可能已经重新登录。若当前会话已换成另一份令牌，这个 401
-     * 属于旧令牌，属于迟到响应：忽略即可，并返回当前登录状态，不能把刚完成的
-     * 新登录清掉。检查与清理在同一把锁内，避免与 [updateSession] 交错。</p>
+     * 属于旧令牌，不能清掉刚完成的新登录；但这份新会话同样没有通过归属核验，
+     * 不能当作原会议身份使用，所以返回 [originalIdentity] 让本次续办暂缓。
+     * 检查与清理在同一把锁内，避免与 [updateSession] 交错。</p>
      */
     @Synchronized
-    private fun expireProbedSession(probed: StoredSession): IdentityResult {
+    private fun expireProbedSession(
+        probed: StoredSession,
+        originalIdentity: IdentitySession,
+    ): IdentityResult {
         val current = session ?: return IdentityResult.loginRequired("请先登录")
         if (current.accessToken != probed.accessToken) {
-            // 新的持久会话已经建立：旧请求的 401 与它无关。
+            // 新的持久会话已经建立：旧请求的 401 与它的登录状态无关。
             if (current.expiresAt.isNotBlank() && isExpired(current.expiresAt)) {
                 clearSession()
                 return IdentityResult.loginRequired("登录已过期，请重新登录")
             }
-            return IdentityResult.loggedIn(IdentitySession(current.accessToken, current.displayName))
+            // 新会话未确认归属，不能写进原场收尾记录；保留登录，本次续办暂缓。
+            return IdentityResult.loggedIn(originalIdentity)
         }
         clearSession()
         return IdentityResult.loginRequired("登录已失效，请重新登录")
