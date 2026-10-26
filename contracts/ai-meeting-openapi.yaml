@@ -877,6 +877,57 @@ paths:
                 $ref: "#/components/schemas/IssueArtifactAccessResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/meetings/{meetingId}:heartbeat:
+    post:
+      tags: [Meetings]
+      operationId: meetingHeartbeat
+      summary: 会议存活心跳，记录开始与最后活跃事实
+      description: |
+        由会议前台服务在会议活跃期间按 Create 响应下发的 heartbeatIntervalMs 周期调用。
+        客户端不传时间戳：服务端把首次心跳记为 startedAt、每次心跳刷新 lastActiveAt，
+        供弃场收口与用量结算使用。与 WSS 传输层的瞬时 heartbeat 消息无关。
+        仅 STARTING／RUNNING 接受；重复调用幂等，只刷新最后活跃时间。
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/MeetingId"
+      responses:
+        "200":
+          description: 心跳已记录；返回当前部署的期望间隔（毫秒）
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [heartbeatIntervalMs]
+                properties:
+                  heartbeatIntervalMs:
+                    type: integer
+                    format: int64
+                    minimum: 1000
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: 会议不在 STARTING／RUNNING，不能记录心跳
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: 心跳存储暂不可用，可下个周期重试
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+
 components:
   securitySchemes:
     bearerAuth:
