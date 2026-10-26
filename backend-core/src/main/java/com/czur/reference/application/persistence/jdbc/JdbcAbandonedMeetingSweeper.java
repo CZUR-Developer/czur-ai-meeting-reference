@@ -37,7 +37,9 @@ import java.util.logging.Logger;
  * <p><b>A 类</b>：{@code ai_trans_meeting_heartbeat} 无行，状态停在
  * {@code CREATED}／{@code STARTING}，且创建时间已超过无心跳窗口。决定为
  * {@code NEVER_STARTED → CANCELLED}，结算时长固定 0；没有预占的历史会议在
- * 落决定时即视为已结算。</p>
+ * 落决定时即视为已结算。客户端已提交冻结采音用量（{@code audio_duration_ms}
+ * 非空）时说明本场正在走正常 Stop，候选查询与行锁内复核都跳过，不按“从未开始”
+ * 取消或零结算。</p>
  *
  * <p><b>B 类</b>：存在心跳行，状态 {@code STARTING}／{@code RUNNING}，且
  * {@code now - last_active_at} 已超过 {@code max(3 × 心跳间隔, 10 分钟)}。
@@ -239,8 +241,11 @@ public final class JdbcAbandonedMeetingSweeper {
                     return false;
                 }
                 if (heartbeatExists(connection, meetingId)
+                        || stopUsageSubmitted(connection, meetingId)
                         || JdbcMeetingAbandonmentStore.exists(
                                 connection, engine, meetingId, false)) {
+                    // 首跳之后又提交了冻结用量：本场已进入正常 Stop 路径，不能按
+                    // “从未开始”取消并结算 0。候选查询已排除一次，这里做行锁内复核。
                     connection.rollback();
                     return false;
                 }
@@ -471,7 +476,7 @@ public final class JdbcAbandonedMeetingSweeper {
         return ids;
     }
 
-    /** A 类候选：无心跳行、停在开始前、创建时间已超过窗口，且没有已落决定。 */
+    /** A 类候选：无心跳行、停在开始前、创建时间已超过窗口，且没有已落决定或冻结用量。 */
     private List<String> findNeverStarted(Instant threshold) {
         String sql = "SELECT m.meeting_id FROM "
                 + database.table(JdbcDatabaseTable.MEETING) + " m"
@@ -480,6 +485,9 @@ public final class JdbcAbandonedMeetingSweeper {
                 + " AND NOT EXISTS (SELECT 1 FROM "
                 + database.table(JdbcDatabaseTable.MEETING_HEARTBEAT) + " h"
                 + " WHERE h.meeting_id = m.meeting_id)"
+                + " AND NOT EXISTS (SELECT 1 FROM "
+                + database.table(JdbcDatabaseTable.MEETING_CLIENT_INPUT) + " ci"
+                + " WHERE ci.meeting_id = m.meeting_id AND ci.audio_duration_ms IS NOT NULL)"
                 + " AND NOT EXISTS (SELECT 1 FROM "
                 + database.table(JdbcDatabaseTable.MEETING_ABANDONMENT) + " a"
                 + " WHERE a.meeting_id = m.meeting_id)"
@@ -538,8 +546,15 @@ public final class JdbcAbandonedMeetingSweeper {
                 if (!rows.next()) {
                     return null;
                 }
-                return new HeartbeatFacts(JdbcValues.instant(rows, "started_at"),
-                        JdbcValues.instant(rows, "last_active_at"));
+                Instant startedAt = JdbcValues.instant(rows, "started_at");
+                Instant lastActiveAt = JdbcValues.instant(rows, "last_active_at");
+                // 旧版非单调更新可能留下 last_active_at < started_at。决定构造拒绝
+                // 逆序，若直接使用坏数据会让本场每轮 deferred、会议与预占永久卡死；
+                // 这里按 max 归一，历史坏行也能在本轮正常收口。
+                if (lastActiveAt.isBefore(startedAt)) {
+                    lastActiveAt = startedAt;
+                }
+                return new HeartbeatFacts(startedAt, lastActiveAt);
             }
         }
     }

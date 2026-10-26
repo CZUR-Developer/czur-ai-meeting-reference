@@ -127,7 +127,7 @@ class MeetingServicePresentationTest {
         } finally { host.destroy() }
     }
 
-    @Test fun heartbeatTimerStartsOnlyWithPositiveIntervalAndStopsWithPresentation() {
+    @Test fun heartbeatTimerStartsOnlyWithPositiveIntervalAndStopsAtTerminalState() {
         val host = Robolectric.buildService(MeetingService::class.java).create()
         val service = host.get()
         val beats = AtomicInteger()
@@ -148,10 +148,17 @@ class MeetingServicePresentationTest {
 
             set(service, "active", true)
             set(service, "timing", MeetingTimeRule(SystemClock.elapsedRealtime(), 3_600_000L))
+            // 用户点停止只结束会中呈现；冻结用量、纪要和 Stop ACK 还没完成，
+            // 定时器必须继续，否则收尾中的会议会被服务端判成弃场。
             invoke(service, "stopMeetingPresentation")
-            assertFalse("停止会议呈现必须取消定时器", timer.isRunning())
+            assertTrue("停止收尾期间继续保持心跳", timer.isRunning())
             shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(120))
-            assertEquals("取消后不再补发心跳", 1, beats.get())
+            assertEquals("收尾期间仍按间隔发送", 2, beats.get())
+
+            invoke(service, "finishWithStatus", String::class.java, "会议已结束")
+            assertFalse("终态必须取消定时器", timer.isRunning())
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(120))
+            assertEquals("终态后不再补发心跳", 2, beats.get())
         } finally { host.destroy() }
     }
 

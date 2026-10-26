@@ -518,6 +518,8 @@ class MeetingService : Service() {
     }
     private fun resultReady() {
         MeetingAppAssembly.markActiveMeeting(null)
+        // READY 是终态：此时收尾已确认，心跳定时器不再需要。
+        stopHeartbeat()
         stopMeetingUi(); status = "本场结果已就绪"; publish(); executeResultAction()
     }
     fun retryResultAction() { if (actionOutcome?.status() == ResultActionOutcome.Status.FAILED) executeResultAction() }
@@ -559,9 +561,14 @@ class MeetingService : Service() {
     /**
      * Stop 一经接受就结束会中呈现，不等待模型、上传或服务端 READY。
      * 这里只退窗和冻结显示计时；会话、前台 Service 与截图末帧仍由原收尾链持有。
+     *
+     * <p>心跳刻意不在这里停：用户确认停止后还要按序提交冻结用量、纪要并等待后端
+     * 受理 Stop，这些请求可能排队很久。服务端只把 STARTING／RUNNING 视为活跃，
+     * 提前断心跳会让收尾中的会议被失联窗口判成弃场。定时器保留到 READY／ENDED／
+     * FAILED／CLOSED 终态或 Service 销毁；SDK 在收到 Stop ACK 后自己也会忽略后续
+     * heartbeat 调用，不会再刷服务端。</p>
      */
     private fun stopMeetingPresentation() {
-        stopHeartbeat()
         if (stoppedClock == null && timing != null) {
             stoppedClock = timing!!.at(SystemClock.elapsedRealtime())
             Log.i(TAG, "会中呈现已停止，保留同场会话等待结果 meetingId=$meetingId")
@@ -576,6 +583,8 @@ class MeetingService : Service() {
         closePresentation(); projectionData = null; stopForeground(STOP_FOREGROUND_REMOVE)
     }
     private fun finishWithStatus(message: String) {
+        // FAILED／ENDED／CLOSED 都是终态：不再需要刷新服务端活跃事实。
+        stopHeartbeat()
         stopMeetingUi(); busy = false; canStop = false; status = message
         releaseResultAccess(); stopSelf(); publish()
     }

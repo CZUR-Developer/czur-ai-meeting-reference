@@ -18,9 +18,15 @@ import java.util.logging.Logger;
  *
  * <p>先锁定会议父行并复核 {@code STARTING/RUNNING} 与“没有弃场决定”，再执行
  * 心跳 UPSERT。首次插入写入 {@code started_at=now,last_active_at=now,
- * heartbeat_count=1}；主键冲突时只把 {@code last_active_at} 刷新为本次
+ * heartbeat_count=1}；主键冲突时只把 {@code last_active_at} 推进到本次
  * {@code now}，并让 {@code heartbeat_count} 原子加一。{@code started_at} 永不
  * 被覆盖，重复心跳因此只是刷新最后活跃时间，不会改写会议的真正开始事实。</p>
+ *
+ * <p>心跳请求可能乱序到达：较早取时间、较晚提交的请求不能把最后活跃时间改回
+ * 过去，否则 {@code last_active_at < started_at} 会让弃场决定构造永久失败。
+ * 因此刷新用 {@code GREATEST(last_active_at, started_at, VALUES(last_active_at))}
+ * 做单调推进，并同时保证最后活跃时间不早于真正开始时间；首次插入的两个时间
+ * 都取同一服务端时刻，同样满足该顺序。</p>
  *
  * <p>锁顺序与弃场决定事务一致（先会议父行、后决定行），因此扫描器落决定时
  * 心跳要么在决定前完整提交，要么在决定后看到 {@code STOPPING}/决定而拒绝；
@@ -35,12 +41,13 @@ public final class JdbcMeetingHeartbeatStore implements MeetingHeartbeatStore {
             JdbcMeetingHeartbeatStore.class.getName());
 
     // MySQL 5.7 在 ON DUPLICATE KEY UPDATE 中使用 VALUES(col) 引用本次候选值；
-    // 不更新 started_at，也不把计数改成常量。
+    // 不更新 started_at，也不把计数改成常量。GREATEST 同时吸收乱序到达的旧时间
+    // 与历史逆序行（last_active_at 早于 started_at 时抬到 started_at）。
     private static final String UPSERT_SQL = """
             INSERT INTO %s (meeting_id, started_at, last_active_at, heartbeat_count)
             VALUES (?, ?, ?, 1)
             ON DUPLICATE KEY UPDATE
-                last_active_at = VALUES(last_active_at),
+                last_active_at = GREATEST(last_active_at, started_at, VALUES(last_active_at)),
                 heartbeat_count = heartbeat_count + 1
             """;
 

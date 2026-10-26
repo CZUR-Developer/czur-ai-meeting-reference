@@ -27,7 +27,8 @@ interface MeetingSession : AutoCloseable {
     /** 交换呈现位置，不改语义侧及真实语种。 */
     fun swapDisplayColumns()
     /**
-     * 发送一次服务端活跃心跳；只在会议进行中受理，失败只记录，不改变会议状态。
+     * 发送一次服务端活跃心跳；会议进行中和停止收尾期（服务端受理 Stop 前）受理，
+     * Stop ACK／终态／销毁后忽略。失败只记录，不改变会议状态。
      * 默认不发送：Mock 或旧服务端没有心跳字段，宿主不应启动定时器。
      */
     fun heartbeat() { }

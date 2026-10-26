@@ -97,6 +97,20 @@ class JdbcMysqlMeetingHeartbeatStoreIntegrationTest {
     }
 
     @Test
+    void outOfOrderHeartbeatNeverRegressesActivity() throws Exception {
+        insertMeeting("mtg_hb_order");
+        var store = new JdbcMeetingHeartbeatStore(database);
+
+        assertTrue(store.record("mtg_hb_order", LATER));
+        assertRow("mtg_hb_order", LATER, LATER, 1);
+        // 较早取时间、较晚提交的请求不能把最后活跃改回过去，也不能低于 started_at。
+        assertTrue(store.record("mtg_hb_order", STARTED));
+        assertRow("mtg_hb_order", LATER, LATER, 2);
+        assertTrue(store.record("mtg_hb_order", ACTIVE));
+        assertRow("mtg_hb_order", LATER, LATER, 3);
+    }
+
+    @Test
     void inactiveOrDecidedMeetingCannotBeRefreshed() throws Exception {
         insertMeeting("mtg_hb_decided", "RUNNING");
         var store = new JdbcMeetingHeartbeatStore(database);

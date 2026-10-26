@@ -141,23 +141,52 @@ class MeetingCoordinatorTest {
         }
     }
 
-    /** 停止后、销毁后都不再发送；在途之外的触发直接丢弃。 */
-    @Test fun heartbeatStopsAfterStopRequestedAndAfterClose() {
+    /**
+     * 用户点停止后，收尾期间（冻结用量／纪要／Stop 排队）心跳继续；
+     * 服务端受理 Stop 后立即停发，结果就绪与销毁后也不再发送。
+     */
+    @Test fun heartbeatContinuesThroughStopFinalizationAndStopsAfterStopAck() {
         Fixture(true, ALL).use { f ->
             f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.WEB, false)
             f.session.heartbeat()
             f.server.awaitHeartbeats(1)
 
+            // 冻结用量提交被挂住：会议停在 FINALIZING，Stop 还排在后面。
+            f.runtime.duration = OptionalLong.of(60_000L)
+            f.server.blockUsage = true
+            f.server.blockManifest = true
+            f.probe.awaitCanStop()
             f.session.requestStop()
-            f.probe.awaitPhase(MeetingSessionState.Phase.STOPPING)
+            assertTrue("用量提交应已进入收尾", f.server.usageEntered.await(2, TimeUnit.SECONDS))
+            f.probe.awaitPhase(MeetingSessionState.Phase.FINALIZING)
+            assertFalse("用量确认前不能发后端 Stop", f.server.steps.contains("stop"))
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+            while (f.server.heartbeats.size < 2 && System.nanoTime() < deadline) {
+                f.session.heartbeat()
+                Thread.sleep(10)
+            }
+            Thread.sleep(100)
+            assertEquals("停止收尾期间必须继续发心跳", 2, f.server.heartbeats.size)
+
+            // 放开用量：Stop 被受理后被结果读取挂住，此时已在 STOPPING，心跳必须停。
+            f.server.releaseUsage.countDown()
+            assertTrue("结果读取应已进入", f.server.manifestEntered.await(2, TimeUnit.SECONDS))
+            assertTrue(f.server.steps.contains("stop"))
+            val beatsAfterAck = f.server.heartbeats.size
             repeat(5) { f.session.heartbeat() }
+            Thread.sleep(100)
+            assertEquals("Stop 受理后不得再发心跳", beatsAfterAck, f.server.heartbeats.size)
+
+            f.server.releaseManifest.countDown()
             assertNotNull(f.probe.result())
-            assertEquals("停止后不得再发心跳", 1, f.server.heartbeats.size)
+            f.session.heartbeat()
+            Thread.sleep(100)
+            assertEquals("结果就绪后不得再发心跳", beatsAfterAck, f.server.heartbeats.size)
 
             f.client.close()
             f.session.heartbeat()
             Thread.sleep(100)
-            assertEquals("销毁后不得再发心跳", 1, f.server.heartbeats.size)
+            assertEquals("销毁后不得再发心跳", beatsAfterAck, f.server.heartbeats.size)
         }
     }
 
@@ -2007,6 +2036,7 @@ class MeetingCoordinatorTest {
             server.releaseUsage.countDown()
             server.releaseModelGrant.countDown()
             server.releaseHeartbeat.countDown()
+            server.releaseManifest.countDown()
             client.close()
         }
     }
@@ -2292,6 +2322,9 @@ class MeetingCoordinatorTest {
         var heartbeatIntervalMs = 0L
         var failHeartbeat = false
         val heartbeats: MutableList<String> = Collections.synchronizedList(ArrayList())
+        @Volatile var blockManifest = false
+        val manifestEntered = CountDownLatch(1)
+        val releaseManifest = CountDownLatch(1)
         var translationGrant: TranslationSessionGrant? = null
         var renewedTranslationGrant: TranslationSessionGrant? = null
         var translationGrantRequests = 0
@@ -2442,6 +2475,15 @@ class MeetingCoordinatorTest {
             steps.add("manifest")
             genTimes.add(genTime)
             this.includeContent = includeContent
+            if (blockManifest) {
+                manifestEntered.countDown()
+                try {
+                    if (!releaseManifest.await(4, TimeUnit.SECONDS)) throw IOException("测试未释放结果读取")
+                } catch (interrupted: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw IOException(interrupted)
+                }
+            }
             if (failManifest) throw IOException("fixture-manifest-not-ready")
             if (includeContent && failContent) throw IOException("受控正文读取失败")
             return MeetingResult(id, "本场", genTime, MeetingResult.Status.READY, setOf("transcript.final"),

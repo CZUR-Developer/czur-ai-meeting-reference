@@ -47,6 +47,7 @@ class PersistentReferenceIdentityProvider(
     }
 
     /** 登录成功后保存服务端返回的短期会话；密码从未进入本类。 */
+    @Synchronized
     override fun updateSession(session: IdentitySession, expiresAt: String?) {
         val value = StoredSession(session.accessToken(), session.displayName(), expiresAt.orEmpty())
         this.session = value
@@ -58,6 +59,7 @@ class PersistentReferenceIdentityProvider(
     }
 
     /** 退出时删除令牌和关联的显示信息，部署地址仍由当前 APK 的编译配置提供。 */
+    @Synchronized
     override fun clearSession() {
         session = null
         preferences.edit()
@@ -74,8 +76,9 @@ class PersistentReferenceIdentityProvider(
      * 新会话读取后端会议详情 `/v1/meetings/{meetingId}`。会议按主体隔离，能读到
      * 就说明当前账号就是原会议所有者，可以安全替换；403/404 表示换账号或会议
      * 已不存在，返回原身份并保留原状态，让 Stop 继续用旧令牌失败而不会串号。
-     * 当前会话自身 401 时清理本地登录并要求重新登录；网络或存储异常直接抛出，
-     * 由上层保留原场等待下次确认，不把失败伪装成成功。</p>
+     * 当前会话自身 401 只作废“发起核验时的那一份”并要求重新登录：核验是网络
+     * 调用，返回时用户可能已重新登录，迟到的 401 不能清掉新会话。网络或存储异常
+     * 直接抛出，由上层保留原场等待下次确认，不把失败伪装成成功。</p>
      *
      * <p>本方法不打开 UI、不建新场、不改会议归属；只在尾部发布／Stop／结果阶段
      * 由同一 IO 队列调用。</p>
@@ -101,11 +104,30 @@ class PersistentReferenceIdentityProvider(
             )
             // 换账号：保留原状态，调用方继续用旧令牌失败，不能借用他人会话。
             Ownership.NOT_OWNER -> IdentityResult.loggedIn(originalIdentity)
-            Ownership.UNAUTHORIZED -> {
-                clearSession()
-                IdentityResult.loginRequired("登录已失效，请重新登录")
-            }
+            Ownership.UNAUTHORIZED -> expireProbedSession(current)
         }
+    }
+
+    /**
+     * 401 只作废发起核验时的那份持久会话。
+     *
+     * <p>核验期间用户可能已经重新登录。若当前会话已换成另一份令牌，这个 401
+     * 属于旧令牌，属于迟到响应：忽略即可，并返回当前登录状态，不能把刚完成的
+     * 新登录清掉。检查与清理在同一把锁内，避免与 [updateSession] 交错。</p>
+     */
+    @Synchronized
+    private fun expireProbedSession(probed: StoredSession): IdentityResult {
+        val current = session ?: return IdentityResult.loginRequired("请先登录")
+        if (current.accessToken != probed.accessToken) {
+            // 新的持久会话已经建立：旧请求的 401 与它无关。
+            if (current.expiresAt.isNotBlank() && isExpired(current.expiresAt)) {
+                clearSession()
+                return IdentityResult.loginRequired("登录已过期，请重新登录")
+            }
+            return IdentityResult.loggedIn(IdentitySession(current.accessToken, current.displayName))
+        }
+        clearSession()
+        return IdentityResult.loginRequired("登录已失效，请重新登录")
     }
 
     private fun ownershipOf(meetingId: String, accessToken: String): Ownership {

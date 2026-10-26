@@ -329,7 +329,11 @@ class MeetingCoordinator(
         /** 状态队列关门后，已排队电平也不能再次点亮 UI。 */
         @Volatile private var audioLevelActive = false
         @Volatile private var meetingId: String? = null
-        /** 仅心跳线程读取；RUNNING 时置 true，停止/失败/结果/销毁时置 false。 */
+        /**
+         * 仅心跳线程读取。开始后置 true；服务端受理 Stop（ACK）、失败、结果、
+         * 取消／销毁时置 false。用户点停止只进入收尾，不会关闭它，避免收尾中的
+         * 会议因心跳断档被服务端判成弃场。
+         */
         @Volatile private var heartbeatAllowed = false
         /** 原子 in-flight：已有心跳未返回时直接跳过本次触发，不排队。 */
         private val heartbeatInFlight = AtomicBoolean(false)
@@ -743,7 +747,13 @@ class MeetingCoordinator(
         }
         /**
          * 心跳只刷新服务端活跃事实：失败只记录，不改会议状态，也不在本次调用内重试。
-         * 由宿主按 Create 回告的间隔触发；停止／失败／销毁后不再发送。
+         * 由宿主按 Create 回告的间隔触发；开始后持续发送，直到服务端受理 Stop（ACK）、
+         * 会议进入 READY／ENDED／FAILED 或销毁。
+         *
+         * <p>用户点停止不等于服务端已受理停止：冻结用量、纪要、Stop 可能在后端业务
+         * 队列里排很久。停止后立刻断心跳，收尾中的会议会被服务端的失联窗口判成弃场。
+         * 服务端心跳接口只接受 STARTING／RUNNING，受理 Stop 后进入 STOPPING 并回 409，
+         * 这个 409 本身无害，但已无意义，所以在 ACK 处停发。</p>
          *
          * <p>发送走独立单线程执行器，不复用字幕／翻译的 io 队列：即使业务请求被慢
          * 任务占满，心跳仍按宿主节奏发出。原子 in-flight 保证同一时刻最多一次，
@@ -777,8 +787,11 @@ class MeetingCoordinator(
         override fun requestStop() {
             enqueue {
                 if (done || !active || !canStop) return@enqueue
-                // 用户确认停止后立即停发心跳；服务端随后进入 STOPPING/收口。
-                heartbeatAllowed = false
+                // 这里刻意不停心跳：停止受理后还要提交冻结用量、生成纪要并等后端
+                // 受理 Stop，这些请求可能排在业务队列里超过失联窗口。服务端只把
+                // 仍在 STARTING／RUNNING 的会议视为活跃，若用户一点停止就断心跳，
+                // 收尾中的会议会被弃场扫描按失联处理。心跳改在 Stop ACK 处停止，
+                // 见 complete()／finishSavedFinalization 的受理分支。
                 stopRequested = true; audioLevelActive = false; canStop = false
                 phase = MeetingSessionState.Phase.STOPPING
                 if (display.flushPendingLanguages()) showDisplay()
@@ -875,7 +888,7 @@ class MeetingCoordinator(
                         sessionConfig.artifactPublisher(), BooleanSupplier { cancelled || closed }, LongSupplier {
                             if (genTime == null) genTime = wallClockMs.asLong
                             genTime!!
-                        }, Runnable { model!!.close() })
+                        }, Runnable { heartbeatAllowed = false; model!!.close() })
                     if (finalResult != null) enqueue { ready(finalResult) }
                     return
                 }
@@ -897,6 +910,10 @@ class MeetingCoordinator(
                     enqueue { completionFailed("后端仍在收口，请稍后再次确认停止") }
                     return
                 }
+                // 服务端已受理 Stop：会议进入 STOPPING，之后心跳只会得到 409。
+                // 从这一刻停发；尚未受理或受理失败时仍在 STOPPING／FINALIZING 收尾，
+                // 心跳继续，避免会议在收尾期间被扫描器判成弃场。
+                heartbeatAllowed = false
                 LOG.info("后端 Stop 已受理，结果尚需确认")
                 if (genTime == null) genTime = wallClockMs.asLong
                 model!!.close()

@@ -259,6 +259,52 @@ class JdbcMysqlAbandonedMeetingSweeperIntegrationTest {
         assertEquals(0, abandonOperationCount("mtg_stopped_usage"));
     }
 
+    /**
+     * 首跳从未成功但客户端已提交冻结用量：不能按“从未开始”取消并结算 0。
+     *
+     * <p>这类会议正在走正常 Stop 收尾，只是心跳一次都没发出去；扫描器必须跳过，
+     * 把结算交给 Stop 路径。</p>
+     */
+    @Test
+    void neverStartedMeetingWithFrozenUsageIsNotCancelled() throws Exception {
+        seedOwnedMeeting("mtg_first_jump_usage", "STARTING", T0);
+        insertClientUsage("mtg_first_jump_usage", 60_000L, 0L);
+        JdbcAbandonedMeetingSweeper sweeper = sweeper(providerAt(SWEEP_NOW, "sweep"),
+                finalizerAt(SWEEP_NOW), MAX_MEETING_DURATION_MS);
+
+        JdbcAbandonedMeetingSweeper.Result result = sweeper.runOnce();
+
+        assertEquals(0, result.cancelledMeetings());
+        assertEquals(0, result.finalizedMeetings());
+        assertEquals(0, result.deferredMeetings());
+        assertEquals("STARTING", meetingState("mtg_first_jump_usage"));
+        assertReservationState("mtg_first_jump_usage", "RESERVED", null);
+        assertEquals(0, decisionCount("mtg_first_jump_usage"));
+        assertEquals(0, abandonOperationCount("mtg_first_jump_usage"));
+    }
+
+    /**
+     * 历史逆序心跳行（last_active_at 早于 started_at）不能让决定构造永久失败。
+     *
+     * <p>旧版非单调刷新可能留下这种坏数据。扫描器在锁内按 max 归一后再构造决定：
+     * 本轮完成决定与结算，只把结果写入留到下一轮，不再每轮 deferred 卡死会议。</p>
+     */
+    @Test
+    void reversedHeartbeatRowIsNormalizedInsteadOfBlockingDecision() throws Exception {
+        seedOwnedMeeting("mtg_reversed", "RUNNING", T0);
+        insertHeartbeat("mtg_reversed", T0.plus(Duration.ofMinutes(10)),
+                T0.plus(Duration.ofMinutes(2)));
+        JdbcAbandonedMeetingSweeper sweeper = sweeper(providerAt(SWEEP_NOW, "sweep"),
+                new FinalizerFailingOnce(finalizerAt(SWEEP_NOW)), MAX_MEETING_DURATION_MS);
+
+        JdbcAbandonedMeetingSweeper.Result result = sweeper.runOnce();
+
+        assertEquals(1, result.deferredMeetings());
+        assertEquals("STOPPING", meetingState("mtg_reversed"));
+        assertSettled("mtg_reversed", 0);
+        assertDecision("mtg_reversed", "ABANDONED", "READY_WITH_WARNINGS", 0, "SETTLED");
+    }
+
     @Test
     void settleAbandonedReplaysAndTreatsCommittedAsReplay() throws Exception {
         seedOwnedMeeting("mtg_replay", "STARTING", T0);
