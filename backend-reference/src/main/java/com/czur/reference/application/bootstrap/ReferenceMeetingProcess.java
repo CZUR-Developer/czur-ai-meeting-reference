@@ -198,10 +198,10 @@ public final class ReferenceMeetingProcess implements AutoCloseable {
     static ArtifactStore createArtifactStore(Map<String, String> values)
             throws ArtifactStoreException {
         // 和共享 HTTP 装配采用同一最长时长及同一函数，PCM 正常回退不会在长会停止时
-        // 被旧 64 MiB 截断。省略时只为独立 Store 选择测试保留参考一小时缺省。
+        // 被旧 64 MiB 截断。省略时按 CZUR 业务上限五小时计算预算。
         long maxArtifactBytes = com.czur.reference.application.artifact.AudioArtifactBudget
                 .forMaxDurationMs(Long.parseLong(values.getOrDefault(
-                        MeetingDeploymentConfig.MAX_MEETING_DURATION_MS, "3600000")));
+                        MeetingDeploymentConfig.MAX_MEETING_DURATION_MS, "18000000")));
         String mode = values.getOrDefault(ARTIFACT_STORE, "file").trim();
         return switch (mode) {
             case "file" -> new PersistentFileSystemMockArtifactStore(
