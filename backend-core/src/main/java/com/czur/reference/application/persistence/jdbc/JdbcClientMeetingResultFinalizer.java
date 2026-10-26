@@ -394,7 +394,7 @@ public final class JdbcClientMeetingResultFinalizer
                     endedAt = locked.snapshot().updatedAt();
                 }
                 writeClientResult(connection, locked, startedAt, endedAt, capturedDurationMs,
-                        speakerArtifact, MeetingEvent.READY, ManifestStatus.READY);
+                        speakerArtifact, MeetingEvent.READY, ManifestStatus.READY, List.of());
                 connection.commit();
                 return true;
             } catch (SQLException | ArtifactStoreException | RuntimeException failure) {
@@ -471,7 +471,9 @@ public final class JdbcClientMeetingResultFinalizer
                         ? locked.snapshot().updatedAt() : decision.decidedAt();
                 writeClientResult(connection, locked, decision.startedAt(), endedAt,
                         decision.settleDurationMs(), null, MeetingEvent.READY_WITH_WARNINGS,
-                        ManifestStatus.READY_WITH_WARNINGS);
+                        ManifestStatus.READY_WITH_WARNINGS,
+                        List.of(new MeetingManifest.Warning(
+                                "meeting.abandoned", "meeting.lifecycle", "meeting.abandoned", null)));
                 JdbcMeetingAbandonmentStore.delete(connection, engine, meetingId);
                 connection.commit();
                 LOGGER.log(Level.INFO, "弃场会议已收口 durationMs={0}",
@@ -499,7 +501,8 @@ public final class JdbcClientMeetingResultFinalizer
     private void writeClientResult(Connection connection,
             JdbcMeetingRepository.VersionedMeeting locked, Instant startedAt, Instant endedAt,
             Long capturedDurationMs, ObjectNode speakerArtifact, MeetingEvent terminalEvent,
-            ManifestStatus manifestStatus) throws SQLException, ArtifactStoreException {
+            ManifestStatus manifestStatus, List<MeetingManifest.Warning> warnings)
+            throws SQLException, ArtifactStoreException {
         String meetingId = locked.snapshot().meetingId();
         if (terminalEvent != MeetingEvent.READY
                 && terminalEvent != MeetingEvent.READY_WITH_WARNINGS) {
@@ -601,7 +604,7 @@ public final class JdbcClientMeetingResultFinalizer
                         : capturedDurationMs,
                 new MeetingManifest.Languages(projection.language(),
                         projection.targetLanguages()),
-                artifactRefs, List.of());
+                artifactRefs, warnings);
         try (PreparedStatement statement = connection.prepareStatement("""
                 INSERT INTO %s
                     (meeting_id, artifact_id, manifest_json)
