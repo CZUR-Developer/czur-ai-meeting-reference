@@ -71,7 +71,25 @@ class HttpMeetingServerClientTest {
             assertFalse(body.has("resultDelivery"))
             assertEquals("mtg_config", created.meetingId())
             assertEquals(600000, created.maxMeetingDurationMs())
+            assertEquals(0L, created.heartbeatIntervalMs())
             assertFalse(config.toString().contains("test-token"))
+        }
+    }
+
+    @Test fun createAdoptsHeartbeatIntervalAndSendsHeartbeatWithoutBody() {
+        Fixture().use { fixture ->
+            fixture.reply(201, "{\"meetingId\":\"mtg_hb\",\"limits\":{"
+                + "\"maxMeetingDurationMs\":600000,\"heartbeatIntervalMs\":120000}}")
+            val created = fixture.client().createMeeting(options())
+            assertEquals(120000L, created.heartbeatIntervalMs())
+            fixture.request()
+            fixture.reply(200, "{\"heartbeatIntervalMs\":120000}")
+            fixture.client().sendHeartbeat("mtg_hb")
+            val request = fixture.request()
+            assertEquals("/v1/meetings/mtg_hb:heartbeat", request.path())
+            assertEquals("Bearer test-token", request.authorization())
+            assertEquals("", request.body())
+            assertNull("心跳没有幂等键", request.stopKey())
         }
     }
 

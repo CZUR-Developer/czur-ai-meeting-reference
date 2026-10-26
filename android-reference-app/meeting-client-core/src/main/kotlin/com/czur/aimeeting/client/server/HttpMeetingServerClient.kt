@@ -74,8 +74,10 @@ class HttpMeetingServerClient(config: MeetingClientConfig) : MeetingServerClient
                 .put("requestedCapabilities", JSONArray(setup.requestedCapabilities()))
                 .put("artifactPolicy", JSONObject().put("retainAudio", setup.retainAudio()).put("presentationCapture", setup.presentationCapture()))
             val created = JSONObject(post("/v1/meetings", body.toString(), UUID.randomUUID().toString(), 201).body)
+            val limits = created.getJSONObject("limits")
             return CreatedMeeting(created.getString("meetingId"), null, MeetingCapabilityState.fromCreateResponse(created),
-                created.getJSONObject("limits").getLong("maxMeetingDurationMs"))
+                limits.getLong("maxMeetingDurationMs"),
+                limits.optLong("heartbeatIntervalMs", 0L).coerceAtLeast(0L))
         } catch (invalidResponse: JSONException) { throw IOException("创建会议响应格式错误", invalidResponse) }
     }
     @Throws(IOException::class)
@@ -129,6 +131,11 @@ class HttpMeetingServerClient(config: MeetingClientConfig) : MeetingServerClient
     }
     @Throws(IOException::class)
     override fun startClient(meetingId: String) { post("/v1/meetings/$meetingId:startClient", null, null, 200) }
+    @Throws(IOException::class)
+    override fun sendHeartbeat(meetingId: String) {
+        // 心跳无请求体、无幂等键；服务端用自身时钟记录开始与最后活跃。
+        post("/v1/meetings/$meetingId:heartbeat", null, null, 200)
+    }
     @Throws(IOException::class)
     override fun appendTranscript(meetingId: String, clientSequence: Int, event: TranscriptEvent) {
         try {

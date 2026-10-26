@@ -133,6 +133,12 @@ class MeetingService : Service() {
     private var returnToMeetingAfterPresentation = false
     private var presentationNotice = ""
     private var announcedPresentationNotice = ""
+    /**
+     * 活跃期心跳由前台服务持有，SDK 只负责把一次心跳排到自己的 IO 队列。
+     * 会议停止、失败或 Service 销毁时取消定时器；失败不在服务层重试。
+     */
+    private val heartbeatTimer = MeetingHeartbeatTimer(
+        MainThreadHeartbeatScheduler(main)) { session?.heartbeat() }
     private var setup: MeetingSetup? = null
     private var meetingId: String? = null
     /** 空闲绑定不发布账号／部署提示；实际创建会议后才由 Service 提供会议消息。 */
@@ -267,8 +273,15 @@ class MeetingService : Service() {
         session?.swapDisplayColumns()
         Log.i(TAG, "双语分栏左右交换已请求 meetingId=$meetingId")
     }
+    /** 只按 Create 回告的间隔启动；0 表示旧服务端，不发送心跳。 */
+    private fun startHeartbeat(intervalMs: Long) {
+        if (intervalMs > 0) heartbeatTimer.start(intervalMs) else heartbeatTimer.stop()
+    }
+    private fun stopHeartbeat() { heartbeatTimer.stop() }
     private fun begin(prepared: MeetingAppAssembly.PreparedMeeting) {
         releaseResultAccess()
+        // 上一场的定时器必须先停；新场是否发送由 onStarted 回告的间隔决定。
+        stopHeartbeat()
         val requested = prepared.setup()
         preparedMeeting = prepared; setup = requested; busy = true; active = false; canStop = false
         stopRequested = false; presentationStopContinuation = null; returnToMeetingAfterPresentation = false
@@ -291,8 +304,11 @@ class MeetingService : Service() {
                     reminderPresentation = MeetingReminderPresentation(); limitReminderLogged = false; idleReminderLogged = false
                     capabilityText = describeCapabilities(started.availableCapabilities())
                     if (requested.presentationCapture()) startPresentation(started.startedAtMs())
+                    // Create 回告的间隔缺失或为 0 时不发心跳，兼容旧服务端。
+                    startHeartbeat(started.heartbeatIntervalMs())
                     main.removeCallbacks(clockTick); main.post(clockTick)
-                    Log.i(TAG, "组合会议已启动 meetingId=$meetingId mode=${requested.mode()}")
+                    Log.i(TAG, "组合会议已启动 meetingId=$meetingId mode=${requested.mode()}"
+                        + " heartbeatMs=${started.heartbeatIntervalMs()}")
                 }
                 override fun onState(next: MeetingSessionState) {
                     val enteringRunning = next.phase() == MeetingSessionState.Phase.RUNNING && !active && !stopRequested
@@ -545,6 +561,7 @@ class MeetingService : Service() {
      * 这里只退窗和冻结显示计时；会话、前台 Service 与截图末帧仍由原收尾链持有。
      */
     private fun stopMeetingPresentation() {
+        stopHeartbeat()
         if (stoppedClock == null && timing != null) {
             stoppedClock = timing!!.at(SystemClock.elapsedRealtime())
             Log.i(TAG, "会中呈现已停止，保留同场会话等待结果 meetingId=$meetingId")
@@ -588,6 +605,7 @@ class MeetingService : Service() {
             unregisterReceiver(debugStopReceiver); debugStopReceiverRegistered = false; Log.d(TAG, "调试正常停止命令已注销")
         }
         unregisterReceiver(screenOffReceiver)
+        stopHeartbeat()
         main.removeCallbacks(clockTick); main.removeCallbacks(presentationTick); closePresentation()
         overlay.dismiss(); releaseResultAccess(); platformWork.shutdownNow(); super.onDestroy()
     }

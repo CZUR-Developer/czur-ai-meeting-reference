@@ -512,7 +512,8 @@ class MeetingCoordinator(
                 active = true; audioLevelActive = true; canStop = runtime.waitsForModelFinish()
                 acceptingPresentation = options.presentationCapture()
                 phase = MeetingSessionState.Phase.RUNNING
-                val info = MeetingStarted(id, startedAtMs, created.maxMeetingDurationMs(), available)
+                val info = MeetingStarted(id, startedAtMs, created.maxMeetingDurationMs(), available,
+                    created.heartbeatIntervalMs())
                 notifyListener { listener.onStarted(info) }
                 showDisplay(); publish(); LOG.info("会议已开始")
                 modelControl.execute {
@@ -725,6 +726,25 @@ class MeetingCoordinator(
         }
         override fun swapDisplayColumns() {
             enqueue { if (!done && active && display.isBilingual()) { display.swapColumns(); showDisplay() } }
+        }
+        /**
+         * 心跳只刷新服务端活跃事实：失败只记录，不改会议状态，也不在本次调用内重试。
+         * 由宿主按 Create 回告的间隔触发；Stop／失败后 active 变 false，自然停止发送。
+         */
+        override fun heartbeat() {
+            enqueue {
+                if (done || cancelled || !active) return@enqueue
+                val currentId = meetingId ?: return@enqueue
+                io.execute {
+                    if (closed || cancelled || done) return@execute
+                    try {
+                        server.sendHeartbeat(currentId)
+                    } catch (failure: Exception) {
+                        if (failure !is IOException && failure !is RuntimeException) throw failure
+                        logFailure("会议心跳", failure)
+                    }
+                }
+            }
         }
         override fun requestStop() {
             enqueue {

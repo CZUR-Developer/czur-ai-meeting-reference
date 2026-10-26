@@ -26,6 +26,11 @@ interface MeetingSession : AutoCloseable {
     }
     /** 交换呈现位置，不改语义侧及真实语种。 */
     fun swapDisplayColumns()
+    /**
+     * 发送一次服务端活跃心跳；只在会议进行中受理，失败只记录，不改变会议状态。
+     * 默认不发送：Mock 或旧服务端没有心跳字段，宿主不应启动定时器。
+     */
+    fun heartbeat() { }
     /** 本场结果窄访问，READY 前返回类型化错误，关闭后不可继续，不重读当前账号或重做 Stop。 */
     fun resultActionAccess(): ResultActionAccess =
         throw UnsupportedOperationException("当前会议实现未提供结果动作访问")

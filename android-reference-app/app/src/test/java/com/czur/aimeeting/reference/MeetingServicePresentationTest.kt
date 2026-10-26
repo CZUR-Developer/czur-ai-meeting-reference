@@ -6,6 +6,7 @@ import android.os.SystemClock
 import android.os.PowerManager
 import android.content.Context
 import com.czur.aimeeting.client.MeetingClient
+import com.czur.aimeeting.client.MeetingHeartbeatTimer
 import com.czur.aimeeting.client.MeetingSession
 import com.czur.aimeeting.client.display.DisplayRouter
 import com.czur.aimeeting.client.display.MeetingDisplaySnapshot
@@ -123,6 +124,34 @@ class MeetingServicePresentationTest {
             invoke(service, "publish")
             assertEquals(stoppedTime, state!!.timeText)
             assertNull(state!!.readyResult)
+        } finally { host.destroy() }
+    }
+
+    @Test fun heartbeatTimerStartsOnlyWithPositiveIntervalAndStopsWithPresentation() {
+        val host = Robolectric.buildService(MeetingService::class.java).create()
+        val service = host.get()
+        val beats = AtomicInteger()
+        val session = Proxy.newProxyInstance(MeetingSession::class.java.classLoader,
+            arrayOf(MeetingSession::class.java)) { _, method, _ ->
+            if (method.name == "heartbeat") beats.incrementAndGet()
+            null
+        } as MeetingSession
+        set(service, "session", session)
+        val timer = get(service, "heartbeatTimer") as MeetingHeartbeatTimer
+        try {
+            invoke(service, "startHeartbeat", Long::class.javaPrimitiveType!!, 0L)
+            assertFalse("旧服务端缺字段时不发心跳", timer.isRunning())
+            invoke(service, "startHeartbeat", Long::class.javaPrimitiveType!!, 120_000L)
+            assertTrue(timer.isRunning())
+            shadowOf(Looper.getMainLooper()).idle()
+            assertEquals("首次心跳在启动后立即发出", 1, beats.get())
+
+            set(service, "active", true)
+            set(service, "timing", MeetingTimeRule(SystemClock.elapsedRealtime(), 3_600_000L))
+            invoke(service, "stopMeetingPresentation")
+            assertFalse("停止会议呈现必须取消定时器", timer.isRunning())
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(120))
+            assertEquals("取消后不再补发心跳", 1, beats.get())
         } finally { host.destroy() }
     }
 

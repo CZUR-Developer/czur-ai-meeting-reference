@@ -105,6 +105,26 @@ class MeetingCoordinatorTest {
     private fun textGrant(expiresAt: String = "2030-01-01T00:00:00Z") = TranslationSessionGrant(
         SampleJsonTranslationAdapter.ID, "https://translation.example.test", expiresAt, null)
 
+    @Test fun heartbeatIsForwardedOnlyWhileRunningAndFailureDoesNotChangeState() {
+        Fixture(true, ALL).use { f ->
+            f.server.heartbeatIntervalMs = 120_000L
+            f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.WEB, false)
+            assertEquals(120_000L, f.probe.info!!.heartbeatIntervalMs())
+            f.session.heartbeat()
+            f.server.awaitHeartbeats(1)
+            assertEquals(listOf("mtg_test"), f.server.heartbeats)
+            // 失败只记录：不抛出到宿主，也不改变仍在进行中的状态。
+            f.server.failHeartbeat = true
+            f.session.heartbeat()
+            f.server.awaitHeartbeats(2)
+            assertEquals(2, f.server.heartbeats.size)
+            assertEquals(MeetingSessionState.Phase.RUNNING, f.probe.awaitPhase(
+                MeetingSessionState.Phase.RUNNING).phase())
+            // 未提供间隔时 SDK 如实回告 0，宿主据此不启动定时器。
+            assertEquals(600000L, f.probe.info!!.maxMeetingDurationMs())
+        }
+    }
+
     @Test fun optionalSpeakerIsRequestedOnlyWhenDeploymentAndLocalAdapterProvideIt() {
         Fixture(true, setOf(MeetingCapabilityState.TRANSCRIPT)).use { f ->
             f.server.deploymentCapabilities = setOf(MeetingCapabilityState.TRANSCRIPT)
@@ -2211,6 +2231,9 @@ class MeetingCoordinatorTest {
         var jpeg: ByteArray? = null
         var emailUrl: String? = null
         var adapterId = TingwuModelAdapter.ID
+        var heartbeatIntervalMs = 0L
+        var failHeartbeat = false
+        val heartbeats: MutableList<String> = Collections.synchronizedList(ArrayList())
         var translationGrant: TranslationSessionGrant? = null
         var renewedTranslationGrant: TranslationSessionGrant? = null
         var translationGrantRequests = 0
@@ -2227,8 +2250,20 @@ class MeetingCoordinatorTest {
                 for (capability in granted)
                     decisions.put(JSONObject().put("capability", capability).put("availability", "AVAILABLE"))
                 return CreatedMeeting("mtg_test", null, MeetingCapabilityState.fromCreateResponse(
-                    JSONObject().put("capabilityDecisions", decisions)), 600000L)
+                    JSONObject().put("capabilityDecisions", decisions)), 600000L,
+                    heartbeatIntervalMs)
             } catch (failure: Exception) { throw IOException(failure) }
+        }
+        override fun sendHeartbeat(id: String) {
+            heartbeats.add(id)
+            if (failHeartbeat) throw IOException("fixture-heartbeat-failed")
+        }
+        fun awaitHeartbeats(count: Int) {
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+            while (heartbeats.size < count) {
+                if (System.nanoTime() > deadline) fail("应收到心跳调用 count=$count")
+                Thread.sleep(10)
+            }
         }
         override fun requestModelSession(id: String): ModelSessionGrant {
             steps.add("grant")
