@@ -18,6 +18,7 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import com.czur.reference.application.entitlement.ExpiredReservationCleanupWorker;
 import com.czur.reference.application.persistence.jdbc.JdbcClientModelWorkers;
+import com.czur.reference.application.persistence.jdbc.JdbcStaleStartSweeper;
 import com.czur.reference.application.port.entitlement.LeaseAwareReservationCanceller;
 
 import java.time.Clock;
@@ -137,12 +138,16 @@ public final class ReferenceClientMeetingProcess implements AutoCloseable {
                 LOGGER.log(Level.INFO, "权益端口不支持 lease-aware cancel，跳过过期预占清理");
             }
             final ExpiredReservationCleanupWorker cleanupWorker = cleanup;
+            // 启动失败的会议停在 CREATED／STARTING，过期预占清理不覆盖已绑定预占；
+            // 这里按超时把它们收口为 CANCELLED 并释放预占，避免永远留一条空会议。
+            final JdbcStaleStartSweeper staleStartSweeper = new JdbcStaleStartSweeper(
+                    assembly.databaseContext(), config.deploymentScope(), clock);
             scheduler = Executors.newSingleThreadScheduledExecutor(task -> {
                 Thread thread = new Thread(task, "reference-client-meeting-worker");
                 thread.setDaemon(true);
                 return thread;
             });
-            scheduler.scheduleWithFixedDelay(() -> tick(cleanupWorker), 0, TICK_SECONDS, TimeUnit.SECONDS);
+            scheduler.scheduleWithFixedDelay(() -> tick(cleanupWorker, staleStartSweeper), 0, TICK_SECONDS, TimeUnit.SECONDS);
             LOGGER.log(Level.INFO, "参考客户端直连后端已启动 httpPort={0} modelAdapter={1}",
                     new Object[]{http.address().getPort(), issuer.getClass().getSimpleName()});
             return new ReferenceClientMeetingProcess(assembly, http, artifacts, scheduler);
@@ -155,17 +160,27 @@ public final class ReferenceClientMeetingProcess implements AutoCloseable {
         }
     }
 
-    /** 一次清理；失败只记录，不打断后续周期。 */
-    static void tick(ExpiredReservationCleanupWorker cleanup) {
-        if (cleanup == null) return;
+    /** 一次清理；两类任务各自兜异常，互不阻塞，失败只记录并等下个周期。 */
+    static void tick(ExpiredReservationCleanupWorker cleanup, JdbcStaleStartSweeper sweeper) {
+        if (cleanup != null) {
+            try {
+                ExpiredReservationCleanupWorker.RunResult result = cleanup.runOnce();
+                if (result.claimedCount() > 0) {
+                    LOGGER.log(Level.INFO, "过期预占清理 claimed={0} items={1}",
+                            new Object[]{result.claimedCount(), result.items().size()});
+                }
+            } catch (RuntimeException failure) {
+                LOGGER.log(Level.WARNING, "过期预占清理失败，下个周期继续", failure);
+            }
+        }
         try {
-            ExpiredReservationCleanupWorker.RunResult result = cleanup.runOnce();
-            if (result.claimedCount() > 0) {
-                LOGGER.log(Level.INFO, "过期预占清理 claimed={0} items={1}",
-                        new Object[]{result.claimedCount(), result.items().size()});
+            JdbcStaleStartSweeper.Result swept = sweeper.runOnce();
+            if (swept.cancelledMeetings() > 0) {
+                LOGGER.log(Level.INFO, "启动失败会议收口 cancelled={0} released={1}",
+                        new Object[]{swept.cancelledMeetings(), swept.releasedReservations()});
             }
         } catch (RuntimeException failure) {
-            LOGGER.log(Level.WARNING, "过期预占清理失败，下个周期继续", failure);
+            LOGGER.log(Level.WARNING, "启动失败会议收口失败，下个周期继续", failure);
         }
     }
 
