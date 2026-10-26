@@ -23,10 +23,12 @@ import java.util.Objects;
  * 目标状态的会议，已取消的不会再次命中。</p>
  */
 public final class JdbcStaleStartSweeper {
-    /** 启动阶段的会议超过这个时长仍没进入 RUNNING，视为启动失败。 */
-    public static final Duration DEFAULT_START_TIMEOUT = Duration.ofMinutes(15);
+    /**
+     * 判定窗口：超过参考最大会议时长（60 分钟）且从未产生任何客户端事件，才视为启动失败。
+     * 正常会议在整个过程中一直是 STARTING，所以不能用"状态 + 时间"直接判定。
+     */
+    public static final Duration DEFAULT_START_TIMEOUT = Duration.ofMinutes(60);
     public static final int DEFAULT_BATCH_LIMIT = 50;
-    private static final String CANCEL_REASON = "STALE_START";
 
     private final JdbcDatabaseContext database;
     private final JdbcDatabaseEngine engine;
@@ -59,56 +61,51 @@ public final class JdbcStaleStartSweeper {
         }
     }
 
-    /** 一次扫描；返回取消的会议数与释放的预占数。 */
+    /**
+     * 一次扫描；只取消从未收到客户端输入的启动失败会议。
+     *
+     * <p>预占不动：领域规定 {@code CANCELLED} 不允许保留会议绑定，而已绑定预占不在
+     * 现有取消／清理流程的合法转移里。这里只把会议置为终态，避免留下"永远开始不了"
+     * 的记录；预占结算交给后续正式的失败结算流程，而不是绕过 Provider 直接改状态。</p>
+     */
     public Result runOnce() {
         Instant now = clock.instant();
         Instant threshold = now.minus(startTimeout);
         String meetingTable = database.table(JdbcDatabaseTable.MEETING);
-        String reservationTable = database.table(JdbcDatabaseTable.USAGE_RESERVATION);
-        String select = "SELECT meeting_id, usage_reservation_id FROM " + meetingTable
-                + " WHERE deployment_scope = ? AND state IN ('CREATED','STARTING')"
-                + " AND updated_at <= ? ORDER BY updated_at LIMIT ? FOR UPDATE";
+        // 正常会议从开始到结束一直是 STARTING（start 之后不再推进状态，字幕写入也不碰
+        // meeting 行），而且 startClient 就会写一条 client input 行。因此判定依据是
+        // “超过最大会议时长 + 从未产生任何客户端事件”：出过字幕的会一律不碰。
+        String select = "SELECT m.meeting_id FROM " + meetingTable + " m"
+                + " WHERE m.deployment_scope = ? AND m.state IN ('CREATED','STARTING')"
+                + " AND m.updated_at <= ?"
+                + " AND NOT EXISTS (SELECT 1 FROM " + database.table(JdbcDatabaseTable.MEETING_CLIENT_EVENT)
+                + " e WHERE e.meeting_id = m.meeting_id)"
+                + " ORDER BY m.updated_at LIMIT ? FOR UPDATE";
         int cancelled = 0;
-        int released = 0;
         try (Connection connection = database.dataSource().getConnection()) {
             boolean previousAutoCommit = connection.getAutoCommit();
             connection.setAutoCommit(false);
             try {
-                List<String[]> rows = new ArrayList<>();
+                List<String> rows = new ArrayList<>();
                 try (PreparedStatement statement = connection.prepareStatement(select)) {
                     JdbcValues.setText(statement, 1, engine, deploymentScope);
                     JdbcValues.setInstant(statement, 2, threshold);
                     statement.setInt(3, batchLimit);
                     try (ResultSet result = statement.executeQuery()) {
                         while (result.next()) {
-                            rows.add(new String[]{result.getString(1), result.getString(2)});
+                            rows.add(result.getString(1));
                         }
                     }
                 }
-                for (String[] row : rows) {
+                for (String meetingId : rows) {
                     try (PreparedStatement update = connection.prepareStatement(
                             "UPDATE " + meetingTable + " SET state = 'CANCELLED', updated_at = ?,"
                                     + " aggregate_version = aggregate_version + 1"
                                     + " WHERE meeting_id = ? AND state IN ('CREATED','STARTING')")) {
                         JdbcValues.setInstant(update, 1, now);
-                        JdbcValues.setText(update, 2, engine, row[0]);
+                        JdbcValues.setText(update, 2, engine, meetingId);
                         if (update.executeUpdate() == 1) {
                             cancelled++;
-                        }
-                    }
-                    if (row[1] != null && !row[1].isBlank()) {
-                        try (PreparedStatement release = connection.prepareStatement(
-                                "UPDATE " + reservationTable + " SET status = 'CANCELLED',"
-                                        + " cancelled_at = ?, cancellation_reason_code = ?,"
-                                        + " updated_at = ?, version = version + 1"
-                                        + " WHERE reservation_id = ? AND status = 'RESERVED'")) {
-                            JdbcValues.setInstant(release, 1, now);
-                            release.setString(2, CANCEL_REASON);
-                            JdbcValues.setInstant(release, 3, now);
-                            JdbcValues.setText(release, 4, engine, row[1]);
-                            if (release.executeUpdate() == 1) {
-                                released++;
-                            }
                         }
                     }
                 }
@@ -121,10 +118,10 @@ public final class JdbcStaleStartSweeper {
         } catch (SQLException failure) {
             throw new IllegalStateException("stale start sweep failed", failure);
         }
-        return new Result(cancelled, released);
+        return new Result(cancelled);
     }
 
     /** 单次扫描结果。 */
-    public record Result(int cancelledMeetings, int releasedReservations) {
+    public record Result(int cancelledMeetings) {
     }
 }

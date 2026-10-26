@@ -176,8 +176,8 @@ public final class ReferenceClientMeetingProcess implements AutoCloseable {
         try {
             JdbcStaleStartSweeper.Result swept = sweeper.runOnce();
             if (swept.cancelledMeetings() > 0) {
-                LOGGER.log(Level.INFO, "启动失败会议收口 cancelled={0} released={1}",
-                        new Object[]{swept.cancelledMeetings(), swept.releasedReservations()});
+                LOGGER.log(Level.INFO, "启动失败会议收口 cancelled={0}",
+                        swept.cancelledMeetings());
             }
         } catch (RuntimeException failure) {
             LOGGER.log(Level.WARNING, "启动失败会议收口失败，下个周期继续", failure);
