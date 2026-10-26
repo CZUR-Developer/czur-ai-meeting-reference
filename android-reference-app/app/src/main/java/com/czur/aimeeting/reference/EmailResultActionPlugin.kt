@@ -27,8 +27,14 @@ class EmailResultActionPlugin @JvmOverloads constructor(
         val recipients = EditText(pageContext).apply { hint = "收件邮箱，多个用逗号分隔（最多10个）" }
         layout.addView(url)
         layout.addView(recipients)
-        return Settings(layout) { EmailResultActionPlugin(url.text.toString().trim(),
-            recipients.text.toString().split(Regex("[,，;；\\s]+")).filter { it.isNotBlank() }.map { it.trim() }) }
+        return Settings(layout) {
+            // 空白输入不覆盖调用方冻结的地址／收件人；历史页不挂载这两个输入框，
+            // 由结果动作前的补录把收件人放进 MeetingOptions。
+            val enteredUrl = url.text.toString().trim().ifBlank { null }
+            val entered = recipients.text.toString().split(Regex("[,，;；\\s]+"))
+                .filter { it.isNotBlank() }.map { it.trim() }
+            EmailResultActionPlugin(enteredUrl, entered.ifEmpty { null })
+        }
     }
     override fun prepare(options: MeetingOptions): Preparation {
         val url = configuredUrl ?: options.resultWebUrl()

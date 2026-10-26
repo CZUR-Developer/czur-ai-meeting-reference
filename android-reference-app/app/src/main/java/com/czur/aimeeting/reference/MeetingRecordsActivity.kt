@@ -16,7 +16,6 @@ import com.czur.aimeeting.client.MeetingErrorCode
 import com.czur.aimeeting.client.MeetingHistoryClient
 import com.czur.aimeeting.client.MeetingHistoryItem
 import com.czur.aimeeting.client.MeetingHistoryPage
-import com.czur.aimeeting.client.MeetingOptions
 import com.czur.aimeeting.client.MeetingResult
 import com.czur.aimeeting.client.MeetingResultContent
 import com.czur.aimeeting.client.identity.IdentityResult
@@ -24,9 +23,11 @@ import com.czur.aimeeting.client.result.ResultActionAccess
 import com.czur.aimeeting.client.result.ResultActionContext
 import com.czur.aimeeting.client.result.ResultActionOutcome
 import com.czur.aimeeting.client.result.ResultActionRegistry
+import com.czur.aimeeting.client.result.ResultOptions
 import com.czur.aimeeting.client.server.DeploymentOptions
 import com.czur.aimeeting.reference.meeting.MeetingAppAssembly
 import com.czur.aimeeting.reference.meeting.MeetingRuntimeFactory
+import com.czur.aimeeting.reference.meeting.MeetingSetup
 import java.time.Duration
 import java.time.Instant
 import java.time.ZoneId
@@ -225,14 +226,26 @@ class MeetingRecordsActivity : Activity() {
     private fun performResult(plugin: com.czur.aimeeting.client.result.ResultActionPlugin,
                               result: MeetingResult, current: MeetingDiscovery,
                               emails: List<String>) {
-        val delivery = if (plugin.id() == "email") MeetingOptions.ResultDelivery.EMAIL
-        else MeetingOptions.ResultDelivery.WEB
-        val options = MeetingOptions(
-            MeetingOptions.Mode.MEETING_MINUTES, "zh-CN", "en-US", false,
-            delivery, MeetingAppAssembly.resultWebUrl(), emails, true
+        // 历史页和主会议流程共用同一份页面设置：先让插件用本页的 Android 打开器
+        // 冻结执行闭包，再交给集中装配准备；直接用全局注册的原型准备会得到
+        // openPage=null 的执行，动作只会失败而不打开网页。
+        val registered = MeetingAppAssembly.resultActions().firstOrNull { it.id() == plugin.id() }
+        if (registered == null) {
+            renderMessage("当前应用未装配所选结果动作")
+            return
+        }
+        val frozen = try {
+            registered.createSettings(this).freeze().get()
+        } catch (failure: RuntimeException) {
+            renderMessage("结果动作准备失败，请稍后重试")
+            return
+        }
+        val setup = MeetingSetup(
+            MeetingSetup.Mode.MEETING_MINUTES, "zh-CN", "en-US", false,
+            ResultOptions.action(plugin.id()), MeetingAppAssembly.resultWebUrl(), emails, true
         )
-        val preparation = MeetingAppAssembly.resultRegistry().prepare(plugin.id(), options, current)
-        val action = preparation.action() ?: run {
+        val preparation = MeetingAppAssembly.prepare(setup, current, frozen)
+        val action = preparation.meeting()?.action() ?: run {
             renderMessage(preparation.message())
             return
         }
