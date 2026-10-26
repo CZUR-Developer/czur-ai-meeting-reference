@@ -1723,6 +1723,19 @@ class MeetingCoordinatorTest {
         }
     }
 
+    /** 本地模型（不等模型收尾）在首条 final 之前音频就失效时，仍要能结束本场。 */
+    @Test fun audioErrorBeforeAnyFinalStillAllowsStop() {
+        Fixture(false, setOf(MeetingCapabilityState.TRANSCRIPT)).use { f ->
+            f.runtime.emitFinished = false
+            f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.WEB, false)
+            f.runtime.listener.onAudioError(AudioInputErrorCode.PERMISSION_DENIED, "测试音频输入已终止")
+            f.session.requestStop()
+            val ended: MeetingSessionState = f.probe.awaitPhase(MeetingSessionState.Phase.ENDED)
+            assertFalse(ended.active())
+            assertEquals(1, f.runtime.stopCalls)
+        }
+    }
+
     /** 保留旧 App StopRule 覆盖：音频终止后用户正常停止，不等待已关闭模型的 FINISHED。 */
     @Test fun terminatedAudioCanStopWithoutModelFinishedCallback() {
         Fixture(true, setOf(MeetingCapabilityState.TRANSCRIPT)).use { f ->

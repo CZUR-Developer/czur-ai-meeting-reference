@@ -477,6 +477,9 @@ class MeetingCoordinator(
                             enqueue {
                                 if (!done) {
                                     audioFailed = true; modelFinished = true; audioLevelActive = false
+                                    // 音频已经失效，必须允许用户结束本场；否则会停在
+                                    // "有悬浮窗、没有字幕、停止不可用"的状态里出不去。
+                                    canStop = true
                                     LOG.warning("本场音频输入终止 code=$code message=$message")
                                     notifyListener { listener.onAudioError(code) }
                                     publish(notice = MeetingNotice.AUDIO_INPUT_ENDED)
