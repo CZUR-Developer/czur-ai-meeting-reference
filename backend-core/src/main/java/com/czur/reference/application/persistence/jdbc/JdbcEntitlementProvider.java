@@ -355,7 +355,7 @@ public class JdbcEntitlementProvider
                 }
 
                 // 行锁等待期间同一幂等键可能已经由另一个 Worker 提交；优先稳定重放。
-                existing = findOperation(connection, identity);
+                existing = findOperationCurrent(connection, identity);
                 if (existing.isPresent()) {
                     EntitlementProviderResult<UsageOperationResult> replay =
                             replayOrConflict(existing.get(), identity);
