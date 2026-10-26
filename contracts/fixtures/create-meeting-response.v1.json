@@ -35,6 +35,7 @@
     "maxMeetingDurationMs": 120000,
     "maxAudioFrameBytes": 3200,
     "eventReplayWindow": 128,
-    "maxReplayAudioMs": 30000
+    "maxReplayAudioMs": 30000,
+    "heartbeatIntervalMs": 120000
   }
 }

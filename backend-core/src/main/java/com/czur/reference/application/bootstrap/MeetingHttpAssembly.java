@@ -14,6 +14,7 @@ import com.czur.reference.application.http.MeetingJdkHttpServer;
 import com.czur.reference.application.http.MeetingHttpDispatcher;
 import com.czur.reference.application.http.MeetingHttpRuntime;
 import com.czur.reference.application.http.MeetingArtifactHttpEndpoint;
+import com.czur.reference.application.http.MeetingHeartbeatEndpoint;
 import com.czur.reference.application.http.ReferenceMeetingHttpRequestDecoder;
 import com.czur.reference.application.http.ReferenceDeploymentCapabilitiesEndpoint;
 import com.czur.reference.application.http.ResultEmailEndpoint;
@@ -30,6 +31,7 @@ import com.czur.reference.application.persistence.jdbc.JdbcMeetingQueryPort;
 import com.czur.reference.application.persistence.jdbc.JdbcMeetingManifestQueryPort;
 import com.czur.reference.application.persistence.jdbc.JdbcArtifactContentQueryPort;
 import com.czur.reference.application.persistence.jdbc.JdbcMeetingEventLogPort;
+import com.czur.reference.application.persistence.jdbc.JdbcMeetingHeartbeatStore;
 import com.czur.reference.application.persistence.jdbc.JdbcModelSessionLanguageLookup;
 import com.czur.reference.application.persistence.jdbc.JdbcClientMeetingInputPort;
 import com.czur.reference.application.persistence.jdbc.JdbcClientMeetingResultFinalizer;
@@ -136,6 +138,7 @@ public class MeetingHttpAssembly implements AutoCloseable {
             EntitlementProvider entitlementProvider,
             MeetingArtifactHttpEndpoint artifactEndpoint,
             SpeakerIdentityEnrollmentEndpoint speakerEnrollment, SpeakerNameEditEndpoint speakerEditing,
+            MeetingHeartbeatEndpoint heartbeat,
             long audioArtifactMaxBytes) {
         this.closed = new AtomicBoolean();
         this.database = database;
@@ -153,7 +156,7 @@ public class MeetingHttpAssembly implements AutoCloseable {
         this.clock = clock;
         this.artifactMedia = artifactMedia;
         this.dispatcher = new MeetingHttpDispatcher(runtime, errors, contextResolver, resultEmail,
-                artifactEndpoint, speakerEnrollment, speakerEditing);
+                artifactEndpoint, speakerEnrollment, speakerEditing, heartbeat);
         this.entitlementProvider = entitlementProvider;
         this.audioArtifactMaxBytes = audioArtifactMaxBytes;
     }
@@ -553,6 +556,11 @@ public class MeetingHttpAssembly implements AutoCloseable {
                     speakerEditingEnabled ? new SpeakerNameEditEndpoint(
                             new JdbcSpeakerNameEditPort(databaseContext, artifactStore, enrollment), errors,
                             speakerAccess) : null,
+                    // 心跳与查询共用同一连接池和服务端时钟；未开启 Create 也不关闭，
+                    // 以便先前创建、仍处于会中的会议继续记录开始与活跃事实。
+                    new MeetingHeartbeatEndpoint(query,
+                            new JdbcMeetingHeartbeatStore(databaseContext), clock,
+                            config.heartbeatIntervalMs(), errors),
                     AudioArtifactBudget.forMaxDurationMs(config.runtimeLimits().maxMeetingDurationMs()));
         } catch (RuntimeException | Error failure) {
             try {

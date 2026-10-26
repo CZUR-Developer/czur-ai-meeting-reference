@@ -927,7 +927,7 @@ class MeetingHttpAdapterContractTest {
                 unusedEntitlement, () -> "mtg_unused",
                 new CompleteMeetingResponseAssembler(new CapabilityPlanner(),
                         request -> { throw new AssertionError("no create"); },
-                        new TrustedCreateRuntimeLimits(120_000, 3_200, 128, null)),
+                        new TrustedCreateRuntimeLimits(120_000, 3_200, 128, null, 120_000)),
                 request -> { throw new AssertionError("no create"); },
                 new UsageEstimate(UsageUnit.MEETING_DURATION_MS, 60_000),
                 (id, revision) -> { throw new AssertionError("no create"); },

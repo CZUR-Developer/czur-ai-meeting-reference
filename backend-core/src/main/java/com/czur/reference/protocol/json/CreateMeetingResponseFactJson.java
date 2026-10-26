@@ -286,6 +286,8 @@ public final class CreateMeetingResponseFactJson {
         } else {
             json.append(value.maxReplayAudioMs());
         }
+        comma(json);
+        field(json, "heartbeatIntervalMs").append(value.heartbeatIntervalMs());
         json.append('}');
     }
 
@@ -529,10 +531,12 @@ public final class CreateMeetingResponseFactJson {
         int maxFrame = 0;
         int replayWindow = 0;
         Long maxReplay = null;
+        int heartbeatInterval = 0;
         boolean durationSeen = false;
         boolean frameSeen = false;
         boolean windowSeen = false;
         boolean replaySeen = false;
+        boolean heartbeatSeen = false;
         while (!reader.nextIs('}')) {
             String key = reader.readString();
             reader.expect(':');
@@ -561,15 +565,21 @@ public final class CreateMeetingResponseFactJson {
                         maxReplay = reader.readLong();
                     }
                 }
+                case "heartbeatIntervalMs" -> {
+                    requireOnce(heartbeatSeen);
+                    heartbeatSeen = true;
+                    heartbeatInterval = reader.readInt();
+                }
                 default -> throw CreateFactJsonSupport.invalid();
             }
             commaOrEnd(reader);
         }
         reader.expect('}');
-        if (!durationSeen || !frameSeen || !windowSeen || !replaySeen) {
+        if (!durationSeen || !frameSeen || !windowSeen || !replaySeen || !heartbeatSeen) {
             throw CreateFactJsonSupport.invalid();
         }
-        return new CreateMeetingResponseFact.Limits(maxDuration, maxFrame, replayWindow, maxReplay);
+        return new CreateMeetingResponseFact.Limits(maxDuration, maxFrame, replayWindow,
+                maxReplay, heartbeatInterval);
     }
 
     private static Set<String> readStringSet(CreateFactJsonSupport.Reader reader) {

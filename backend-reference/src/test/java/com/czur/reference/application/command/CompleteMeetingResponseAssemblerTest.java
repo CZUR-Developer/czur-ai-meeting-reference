@@ -191,13 +191,14 @@ class CompleteMeetingResponseAssemblerTest {
 
     @Test
     void trustedRuntimeLimitsNeverExceedFirstAuthorizedProfile() {
-        var limits = new TrustedCreateRuntimeLimits(7_200_000, 6_400, 128, null);
+        var limits = new TrustedCreateRuntimeLimits(7_200_000, 6_400, 128, null, 120_000);
         assertEquals(3_600_000, limits.authorizedLimits(3_600_000)
                 .maxMeetingDurationMs());
         assertEquals(120_000, limits.authorizedLimits(120_000)
                 .maxMeetingDurationMs());
+        assertEquals(120_000, limits.authorizedLimits(120_000).heartbeatIntervalMs());
         assertThrows(IllegalArgumentException.class,
-                () -> new TrustedCreateRuntimeLimits(0, 6_400, 128, null));
+                () -> new TrustedCreateRuntimeLimits(0, 6_400, 128, null, 120_000));
         assertThrows(IllegalArgumentException.class,
                 () -> limits.authorizedLimits(0));
     }
@@ -205,7 +206,7 @@ class CompleteMeetingResponseAssemblerTest {
     private static CompleteMeetingResponseAssembler assembler(
             CreateRealtimeSessionAllocator allocator, long maxDurationMs, int maxFrameBytes) {
         return new CompleteMeetingResponseAssembler(new CapabilityPlanner(), allocator,
-                new TrustedCreateRuntimeLimits(maxDurationMs, maxFrameBytes, 128, 5_000L));
+                new TrustedCreateRuntimeLimits(maxDurationMs, maxFrameBytes, 128, 5_000L, 60_000));
     }
 
     private static CompleteMeetingResponseAssembler.Input input(Fixture fixture,

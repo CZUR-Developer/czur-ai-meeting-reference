@@ -251,13 +251,15 @@ public final class CreateMeetingResponseFact {
      * OpenAPI Create response 中冻结的执行限制。
      *
      * <p>{@code maxReplayAudioMs} 对应协议中的可选字段；{@code null} 表示服务端
-     * 没有声明该项限制，而不是把缺省值猜成零。</p>
+     * 没有声明该项限制，而不是把缺省值猜成零。{@code heartbeatIntervalMs} 是
+     * 客户端下一次心跳的期望间隔，服务端只按部署配置回告，不由单场状态推导。</p>
      */
     public record Limits(
             long maxMeetingDurationMs,
             int maxAudioFrameBytes,
             int eventReplayWindow,
-            Long maxReplayAudioMs) {
+            Long maxReplayAudioMs,
+            int heartbeatIntervalMs) {
         public Limits {
             if (maxMeetingDurationMs <= 0) {
                 throw new IllegalArgumentException("limits.maxMeetingDurationMs must be positive");
@@ -271,6 +273,10 @@ public final class CreateMeetingResponseFact {
             if (maxReplayAudioMs != null && maxReplayAudioMs < 0) {
                 throw new IllegalArgumentException("limits.maxReplayAudioMs must not be negative");
             }
+            if (heartbeatIntervalMs <= 0) {
+                throw new IllegalArgumentException(
+                        "limits.heartbeatIntervalMs must be positive");
+            }
         }
 
         /** 限制对象不含敏感文本，保持默认摘要安全。 */
@@ -279,7 +285,8 @@ public final class CreateMeetingResponseFact {
             return "Limits[maxMeetingDurationMs=" + maxMeetingDurationMs
                     + ", maxAudioFrameBytes=" + maxAudioFrameBytes
                     + ", eventReplayWindow=" + eventReplayWindow
-                    + ", maxReplayAudioMs=" + maxReplayAudioMs + ']';
+                    + ", maxReplayAudioMs=" + maxReplayAudioMs
+                    + ", heartbeatIntervalMs=" + heartbeatIntervalMs + ']';
         }
     }
 }

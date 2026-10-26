@@ -182,6 +182,33 @@ public final class HttpErrorMapper {
                 "ai_meeting.model.session_unavailable");
     }
 
+    /**
+     * 心跳只接受会中状态；状态不符沿用 Stop／模型会话的 409 会话域错误形状。
+     * 响应不回显会议当前状态或合法状态列表，避免泄露跨主体事实。
+     */
+    public HttpResponse heartbeatInvalidState() {
+        return error(409, HttpErrorEnvelope.Domain.SESSION, "HEARTBEAT_INVALID_STATE",
+                false, HttpErrorEnvelope.UserAction.NONE,
+                "ai_meeting.session.heartbeat_invalid_state");
+    }
+
+    /** 心跳持久化不可用；客户端按同一节奏重试即可，不需要更换幂等键。 */
+    public HttpResponse heartbeatUnavailable() {
+        return error(503, HttpErrorEnvelope.Domain.STORAGE, "HEARTBEAT_UNAVAILABLE",
+                true, HttpErrorEnvelope.UserAction.RETRY,
+                "ai_meeting.storage.heartbeat_unavailable");
+    }
+
+    /** 心跳成功只回告服务端冻结的期望间隔，不返回会议状态或活跃时间。 */
+    public HttpResponse heartbeat(int heartbeatIntervalMs) {
+        if (heartbeatIntervalMs <= 0) {
+            throw new IllegalArgumentException("heartbeatIntervalMs must be positive");
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("heartbeatIntervalMs", heartbeatIntervalMs);
+        return success(200, body);
+    }
+
     /** 永久 Key 不进入响应；只把本场短期材料交给已认证 App。 */
     public HttpResponse summarySession(String meetingId,
             SummarySessionIssuer.Session session) {

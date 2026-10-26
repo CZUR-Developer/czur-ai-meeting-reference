@@ -52,6 +52,7 @@ class CreateMeetingFactJsonTest {
         assertEquals(canonical, CreateMeetingResponseFactJson.encode(decoded));
         assertEquals(fact.meetingId(), decoded.meetingId());
         assertEquals(fact.realtime().sessionToken(), decoded.realtime().sessionToken());
+        assertEquals(120_000, decoded.limits().heartbeatIntervalMs());
         assertEquals(fact.capabilityDecisions(), decoded.capabilityDecisions());
         assertEquals(canonical,
                 CreateMeetingResponseFactJson.encode(CreateMeetingResponseFactJson.decode(
@@ -109,6 +110,10 @@ class CreateMeetingFactJsonTest {
                 "\\\"maxMeetingDurationMs\\\":999999999999999999999999"));
         assertMalformedResponse(canonical.replace("\"requiredByProfile\":true",
                 "\"requiredByProfile\":trueX"));
+        // 心跳间隔是本版持久事实的一部分；缺失或非正数都必须失败关闭。
+        assertMalformedResponse(canonical.replace(",\"heartbeatIntervalMs\":120000", ""));
+        assertMalformedResponse(canonical.replace("\"heartbeatIntervalMs\":120000",
+                "\"heartbeatIntervalMs\":0"));
 
         String malformedToken = canonical.replace(RESPONSE_TOKEN, RESPONSE_TOKEN + "\\uD800");
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
@@ -163,6 +168,6 @@ class CreateMeetingFactJsonTest {
                         URI.create("https://example.test/realtime"),
                         CreateMeetingResponseFact.REALTIME_SUBPROTOCOL,
                         RESPONSE_TOKEN, Instant.parse("2030-01-01T00:00:00Z")),
-                new CreateMeetingResponseFact.Limits(3_600_000, 64_000, 200, 30_000L));
+                new CreateMeetingResponseFact.Limits(3_600_000, 64_000, 200, 30_000L, 120_000));
     }
 }

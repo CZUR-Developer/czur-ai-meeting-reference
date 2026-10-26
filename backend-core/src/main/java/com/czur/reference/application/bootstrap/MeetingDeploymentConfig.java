@@ -40,6 +40,9 @@ import java.util.TreeSet;
 public class MeetingDeploymentConfig {
     // 首版公开音频仅支持 16 kHz、单声道、16-bit PCM，最短帧 20 ms。
     private static final int MINIMUM_PUBLIC_AUDIO_FRAME_BYTES = 16_000 * 2 * 20 / 1_000;
+    // 客户端心跳缺省两分钟；过密周期没有业务收益，只会放大单场写入次数。
+    private static final int DEFAULT_HEARTBEAT_INTERVAL_MS = 120_000;
+    private static final int MINIMUM_HEARTBEAT_INTERVAL_MS = 1_000;
     private static final String MOCK_TRANSCRIPT_WORKFLOW = "mock.transcript";
     private static final String MOCK_TRANSCRIPT_ARTIFACT = "transcript.final";
     private static final String MODEL_TRANSLATION_WORKFLOW = "model.translation.realtime";
@@ -75,6 +78,8 @@ public class MeetingDeploymentConfig {
     public static final String ESTIMATED_DURATION_MS = "AI_MEETING_ESTIMATED_DURATION_MS";
     public static final String MAX_MEETING_DURATION_MS = "AI_MEETING_MAX_MEETING_DURATION_MS";
     public static final String MAX_AUDIO_FRAME_BYTES = "AI_MEETING_MAX_AUDIO_FRAME_BYTES";
+    /** 客户端心跳间隔；缺省 120000 ms，显式配置时必须是至少 1000 ms 的正整数。 */
+    public static final String HEARTBEAT_INTERVAL_MS = "AI_MEETING_HEARTBEAT_INTERVAL_MS";
     public static final String EVENT_REPLAY_WINDOW = "AI_MEETING_EVENT_REPLAY_WINDOW";
     public static final String MAX_REPLAY_AUDIO_MS = "AI_MEETING_MAX_REPLAY_AUDIO_MS";
     public static final String PAGE_TOKEN_SECRET = "AI_MEETING_PAGE_TOKEN_SECRET";
@@ -94,6 +99,7 @@ public class MeetingDeploymentConfig {
     private final DeploymentLimits capabilityLimits;
     private final UsageEstimate trustedEstimate;
     private final TrustedCreateRuntimeLimits runtimeLimits;
+    private final int heartbeatIntervalMs;
     private final byte[] pageTokenSecret;
     private final URI wssOrigin;
     private final Duration wssTokenTtl;
@@ -113,6 +119,7 @@ public class MeetingDeploymentConfig {
             ProductProfile profile, FixedEntitlementPolicyConfig entitlement,
             CapabilityDescriptor mockCapabilities, DeploymentLimits capabilityLimits,
             UsageEstimate trustedEstimate, TrustedCreateRuntimeLimits runtimeLimits,
+            int heartbeatIntervalMs,
             byte[] pageTokenSecret, URI wssOrigin, Duration wssTokenTtl,
             boolean createEnabled, boolean realtimeRenewEnabled, Duration resultLinkTtl,
             ResultEmailConfig resultEmail, String modelAdapterId,
@@ -128,6 +135,7 @@ public class MeetingDeploymentConfig {
         this.capabilityLimits = capabilityLimits;
         this.trustedEstimate = trustedEstimate;
         this.runtimeLimits = runtimeLimits;
+        this.heartbeatIntervalMs = heartbeatIntervalMs;
         this.pageTokenSecret = pageTokenSecret.clone();
         this.wssOrigin = wssOrigin;
         this.wssTokenTtl = wssTokenTtl;
@@ -154,6 +162,7 @@ public class MeetingDeploymentConfig {
         this.capabilityLimits = config.capabilityLimits;
         this.trustedEstimate = config.trustedEstimate;
         this.runtimeLimits = config.runtimeLimits;
+        this.heartbeatIntervalMs = config.heartbeatIntervalMs;
         this.pageTokenSecret = config.pageTokenSecret.clone();
         this.wssOrigin = config.wssOrigin;
         this.wssTokenTtl = config.wssTokenTtl;
@@ -322,10 +331,11 @@ public class MeetingDeploymentConfig {
         }
         int eventReplayWindow = positiveInt(environment, EVENT_REPLAY_WINDOW);
         Long maxReplayAudioMs = optionalNonNegativeLong(environment, MAX_REPLAY_AUDIO_MS);
+        int heartbeatIntervalMs = heartbeatInterval(environment);
         TrustedCreateRuntimeLimits runtimeLimits;
         try {
             runtimeLimits = new TrustedCreateRuntimeLimits(maxMeetingMs, maxAudioFrameBytes,
-                    eventReplayWindow, maxReplayAudioMs);
+                    eventReplayWindow, maxReplayAudioMs, heartbeatIntervalMs);
         } catch (RuntimeException malformed) {
             throw invalid(MAX_AUDIO_FRAME_BYTES);
         }
@@ -366,7 +376,7 @@ public class MeetingDeploymentConfig {
                     BailianSummarySessionConfig.fromEnvironment(environment);
             return new MeetingDeploymentConfig(database, scope,
                     audience, clientId, profile, entitlement, mock, limits, estimate,
-                    runtimeLimits, secret, wssOrigin, tokenTtl,
+                    runtimeLimits, heartbeatIntervalMs, secret, wssOrigin, tokenTtl,
                     enabled, renewEnabled, resultLinkTtl, resultEmail, adapterId,
                     tingwu, sampleEndpoint, bailian, modelLanguages(environment));
         } finally {
@@ -386,6 +396,11 @@ public class MeetingDeploymentConfig {
     public DeploymentLimits capabilityLimits() { return capabilityLimits; }
     public UsageEstimate trustedEstimate() { return trustedEstimate; }
     public TrustedCreateRuntimeLimits runtimeLimits() { return runtimeLimits; }
+    /**
+     * 客户端心跳间隔；同时冻结进 Create 响应与心跳成功响应，服务端不自行缩短或延长。
+     * 本阶段只回告节奏，不据此推进会议状态或收口。
+     */
+    public int heartbeatIntervalMs() { return heartbeatIntervalMs; }
     /** 只供分页 HMAC 编解码器构造使用；返回私有密钥的副本。 */
     public byte[] pageTokenSecretCopy() { return pageTokenSecret.clone(); }
     /** 首次 Create 会话的公开 WSS origin；监听器由装配根的显式工厂另行创建。 */
@@ -472,6 +487,21 @@ public class MeetingDeploymentConfig {
             throw invalid(key);
         }
         return (int) number;
+    }
+
+    /**
+     * 心跳间隔缺省启用；显式给出时必须是可解析的正整数且不低于下限。
+     * 只报告键名，不回显动态配置内容。
+     */
+    private static int heartbeatInterval(Map<String, String> environment) {
+        if (!environment.containsKey(HEARTBEAT_INTERVAL_MS)) {
+            return DEFAULT_HEARTBEAT_INTERVAL_MS;
+        }
+        int interval = positiveInt(environment, HEARTBEAT_INTERVAL_MS);
+        if (interval < MINIMUM_HEARTBEAT_INTERVAL_MS) {
+            throw invalid(HEARTBEAT_INTERVAL_MS);
+        }
+        return interval;
     }
 
     private static long positiveLong(Map<String, String> environment, String key) {

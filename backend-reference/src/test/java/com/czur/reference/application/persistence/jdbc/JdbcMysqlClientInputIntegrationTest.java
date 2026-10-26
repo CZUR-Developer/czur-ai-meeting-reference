@@ -297,7 +297,7 @@ class JdbcMysqlClientInputIntegrationTest {
                 grant.grantedCapabilities(), plan.decisions(), snapshot.audioProfile(),
                 new CreateMeetingResponseFact.RealtimeSession(URI.create("wss://model.example.invalid"),
                         CreateMeetingResponseFact.REALTIME_SUBPROTOCOL, "local-test-session-token",
-                        NOW.plusSeconds(300)), new CreateMeetingResponseFact.Limits(3_600_000, 32_000, 100, null));
+                        NOW.plusSeconds(300)), new CreateMeetingResponseFact.Limits(3_600_000, 32_000, 100, null, 120_000));
         assertInstanceOf(CompleteMeetingCreationUnitOfWork.Success.class,
                 new JdbcCompleteMeetingCreationUnitOfWork(database, CLOCK).create(
                         new CompleteMeetingCreationUnitOfWork.CreateRequest(SCOPE, SUBJECT, request, response, reserve)));

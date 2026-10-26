@@ -641,6 +641,27 @@ class ReferenceMeetingDeploymentConfigTest {
     }
 
     @Test
+    void heartbeatIntervalDefaultsToTwoMinutesAndRejectsInvalidValues() {
+        Map<String, String> values = valid();
+        var defaults = ReferenceMeetingDeploymentConfig.fromEnvironment(values);
+        assertEquals(120_000, defaults.heartbeatIntervalMs());
+        assertEquals(120_000, defaults.runtimeLimits().heartbeatIntervalMs());
+
+        values.put(ReferenceMeetingDeploymentConfig.HEARTBEAT_INTERVAL_MS, "5000");
+        var configured = ReferenceMeetingDeploymentConfig.fromEnvironment(values);
+        assertEquals(5_000, configured.heartbeatIntervalMs());
+        assertEquals(5_000, configured.runtimeLimits().heartbeatIntervalMs());
+
+        // 下限保护客户端不要用毫秒级周期压垮单场写入；坏值只报告键名。
+        for (String malformed : new String[]{"0", "-1", "999", "abc", "", " 1000",
+                "1000 ", "999999999999999999999999"}) {
+            Map<String, String> rejected = valid();
+            rejected.put(ReferenceMeetingDeploymentConfig.HEARTBEAT_INTERVAL_MS, malformed);
+            rejects(rejected, ReferenceMeetingDeploymentConfig.HEARTBEAT_INTERVAL_MS);
+        }
+    }
+
+    @Test
     void malformedWssNumbersAndSecretsNeverEchoInput() {
         Map<String, String> urlWithSecret = valid();
         urlWithSecret.put(DatabaseRuntimeConfig.DATABASE_URL,

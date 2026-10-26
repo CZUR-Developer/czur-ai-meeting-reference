@@ -106,6 +106,7 @@ public final class CreateMeetingPublicResponseJson {
         if (limits.maxReplayAudioMs() != null) {
             value.put("maxReplayAudioMs", limits.maxReplayAudioMs());
         }
+        value.put("heartbeatIntervalMs", limits.heartbeatIntervalMs());
         return value;
     }
 }

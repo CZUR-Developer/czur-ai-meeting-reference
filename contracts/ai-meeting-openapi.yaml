@@ -1020,6 +1020,10 @@ components:
         maxReplayAudioMs:
           type: integer
           minimum: 0
+        heartbeatIntervalMs:
+          type: integer
+          minimum: 1
+          description: 客户端下一次心跳的期望间隔（毫秒）；服务端按部署配置回告，不由单场状态推导。当前阶段仅用于接收与记录，不驱动状态推进或收口。
     ProfileRef:
       type: object
       additionalProperties: false

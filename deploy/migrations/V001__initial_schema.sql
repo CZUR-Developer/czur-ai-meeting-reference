@@ -196,6 +196,16 @@ CREATE TABLE ai_trans_meeting_event (
     PRIMARY KEY (meeting_id, event_sequence)
 ) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
+-- 会议心跳只记录“真正开始”和“最后活跃”的服务端事实；本阶段不驱动状态推进，
+-- 也不参与结算。两列时间均为服务端时钟写入的 UTC DATETIME(6)。
+CREATE TABLE ai_trans_meeting_heartbeat (
+    meeting_id VARBINARY(1024) NOT NULL,
+    started_at DATETIME(6) NOT NULL,
+    last_active_at DATETIME(6) NOT NULL,
+    heartbeat_count BIGINT NOT NULL,
+    PRIMARY KEY (meeting_id)
+) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+
 CREATE TABLE ai_trans_meeting_client_input (
     meeting_id VARBINARY(1024) NOT NULL,
     started_at DATETIME(6) NOT NULL,
@@ -443,6 +453,10 @@ ALTER TABLE ai_trans_meeting_deletion_plan
 
 ALTER TABLE ai_trans_meeting_event
     ADD CONSTRAINT ai_trans_meeting_event_meeting_id_fkey FOREIGN KEY (meeting_id)
+    REFERENCES ai_trans_meeting (meeting_id) ON DELETE RESTRICT ON UPDATE RESTRICT;
+
+ALTER TABLE ai_trans_meeting_heartbeat
+    ADD CONSTRAINT ai_trans_meeting_heartbeat_meeting_fk FOREIGN KEY (meeting_id)
     REFERENCES ai_trans_meeting (meeting_id) ON DELETE RESTRICT ON UPDATE RESTRICT;
 
 ALTER TABLE ai_trans_meeting_client_input

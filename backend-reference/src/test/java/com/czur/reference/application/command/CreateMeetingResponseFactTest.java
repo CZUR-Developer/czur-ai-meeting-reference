@@ -90,13 +90,15 @@ class CreateMeetingResponseFactTest {
     @Test
     void validatesLimitsAndRedactsSensitiveResponseContents() {
         assertThrows(IllegalArgumentException.class,
-                () -> new CreateMeetingResponseFact.Limits(0, 1, 1, null));
+                () -> new CreateMeetingResponseFact.Limits(0, 1, 1, null, 1));
         assertThrows(IllegalArgumentException.class,
-                () -> new CreateMeetingResponseFact.Limits(1, 0, 1, null));
+                () -> new CreateMeetingResponseFact.Limits(1, 0, 1, null, 1));
         assertThrows(IllegalArgumentException.class,
-                () -> new CreateMeetingResponseFact.Limits(1, 1, 0, null));
+                () -> new CreateMeetingResponseFact.Limits(1, 1, 0, null, 1));
         assertThrows(IllegalArgumentException.class,
-                () -> new CreateMeetingResponseFact.Limits(1, 1, 1, -1L));
+                () -> new CreateMeetingResponseFact.Limits(1, 1, 1, -1L, 1));
+        assertThrows(IllegalArgumentException.class,
+                () -> new CreateMeetingResponseFact.Limits(1, 1, 1, null, 0));
 
         String diagnostic = valid(Set.of("summary.structured"), List.of(
                 decision("summary.structured", CapabilityDecision.Availability.AVAILABLE))).toString();
@@ -128,7 +130,7 @@ class CreateMeetingResponseFactTest {
     }
 
     private static CreateMeetingResponseFact.Limits limits() {
-        return new CreateMeetingResponseFact.Limits(3_600_000, 64_000, 200, 30_000L);
+        return new CreateMeetingResponseFact.Limits(3_600_000, 64_000, 200, 30_000L, 120_000);
     }
 
     private static CapabilityDecision decision(

@@ -632,7 +632,7 @@ class AuthenticatedCompleteMeetingApplicationServiceTest {
                         "candidate-token-secret", NOW.plusSeconds(60));
             };
             var assembler = new CompleteMeetingResponseAssembler(new CapabilityPlanner(),
-                    allocator, new TrustedCreateRuntimeLimits(120_000, 3_200, 128, null));
+                    allocator, new TrustedCreateRuntimeLimits(120_000, 3_200, 128, null, 120_000));
             return new AuthenticatedCompleteMeetingApplicationService(DEPLOYMENT,
                     request -> {
                         calls.add("verify");
@@ -696,7 +696,7 @@ class AuthenticatedCompleteMeetingApplicationServiceTest {
                             URI.create("wss://example.test/v1/realtime/mtg_first_winner"),
                             CreateMeetingResponseFact.REALTIME_SUBPROTOCOL,
                             "stored-token-secret", NOW.plusSeconds(60)),
-                    new CreateMeetingResponseFact.Limits(120_000, 3_200, 128, null));
+                    new CreateMeetingResponseFact.Limits(120_000, 3_200, 128, null, 120_000));
         }
 
         @Override

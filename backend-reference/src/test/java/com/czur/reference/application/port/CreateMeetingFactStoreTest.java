@@ -78,6 +78,6 @@ class CreateMeetingFactStoreTest {
                         URI.create("https://example.test/realtime"),
                         CreateMeetingResponseFact.REALTIME_SUBPROTOCOL,
                         "secret-token", Instant.EPOCH),
-                new CreateMeetingResponseFact.Limits(1, 1, 1, null));
+                new CreateMeetingResponseFact.Limits(1, 1, 1, null, 1));
     }
 }

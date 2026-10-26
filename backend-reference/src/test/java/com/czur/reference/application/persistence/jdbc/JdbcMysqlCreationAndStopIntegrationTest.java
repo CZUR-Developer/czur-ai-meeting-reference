@@ -293,7 +293,7 @@ class JdbcMysqlCreationAndStopIntegrationTest {
                 snapshot.profile(), CAPABILITIES, List.of(), AudioProfile.pcm16kMono(100),
                 new CreateMeetingResponseFact.RealtimeSession(URI.create("wss://example.test/realtime"),
                         CreateMeetingResponseFact.REALTIME_SUBPROTOCOL, token, CREATED_AT.plusSeconds(120)),
-                new CreateMeetingResponseFact.Limits(3_600_000, 64_000, 200, null));
+                new CreateMeetingResponseFact.Limits(3_600_000, 64_000, 200, null, 120_000));
         return new CompleteMeetingCreationUnitOfWork.CreateRequest(DEPLOYMENT, SUBJECT, request, response, reserve);
     }
 

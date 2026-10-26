@@ -56,7 +56,8 @@ class CreateMeetingPublicResponseJsonTest {
                 fields(body.path("realtime")));
         assertEquals("opaque-test-token", body.path("realtime").path("sessionToken").asText());
         assertEquals(List.of("maxMeetingDurationMs", "maxAudioFrameBytes",
-                "eventReplayWindow"), fields(body.path("limits")));
+                "eventReplayWindow", "heartbeatIntervalMs"), fields(body.path("limits")));
+        assertEquals(120_000, body.path("limits").path("heartbeatIntervalMs").asInt());
         assertFalse(publicJson.contains("schemaVersion"));
         assertFalse(publicJson.contains("warningCode"));
         assertFalse(publicJson.contains("action"));
@@ -127,7 +128,7 @@ class CreateMeetingPublicResponseJsonTest {
                         CreateMeetingResponseFact.REALTIME_SUBPROTOCOL,
                         "opaque-test-token", Instant.parse("2030-01-01T00:01:00Z")),
                 new CreateMeetingResponseFact.Limits(120_000, 3_200, 128,
-                        maxReplayAudioMs));
+                        maxReplayAudioMs, 120_000));
     }
 
     private static List<String> fields(JsonNode node) {

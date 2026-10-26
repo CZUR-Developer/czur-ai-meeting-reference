@@ -5,8 +5,9 @@ import java.util.Objects;
 /**
  * 已解码会议请求的公共分发入口，由不同HTTP transport共享同一实例。
  *
- * <p>本类提取原JDK入口的业务分发顺序：可选结果邮件先使用既有客户端写入
- * 身份解析器，其余路由按{@link MeetingHttpAdapter#authenticationRoute(HttpRequest)}
+ * <p>本类提取原JDK入口的业务分发顺序：可选结果邮件、会后人物与会议心跳先使用
+ * 既有客户端写入身份解析器，其余路由按
+ * {@link MeetingHttpAdapter#authenticationRoute(HttpRequest)}
  * 选择已有读取、删除或客户端写入上下文；Create／Stop继续由应用服务自行认证。
  * 不增加路由、权限、身份回退或会议状态机，不解析原始网络字节。</p>
  *
@@ -22,6 +23,7 @@ public final class MeetingHttpDispatcher {
     private final MeetingArtifactHttpEndpoint artifactEndpoint;
     private final SpeakerIdentityEnrollmentEndpoint speakerEnrollment;
     private final SpeakerNameEditEndpoint speakerEditing;
+    private final MeetingHeartbeatEndpoint heartbeat;
 
     /** 无外层身份解析器；保留旧JDK构造器的空上下文及邮件关闭行为。 */
     public MeetingHttpDispatcher(MeetingHttpRuntime runtime, HttpErrorMapper errors) {
@@ -70,6 +72,19 @@ public final class MeetingHttpDispatcher {
             AuthenticatedMeetingHttpContextResolver contextResolver,
             ResultEmailEndpoint resultEmail, MeetingArtifactHttpEndpoint artifactEndpoint,
             SpeakerIdentityEnrollmentEndpoint speakerEnrollment, SpeakerNameEditEndpoint speakerEditing) {
+        this(runtime, errors, contextResolver, resultEmail, artifactEndpoint,
+                speakerEnrollment, speakerEditing, null);
+    }
+
+    /**
+     * 显式接入会议心跳；认证复用既有 CLIENT_WRITE 解析器，旧装配保持 501。
+     * 心跳属于会中记录入口，不改变查询、Stop 或邮件路由的分发顺序。
+     */
+    public MeetingHttpDispatcher(MeetingHttpRuntime runtime, HttpErrorMapper errors,
+            AuthenticatedMeetingHttpContextResolver contextResolver,
+            ResultEmailEndpoint resultEmail, MeetingArtifactHttpEndpoint artifactEndpoint,
+            SpeakerIdentityEnrollmentEndpoint speakerEnrollment, SpeakerNameEditEndpoint speakerEditing,
+            MeetingHeartbeatEndpoint heartbeat) {
         this.runtime = Objects.requireNonNull(runtime, "runtime");
         this.errors = Objects.requireNonNull(errors, "errors");
         if (contextResolver != null && contextResolver.errorMapper() != errors) {
@@ -80,6 +95,7 @@ public final class MeetingHttpDispatcher {
         this.artifactEndpoint = artifactEndpoint;
         this.speakerEnrollment = speakerEnrollment;
         this.speakerEditing = speakerEditing;
+        this.heartbeat = heartbeat;
     }
 
     /**
@@ -116,6 +132,16 @@ public final class MeetingHttpDispatcher {
                 return rejected.response();
             }
             return resultEmail.handle(request,
+                    ((AuthenticatedMeetingHttpContextResolver.Ready) resolution).context());
+        }
+        if (MeetingHeartbeatEndpoint.matches(request)) {
+            if (heartbeat == null) return errors.notImplemented();
+            if (contextResolver == null) return errors.missingContext();
+            var resolution = contextResolver.forClientWrite(request);
+            if (resolution instanceof AuthenticatedMeetingHttpContextResolver.Rejected rejected) {
+                return rejected.response();
+            }
+            return heartbeat.handle(request,
                     ((AuthenticatedMeetingHttpContextResolver.Ready) resolution).context());
         }
         if (contextResolver == null) {

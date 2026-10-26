@@ -178,6 +178,6 @@ class CreateMeetingHttpErrorMapperTest {
                         URI.create("wss://example.test/realtime"),
                         CreateMeetingResponseFact.REALTIME_SUBPROTOCOL,
                         "private-realtime-token", Instant.parse("2030-01-01T00:01:00Z")),
-                new CreateMeetingResponseFact.Limits(120_000, 1_280, 128, null));
+                new CreateMeetingResponseFact.Limits(120_000, 1_280, 128, null, 120_000));
     }
 }

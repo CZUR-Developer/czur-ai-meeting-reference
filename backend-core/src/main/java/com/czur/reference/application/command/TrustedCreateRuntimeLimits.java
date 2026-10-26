@@ -11,15 +11,17 @@ package com.czur.reference.application.command;
  * @param maxAudioFrameBytes 单次音频帧可接受的最大字节数
  * @param eventReplayWindow 事件重放窗口数量
  * @param maxReplayAudioMs 可选的音频补拉最大时长，null 表示未声明
+ * @param heartbeatIntervalMs 客户端心跳间隔，单位毫秒
  */
 public record TrustedCreateRuntimeLimits(
         long maxMeetingDurationMs,
         int maxAudioFrameBytes,
         int eventReplayWindow,
-        Long maxReplayAudioMs) {
+        Long maxReplayAudioMs,
+        int heartbeatIntervalMs) {
     public TrustedCreateRuntimeLimits {
         new CreateMeetingResponseFact.Limits(maxMeetingDurationMs, maxAudioFrameBytes,
-                eventReplayWindow, maxReplayAudioMs);
+                eventReplayWindow, maxReplayAudioMs, heartbeatIntervalMs);
     }
 
     /** 把授权时长上限收紧为最终响应限制，永不放大已授权 Profile。 */
@@ -29,6 +31,7 @@ public record TrustedCreateRuntimeLimits(
         }
         return new CreateMeetingResponseFact.Limits(
                 Math.min(authorizedMaxDurationMs, maxMeetingDurationMs),
-                maxAudioFrameBytes, eventReplayWindow, maxReplayAudioMs);
+                maxAudioFrameBytes, eventReplayWindow, maxReplayAudioMs,
+                heartbeatIntervalMs);
     }
 }

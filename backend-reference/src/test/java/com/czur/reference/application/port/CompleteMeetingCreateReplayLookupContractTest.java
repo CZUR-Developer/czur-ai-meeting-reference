@@ -33,7 +33,7 @@ class CompleteMeetingCreateReplayLookupContractTest {
                         URI.create("wss://example.test/secret"),
                         CreateMeetingResponseFact.REALTIME_SUBPROTOCOL,
                         "token-secret", Instant.parse("2030-01-01T00:02:00Z")),
-                new CreateMeetingResponseFact.Limits(60_000, 64_000, 200, null));
+                new CreateMeetingResponseFact.Limits(60_000, 64_000, 200, null, 60_000));
         var results = List.of(new CompleteMeetingCreateReplayLookup.NotFound(),
                 new CompleteMeetingCreateReplayLookup.Replayed(response),
                 new CompleteMeetingCreateReplayLookup.Conflict(),
