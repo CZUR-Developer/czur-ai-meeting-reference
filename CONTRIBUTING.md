@@ -10,7 +10,7 @@
 - 从仓库根目录执行 `bash tools/verify-local.sh`，在本机检查后端、契约和 Web。
 - Android：在 `android-reference-app/` 执行 `./gradlew :app:testDebugUnitTest`；需要本机 Android SDK。
 - 参考客户端 MySQL 5.7 集成测试使用显式提供的隔离测试库，连接配置见
-  `backend-reference/README.md`；旧 PostgreSQL 兼容测试仅在单独准备夹具时运行。
+  `backend-reference/README.md`；测试库只使用 MySQL 5.7。
 - 日常测试不启动 Docker；根目录 Dockerfile 和 `deploy/` Compose 仅用于后端交付部署。
 - GitHub 公开发布前再运行公开边界扫描；内部 Gitee 开发提交不以该扫描代替功能测试。
 - 修改协议时同步更新 Schema、Fixture 和说明文档。

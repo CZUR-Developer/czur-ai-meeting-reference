@@ -232,11 +232,9 @@ if (snapshot instanceof JdbcClientMeetingResultFinalizer.Ready ready) {
 先执行唯一 MySQL V001，启动只读检查连接和初始化结果，不修改其他业务表。
 连接池与借出连接由对应所有者释放，不为每个插件建立第二套会议事实源。
 
-源码另保留 PostgreSQL 适配和非默认服务端 WSS／Mock 入口，
-`ReferenceMeetingHttpAssembly.start(...)` 使用这套装配；它不适用于默认 MySQL 客户端。
-`JdbcDatabaseRuntime` 完整运行入口仍只接受 PostgreSQL，相关音频／Worker SQL
-未适配 MySQL。本仓交付的 MySQL V001 不能用于初始化 PostgreSQL；
-需要该非默认入口的宿主须另行准备匹配结构与显式兼容验证。
+持久层只支持 MySQL 5.7：`JdbcDatabaseEngine` 只有 `MYSQL`，PostgreSQL 适配与
+相关测试夹具已移除；非默认服务端 WSS／Mock 入口仍通过
+`ReferenceMeetingHttpAssembly.start(...)` 装配，但同样使用 MySQL 基线。
 
 `startClientModel(...)` 不创建服务端音频 Worker、WSS、删除或实时 Token 续签组件，
 相关有效 HTTP DELETE／renew 路由返回 501；Create 的 `realtime` 字段仅保留协议兼容。

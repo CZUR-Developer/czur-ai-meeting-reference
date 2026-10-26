@@ -12,19 +12,16 @@ Maven、Python 3 和 npm，检查工程结构、Java 测试、公开协议 Fixtu
 完整会议运行测试会创建并清理自己的随机 `ai_trans_*` 隔离库，任何测试都不能使用承载用户数据的库。
 没有测试库时，数据库集成测试会跳过；这不等于数据库验收通过。
 
-`test-t13-*`～`test-t16-*` 是 PostgreSQL／服务端音频路径的专用容器测试工具，
-不属于默认客户端直连模型的 MySQL 开发验证入口，日常请运行上述本机脚本。
-若宿主使用非默认路径，应另以本机进程及隔离数据库核对跨进程、重启等相关语义，
-不能用默认路径测试代签。交付后端的 Dockerfile 和 Compose 用法见
-[`部署说明`](../deploy/README.md)，与开发验证分开。
+数据库交付与验证只走 MySQL 5.7：不再提供 PostgreSQL 容器夹具或跨进程重启脚本，
+历史 PostgreSQL 回归入口已随引擎支持一起移除。交付后端的 Dockerfile 和
+Compose 用法见[`部署说明`](../deploy/README.md)，与开发验证分开。
 
 公开发布前单独运行 `python3 tools/check-public-boundary.py`；它是发布内容检查，
 不能替代编译、测试或实际功能验收。
 
 MySQL 5.7 的小型数据库能力实验见
 [`mysql57-compatibility/`](mysql57-compatibility/README.md)。仅连接显式指定的本机隔离库，
-不执行正式 V001；此入口仅为能力探针。共享核心的正常客户端会议链支持 MySQL 5.7，
-非默认 WSS／Mock 链仍可在显式 PostgreSQL 测试夹具中运行；默认局域网参考方案使用 MySQL。
+不执行正式 V001；此入口仅为能力探针。共享核心的正常客户端会议链只支持 MySQL 5.7；局域网参考方案同样使用 MySQL。
 
 ## Android 设备启动校验
 

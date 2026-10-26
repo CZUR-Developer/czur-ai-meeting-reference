@@ -144,7 +144,7 @@ JDBC 实现使用会议行锁、已有结果表和不可变 Artifact，递增 Ma
 
 `JdbcClientMeetingResultFinalizer.readFinalSnapshot(assembly.databaseContext(),
 verifiedContext, meetingId)` 可在模型尾事件和采音用量保存后读取同场最终事实。
-使用同一 `JdbcDatabaseContext`，避免把默认 PostgreSQL 的 DataSource 重载用于 MySQL。
+使用同一 `JdbcDatabaseContext`，所有持久层只装配 MySQL 引擎。
 
 `Ready` 包含最终原文／译文、已提交总结、实测采音时长、首次创建参数，以及可选录音
 和演示截图的描述符。没有总结时 `summary()` 为 `null`；描述符不载入长音频或 JPEG。
@@ -156,10 +156,9 @@ verifiedContext, meetingId)` 可在模型尾事件和采音用量保存后读取
 [`V001__initial_schema.sql`](../deploy/migrations/V001__initial_schema.sql)。
 启动只检查已初始化的基线，不自动建表；不能把 readiness 当作业务全流程验收。
 
-源码保留 PostgreSQL 适配及服务端 WSS／Mock 音频接入组件，供显式装配的兼容宿主使用。
-`startClientModel(...)` 不装配这套音频 Worker、WSS、删除或实时 Token 续签组件；
+持久层只支持 MySQL 5.7 兼容基线：`JdbcDatabaseEngine` 只有 `MYSQL`，
+`DATABASE_URL` 必须是 `jdbc:mysql://`，其他协议在启动期被拒绝。
+`startClientModel(...)` 不装配服务端 WSS／Mock 音频 Worker、删除或实时 Token 续签组件；
 相关有效 HTTP DELETE／renew 路由返回 501。
-`JdbcDatabaseRuntime` 完整运行入口仍只接受 PostgreSQL，相关音频／Worker SQL
-未适配 MySQL。公开交付的 MySQL V001 只对应默认客户端会议链，不能据此将全部
-PostgreSQL 组件视作 MySQL 可用，也不能把该 SQL 用于初始化 PostgreSQL。
+公开交付的 MySQL V001 只对应默认客户端会议链，不能据此认为全部可选组件都已验收。
 新伙伴从默认客户端入口开始即可，无需装配这些非默认组件。
