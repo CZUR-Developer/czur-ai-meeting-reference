@@ -137,8 +137,7 @@ public final class JdbcClientMeetingResultFinalizer
         this(dataSource, engine, receipts, clock, artifactStore, entitlementProvider, null);
     }
 
-    /** 包内完整装配；同包门禁用可控 DataSource 复现发布成功但登记失败的窗口。 */
-    JdbcClientMeetingResultFinalizer(DataSource dataSource, JdbcDatabaseEngine engine,
+    private JdbcClientMeetingResultFinalizer(DataSource dataSource, JdbcDatabaseEngine engine,
             FinalizationReceiptGenerator receipts, Clock clock, ArtifactStore artifactStore,
             EntitlementProvider entitlementProvider, SpeakerIdentityProvider speakerIdentity) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
@@ -365,7 +364,7 @@ public final class JdbcClientMeetingResultFinalizer
         // 本入口每次均经过账本，包括下方resultExists早返的正常Stop重放。
         Long capturedDurationMs = commitClientUsage(meetingId);
         // 可选供应商网络和音频切片只在连接释放后运行，不能放进下面的会议行锁事务。
-        SpeakerArtifact speakerArtifact = identifySpeakers(meetingId);
+        ObjectNode speakerArtifact = identifySpeakers(meetingId);
         try (Connection connection = dataSource.getConnection()) {
             connection.setAutoCommit(false);
             try {
@@ -501,7 +500,7 @@ public final class JdbcClientMeetingResultFinalizer
      */
     private void writeClientResult(Connection connection,
             JdbcMeetingRepository.VersionedMeeting locked, Instant startedAt, Instant endedAt,
-            Long capturedDurationMs, SpeakerArtifact speakerArtifact, MeetingEvent terminalEvent,
+            Long capturedDurationMs, ObjectNode speakerArtifact, MeetingEvent terminalEvent,
             ManifestStatus manifestStatus, List<MeetingManifest.Warning> warnings)
             throws SQLException, ArtifactStoreException {
         String meetingId = locked.snapshot().meetingId();
@@ -568,9 +567,10 @@ public final class JdbcClientMeetingResultFinalizer
                     artifact));
         }
         if (speakerArtifact != null) {
-            artifactRefs.add(new JdbcClientResultArtifacts(artifactStore, engine).publishReadyText(
-                    connection, speakerArtifact.artifactId(), meetingId,
-                    "speaker.identity", null, 1, speakerArtifact.bodyJson()));
+            String speakerId = "art_client_speaker_" + sha256(
+                    meetingId.getBytes(StandardCharsets.UTF_8)) + "_1";
+            artifactRefs.add(publishReady(connection, speakerId, meetingId,
+                    "speaker.identity", null, speakerArtifact));
         }
         for (var capture : presentationCaptures(connection, engine, meetingId)) {
             WriteIntentSpec spec = capture.artifact().intent().spec();
@@ -757,16 +757,9 @@ public final class JdbcClientMeetingResultFinalizer
                 artifactId, meetingId, type, language, 1, body);
     }
 
-    /**
-     * 本场输入已在 Stop 冻结；读取完释放连接后再执行可选后处理。
-     *
-     * <p>识别正文在第一次发布前冻结到独立事实行，重试直接复用同一份正文，
-     * 不再调用 Provider。否则重新识别可能得到不同人物，同一个不可变
-     * artifactId 会被存储以正文冲突拒绝，会议永远进不了 READY。</p>
-     */
-    private SpeakerArtifact identifySpeakers(String meetingId) {
+    /** 本场输入已在 Stop 冻结；读取完释放连接后再执行可选后处理。 */
+    private ObjectNode identifySpeakers(String meetingId) {
         if (speakerIdentity == null) return null;
-        String artifactId = speakerArtifactId(meetingId);
         MeetingSpeakers input;
         try (Connection connection = dataSource.getConnection()) {
             connection.setReadOnly(true);
@@ -779,12 +772,6 @@ public final class JdbcClientMeetingResultFinalizer
                 try (var rows = statement.executeQuery()) {
                     if (!rows.next() || !"STOPPING".equals(JdbcValues.text(rows, "state"))) return null;
                 }
-            }
-            var frozen = JdbcClientSpeakerIdentityFreeze.find(connection, engine, meetingId, artifactId);
-            if (frozen.isPresent()) {
-                connection.rollback();
-                LOGGER.log(Level.INFO, "会后人物识别复用已冻结结果");
-                return new SpeakerArtifact(artifactId, frozen.get());
             }
             input = speakerInput(connection, engine, meetingId);
             connection.rollback();
@@ -802,22 +789,7 @@ public final class JdbcClientMeetingResultFinalizer
             LOGGER.log(Level.WARNING, "会后人物识别暂未完成，保留本场分人 reason={0}",
                     failure.getClass().getSimpleName());
         }
-        String bodyJson = identityArtifact(input, matches).toString();
-        return new SpeakerArtifact(artifactId, JdbcClientSpeakerIdentityFreeze.freeze(
-                dataSource, engine, meetingId, artifactId, bodyJson));
-    }
-
-    /** 冻结行与发布共用同一稳定 artifactId；revision 固定为首次收口的 1。 */
-    private static String speakerArtifactId(String meetingId) {
-        return "art_client_speaker_" + sha256(meetingId.getBytes(StandardCharsets.UTF_8)) + "_1";
-    }
-
-    /** 已冻结的会后人物产物正文；重试发布必须逐字节复用这一份文本。 */
-    private record SpeakerArtifact(String artifactId, String bodyJson) {
-        private SpeakerArtifact {
-            Objects.requireNonNull(artifactId, "artifactId");
-            Objects.requireNonNull(bodyJson, "bodyJson");
-        }
+        return identityArtifact(input, matches);
     }
 
     /** 注册与首次收口共用同一份最终事件投影，不复制本场 speaker／时间窗规则。 */

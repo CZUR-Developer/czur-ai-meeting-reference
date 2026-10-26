@@ -47,9 +47,6 @@ class JdbcDatabaseContextTest {
         assertEquals("ai_trans_speaker_identity_person",
                 JdbcDatabaseTable.SPEAKER_IDENTITY_PERSON.physicalName(JdbcDatabaseEngine.MYSQL));
         assertFalse(JdbcDatabaseTable.SPEAKER_IDENTITY_PERSON.requiredForBaseline(JdbcDatabaseEngine.MYSQL));
-        assertEquals("ai_trans_meeting_speaker_identity",
-                JdbcDatabaseTable.MEETING_SPEAKER_IDENTITY.physicalName(JdbcDatabaseEngine.MYSQL));
-        assertFalse(JdbcDatabaseTable.MEETING_SPEAKER_IDENTITY.requiredForBaseline(JdbcDatabaseEngine.MYSQL));
     }
 
     private static DatabaseRuntimeConfig config(String url) {

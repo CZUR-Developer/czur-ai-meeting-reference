@@ -29,20 +29,7 @@ final class JdbcClientResultArtifacts {
     MeetingManifest.ArtifactRef publishReady(Connection connection, String artifactId,
             String meetingId, String type, String language, int revision, ObjectNode body)
             throws ArtifactStoreException, SQLException {
-        return publishReadyText(connection, artifactId, meetingId, type, language, revision,
-                body.toString());
-    }
-
-    /**
-     * 发布已冻结的正文文本；重试必须传入与首次完全相同的文本。
-     *
-     * <p>人物识别结果先冻结在数据库再到这里发布，因此不能再用可变对象临时
-     * 序列化，否则同一 artifactId 可能换一份正文并被不可变存储拒绝。</p>
-     */
-    MeetingManifest.ArtifactRef publishReadyText(Connection connection, String artifactId,
-            String meetingId, String type, String language, int revision, String bodyJson)
-            throws ArtifactStoreException, SQLException {
-        byte[] content = bodyJson.getBytes(StandardCharsets.UTF_8);
+        byte[] content = body.toString().getBytes(StandardCharsets.UTF_8);
         String checksum = "sha256:" + digest(content);
         var spec = new ArtifactStore.WriteIntentSpec(artifactId, meetingId, type,
                 "application/json", language, revision, content.length, checksum);
