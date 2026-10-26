@@ -206,15 +206,16 @@ class MeetingCoordinator(
                 val server = servers.apply(sessionConfig)
                 // 录音只为续办读取文件持久前缀；估算时长不冒充正常停止的计数门原值。
                 val audio = RecoveredAudioFacts.sealedArtifact(meetingId, record.audioFile())
-                var checkpoint = stoppedStore.get().save(StoppedMeetingCheckpoint.pending(
-                    MeetingArtifactPublisher.Context(meetingId, audio, audio.durationMs(), sessionConfig)))
-                LOG.info("原场现场续办开始 phase=${checkpoint.phase()}")
                 // 发布快照要求本场冻结用量已提交；正常停止在发布前提交，续办必须补同一事实。
                 LOG.info("原场冻结用量提交开始 durationMs=${audio.durationMs()}")
                 server.submitUsage(meetingId, audio.durationMs())
                 LOG.info("原场冻结用量已确认")
-                // 纪要必须在发布前补交：发布计划按当时的最终快照冻结纪要。
+                // 纪要必须在写停止记录之前补交：一旦停止记录落盘，下次会走 resumeFinalization，
+                // 那条路径只补用量、不会再补纪要，失败一次就会永久缺纪要。
                 submitRecoveredSummary(record, server)
+                var checkpoint = stoppedStore.get().save(StoppedMeetingCheckpoint.pending(
+                    MeetingArtifactPublisher.Context(meetingId, audio, audio.durationMs(), sessionConfig)))
+                LOG.info("原场现场续办开始 phase=${checkpoint.phase()}")
                 val result = finishSavedFinalization(checkpoint, stoppedStore.get(), server,
                     sessionConfig.artifactPublisher(), BooleanSupplier { closed }, wallClockMs,
                     Runnable {}, record.activeDelivery())
