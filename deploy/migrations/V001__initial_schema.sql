@@ -207,6 +207,30 @@ CREATE TABLE ai_trans_meeting_heartbeat (
     PRIMARY KEY (meeting_id)
 ) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
+-- 弃场/启动失败的收口决定。扫描命中后先在同一持久化事务里写下本行，再在
+-- 连接外调用权益结算，最后另开事务写结果与终态；结算失败只保留本行等待下轮。
+-- 本行存在即表示该会议不可再活跃：心跳和客户端输入都必须拒绝，直到收口完成。
+-- decision_kind：NEVER_STARTED（无心跳，目标 CANCELLED、结算 0）或
+-- ABANDONED（心跳过期，目标 READY_WITH_WARNINGS）。
+-- settle_duration_ms 在落决定时冻结（最后活跃减真正开始，部署上限截断），
+-- 后续重试不再重算；settlement_state 为 DECIDED/SETTLED，SETTLED 后只重试收尾。
+-- 收口完成后删除本行；主键保证同一会议最多一条决定，不会重复结算或重复收口。
+CREATE TABLE ai_trans_meeting_abandonment (
+    meeting_id VARBINARY(1024) NOT NULL,
+    decision_kind VARBINARY(32) NOT NULL,
+    deployment_scope VARBINARY(256) NOT NULL,
+    subject_scope VARBINARY(1024) NOT NULL,
+    target_state VARBINARY(128) NOT NULL,
+    decided_at DATETIME(6) NOT NULL,
+    started_at DATETIME(6) NOT NULL,
+    last_active_at DATETIME(6) NOT NULL,
+    settle_duration_ms BIGINT NOT NULL,
+    usage_reservation_id VARBINARY(1024),
+    settlement_state VARBINARY(32) NOT NULL,
+    settled_at DATETIME(6),
+    PRIMARY KEY (meeting_id)
+) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+
 CREATE TABLE ai_trans_meeting_client_input (
     meeting_id VARBINARY(1024) NOT NULL,
     started_at DATETIME(6) NOT NULL,
@@ -395,6 +419,7 @@ CREATE TABLE ai_trans_workflow_step (
 CREATE INDEX ai_trans_idempotency_expiry_idx ON ai_trans_idempotency_record (expires_at);
 CREATE INDEX ai_trans_meeting_event_stream_sequence_idx ON ai_trans_meeting_event (meeting_id, stream_id, event_sequence);
 CREATE INDEX ai_trans_meeting_heartbeat_active_idx ON ai_trans_meeting_heartbeat (last_active_at);
+CREATE INDEX ai_trans_meeting_abandonment_pending_idx ON ai_trans_meeting_abandonment (deployment_scope, settlement_state, decided_at);
 CREATE UNIQUE INDEX ai_trans_meeting_finalization_receipt_uq ON ai_trans_meeting (finalization_receipt_id);
 CREATE INDEX ai_trans_meeting_realtime_token_grant_active_idx ON ai_trans_meeting_realtime_token_grant (meeting_id, expires_at);
 CREATE UNIQUE INDEX ai_trans_meeting_scope_session_uq ON ai_trans_meeting (deployment_scope, client_session_id);
@@ -459,6 +484,10 @@ ALTER TABLE ai_trans_meeting_event
 
 ALTER TABLE ai_trans_meeting_heartbeat
     ADD CONSTRAINT ai_trans_meeting_heartbeat_meeting_fk FOREIGN KEY (meeting_id)
+    REFERENCES ai_trans_meeting (meeting_id) ON DELETE RESTRICT ON UPDATE RESTRICT;
+
+ALTER TABLE ai_trans_meeting_abandonment
+    ADD CONSTRAINT ai_trans_meeting_abandonment_meeting_fk FOREIGN KEY (meeting_id)
     REFERENCES ai_trans_meeting (meeting_id) ON DELETE RESTRICT ON UPDATE RESTRICT;
 
 ALTER TABLE ai_trans_meeting_client_input

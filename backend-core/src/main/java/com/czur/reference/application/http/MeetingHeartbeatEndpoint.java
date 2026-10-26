@@ -22,8 +22,11 @@ import java.util.regex.Pattern;
  * “会议不存在”和“状态不符”之外的新语义。</p>
  *
  * <p>成功时只回告部署配置冻结的心跳间隔，不返回状态、活跃时间或计数；持久化
- * 由 {@link MeetingHeartbeatStore} 用一条 UPSERT 完成，重复调用只是刷新最后
- * 活跃时间。本类不推进会议状态、不结算用量，也不读取客户端上报的时间。</p>
+ * 由 {@link MeetingHeartbeatStore} 用短事务完成（锁读会议父行、复核活跃条件，
+ * 再 UPSERT 心跳行），重复调用只是刷新最后活跃时间。心跳事实供弃场扫描决定
+ * 窗口与结算时长；本类本身不推进会议状态、不结算用量，也不读取客户端上报的
+ * 时间。会议已离开 {@code STARTING}／{@code RUNNING} 或已落弃场决定时，写入
+ * 端口返回 false，本类回 409。</p>
  *
  * <p>日志只记录固定故障类别，不记录会议标识、主体、状态或异常正文。</p>
  */
@@ -91,7 +94,10 @@ public final class MeetingHeartbeatEndpoint {
                 return errors.heartbeatInvalidState();
             }
             try {
-                store.record(meetingId, clock.instant());
+                if (!store.record(meetingId, clock.instant())) {
+                    // 查询与写入之间会议已离开 STARTING/RUNNING，或已落弃场决定。
+                    return errors.heartbeatInvalidState();
+                }
             } catch (RuntimeException unavailable) {
                 LOGGER.log(Level.FINE, "会议心跳记录失败 type={0}",
                         unavailable.getClass().getSimpleName());

@@ -134,7 +134,7 @@ class MeetingService : Service() {
     private var presentationNotice = ""
     private var announcedPresentationNotice = ""
     /**
-     * 活跃期心跳由前台服务持有，SDK 只负责把一次心跳排到自己的 IO 队列。
+     * 活跃期心跳由前台服务持有，SDK 用独立单线程执行器发送（不与业务 IO 队列共用）。
      * 会议停止、失败或 Service 销毁时取消定时器；失败不在服务层重试。
      */
     private val heartbeatTimer = MeetingHeartbeatTimer(

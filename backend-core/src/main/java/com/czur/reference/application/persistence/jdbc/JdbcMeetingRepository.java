@@ -536,6 +536,47 @@ public final class JdbcMeetingRepository implements MeetingRepository {
     }
 
     /**
+     * 在调用方事务连接上以完整旧事实和聚合版本 CAS 更新历史兼容会议。
+     *
+     * <p>历史会议没有 Grant/预占，owned CAS 会拒绝；本方法只更新
+     * {@code state}/{@code updated_at}/聚合版本，WHERE 仍核对全部 legacy 归属
+     * 形态、Profile、创建时间、旧状态、旧更新时间和版本，防止旧命令覆盖已绑定
+     * 权益的会议或凭过期快照回退状态。只由弃场扫描的“结算成功→取消”收口使用。</p>
+     */
+    static void updateLegacyExisting(Connection connection, JdbcDatabaseEngine engine,
+            VersionedMeeting before, MeetingAggregate.MeetingSnapshot after) throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(engine, "engine");
+        Objects.requireNonNull(before, "before");
+        Objects.requireNonNull(after, "after");
+        requireLegacyExistingTransition(before.snapshot(), after);
+        MeetingAggregate.MeetingSnapshot snapshot = before.snapshot();
+        try (PreparedStatement statement = connection.prepareStatement(
+                """
+                UPDATE %s
+                   SET state = ?, updated_at = ?, aggregate_version = aggregate_version + 1
+                 WHERE meeting_id = ? AND deployment_scope = ? AND client_session_id = ?
+                   AND subject_scope = ? AND grant_id IS NULL AND grant_expires_at IS NULL
+                   AND usage_reservation_id IS NULL AND profile_id = ? AND profile_revision = ?
+                   AND created_at = ? AND state = ? AND updated_at = ? AND aggregate_version = ?
+                """.formatted(JdbcDatabaseTable.MEETING.physicalName(engine)))) {
+            statement.setString(1, after.state().name());
+            JdbcValues.setInstant(statement, 2, after.updatedAt());
+            JdbcValues.setText(statement, 3, engine, snapshot.meetingId());
+            JdbcValues.setText(statement, 4, engine, snapshot.deploymentScope());
+            JdbcValues.setText(statement, 5, engine, snapshot.clientSessionId());
+            JdbcValues.setText(statement, 6, engine, snapshot.subjectScope());
+            JdbcValues.setText(statement, 7, engine, snapshot.profileId());
+            statement.setInt(8, snapshot.profileRevision());
+            JdbcValues.setInstant(statement, 9, snapshot.createdAt());
+            statement.setString(10, snapshot.state().name());
+            JdbcValues.setInstant(statement, 11, snapshot.updatedAt());
+            statement.setLong(12, before.aggregateVersion());
+            requireUpdatedOwned(statement.executeUpdate());
+        }
+    }
+
+    /**
      * 锁定删除目标，并在同一个 ResultSet 中先完成原始归属检查。
      *
      * <p>该方法必须由已经关闭 auto-commit 的删除事务调用。不存在、拒绝和放行
@@ -1205,16 +1246,35 @@ public final class JdbcMeetingRepository implements MeetingRepository {
         }
     }
 
+    private static void requireLegacyExistingTransition(
+            MeetingAggregate.MeetingSnapshot before,
+            MeetingAggregate.MeetingSnapshot after) {
+        if (!isLegacy(before) || !isLegacy(after)) {
+            throw new IllegalArgumentException(
+                    "updateLegacyExisting requires legacy meeting snapshots");
+        }
+        if (!sameImmutableFacts(before, after)) {
+            throw new IllegalArgumentException(
+                    "updateLegacyExisting cannot change immutable meeting facts");
+        }
+        if (before.state() == after.state()
+                || after.updatedAt().isBefore(before.updatedAt())) {
+            throw new IllegalArgumentException(
+                    "updateLegacyExisting requires a forward lifecycle transition");
+        }
+    }
+
     private static boolean sameImmutableFacts(
             MeetingAggregate.MeetingSnapshot before,
             MeetingAggregate.MeetingSnapshot after) {
+        // legacy 快照的三个权益引用均为 null，必须用 Objects.equals 而不是实例 equals。
         return before.meetingId().equals(after.meetingId())
                 && before.deploymentScope().equals(after.deploymentScope())
                 && before.clientSessionId().equals(after.clientSessionId())
                 && before.subjectScope().equals(after.subjectScope())
-                && before.grantId().equals(after.grantId())
-                && before.grantExpiresAt().equals(after.grantExpiresAt())
-                && before.usageReservationId().equals(after.usageReservationId())
+                && Objects.equals(before.grantId(), after.grantId())
+                && Objects.equals(before.grantExpiresAt(), after.grantExpiresAt())
+                && Objects.equals(before.usageReservationId(), after.usageReservationId())
                 && before.profileId().equals(after.profileId())
                 && before.profileRevision() == after.profileRevision()
                 && before.createdAt().equals(after.createdAt());

@@ -1,8 +1,11 @@
 package com.czur.reference.application.persistence.jdbc;
 
+import com.czur.reference.application.command.MeetingCommandContext;
+import com.czur.reference.application.command.MeetingPermissions;
 import com.czur.reference.application.entitlement.FixedEntitlementPolicy;
 import com.czur.reference.application.entitlement.FixedEntitlementPolicyConfig;
 import com.czur.reference.application.port.AbandonedMeetingFinalizer;
+import com.czur.reference.application.port.ClientMeetingInputPort;
 import com.czur.reference.application.port.FinalizationReceiptGenerator;
 import com.czur.reference.application.port.entitlement.AuthorizeStartRequest;
 import com.czur.reference.application.port.entitlement.CancelReservationRequest;
@@ -21,6 +24,12 @@ import com.czur.reference.application.port.entitlement.UsageOperationScopes;
 import com.czur.reference.application.port.entitlement.UsageReservation;
 import com.czur.reference.application.port.entitlement.UsageUnit;
 import com.czur.reference.application.port.identity.Subject;
+import com.czur.reference.application.port.identity.VerifiedIdentity;
+import com.czur.reference.application.port.model.CanonicalTranscriptEvent;
+import com.czur.reference.application.realtime.RealtimeMeetingStartCoordinator;
+import com.czur.reference.domain.capability.CapabilityDescriptor;
+import com.czur.reference.domain.capability.CapabilityPlanner;
+import com.czur.reference.domain.capability.DeploymentLimits;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -48,6 +57,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -295,6 +305,174 @@ class JdbcMysqlAbandonedMeetingSweeperIntegrationTest {
         assertEquals(0, abandonOperationCount("mtg_stop_committed"));
     }
 
+    /**
+     * 决定已落、结果写入失败：重启扫描只重试收尾，不再调用结算端口。
+     *
+     * <p>第一次运行完成“落决定 → 结算 → 标记 SETTLED”，随后结果写入抛错；
+     * 第二次运行（新扫描器实例）只读决定并写 READY_WITH_WARNINGS。预占只结算
+     * 一次，弃场操作只有一条。</p>
+     */
+    @Test
+    void decidedMeetingConvergesAfterResultWriteFailureAndSettlesOnce() throws Exception {
+        seedOwnedMeeting("mtg_converge", "RUNNING", T0);
+        Instant heartbeatStarted = T0.plus(Duration.ofMinutes(1));
+        Instant lastActive = T0.plus(Duration.ofMinutes(13));
+        insertHeartbeat("mtg_converge", heartbeatStarted, lastActive);
+        CountingProvider provider = new CountingProvider(providerAt(SWEEP_NOW, "sweep"));
+        JdbcAbandonedMeetingSweeper first = sweeper(provider,
+                new FinalizerFailingOnce(finalizerAt(SWEEP_NOW)), MAX_MEETING_DURATION_MS);
+
+        JdbcAbandonedMeetingSweeper.Result firstRun = first.runOnce();
+
+        long expectedDurationMs = Duration.ofMinutes(12).toMillis();
+        assertEquals(1, firstRun.deferredMeetings());
+        assertEquals(0, firstRun.finalizedMeetings());
+        assertEquals("STOPPING", meetingState("mtg_converge"));
+        assertEquals(1, provider.settleCalls);
+        assertSettled("mtg_converge", expectedDurationMs);
+        assertEquals(1, abandonOperationCount("mtg_converge"));
+        assertEquals(1, decisionCount("mtg_converge"));
+        assertDecision("mtg_converge", "ABANDONED", "READY_WITH_WARNINGS",
+                expectedDurationMs, "SETTLED");
+        assertFalse(clientResultExists("mtg_converge"));
+
+        // 模拟进程重启：同一决定只重试收尾，不再结算。
+        JdbcAbandonedMeetingSweeper second = sweeper(provider, finalizerAt(SWEEP_NOW),
+                MAX_MEETING_DURATION_MS);
+        JdbcAbandonedMeetingSweeper.Result secondRun = second.runOnce();
+
+        assertEquals(1, secondRun.finalizedMeetings());
+        assertEquals(0, secondRun.deferredMeetings());
+        assertEquals("READY_WITH_WARNINGS", meetingState("mtg_converge"));
+        assertEquals(1, provider.settleCalls);
+        assertEquals(1, abandonOperationCount("mtg_converge"));
+        assertTrue(clientResultExists("mtg_converge"));
+        assertEquals(0, decisionCount("mtg_converge"));
+        try (Connection connection = connection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "SELECT manifest_json FROM ai_trans_meeting_client_result"
+                             + " WHERE meeting_id=?")) {
+            JdbcValues.setText(statement, 1, MYSQL, "mtg_converge");
+            try (ResultSet rows = statement.executeQuery()) {
+                assertTrue(rows.next());
+                JsonNode manifest = JSON.readTree(rows.getString("manifest_json"));
+                assertEquals("READY_WITH_WARNINGS", manifest.path("status").asText());
+                assertEquals(expectedDurationMs, manifest.path("durationMs").asLong());
+                assertEquals(heartbeatStarted.toString(), manifest.path("startedAt").asText());
+            }
+        }
+        // 收口完成后再扫描：不重复结算也不重复写结果。
+        assertEquals(0, second.runOnce().finalizedMeetings());
+        assertEquals(1, provider.settleCalls);
+    }
+
+    /**
+     * 决定落库后，心跳、字幕、用量与 Start 都必须被拒绝，不能把会议重新拉活。
+     *
+     * <p>用“结果写入固定失败”的收尾器把会议停在“已决定、未收口”的真实窗口，
+     * 再按生产端口逐项验证拒绝行为。</p>
+     */
+    @Test
+    void decidedMeetingRejectsHeartbeatClientInputUsageAndStart() throws Exception {
+        seedOwnedMeeting("mtg_decided", "RUNNING", T0);
+        Instant heartbeatStarted = T0.plus(Duration.ofMinutes(1));
+        Instant lastActive = T0.plus(Duration.ofMinutes(13));
+        insertHeartbeat("mtg_decided", heartbeatStarted, lastActive);
+        JdbcAbandonedMeetingSweeper sweeper = sweeper(providerAt(SWEEP_NOW, "sweep"),
+                new FinalizerFailingOnce(finalizerAt(SWEEP_NOW)), MAX_MEETING_DURATION_MS);
+
+        assertEquals(1, sweeper.runOnce().deferredMeetings());
+        assertEquals("STOPPING", meetingState("mtg_decided"));
+
+        // 心跳不得刷新最后活跃，也不得新增行。
+        assertFalse(new JdbcMeetingHeartbeatStore(database).record(
+                "mtg_decided", SWEEP_NOW.plus(Duration.ofMinutes(5))));
+        try (Connection connection = connection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "SELECT started_at, last_active_at, heartbeat_count"
+                             + " FROM ai_trans_meeting_heartbeat WHERE meeting_id=?")) {
+            JdbcValues.setText(statement, 1, MYSQL, "mtg_decided");
+            try (ResultSet rows = statement.executeQuery()) {
+                assertTrue(rows.next());
+                assertEquals(heartbeatStarted, JdbcValues.instant(rows, "started_at"));
+                assertEquals(lastActive, JdbcValues.instant(rows, "last_active_at"));
+                assertEquals(1, rows.getLong("heartbeat_count"));
+            }
+        }
+
+        ClientMeetingInputPort input = inputPort();
+        MeetingCommandContext context = clientContext();
+        assertEquals(new ClientMeetingInputPort.Rejected(
+                        ClientMeetingInputPort.Reason.INVALID_STATE),
+                input.start(context, "mtg_decided"));
+        assertEquals(new ClientMeetingInputPort.Rejected(
+                        ClientMeetingInputPort.Reason.INVALID_STATE),
+                input.append(context, "mtg_decided", new ClientMeetingInputPort.ClientTranscript(
+                        "after-decision", 1,
+                        new CanonicalTranscriptEvent("segment", 1,
+                                CanonicalTranscriptEvent.Operation.UPSERT, 0, 2000,
+                                "zh-CN", "不应被接受", true, null, 0, List.of(), List.of()))));
+        assertEquals(new ClientMeetingInputPort.Rejected(
+                        ClientMeetingInputPort.Reason.INVALID_STATE),
+                input.submitUsage(context, "mtg_decided", 1_000));
+    }
+
+    /**
+     * 池大小 1 是合法配置：A、B 两类都必须在不再借第二个连接的情况下完成。
+     */
+    @Test
+    void singleConnectionPoolCompletesBothAbandonmentClasses() throws Exception {
+        seedOwnedMeeting("mtg_pool_a", "STARTING", T0);
+        seedOwnedMeeting("mtg_pool_b", "RUNNING", T0);
+        insertHeartbeat("mtg_pool_b", T0.plus(Duration.ofMinutes(1)),
+                T0.plus(Duration.ofMinutes(13)));
+        JdbcDatabaseContext single = JdbcDatabaseContext.start(DatabaseRuntimeConfig.of(
+                scopedUrl(), user(), password(),
+                Duration.ofSeconds(5), Duration.ofSeconds(2), Duration.ofSeconds(20), 1, 0));
+        try {
+            EntitlementProvider provider = providerAt(single, SWEEP_NOW, "sweep");
+            AbandonedMeetingFinalizer finalizer = new JdbcClientMeetingResultFinalizer(
+                    single, () -> "receipt-pool-" + receipts.incrementAndGet(),
+                    Clock.fixed(SWEEP_NOW, ZoneOffset.UTC), null, provider);
+            JdbcAbandonedMeetingSweeper sweeper = new JdbcAbandonedMeetingSweeper(
+                    single, DEPLOYMENT, Clock.fixed(SWEEP_NOW, ZoneOffset.UTC),
+                    provider, finalizer, new JdbcAbandonedMeetingSweeper.Config(
+                            NO_HEARTBEAT_WINDOW, HEARTBEAT_IDLE_WINDOW,
+                            MAX_MEETING_DURATION_MS, 50));
+
+            JdbcAbandonedMeetingSweeper.Result result = sweeper.runOnce();
+
+            assertEquals(1, result.cancelledMeetings());
+            assertEquals(1, result.finalizedMeetings());
+            assertEquals(0, result.deferredMeetings());
+            assertEquals("CANCELLED", meetingState("mtg_pool_a"));
+            assertEquals("READY_WITH_WARNINGS", meetingState("mtg_pool_b"));
+            assertSettled("mtg_pool_a", 0);
+            assertSettled("mtg_pool_b", Duration.ofMinutes(12).toMillis());
+        } finally {
+            single.close();
+        }
+    }
+
+    /**
+     * 没有 Grant/预占的历史会议也要能收口：决定落库即视为已结算，不调用权益端口，
+     * 取消走 legacy 保存原语（owned CAS 会拒绝历史快照）。
+     */
+    @Test
+    void legacyMeetingWithoutReservationIsCancelledWithoutSettlement() throws Exception {
+        insertLegacyMeeting("mtg_legacy", "STARTING", T0);
+        CountingProvider provider = new CountingProvider(providerAt(SWEEP_NOW, "sweep"));
+
+        JdbcAbandonedMeetingSweeper.Result result = sweeper(provider, finalizerAt(SWEEP_NOW),
+                MAX_MEETING_DURATION_MS).runOnce();
+
+        assertEquals(1, result.cancelledMeetings());
+        assertEquals(0, result.deferredMeetings());
+        assertEquals("CANCELLED", meetingState("mtg_legacy"));
+        assertEquals(0, provider.settleCalls);
+        assertEquals(0, decisionCount("mtg_legacy"));
+    }
+
     private JdbcAbandonedMeetingSweeper sweeper(EntitlementProvider provider,
             AbandonedMeetingFinalizer finalizer, long maxMeetingDurationMs) {
         Clock clock = Clock.fixed(SWEEP_NOW, ZoneOffset.UTC);
@@ -310,7 +488,90 @@ class JdbcMysqlAbandonedMeetingSweeperIntegrationTest {
                 Clock.fixed(now, ZoneOffset.UTC), null, providerAt(now, "finalizer"));
     }
 
+    /** 结果写入固定失败一次，用来制造“决定已落、收口未完成”的真实中间态。 */
+    private static final class FinalizerFailingOnce implements AbandonedMeetingFinalizer {
+        private final AbandonedMeetingFinalizer delegate;
+        private boolean failNext = true;
+
+        private FinalizerFailingOnce(AbandonedMeetingFinalizer delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public boolean finalizeAbandoned(String meetingId) {
+            if (failNext) {
+                failNext = false;
+                throw new IllegalStateException("fixture-result-write-failed");
+            }
+            return delegate.finalizeAbandoned(meetingId);
+        }
+    }
+
+    /** 统计弃场结算调用次数，证明“预占只结算一次”。 */
+    private static final class CountingProvider implements EntitlementProvider {
+        private final EntitlementProvider delegate;
+        private int settleCalls;
+
+        private CountingProvider(EntitlementProvider delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public EntitlementProviderResult<MeetingGrant> authorizeStart(
+                AuthorizeStartRequest request) {
+            return delegate.authorizeStart(request);
+        }
+
+        @Override
+        public EntitlementProviderResult<UsageOperationResult> reserveUsage(
+                ReserveUsageRequest request) {
+            return delegate.reserveUsage(request);
+        }
+
+        @Override
+        public EntitlementProviderResult<UsageOperationResult> commitUsage(
+                CommitUsageRequest request) {
+            return delegate.commitUsage(request);
+        }
+
+        @Override
+        public EntitlementProviderResult<UsageOperationResult> settleAbandoned(
+                SettleAbandonedRequest request) {
+            settleCalls++;
+            return delegate.settleAbandoned(request);
+        }
+
+        @Override
+        public EntitlementProviderResult<UsageOperationResult> cancelReservation(
+                CancelReservationRequest request) {
+            return delegate.cancelReservation(request);
+        }
+    }
+
+    /** 只构造一次真实端口；本用例只验证决定门，不触发 Start 执行链。 */
+    private ClientMeetingInputPort inputPort() {
+        Clock clock = Clock.fixed(SWEEP_NOW, ZoneOffset.UTC);
+        RealtimeMeetingStartCoordinator coordinator = new RealtimeMeetingStartCoordinator(
+                DEPLOYMENT, new JdbcRealtimeStartFactsLookup(database),
+                (profileId, revision) -> java.util.Optional.empty(),
+                new CapabilityDescriptor(Set.of()), DeploymentLimits.NONE, clock,
+                new JdbcMeetingStartExecutionUnitOfWork(database, new CapabilityPlanner()));
+        return new JdbcClientMeetingInputPort(database, coordinator, clock, null);
+    }
+
+    private MeetingCommandContext clientContext() {
+        return new MeetingCommandContext(DEPLOYMENT, new VerifiedIdentity(
+                new Subject(SUBJECT), Set.of("USER"),
+                Set.of(MeetingPermissions.CREATE, MeetingPermissions.STOP),
+                SWEEP_NOW.minusSeconds(60), SWEEP_NOW.plusSeconds(600), null));
+    }
+
     private EntitlementProvider providerAt(Instant now, String token) {
+        return providerAt(database, now, token);
+    }
+
+    private EntitlementProvider providerAt(JdbcDatabaseContext context, Instant now,
+            String token) {
         Clock clock = Clock.fixed(now, ZoneOffset.UTC);
         EntitlementIdGenerator ids = new EntitlementIdGenerator() {
             @Override public String newGrantId() { return "grant_" + token; }
@@ -321,7 +582,30 @@ class JdbcMysqlAbandonedMeetingSweeperIntegrationTest {
                 new FixedEntitlementPolicyConfig(DEPLOYMENT, PROFILE, 1, CAPABILITIES,
                         MAX_MEETING_DURATION_MS, Duration.ofMinutes(5), Duration.ofMinutes(3)),
                 clock, ids);
-        return new JdbcEntitlementProvider(database, policy, clock);
+        return new JdbcEntitlementProvider(context, policy, clock);
+    }
+
+    /**
+     * 只落一场没有 Grant/预占的历史会议；用于验证 A 类无需结算也能取消。
+     */
+    private void insertLegacyMeeting(String meetingId, String state, Instant createdAt)
+            throws Exception {
+        try (Connection connection = connection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "INSERT INTO ai_trans_meeting (meeting_id, deployment_scope,"
+                             + " client_session_id, subject_scope, profile_id, profile_revision,"
+                             + " state, aggregate_version, created_at, updated_at, metadata)"
+                             + " VALUES (?, ?, ?, 'LEGACY_UNOWNED', ?, 1, ?, 0, ?, ?,"
+                             + " CAST('{}' AS JSON))")) {
+            JdbcValues.setText(statement, 1, MYSQL, meetingId);
+            JdbcValues.setText(statement, 2, MYSQL, DEPLOYMENT);
+            JdbcValues.setText(statement, 3, MYSQL, "legacy-session-" + meetingId);
+            statement.setString(4, PROFILE);
+            JdbcValues.setText(statement, 5, MYSQL, state);
+            JdbcValues.setInstant(statement, 6, createdAt);
+            JdbcValues.setInstant(statement, 7, createdAt);
+            assertEquals(1, statement.executeUpdate());
+        }
     }
 
     /**
@@ -415,6 +699,49 @@ class JdbcMysqlAbandonedMeetingSweeperIntegrationTest {
             try (ResultSet rows = statement.executeQuery()) {
                 assertTrue(rows.next());
                 return JdbcValues.text(rows, "state");
+            }
+        }
+    }
+
+    private int decisionCount(String meetingId) throws Exception {
+        try (Connection connection = connection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "SELECT COUNT(*) FROM ai_trans_meeting_abandonment WHERE meeting_id=?")) {
+            JdbcValues.setText(statement, 1, MYSQL, meetingId);
+            try (ResultSet rows = statement.executeQuery()) {
+                assertTrue(rows.next());
+                return rows.getInt(1);
+            }
+        }
+    }
+
+    private void assertDecision(String meetingId, String kind, String targetState,
+            long expectedDurationMs, String settlementState) throws Exception {
+        try (Connection connection = connection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "SELECT decision_kind, target_state, settle_duration_ms,"
+                             + " settlement_state, decided_at FROM ai_trans_meeting_abandonment"
+                             + " WHERE meeting_id=?")) {
+            JdbcValues.setText(statement, 1, MYSQL, meetingId);
+            try (ResultSet rows = statement.executeQuery()) {
+                assertTrue(rows.next());
+                assertEquals(kind, JdbcValues.text(rows, "decision_kind"));
+                assertEquals(targetState, JdbcValues.text(rows, "target_state"));
+                assertEquals(expectedDurationMs, rows.getLong("settle_duration_ms"));
+                assertEquals(settlementState, JdbcValues.text(rows, "settlement_state"));
+                assertNotNull(JdbcValues.instant(rows, "decided_at"));
+                assertFalse(rows.next());
+            }
+        }
+    }
+
+    private boolean clientResultExists(String meetingId) throws Exception {
+        try (Connection connection = connection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "SELECT 1 FROM ai_trans_meeting_client_result WHERE meeting_id=?")) {
+            JdbcValues.setText(statement, 1, MYSQL, meetingId);
+            try (ResultSet rows = statement.executeQuery()) {
+                return rows.next();
             }
         }
     }

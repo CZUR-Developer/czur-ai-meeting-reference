@@ -164,6 +164,13 @@ public final class JdbcMeetingStartExecutionUnitOfWork
                 return failAndRollback(
                         connection, resolution, ErrorCode.PROFILE_MISMATCH, phase);
             }
+            // 已落弃场决定的会议不允许再 Start（含 WSS 首次启动）；决定行表示扫描器
+            // 已冻结收口事实，重新启动会把会议拉回普通活跃链。行锁内查询避免竞态。
+            phase = Phase.STATE_CHECK;
+            if (JdbcMeetingAbandonmentStore.exists(connection, engine, request.meetingId())) {
+                return failAndRollback(
+                        connection, resolution, ErrorCode.INVALID_MEETING_STATE, phase);
+            }
 
             phase = Phase.EXECUTION_FACT_READ;
             JdbcFinalizationExecutionFactStore factStore =

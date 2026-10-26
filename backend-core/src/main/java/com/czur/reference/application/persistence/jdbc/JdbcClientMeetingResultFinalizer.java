@@ -18,7 +18,6 @@ import com.czur.reference.domain.capability.CapabilityIds;
 import com.czur.reference.domain.capability.CapabilityDecision;
 import com.czur.reference.application.port.entitlement.CommitUsageRequest;
 import com.czur.reference.application.port.entitlement.EntitlementProvider;
-import com.czur.reference.application.port.entitlement.SettleAbandonedRequest;
 import com.czur.reference.application.port.entitlement.UsageActual;
 import com.czur.reference.application.port.entitlement.UsageOperationScopes;
 import com.czur.reference.application.port.entitlement.UsageUnit;
@@ -355,6 +354,12 @@ public final class JdbcClientMeetingResultFinalizer
 
     @Override
     public boolean finalizeIfClient(String meetingId) {
+        // 已落弃场决定的会议只由扫描器收口；正常 Stop 不能把它改写成 READY，
+        // 也不能抢在弃场结算前提交采音用量。
+        if (abandonmentDecided(meetingId)) {
+            LOGGER.log(Level.FINE, "弃场决定已存在，正常收尾让位");
+            return true;
+        }
         // 先释放读取冻结事实的连接，再调用Provider，避免结果事务占用连接等待第二个池位。
         // 本入口每次均经过账本，包括下方resultExists早返的正常Stop重放。
         Long capturedDurationMs = commitClientUsage(meetingId);
@@ -370,6 +375,11 @@ public final class JdbcClientMeetingResultFinalizer
                 if (startedAt == null) {
                     connection.rollback();
                     return false;
+                }
+                // 复核与早检之间可能刚落决定；同一事务内再查一次才允许写结果。
+                if (JdbcMeetingAbandonmentStore.exists(connection, engine, meetingId)) {
+                    connection.rollback();
+                    return true;
                 }
                 if (resultExists(connection, meetingId)) {
                     connection.rollback();
@@ -399,33 +409,24 @@ public final class JdbcClientMeetingResultFinalizer
     }
 
     /**
-     * 服务端弃场收尾：在没有客户端 Stop 的情况下把已有心跳的会议收成
-     * READY_WITH_WARNINGS。
+     * 按已落库的弃场决定收尾：只写结果、Manifest 与终态。
      *
-     * <p>扫描器已按窗口筛过候选；本方法在会议行锁内重新核对状态、心跳陈旧与
-     * Stop 用量优先级，避免判定和真正收尾之间的竞态。收尾前先通过
-     * {@link EntitlementProvider} 的弃场结算提交零或时长用量；结算失败只返回
-     * false，会议保持原状态等待下一轮，不伪造成功。预占已经 COMMITTED 时由
-     * Provider 按重放成功处理。</p>
+     * <p>结算已由扫描器在决定落库、连接释放之后完成；本方法不再调用
+     * {@link EntitlementProvider}，因此不会在持有池连接时借第二个连接。决定中的
+     * 开始时间、决定时间与结算时长都是冻结事实，重试不重算，重复执行幂等收敛。
+     * 结果写入与决定删除在同一事务内完成；没有决定、未标记结算或目标不一致时
+     * 返回 false，保留决定给下一轮。</p>
      *
-     * <p>结果发布与状态前进复用正常 Stop 的同一段实现，只把终态和清单状态换成
-     * READY_WITH_WARNINGS。可选会后人物识别在本入口跳过：弃场可能没有任何最终
-     * 文字，扫描不应等待外部供应商。没有任何最终事件时仍写入空产物清单。</p>
+     * <p>正常 Stop 的收尾入口会先检查决定并让位。若扫描器与正常 Stop 并发，
+     * 两边都以会议行锁串行化：先拿到锁的一方决定结果，另一方看到决定或最终
+     * 状态后不再重复写入。</p>
      *
-     * @return true 表示本场已收口（含此前已收口）；false 表示条件不再成立而跳过
+     * @return true 表示本场已收口（含此前已收口）；false 表示决定不存在或尚不满足
      * @throws IllegalStateException 数据库或产物存储暂时不可用，由调用方下轮重试
      */
     @Override
-    public boolean finalizeAbandoned(String meetingId, Duration heartbeatIdleWindow,
-            long maxMeetingDurationMs) {
+    public boolean finalizeAbandoned(String meetingId) {
         MeetingIdPolicy.requireValid(meetingId);
-        Objects.requireNonNull(heartbeatIdleWindow, "heartbeatIdleWindow");
-        if (heartbeatIdleWindow.isNegative() || heartbeatIdleWindow.isZero()) {
-            throw new IllegalArgumentException("heartbeatIdleWindow must be positive");
-        }
-        if (maxMeetingDurationMs <= 0) {
-            throw new IllegalArgumentException("maxMeetingDurationMs must be positive");
-        }
         try (Connection connection = dataSource.getConnection()) {
             connection.setAutoCommit(false);
             try {
@@ -436,62 +437,45 @@ public final class JdbcClientMeetingResultFinalizer
                     connection.rollback();
                     return false;
                 }
-                MeetingState state = locked.snapshot().state();
-                if (state != MeetingState.STARTING && state != MeetingState.RUNNING) {
+                JdbcMeetingAbandonmentStore.Decision decision =
+                        JdbcMeetingAbandonmentStore.find(connection, engine, meetingId, true)
+                                .orElse(null);
+                if (decision == null
+                        || decision.kind() != JdbcMeetingAbandonmentStore.Kind.ABANDONED
+                        || decision.targetState() != MeetingState.READY_WITH_WARNINGS
+                        || decision.settlement()
+                                != JdbcMeetingAbandonmentStore.Settlement.SETTLED) {
                     connection.rollback();
                     return false;
                 }
                 if (resultExists(connection, meetingId)) {
-                    connection.rollback();
+                    // 已收口但决定未删（崩溃窗口）：只补删除，不重复发布产物。
+                    JdbcMeetingAbandonmentStore.delete(connection, engine, meetingId);
+                    connection.commit();
                     return true;
                 }
-                HeartbeatFacts heartbeat = lockHeartbeat(connection, meetingId);
-                if (heartbeat == null) {
-                    connection.rollback();
+                MeetingState state = locked.snapshot().state();
+                if (state != MeetingState.STARTING && state != MeetingState.RUNNING
+                        && state != MeetingState.STOPPING) {
+                    // 防御分支：其它路径已把会议推进到别的终态。决定已结算，结果不再
+                    //由本入口改写；删除决定避免永久重扫，保留固定告警供人工核对。
+                    LOGGER.log(Level.WARNING,
+                            "弃场决定与会议状态不一致，清除决定 state={0}", state);
+                    JdbcMeetingAbandonmentStore.delete(connection, engine, meetingId);
+                    connection.commit();
                     return false;
                 }
-                Instant now = clock.instant().truncatedTo(ChronoUnit.MICROS);
-                if (!now.isAfter(heartbeat.lastActiveAt().plus(heartbeatIdleWindow))) {
-                    connection.rollback();
-                    return false;
-                }
-                if (stopUsageSubmitted(connection, meetingId)) {
-                    // 真实 Stop 已冻结采音用量，本场不是弃场；交给正常收尾链。
-                    connection.rollback();
-                    return false;
-                }
-                long usageMs = abandonedDurationMs(
-                        heartbeat.startedAt(), heartbeat.lastActiveAt(), maxMeetingDurationMs);
-                String reservationId = locked.snapshot().usageReservationId();
-                if (reservationId != null) {
-                    if (entitlementProvider == null) {
-                        throw new IllegalStateException(
-                                "client usage settlement is not configured");
-                    }
-                    var settlement = entitlementProvider.settleAbandoned(
-                            new SettleAbandonedRequest(
-                                    locked.snapshot().deploymentScope(),
-                                    locked.snapshot().subjectScope(),
-                                    reservationId, meetingId,
-                                    new UsageActual(UsageUnit.MEETING_DURATION_MS, usageMs)));
-                    if (!settlement.isSuccess()) {
-                        connection.rollback();
-                        LOGGER.log(Level.WARNING,
-                                "弃场会议用量尚未结算，保留原状态等待下轮 reason={0}",
-                                settlement.errorOrThrow().code());
-                        return false;
-                    }
-                }
-                // meeting_client_result 对 client_input 有外键；心跳已证明本场由客户端
-                // 驱动，缺失输入行时用心跳起点补齐，结果和查询才读得到同一场事实。
-                ensureClientInput(connection, meetingId, heartbeat.startedAt());
-                Instant endedAt = now.isBefore(locked.snapshot().updatedAt())
-                        ? locked.snapshot().updatedAt() : now;
-                writeClientResult(connection, locked, heartbeat.startedAt(), endedAt, usageMs,
-                        null, MeetingEvent.READY_WITH_WARNINGS,
+                // meeting_client_result 对 client_input 有外键；用决定冻结的开始时间补齐。
+                ensureClientInput(connection, meetingId, decision.startedAt());
+                Instant endedAt = decision.decidedAt().isBefore(locked.snapshot().updatedAt())
+                        ? locked.snapshot().updatedAt() : decision.decidedAt();
+                writeClientResult(connection, locked, decision.startedAt(), endedAt,
+                        decision.settleDurationMs(), null, MeetingEvent.READY_WITH_WARNINGS,
                         ManifestStatus.READY_WITH_WARNINGS);
+                JdbcMeetingAbandonmentStore.delete(connection, engine, meetingId);
                 connection.commit();
-                LOGGER.log(Level.INFO, "弃场会议已收口 durationMs={0}", usageMs);
+                LOGGER.log(Level.INFO, "弃场会议已收口 durationMs={0}",
+                        decision.settleDurationMs());
                 return true;
             } catch (SQLException | ArtifactStoreException | RuntimeException failure) {
                 connection.rollback();
@@ -673,35 +657,6 @@ public final class JdbcClientMeetingResultFinalizer
                         projection.summary() != null});
     }
 
-    /** 已提交 Stop 采音用量时优先级高于心跳推导值；此查询在会议行锁内执行。 */
-    private boolean stopUsageSubmitted(Connection connection, String meetingId)
-            throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT 1 FROM " + table(JdbcDatabaseTable.MEETING_CLIENT_INPUT)
-                        + " WHERE meeting_id=? AND audio_duration_ms IS NOT NULL")) {
-            JdbcValues.setText(statement, 1, engine, meetingId);
-            try (ResultSet rows = statement.executeQuery()) {
-                return rows.next();
-            }
-        }
-    }
-
-    /** 读取并锁定本场心跳真实开始与最后活跃；无心跳行返回 null。 */
-    private HeartbeatFacts lockHeartbeat(Connection connection, String meetingId)
-            throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT started_at, last_active_at FROM "
-                        + table(JdbcDatabaseTable.MEETING_HEARTBEAT)
-                        + " WHERE meeting_id=?" + currentRead())) {
-            JdbcValues.setText(statement, 1, engine, meetingId);
-            try (ResultSet rows = statement.executeQuery()) {
-                if (!rows.next()) return null;
-                return new HeartbeatFacts(JdbcValues.instant(rows, "started_at"),
-                        JdbcValues.instant(rows, "last_active_at"));
-            }
-        }
-    }
-
     /**
      * 结果表对 client_input 有外键；心跳已证明本场由客户端驱动，缺失时补齐起点。
      * 已有输入行（正常 startClient 写入）保持原 started_at，不被心跳覆盖。
@@ -727,11 +682,13 @@ public final class JdbcClientMeetingResultFinalizer
         }
     }
 
-    /** 弃场时长取最后一次活跃减真实开始，并按部署上限截断；不得为负。 */
-    static long abandonedDurationMs(Instant startedAt, Instant lastActiveAt,
-            long maxMeetingDurationMs) {
-        long elapsed = Duration.between(startedAt, lastActiveAt).toMillis();
-        return Math.max(0, Math.min(elapsed, maxMeetingDurationMs));
+    /** 只读判断本场是否已落弃场决定；正常 Stop 收尾据此让位给扫描器。 */
+    private boolean abandonmentDecided(String meetingId) {
+        try (Connection connection = dataSource.getConnection()) {
+            return JdbcMeetingAbandonmentStore.exists(connection, engine, meetingId);
+        } catch (SQLException failure) {
+            throw new IllegalStateException("abandonment decision read unavailable", failure);
+        }
     }
 
     /**
@@ -789,14 +746,6 @@ public final class JdbcClientMeetingResultFinalizer
 
     private record FrozenClientUsage(String deploymentScope, String subjectScope,
             String reservationId, long audioDurationMs, Instant submittedAt, long expectedVersion) { }
-
-    /** 心跳行的真实开始与最后活跃；两列都由服务端时钟写入。 */
-    private record HeartbeatFacts(Instant startedAt, Instant lastActiveAt) {
-        HeartbeatFacts {
-            Objects.requireNonNull(startedAt, "startedAt");
-            Objects.requireNonNull(lastActiveAt, "lastActiveAt");
-        }
-    }
 
     private MeetingManifest.ArtifactRef publishReady(Connection connection, String artifactId,
             String meetingId, String type, String language, ObjectNode body)

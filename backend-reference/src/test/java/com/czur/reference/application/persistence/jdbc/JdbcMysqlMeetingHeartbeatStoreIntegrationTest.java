@@ -82,30 +82,51 @@ class JdbcMysqlMeetingHeartbeatStoreIntegrationTest {
         insertMeeting("mtg_hb_second");
         var store = new JdbcMeetingHeartbeatStore(database);
 
-        store.record("mtg_hb_first", STARTED);
+        assertTrue(store.record("mtg_hb_first", STARTED));
         assertRow("mtg_hb_first", STARTED, STARTED, 1);
-        store.record("mtg_hb_first", ACTIVE);
+        assertTrue(store.record("mtg_hb_first", ACTIVE));
         assertRow("mtg_hb_first", STARTED, ACTIVE, 2);
-        store.record("mtg_hb_first", LATER);
+        assertTrue(store.record("mtg_hb_first", LATER));
         assertRow("mtg_hb_first", STARTED, LATER, 3);
 
         // 另一场会议仍是首次插入；重复心跳不会把 started_at 改成最后一次活跃。
         assertNoRow("mtg_hb_second");
-        store.record("mtg_hb_second", LATER);
+        assertTrue(store.record("mtg_hb_second", LATER));
         assertRow("mtg_hb_second", LATER, LATER, 1);
         assertRow("mtg_hb_first", STARTED, LATER, 3);
     }
 
     @Test
-    void unknownMeetingIsRejectedByForeignKeyWithoutCreatingRow() throws Exception {
+    void inactiveOrDecidedMeetingCannotBeRefreshed() throws Exception {
+        insertMeeting("mtg_hb_decided", "RUNNING");
+        var store = new JdbcMeetingHeartbeatStore(database);
+        assertTrue(store.record("mtg_hb_decided", STARTED));
+        assertRow("mtg_hb_decided", STARTED, STARTED, 1);
+        insertAbandonment("mtg_hb_decided");
+
+        // 决定已落：即使状态行还是 RUNNING，本次心跳也不能刷新活跃时间。
+        assertFalse(store.record("mtg_hb_decided", LATER));
+        assertRow("mtg_hb_decided", STARTED, STARTED, 1);
+
+        // 状态离开 STARTING/RUNNING 后同样拒绝，不能把已停止会议重新记活。
+        insertMeeting("mtg_hb_stopping", "STOPPING");
+        assertFalse(store.record("mtg_hb_stopping", ACTIVE));
+        assertNoRow("mtg_hb_stopping");
+    }
+
+    @Test
+    void unknownMeetingIsRejectedWithoutCreatingRow() throws Exception {
         var store = new JdbcMeetingHeartbeatStore(database);
 
-        assertThrows(IllegalStateException.class,
-                () -> store.record("mtg_hb_missing", STARTED));
+        assertFalse(store.record("mtg_hb_missing", STARTED));
         assertNoRow("mtg_hb_missing");
     }
 
     private void insertMeeting(String meetingId) throws Exception {
+        insertMeeting(meetingId, "RUNNING");
+    }
+
+    private void insertMeeting(String meetingId, String state) throws Exception {
         try (Connection connection = connection();
              PreparedStatement statement = connection.prepareStatement(
                      "INSERT INTO ai_trans_meeting (meeting_id, deployment_scope,"
@@ -118,9 +139,30 @@ class JdbcMysqlMeetingHeartbeatStoreIntegrationTest {
             JdbcValues.setText(statement, 4, MYSQL, "hb-subject");
             statement.setString(5, "hb-profile");
             statement.setInt(6, 1);
-            JdbcValues.setText(statement, 7, MYSQL, "RUNNING");
+            JdbcValues.setText(statement, 7, MYSQL, state);
             JdbcValues.setInstant(statement, 8, STARTED);
             JdbcValues.setInstant(statement, 9, STARTED);
+            assertEquals(1, statement.executeUpdate());
+        }
+    }
+
+    /** 落一条与生产同形状的弃场决定：状态仍是 RUNNING，只有决定行判定不可活跃。 */
+    private void insertAbandonment(String meetingId) throws Exception {
+        try (Connection connection = connection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "INSERT INTO ai_trans_meeting_abandonment (meeting_id, decision_kind,"
+                             + " deployment_scope, subject_scope, target_state, decided_at,"
+                             + " started_at, last_active_at, settle_duration_ms,"
+                             + " usage_reservation_id, settlement_state, settled_at)"
+                             + " VALUES (?, 'ABANDONED', ?, ?, 'READY_WITH_WARNINGS', ?, ?, ?, 0,"
+                             + " NULL, 'SETTLED', ?)")) {
+            JdbcValues.setText(statement, 1, MYSQL, meetingId);
+            JdbcValues.setText(statement, 2, MYSQL, "hb-deployment");
+            JdbcValues.setText(statement, 3, MYSQL, "hb-subject");
+            JdbcValues.setInstant(statement, 4, ACTIVE);
+            JdbcValues.setInstant(statement, 5, STARTED);
+            JdbcValues.setInstant(statement, 6, STARTED);
+            JdbcValues.setInstant(statement, 7, ACTIVE);
             assertEquals(1, statement.executeUpdate());
         }
     }

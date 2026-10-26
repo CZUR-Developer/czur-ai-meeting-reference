@@ -66,6 +66,10 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
                 MeetingRow meeting = lockMeeting(connection, meetingId);
                 Rejected rejected = checkOwner(context, meeting);
                 if (rejected != null) return rollback(connection, rejected);
+                // 已落弃场决定的会议不可再活跃：字幕/译文/用量/纪要/截图/录音/Start 全部拒绝。
+                if (abandonmentDecided(connection, meetingId)) {
+                    return rollback(connection, new Rejected(Reason.INVALID_STATE));
+                }
                 if (!clientSourceExists(connection, meetingId)) {
                     return rollback(connection, new Rejected(Reason.INPUT_SOURCE_CONFLICT));
                 }
@@ -154,6 +158,10 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
                 MeetingRow meeting = lockMeeting(connection, meetingId);
                 Rejected rejected = checkOwner(context, meeting);
                 if (rejected != null) return rollback(connection, rejected);
+                // 已落弃场决定的会议不可再活跃：字幕/译文/用量/纪要/截图/录音/Start 全部拒绝。
+                if (abandonmentDecided(connection, meetingId)) {
+                    return rollback(connection, new Rejected(Reason.INVALID_STATE));
+                }
                 if (!clientSourceExists(connection, meetingId)) {
                     return rollback(connection, new Rejected(Reason.INPUT_SOURCE_CONFLICT));
                 }
@@ -256,6 +264,10 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
                 MeetingRow meeting = lockMeeting(connection, meetingId);
                 Rejected rejected = checkOwner(context, meeting);
                 if (rejected != null) return rollback(connection, rejected);
+                // 已落弃场决定的会议不可再活跃：字幕/译文/用量/纪要/截图/录音/Start 全部拒绝。
+                if (abandonmentDecided(connection, meetingId)) {
+                    return rollback(connection, new Rejected(Reason.INVALID_STATE));
+                }
                 if (!clientSourceExists(connection, meetingId)) {
                     return rollback(connection, new Rejected(Reason.INPUT_SOURCE_CONFLICT));
                 }
@@ -323,6 +335,10 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
                 MeetingRow meeting = lockMeeting(connection, meetingId);
                 Rejected rejected = checkOwner(context, meeting);
                 if (rejected != null) return rollback(connection, rejected);
+                // 已落弃场决定的会议不可再活跃：字幕/译文/用量/纪要/截图/录音/Start 全部拒绝。
+                if (abandonmentDecided(connection, meetingId)) {
+                    return rollback(connection, new Rejected(Reason.INVALID_STATE));
+                }
                 if (!clientSourceExists(connection, meetingId)) {
                     return rollback(connection, new Rejected(Reason.INPUT_SOURCE_CONFLICT));
                 }
@@ -444,6 +460,10 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
                 MeetingRow meeting = lockMeeting(connection, meetingId);
                 Rejected rejected = checkOwner(context, meeting);
                 if (rejected != null) return rollback(connection, rejected);
+                // 已落弃场决定的会议不可再活跃：字幕/译文/用量/纪要/截图/录音/Start 全部拒绝。
+                if (abandonmentDecided(connection, meetingId)) {
+                    return rollback(connection, new Rejected(Reason.INVALID_STATE));
+                }
                 if (!clientSourceExists(connection, meetingId)) {
                     return rollback(connection, new Rejected(Reason.INPUT_SOURCE_CONFLICT));
                 }
@@ -558,6 +578,10 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
                 MeetingRow meeting = lockMeeting(connection, meetingId);
                 Rejected rejected = checkOwner(context, meeting);
                 if (rejected != null) return rollback(connection, rejected);
+                // 已落弃场决定的会议不可再活跃：字幕/译文/用量/纪要/截图/录音/Start 全部拒绝。
+                if (abandonmentDecided(connection, meetingId)) {
+                    return rollback(connection, new Rejected(Reason.INVALID_STATE));
+                }
                 boolean alreadyClient = clientSourceExists(connection, meetingId);
                 if (!alreadyClient && meeting.state() != MeetingState.CREATED
                         && meeting.state() != MeetingState.AUTHORIZED) {
@@ -623,6 +647,17 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
             JdbcValues.setText(statement, 1, engine, meetingId);
             try (ResultSet rows = statement.executeQuery()) { return rows.next(); }
         }
+    }
+
+    /**
+     * 本场是否已落弃场决定；所有写入入口在会议行锁内复核。
+     *
+     * <p>决定表示扫描器已冻结收口事实，会议不能再接受任何新输入；即使 A 类
+     * 决定尚未取消（等待零用量结算），也必须按不可活跃处理。</p>
+     */
+    private boolean abandonmentDecided(Connection connection, String meetingId)
+            throws SQLException {
+        return JdbcMeetingAbandonmentStore.exists(connection, engine, meetingId);
     }
 
     private ClientEventRow findClientEvent(Connection connection, String meetingId,

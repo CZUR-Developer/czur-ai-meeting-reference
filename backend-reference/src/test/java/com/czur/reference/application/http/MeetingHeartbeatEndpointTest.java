@@ -130,6 +130,14 @@ class MeetingHeartbeatEndpointTest {
             var unavailable = dispatcher.handle(request("owner"));
             assertEquals(503, unavailable.status());
             assertTrue(unavailable.body().contains("HEARTBEAT_UNAVAILABLE"));
+
+            // 存储端口返回 false：查询后会议已不可活跃或已落弃场决定，按状态冲突处理。
+            fixture.storageFailure.set(false);
+            fixture.rejectedStore.set(true);
+            var rejected = dispatcher.handle(request("owner"));
+            assertEquals(409, rejected.status());
+            assertTrue(rejected.body().contains("HEARTBEAT_INVALID_STATE"));
+            assertTrue(fixture.stored.isEmpty());
         }
     }
 
@@ -153,6 +161,7 @@ class MeetingHeartbeatEndpointTest {
         private final List<String> stored = new ArrayList<>();
         private final AtomicReference<Instant> storedAt = new AtomicReference<>();
         private final AtomicReference<Boolean> storageFailure = new AtomicReference<>(false);
+        private final AtomicReference<Boolean> rejectedStore = new AtomicReference<>(false);
         private MeetingCommandContext lastContext;
 
         private final IdentityProvider provider = request -> {
@@ -185,8 +194,13 @@ class MeetingHeartbeatEndpointTest {
             if (storageFailure.get()) {
                 throw new IllegalStateException("storage down");
             }
+            // 查询后会议已被弃场决定/状态变化收口：端口拒绝本次心跳。
+            if (rejectedStore.get()) {
+                return false;
+            }
             stored.add(meetingId);
             storedAt.set(now);
+            return true;
         };
 
         private final MeetingHttpRuntime runtime = new MeetingHttpRuntime(

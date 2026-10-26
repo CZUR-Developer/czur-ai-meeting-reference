@@ -80,9 +80,9 @@ class MySqlInitialBaselineSchemaAuthorIntegrationTest {
             }
             try (var rows = statement.executeQuery("SELECT COUNT(*), SUM(engine='InnoDB') FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name LIKE 'ai\\_trans\\_%'")) {
                 assertTrue(rows.next());
-                // 当前首版基线包含可选人物表和会议心跳表，不再是加入之前的 26 张表。
-                assertEquals(28, rows.getInt(1));
-                assertEquals(28, rows.getInt(2));
+                // 当前首版基线包含可选人物表、会议心跳表和弃场决定表。
+                assertEquals(29, rows.getInt(1));
+                assertEquals(29, rows.getInt(2));
             }
         }
         ProcessResult repeated = runInitialization(null);

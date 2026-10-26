@@ -125,6 +125,63 @@ class MeetingCoordinatorTest {
         }
     }
 
+    /** 业务 IO 队列被慢任务占满时，心跳仍走独立执行器按时发出。 */
+    @Test fun heartbeatIsSentWhileBusinessIoQueueIsBlocked() {
+        Fixture(true, ALL).use { f ->
+            f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.WEB, false)
+            // 占住唯一的 io 线程：字幕保存挂起，心跳不能被它排在后面。
+            f.server.blockAppend = true
+            f.runtime.emit("blocked", 1, "zh-CN", "占住业务队列", true)
+            assertTrue("业务 IO 应已进入慢请求",
+                f.server.appendEntered.await(2, TimeUnit.SECONDS))
+            f.session.heartbeat()
+            f.server.awaitHeartbeats(1)
+            assertEquals(listOf("mtg_test"), f.server.heartbeats)
+            f.server.releaseAppend.countDown()
+        }
+    }
+
+    /** 停止后、销毁后都不再发送；在途之外的触发直接丢弃。 */
+    @Test fun heartbeatStopsAfterStopRequestedAndAfterClose() {
+        Fixture(true, ALL).use { f ->
+            f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.WEB, false)
+            f.session.heartbeat()
+            f.server.awaitHeartbeats(1)
+
+            f.session.requestStop()
+            f.probe.awaitPhase(MeetingSessionState.Phase.STOPPING)
+            repeat(5) { f.session.heartbeat() }
+            assertNotNull(f.probe.result())
+            assertEquals("停止后不得再发心跳", 1, f.server.heartbeats.size)
+
+            f.client.close()
+            f.session.heartbeat()
+            Thread.sleep(100)
+            assertEquals("销毁后不得再发心跳", 1, f.server.heartbeats.size)
+        }
+    }
+
+    /** 原子 in-flight：慢心跳未返回时，后续触发不排队、不重复发送。 */
+    @Test fun concurrentHeartbeatTriggersKeepOnlyOneInFlight() {
+        Fixture(true, ALL).use { f ->
+            f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.WEB, false)
+            f.server.blockHeartbeat = true
+            repeat(10) { f.session.heartbeat() }
+            assertTrue("首个心跳应已进入服务端调用",
+                f.server.heartbeatEntered.await(2, TimeUnit.SECONDS))
+            Thread.sleep(100)
+            assertEquals("在途时后续触发必须被原子标志丢弃", 1, f.server.heartbeats.size)
+
+            f.server.releaseHeartbeat.countDown()
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+            while (f.server.heartbeats.size < 2 && System.nanoTime() < deadline) {
+                f.session.heartbeat()
+                Thread.sleep(10)
+            }
+            assertEquals("上一次完成后仍可继续发送", 2, f.server.heartbeats.size)
+        }
+    }
+
     @Test fun optionalSpeakerIsRequestedOnlyWhenDeploymentAndLocalAdapterProvideIt() {
         Fixture(true, setOf(MeetingCapabilityState.TRANSCRIPT)).use { f ->
             f.server.deploymentCapabilities = setOf(MeetingCapabilityState.TRANSCRIPT)
@@ -1949,6 +2006,7 @@ class MeetingCoordinatorTest {
             server.releaseAppend.countDown()
             server.releaseUsage.countDown()
             server.releaseModelGrant.countDown()
+            server.releaseHeartbeat.countDown()
             client.close()
         }
     }
@@ -2254,8 +2312,20 @@ class MeetingCoordinatorTest {
                     heartbeatIntervalMs)
             } catch (failure: Exception) { throw IOException(failure) }
         }
+        @Volatile var blockHeartbeat = false
+        val heartbeatEntered = CountDownLatch(1)
+        val releaseHeartbeat = CountDownLatch(1)
         override fun sendHeartbeat(id: String) {
             heartbeats.add(id)
+            if (blockHeartbeat) {
+                heartbeatEntered.countDown()
+                try {
+                    if (!releaseHeartbeat.await(4, TimeUnit.SECONDS)) throw IOException("测试未释放心跳HTTP")
+                } catch (interrupted: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw IOException(interrupted)
+                }
+            }
             if (failHeartbeat) throw IOException("fixture-heartbeat-failed")
         }
         fun awaitHeartbeats(count: Int) {

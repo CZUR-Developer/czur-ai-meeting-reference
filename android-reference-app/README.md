@@ -169,6 +169,36 @@ session.requestStop()
 不替代 Stop，也不生成结果。标准事件、冻结用量、选定总结、录音发布和后端 Stop
 由唯一协调器依序处理。App 无需自行数 PCM、调用模型或重复提交用量。
 
+### 会议心跳由宿主按 Create 间隔驱动
+
+心跳不是 SDK 内部定时器：宿主（参考 App 里是 `MeetingService`）必须在收到
+`onStarted` 后按 Create 响应的 `limits.heartbeatIntervalMs` 周期调用
+`session.heartbeat()`，并在开始、停止、失败、销毁时正确启停。间隔为 `0`
+表示旧服务端不要求心跳，宿主不要启动定时器。
+
+```kotlin
+override fun onStarted(started: MeetingStarted) {
+    if (started.heartbeatIntervalMs() > 0) {
+        heartbeatTimer.start(started.heartbeatIntervalMs())  // 首次立即、之后按间隔
+    }
+}
+
+override fun requestStop() {
+    heartbeatTimer.stop()   // 用户确认停止时先停心跳
+    session.requestStop()
+}
+override fun onResult(result: MeetingResult) { heartbeatTimer.stop() }
+override fun onDestroy() { heartbeatTimer.stop() }
+```
+
+`heartbeat()` 在 SDK 内走**独立**单线程执行器，不与字幕／翻译的业务 IO 队列共用，
+慢请求不会把心跳挤过服务端失联窗口；同一时刻最多一个心跳在途，上一次未返回时
+后续触发直接忽略，不会在本地堆积。失败只记录，不改变会议状态，也不在本次调用内
+重试。服务端只记录“真正开始”和“最后活跃”事实：超过
+`max(3 × heartbeatIntervalMs, 10 分钟)` 没有心跳的会议会被判为弃场，终态收成
+`READY_WITH_WARNINGS`，结算时长取最后活跃减真正开始并按部署上限截断。宿主不发
+心跳，服务端就按这条弃场窗口主动收口，结果不会有正常 Stop 的那样完整。
+
 ## SDK 音频来源、方向与权限边界
 
 SDK 主动探测平台与兼容接口，通过 `onAudioInputMode(AudioInputMode)` 返回实际来源：

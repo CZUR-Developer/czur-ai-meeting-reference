@@ -25,6 +25,7 @@ public enum JdbcDatabaseTable {
     MEETING_DELETION_PLAN("meeting_deletion_plan"),
     MEETING_EVENT("meeting_event"),
     MEETING_HEARTBEAT("meeting_heartbeat"),
+    MEETING_ABANDONMENT("meeting_abandonment"),
     MEETING_CLIENT_INPUT("meeting_client_input"),
     MEETING_CLIENT_EVENT("meeting_client_event"),
     MEETING_CLIENT_SUMMARY("meeting_client_summary"),

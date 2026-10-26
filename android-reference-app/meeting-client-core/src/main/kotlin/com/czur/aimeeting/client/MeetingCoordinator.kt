@@ -25,7 +25,8 @@ import java.util.regex.Pattern
 
 /**
  * 平台无关的唯一正常会议编排。状态／显示／deadline 只在 state 队列，HTTP／总结在 io，
- * start／stop／close 在 modelControl 保序，使挂起 HTTP 不拖停音源。SDK／Mock 只注入运行时。
+ * start／stop／close 在 modelControl 保序，使挂起 HTTP 不拖停音源；心跳另用独立单线程，
+ * 不受业务 io 队列积压影响。SDK／Mock 只注入运行时。
  * 单客户端最多一场会议；未确认标准事件仅内存保留原包，由后续事件／停止补交。
  * 停止记录只覆盖尾部确认后的发布／同键 Stop／实际 READY；装配原场现场端口时，
  * 采音起点另落一份 CapturingMeeting，供进程异常退出后由宿主逐场调用 recoverInterrupted，
@@ -50,6 +51,11 @@ class MeetingCoordinator(
     private val state = Executors.newSingleThreadScheduledExecutor()
     private val io = Executors.newSingleThreadExecutor()
     private val modelControl = Executors.newSingleThreadExecutor()
+    /**
+     * 心跳专用单线程执行器：与字幕／翻译共用的 io 队列分离，慢业务请求不会把
+     * 心跳挤过服务端失联窗口。同一时刻至多一个心跳在途，宿主高频触发不会堆积。
+     */
+    private val heartbeatExecutor = Executors.newSingleThreadExecutor()
     @Volatile private var closed = false
     private var current: Session? = null
     /** 仅客户端级互斥，续办不新建 Session，不阻塞回调队列等待网络。 */
@@ -308,6 +314,8 @@ class MeetingCoordinator(
     @Synchronized override fun close() {
         if (closed) return
         closed = true
+        // 销毁后不再接受新心跳；已在途的一次允许自然结束，不中断 HTTP。
+        heartbeatExecutor.shutdown()
         enqueue { current?.cancel(); io.shutdown(); modelControl.shutdown(); state.shutdown() }
     }
 
@@ -320,7 +328,11 @@ class MeetingCoordinator(
         @Volatile private var cancelled = false
         /** 状态队列关门后，已排队电平也不能再次点亮 UI。 */
         @Volatile private var audioLevelActive = false
-        private var meetingId: String? = null
+        @Volatile private var meetingId: String? = null
+        /** 仅心跳线程读取；RUNNING 时置 true，停止/失败/结果/销毁时置 false。 */
+        @Volatile private var heartbeatAllowed = false
+        /** 原子 in-flight：已有心跳未返回时直接跳过本次触发，不排队。 */
+        private val heartbeatInFlight = AtomicBoolean(false)
         private val id: String get() = meetingId!!
         private var available = emptySet<String>()
         private var model: ModelSession? = null
@@ -510,6 +522,8 @@ class MeetingCoordinator(
                 // 采音真正开始前落原场现场；此后进程异常退出，宿主可凭本记录续办。
                 recordRecovery(startedAtMs)
                 active = true; audioLevelActive = true; canStop = runtime.waitsForModelFinish()
+                // onStarted 之后宿主可能立刻按间隔触发第一次心跳，先开放再回调。
+                heartbeatAllowed = true
                 acceptingPresentation = options.presentationCapture()
                 phase = MeetingSessionState.Phase.RUNNING
                 val info = MeetingStarted(id, startedAtMs, created.maxMeetingDurationMs(), available,
@@ -729,26 +743,42 @@ class MeetingCoordinator(
         }
         /**
          * 心跳只刷新服务端活跃事实：失败只记录，不改会议状态，也不在本次调用内重试。
-         * 由宿主按 Create 回告的间隔触发；Stop／失败后 active 变 false，自然停止发送。
+         * 由宿主按 Create 回告的间隔触发；停止／失败／销毁后不再发送。
+         *
+         * <p>发送走独立单线程执行器，不复用字幕／翻译的 io 队列：即使业务请求被慢
+         * 任务占满，心跳仍按宿主节奏发出。原子 in-flight 保证同一时刻最多一次，
+         * 上一次未返回时后续触发直接忽略，不会在本地无界堆积。</p>
          */
         override fun heartbeat() {
-            enqueue {
-                if (done || cancelled || !active) return@enqueue
-                val currentId = meetingId ?: return@enqueue
-                io.execute {
-                    if (closed || cancelled || done) return@execute
+            if (closed || done || cancelled || !heartbeatAllowed) return
+            if (!heartbeatInFlight.compareAndSet(false, true)) return
+            try {
+                heartbeatExecutor.execute {
                     try {
-                        server.sendHeartbeat(currentId)
-                    } catch (failure: Exception) {
-                        if (failure !is IOException && failure !is RuntimeException) throw failure
-                        logFailure("会议心跳", failure)
+                        // 排队期间可能已经停止、失败或销毁；执行时再核一次。
+                        if (closed || cancelled || done || !heartbeatAllowed) return@execute
+                        val currentId = meetingId ?: return@execute
+                        try {
+                            server.sendHeartbeat(currentId)
+                        } catch (failure: Exception) {
+                            if (failure !is IOException && failure !is RuntimeException) throw failure
+                            logFailure("会议心跳", failure)
+                        }
+                    } finally {
+                        heartbeatInFlight.set(false)
                     }
                 }
+            } catch (rejected: RejectedExecutionException) {
+                heartbeatInFlight.set(false)
+                // 只有关闭中的拒绝可以静默；其它情况保留原异常类型给宿主。
+                if (!closed) throw rejected
             }
         }
         override fun requestStop() {
             enqueue {
                 if (done || !active || !canStop) return@enqueue
+                // 用户确认停止后立即停发心跳；服务端随后进入 STOPPING/收口。
+                heartbeatAllowed = false
                 stopRequested = true; audioLevelActive = false; canStop = false
                 phase = MeetingSessionState.Phase.STOPPING
                 if (display.flushPendingLanguages()) showDisplay()
@@ -885,6 +915,7 @@ class MeetingCoordinator(
         }
         private fun ready(finalResult: MeetingResult) {
             if (done) return
+            heartbeatAllowed = false
             done = true; active = false; phase = MeetingSessionState.Phase.READY; readyResult = finalResult
             cleanupRecovery()
             notifyListener { listener.onResult(finalResult) }
@@ -914,6 +945,7 @@ class MeetingCoordinator(
         }
         private fun endWithoutDelivery(message: String) {
             if (done) return
+            heartbeatAllowed = false
             done = true; active = false; phase = MeetingSessionState.Phase.ENDED
             cleanupRecovery()
             LOG.info("会议已停止，未主动交付结果：$message")
@@ -921,6 +953,7 @@ class MeetingCoordinator(
         }
         private fun failStart(code: MeetingErrorCode) {
             if (done) return
+            heartbeatAllowed = false
             audioLevelActive = false; done = true; active = false; canStop = false; phase = MeetingSessionState.Phase.FAILED
             cancelDeadline()
             cleanupRecovery()
@@ -962,6 +995,7 @@ class MeetingCoordinator(
         override fun close() { enqueue { cancel() } }
         fun cancel() {
             if (cancelled) return
+            heartbeatAllowed = false
             cancelled = true; audioLevelActive = false; readyResult = null; done = true; active = false
             cancelDeadline()
             model?.let { modelControl.execute(it::close) }

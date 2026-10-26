@@ -186,6 +186,27 @@ Android 端通过 `ModelAdapter` 接收 Provider 数据，将原文、译文、�
 原默认实时 GET、总结 POST/JSON 和非空 token 的 Bearer 行为保持。
 线程、时间及扩展接口见 [公共 Android core 说明](../android-reference-app/meeting-client-core/README.md#模型请求描述与独立文本翻译)。
 
+### 活跃心跳与弃场收口
+
+参考部署用“服务端心跳”判断一场会议还在不在。Create 响应里的
+`limits.heartbeatIntervalMs` 是服务端期望的间隔（缺省 120000，`0` 表示旧服务端
+不要求心跳）。参考 App 由前台 Service 按该间隔调用
+`MeetingSession.heartbeat()`：进入 `onStarted` 后启动，用户确认停止、会议失败或
+Service 销毁时取消；SDK 内部用独立单线程发送，不与字幕／翻译的业务 IO 队列共用，
+同一时刻最多一个在途。伙伴自己写宿主时也要遵守同样的启停时机。
+
+服务端只记录每场会议“真正开始”和“最后活跃”的服务端时间。超过
+`max(3 × heartbeatIntervalMs, 10 分钟)` 没有心跳的会议会被判为弃场：先把弃场
+决定落库（冻结结算时长、目标终态和决定时间），再调用权益端口结算，最后写结果和
+`READY_WITH_WARNINGS` 终态。结算时长取最后一次活跃减真正开始，并按部署最大会议
+时长截断；正常 Stop 已经冻结的采音用量优先，这类会议不走弃场。决定落库后心跳、
+字幕、译文、用量和纪要都会被拒绝，会议不能恢复成普通活跃会议；结算失败只保留
+决定，下一轮只重试结算，不会重复扣减。
+
+心跳不驱动会议状态，也不直接触发结算；它只决定弃场窗口和结算时长。宿主不发
+心跳，服务端仍会按窗口主动收口，但结果会带警告并且没有正常 Stop 的完整收尾。
+参考实现已包含扫描器，伙伴只需保证宿主按间隔调用，不需要另写定时收尾。
+
 ### 可选独立文本翻译
 
 仅提供 ASR 时，可在服务端把 `ModelSessionIssuer` 与 `TranslationSessionIssuer`
