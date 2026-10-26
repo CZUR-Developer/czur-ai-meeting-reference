@@ -53,6 +53,7 @@ import com.czur.reference.application.persistence.jdbc.DatabaseReadiness;
 import com.czur.reference.application.persistence.jdbc.DatabaseStartupException;
 import com.czur.reference.application.persistence.jdbc.JdbcEntitlementProvider;
 import com.czur.reference.application.persistence.jdbc.JdbcUsageReserveLookup;
+import com.czur.reference.application.port.AbandonedMeetingFinalizer;
 import com.czur.reference.application.port.MeetingIdGenerator;
 import com.czur.reference.application.port.MeetingManifestPort;
 import com.czur.reference.application.port.MeetingArtifactContentPort;
@@ -121,6 +122,7 @@ public class MeetingHttpAssembly implements AutoCloseable {
     private final Clock clock;
     private final MeetingArtifactMediaPort artifactMedia;
     private final EntitlementProvider entitlementProvider;
+    private final AbandonedMeetingFinalizer abandonedMeetingFinalizer;
     private final long audioArtifactMaxBytes;
     private final AtomicBoolean closed;
 
@@ -136,6 +138,7 @@ public class MeetingHttpAssembly implements AutoCloseable {
             JdbcMeetingEventLogPort eventLog, Clock clock,
             ResultEmailEndpoint resultEmail, MeetingArtifactMediaPort artifactMedia,
             EntitlementProvider entitlementProvider,
+            AbandonedMeetingFinalizer abandonedMeetingFinalizer,
             MeetingArtifactHttpEndpoint artifactEndpoint,
             SpeakerIdentityEnrollmentEndpoint speakerEnrollment, SpeakerNameEditEndpoint speakerEditing,
             MeetingHeartbeatEndpoint heartbeat,
@@ -158,6 +161,8 @@ public class MeetingHttpAssembly implements AutoCloseable {
         this.dispatcher = new MeetingHttpDispatcher(runtime, errors, contextResolver, resultEmail,
                 artifactEndpoint, speakerEnrollment, speakerEditing, heartbeat);
         this.entitlementProvider = entitlementProvider;
+        this.abandonedMeetingFinalizer = Objects.requireNonNull(
+                abandonedMeetingFinalizer, "abandonedMeetingFinalizer");
         this.audioArtifactMaxBytes = audioArtifactMaxBytes;
     }
 
@@ -179,6 +184,7 @@ public class MeetingHttpAssembly implements AutoCloseable {
         this.clock = source.clock;
         this.artifactMedia = source.artifactMedia;
         this.entitlementProvider = source.entitlementProvider;
+        this.abandonedMeetingFinalizer = source.abandonedMeetingFinalizer;
         this.audioArtifactMaxBytes = source.audioArtifactMaxBytes;
         this.closed = source.closed;
     }
@@ -463,10 +469,14 @@ public class MeetingHttpAssembly implements AutoCloseable {
             var inputReconciler = legacy == null ? null : legacy.inputReconciler();
             var realtimeIngress = legacy == null ? null : legacy.audioIngress();
             var realtimeTranscripts = legacy == null ? null : legacy.transcripts();
+            // 正常 Stop 与弃场收尾共用同一个 Finalizer 实例：结果发布、状态前进和
+            // 用量结算边界只有一份实现；宿主不得另造并行状态机。
+            var clientResultFinalizer = new JdbcClientMeetingResultFinalizer(
+                    databaseContext, ids::newReceipt, clock, artifactStore, entitlement,
+                    speakerIdentity);
             var stopService = new AuthenticatedMeetingStopApplicationService(
                     config.deploymentScope(), identity, stop, query, inputReconciler,
-                    new JdbcClientMeetingResultFinalizer(databaseContext, ids::newReceipt,
-                            clock, artifactStore, entitlement, speakerIdentity));
+                    clientResultFinalizer);
             var renewService = realtimeRenewEnabled
                     ? new AuthenticatedRealtimeTokenRenewApplicationService(
                             config.deploymentScope(), identity,
@@ -549,7 +559,7 @@ public class MeetingHttpAssembly implements AutoCloseable {
                     realtimeTranscripts, inputReconciler, events, clock,
                     config.resultEmail().map(email -> new ResultEmailEndpoint(query, manifest,
                             new SmtpResultEmailSender(email), errors)).orElse(null),
-                    artifactMedia, entitlement,
+                    artifactMedia, entitlement, clientResultFinalizer,
                     artifactMedia == null ? null
                             : new MeetingArtifactHttpEndpoint(clientInput, artifactMedia, errors),
                     enrollment == null ? null : new SpeakerIdentityEnrollmentEndpoint(enrollment, errors),
@@ -626,6 +636,17 @@ public class MeetingHttpAssembly implements AutoCloseable {
      * 客户端采音冻结值由用量提交接口提供，真实采音计数由SDK负责。</p>
      */
     public EntitlementProvider entitlementProvider() { return entitlementProvider; }
+
+    /**
+     * 返回与客户端 Stop 共用的弃场收尾端口，供本机进程按心跳窗口收口卡住的会议。
+     *
+     * <p>实现复用本装配根的唯一数据库上下文、结果发布逻辑和权益 Provider；不
+     * 创建第二套会议状态机或连接池。调用方负责串行、周期性地调用，并在本装配
+     * 关闭前停止调用。</p>
+     */
+    public AbandonedMeetingFinalizer abandonedMeetingFinalizer() {
+        return abandonedMeetingFinalizer;
+    }
 
     /**
      * 用本装配根的同一连接池和 Reconciler 创建待收口扫描器。

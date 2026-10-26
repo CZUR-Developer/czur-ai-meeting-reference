@@ -15,6 +15,7 @@ import com.czur.reference.application.port.entitlement.EntitlementProvider;
 import com.czur.reference.application.port.entitlement.EntitlementProviderResult;
 import com.czur.reference.application.port.entitlement.MeetingGrant;
 import com.czur.reference.application.port.entitlement.ReserveUsageRequest;
+import com.czur.reference.application.port.entitlement.SettleAbandonedRequest;
 import com.czur.reference.application.port.entitlement.UsageOperationResult;
 import com.czur.reference.application.port.entitlement.UsageOperationScopes;
 import com.czur.reference.application.port.identity.IdentityProvider;
@@ -782,6 +783,9 @@ class ReferenceMeetingMysqlClientHttpAssemblyIntegrationTest {
         @Override public EntitlementProviderResult<UsageOperationResult> commitUsage(CommitUsageRequest request) {
             commits.add(request);
             return delegate.commitUsage(request);
+        }
+        @Override public EntitlementProviderResult<UsageOperationResult> settleAbandoned(SettleAbandonedRequest request) {
+            return delegate.settleAbandoned(request);
         }
         @Override public EntitlementProviderResult<UsageOperationResult> cancelReservation(CancelReservationRequest request) {
             return delegate.cancelReservation(request);

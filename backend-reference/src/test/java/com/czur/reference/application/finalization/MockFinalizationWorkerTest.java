@@ -27,6 +27,7 @@ import com.czur.reference.application.port.entitlement.EntitlementProviderError;
 import com.czur.reference.application.port.entitlement.EntitlementProviderResult;
 import com.czur.reference.application.port.entitlement.MeetingGrant;
 import com.czur.reference.application.port.entitlement.ReserveUsageRequest;
+import com.czur.reference.application.port.entitlement.SettleAbandonedRequest;
 import com.czur.reference.application.port.entitlement.UsageEstimate;
 import com.czur.reference.application.port.entitlement.UsageOperationResult;
 import com.czur.reference.application.port.entitlement.UsageReservation;
@@ -1292,6 +1293,12 @@ class MockFinalizationWorkerTest {
                 CommitUsageRequest request) {
             commitCalls.incrementAndGet();
             return commit.apply(request);
+        }
+
+        @Override
+        public EntitlementProviderResult<UsageOperationResult> settleAbandoned(
+                SettleAbandonedRequest request) {
+            throw new AssertionError("worker must not settle abandoned meetings");
         }
 
         @Override

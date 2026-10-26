@@ -17,8 +17,8 @@ import com.czur.reference.application.speaker.ReferenceSpeakerIdentityConfig;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import com.czur.reference.application.entitlement.ExpiredReservationCleanupWorker;
+import com.czur.reference.application.persistence.jdbc.JdbcAbandonedMeetingSweeper;
 import com.czur.reference.application.persistence.jdbc.JdbcClientModelWorkers;
-import com.czur.reference.application.persistence.jdbc.JdbcStaleStartSweeper;
 import com.czur.reference.application.port.entitlement.LeaseAwareReservationCanceller;
 
 import java.time.Clock;
@@ -49,10 +49,8 @@ public final class ReferenceClientMeetingProcess implements AutoCloseable {
     private static final Logger LOGGER = Logger.getLogger(
             ReferenceClientMeetingProcess.class.getName());
 
-    /** 过期预占清理周期；重复执行只会重新领取同一批已过期记录，结果幂等。 */
+    /** 过期预占清理与弃场扫描周期；重复执行只会重新领取同一批记录，结果幂等。 */
     private static final long TICK_SECONDS = 30;
-    /** 启动失败收口在最大会议时长之后的宽限，避免卡在自动停止边界。 */
-    private static final java.time.Duration STALE_START_GRACE = java.time.Duration.ofMinutes(15);
 
     private final ReferenceMeetingHttpAssembly assembly;
     private final MeetingJdkHttpServer http;
@@ -140,21 +138,22 @@ public final class ReferenceClientMeetingProcess implements AutoCloseable {
                 LOGGER.log(Level.INFO, "权益端口不支持 lease-aware cancel，跳过过期预占清理");
             }
             final ExpiredReservationCleanupWorker cleanupWorker = cleanup;
-            // 启动失败的会议停在 CREATED／STARTING，过期预占清理不覆盖已绑定预占；
-            // 这里按超时把它们收口为 CANCELLED 并释放预占，避免永远留一条空会议。
-            // 窗口跟随部署的最大会议时长：静音会议也要等到自身时长上限之后才可能被收口，
-            // 不能把"暂时没有识别文字"当成启动失败。
-            final JdbcStaleStartSweeper staleStartSweeper = new JdbcStaleStartSweeper(
+            // 过期预占清理只处理尚未绑定会议的记录；会议室里还留着两类卡住的会议：
+            // 从未出现心跳的启动失败（零用量结算后取消）与已开始但心跳中断的弃场
+            // （按时长结算后收成 READY_WITH_WARNINGS）。同一扫描器复用本装配的权益
+            // Provider 和唯一 Finalizer，窗口由部署心跳间隔推导。
+            final JdbcAbandonedMeetingSweeper abandonedSweeper = new JdbcAbandonedMeetingSweeper(
                     assembly.databaseContext(), config.deploymentScope(), clock,
-                    java.time.Duration.ofMillis(config.runtimeLimits().maxMeetingDurationMs())
-                            .plus(STALE_START_GRACE),
-                    JdbcStaleStartSweeper.DEFAULT_BATCH_LIMIT);
+                    assembly.entitlementProvider(), assembly.abandonedMeetingFinalizer(),
+                    JdbcAbandonedMeetingSweeper.Config.defaults(config.heartbeatIntervalMs(),
+                            config.runtimeLimits().maxMeetingDurationMs()));
             scheduler = Executors.newSingleThreadScheduledExecutor(task -> {
                 Thread thread = new Thread(task, "reference-client-meeting-worker");
                 thread.setDaemon(true);
                 return thread;
             });
-            scheduler.scheduleWithFixedDelay(() -> tick(cleanupWorker, staleStartSweeper), 0, TICK_SECONDS, TimeUnit.SECONDS);
+            scheduler.scheduleWithFixedDelay(() -> tick(cleanupWorker, abandonedSweeper),
+                    0, TICK_SECONDS, TimeUnit.SECONDS);
             LOGGER.log(Level.INFO, "参考客户端直连后端已启动 httpPort={0} modelAdapter={1}",
                     new Object[]{http.address().getPort(), issuer.getClass().getSimpleName()});
             return new ReferenceClientMeetingProcess(assembly, http, artifacts, scheduler);
@@ -168,7 +167,7 @@ public final class ReferenceClientMeetingProcess implements AutoCloseable {
     }
 
     /** 一次清理；两类任务各自兜异常，互不阻塞，失败只记录并等下个周期。 */
-    static void tick(ExpiredReservationCleanupWorker cleanup, JdbcStaleStartSweeper sweeper) {
+    static void tick(ExpiredReservationCleanupWorker cleanup, JdbcAbandonedMeetingSweeper sweeper) {
         if (cleanup != null) {
             try {
                 ExpiredReservationCleanupWorker.RunResult result = cleanup.runOnce();
@@ -181,13 +180,17 @@ public final class ReferenceClientMeetingProcess implements AutoCloseable {
             }
         }
         try {
-            JdbcStaleStartSweeper.Result swept = sweeper.runOnce();
-            if (swept.cancelledMeetings() > 0) {
-                LOGGER.log(Level.INFO, "启动失败会议收口 cancelled={0}",
-                        swept.cancelledMeetings());
+            JdbcAbandonedMeetingSweeper.Result swept = sweeper.runOnce();
+            if (swept.cancelledMeetings() > 0 || swept.finalizedMeetings() > 0) {
+                LOGGER.log(Level.INFO, "弃场会议收口 cancelled={0} finalized={1}",
+                        new Object[]{swept.cancelledMeetings(), swept.finalizedMeetings()});
+            }
+            if (swept.deferredMeetings() > 0) {
+                LOGGER.log(Level.FINE, "弃场会议本轮暂缓 deferred={0}",
+                        swept.deferredMeetings());
             }
         } catch (RuntimeException failure) {
-            LOGGER.log(Level.WARNING, "启动失败会议收口失败，下个周期继续", failure);
+            LOGGER.log(Level.WARNING, "弃场会议收口失败，下个周期继续", failure);
         }
     }
 

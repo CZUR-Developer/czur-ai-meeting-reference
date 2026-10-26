@@ -42,6 +42,7 @@ import com.czur.reference.application.port.entitlement.AuthorizeStartRequest;
 import com.czur.reference.application.port.entitlement.ReserveUsageRequest;
 import com.czur.reference.application.port.entitlement.CommitUsageRequest;
 import com.czur.reference.application.port.entitlement.CancelReservationRequest;
+import com.czur.reference.application.port.entitlement.SettleAbandonedRequest;
 import com.czur.reference.application.port.entitlement.UsageEstimate;
 import com.czur.reference.application.port.entitlement.UsageUnit;
 import com.czur.reference.domain.capability.CapabilityDescriptor;
@@ -917,6 +918,8 @@ class MeetingHttpAdapterContractTest {
                     ReserveUsageRequest request) { throw new AssertionError("no create"); }
             @Override public EntitlementProviderResult<UsageOperationResult> commitUsage(
                     CommitUsageRequest request) { throw new AssertionError("no create"); }
+            @Override public EntitlementProviderResult<UsageOperationResult> settleAbandoned(
+                    SettleAbandonedRequest request) { throw new AssertionError("no create"); }
             @Override public EntitlementProviderResult<UsageOperationResult> cancelReservation(
                     CancelReservationRequest request) { throw new AssertionError("no create"); }
         };

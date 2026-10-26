@@ -398,7 +398,7 @@ public class MeetingDeploymentConfig {
     public TrustedCreateRuntimeLimits runtimeLimits() { return runtimeLimits; }
     /**
      * 客户端心跳间隔；同时冻结进 Create 响应与心跳成功响应，服务端不自行缩短或延长。
-     * 本阶段只回告节奏，不据此推进会议状态或收口。
+     * 弃场扫描以 {@code max(3 × 该间隔, 10 分钟)} 作为失联窗口，不按单场状态猜测。
      */
     public int heartbeatIntervalMs() { return heartbeatIntervalMs; }
     /** 只供分页 HMAC 编解码器构造使用；返回私有密钥的副本。 */

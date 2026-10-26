@@ -13,6 +13,7 @@ import com.czur.reference.application.port.entitlement.EntitlementProvider;
 import com.czur.reference.application.port.entitlement.EntitlementProviderResult;
 import com.czur.reference.application.port.entitlement.MeetingGrant;
 import com.czur.reference.application.port.entitlement.ReserveUsageRequest;
+import com.czur.reference.application.port.entitlement.SettleAbandonedRequest;
 import com.czur.reference.application.port.entitlement.UsageEstimate;
 import com.czur.reference.application.port.entitlement.UsageOperationResult;
 import com.czur.reference.application.port.entitlement.UsageOperationScopes;
@@ -380,6 +381,12 @@ class AuthenticatedMeetingApplicationServiceTest {
         @Override
         public EntitlementProviderResult<UsageOperationResult> commitUsage(
                 com.czur.reference.application.port.entitlement.CommitUsageRequest request) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public EntitlementProviderResult<UsageOperationResult> settleAbandoned(
+                SettleAbandonedRequest request) {
             throw new UnsupportedOperationException();
         }
 

@@ -196,8 +196,9 @@ CREATE TABLE ai_trans_meeting_event (
     PRIMARY KEY (meeting_id, event_sequence)
 ) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
--- 会议心跳只记录“真正开始”和“最后活跃”的服务端事实；本阶段不驱动状态推进，
--- 也不参与结算。两列时间均为服务端时钟写入的 UTC DATETIME(6)。
+-- 会议心跳记录“真正开始”和“最后活跃”的服务端事实；弃场扫描据此区分
+-- 从未开始（无行）与开始后失联（有行但长期不活跃），结算时长取两列差值。
+-- 两列时间均为服务端时钟写入的 UTC DATETIME(6)。
 CREATE TABLE ai_trans_meeting_heartbeat (
     meeting_id VARBINARY(1024) NOT NULL,
     started_at DATETIME(6) NOT NULL,
@@ -393,6 +394,7 @@ CREATE TABLE ai_trans_workflow_step (
 -- MySQL 不支持部分索引；保留可空唯一键与必要筛选列。DESC 在5.7不生效，采用普通BTREE。
 CREATE INDEX ai_trans_idempotency_expiry_idx ON ai_trans_idempotency_record (expires_at);
 CREATE INDEX ai_trans_meeting_event_stream_sequence_idx ON ai_trans_meeting_event (meeting_id, stream_id, event_sequence);
+CREATE INDEX ai_trans_meeting_heartbeat_active_idx ON ai_trans_meeting_heartbeat (last_active_at);
 CREATE UNIQUE INDEX ai_trans_meeting_finalization_receipt_uq ON ai_trans_meeting (finalization_receipt_id);
 CREATE INDEX ai_trans_meeting_realtime_token_grant_active_idx ON ai_trans_meeting_realtime_token_grant (meeting_id, expires_at);
 CREATE UNIQUE INDEX ai_trans_meeting_scope_session_uq ON ai_trans_meeting (deployment_scope, client_session_id);

@@ -1023,7 +1023,7 @@ components:
         heartbeatIntervalMs:
           type: integer
           minimum: 1
-          description: 客户端下一次心跳的期望间隔（毫秒）；服务端按部署配置回告，不由单场状态推导。当前阶段仅用于接收与记录，不驱动状态推进或收口。
+          description: 客户端下一次心跳的期望间隔（毫秒）；服务端按部署配置回告，不由单场状态推导。服务端据此判定弃场：客户端应持续按该间隔发送心跳，长时间没有活跃的会议会被服务端结算并收口为终态。
     ProfileRef:
       type: object
       additionalProperties: false

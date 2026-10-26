@@ -13,16 +13,22 @@ import com.czur.reference.application.port.entitlement.LeaseAwareCancelReservati
 import com.czur.reference.application.port.entitlement.LeaseAwareReservationCanceller;
 import com.czur.reference.application.port.entitlement.MeetingGrant;
 import com.czur.reference.application.port.entitlement.ReserveUsageRequest;
+import com.czur.reference.application.port.entitlement.SettleAbandonedRequest;
 import com.czur.reference.application.port.entitlement.UsageOperationResult;
+import com.czur.reference.application.port.entitlement.UsageOperationScopes;
 import com.czur.reference.application.port.entitlement.UsageReservation;
 import com.czur.reference.application.port.entitlement.UsageReservationTransitionException;
 
 import javax.sql.DataSource;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.HexFormat;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.logging.Level;
@@ -223,6 +229,140 @@ public class JdbcEntitlementProvider
         } catch (SQLException connectionFailure) {
             return unavailable("COMMIT_CONNECTION", connectionFailure);
         }
+    }
+
+    /**
+     * 弃场会议的零或时长结算；与普通 commit 共用同一条预占账本。
+     *
+     * <p>幂等键固定为 {@code meeting.abandon.v1:<meetingId>}，不读取客户端上下文。
+     * 实现先按四元组查操作重放，再锁定预占并校验 {@code boundMeetingId} 就是本场
+     * 会议；预占已是 {@code COMMITTED} 时直接按重放成功返回，不再次提交，也不
+     * 追加第二条结算事实。调用方必须已持久化判定这是弃场，不能把仍在进行的
+     * 会议送进来。</p>
+     */
+    @Override
+    public EntitlementProviderResult<UsageOperationResult> settleAbandoned(
+            SettleAbandonedRequest request) {
+        if (request == null) {
+            return failure(EntitlementProviderError.Code.INVALID_REQUEST, false,
+                    "ABANDON_REQUEST_MISSING");
+        }
+        OperationIdentity identity = OperationIdentity.abandon(request);
+        try (Connection connection = dataSource.getConnection()) {
+            boolean previousAutoCommit = connection.getAutoCommit();
+            connection.setAutoCommit(false);
+            try {
+                Optional<JdbcUsageReservationStore.UsageOperationRow> existing =
+                        findOperation(connection, identity);
+                if (existing.isPresent()) {
+                    EntitlementProviderResult<UsageOperationResult> replay =
+                            replayAbandoned(connection, existing.get(), identity, request);
+                    connection.rollback();
+                    return replay;
+                }
+
+                Optional<UsageReservation> locked = JdbcUsageReservationStore.lockReservation(
+                        connection, engine, request.deploymentScope(), request.subjectScope(),
+                        request.reservationId());
+                if (locked.isEmpty()) {
+                    connection.rollback();
+                    return failure(EntitlementProviderError.Code.RESERVATION_NOT_FOUND, false,
+                            "ABANDON_RESERVATION_NOT_FOUND");
+                }
+                // 锁等待期间可能已有并发结算提交；优先稳定重放，而不是再次提交。
+                existing = findOperationCurrent(connection, identity);
+                if (existing.isPresent()) {
+                    EntitlementProviderResult<UsageOperationResult> replay =
+                            replayAbandoned(connection, existing.get(), identity, request);
+                    connection.rollback();
+                    return replay;
+                }
+
+                UsageReservation current = locked.get();
+                if (!request.meetingId().equals(current.expectedMeetingId())
+                        || !request.meetingId().equals(current.boundMeetingId())) {
+                    connection.rollback();
+                    return failure(EntitlementProviderError.Code.RESERVATION_STATE_CONFLICT,
+                            false, "ABANDON_MEETING_MISMATCH");
+                }
+                if (current.state() == UsageReservation.State.COMMITTED) {
+                    // 正常 Stop 或上一轮弃场已经结算；不重复提交，按稳定终态返回成功。
+                    connection.rollback();
+                    return EntitlementProviderResult.success(identity.terminalResult(current));
+                }
+                if (current.state() != UsageReservation.State.RESERVED) {
+                    connection.rollback();
+                    return failure(EntitlementProviderError.Code.RESERVATION_STATE_CONFLICT,
+                            false, "ABANDON_RESERVATION_NOT_RESERVED");
+                }
+
+                UsageReservation committed;
+                try {
+                    committed = current.commit(request.actual(), clock.instant(),
+                            current.version());
+                } catch (UsageReservationTransitionException transition) {
+                    connection.rollback();
+                    return transitionFailure(transition, "ABANDON");
+                } catch (IllegalArgumentException invalidRequest) {
+                    connection.rollback();
+                    return failure(EntitlementProviderError.Code.INVALID_REQUEST, false,
+                            "ABANDON_USAGE_INVALID");
+                }
+                if (!JdbcUsageReservationStore.commit(connection, engine, current, committed)) {
+                    connection.rollback();
+                    return failure(EntitlementProviderError.Code.VERSION_CONFLICT, false,
+                            "ABANDON_CAS_REJECTED");
+                }
+                UsageOperationResult candidate = identity.terminalResult(committed);
+                if (!JdbcUsageReservationStore.insertOperation(
+                        connection, engine, candidate, clock.instant())) {
+                    return rollbackAndReadWinner(connection, identity);
+                }
+                connection.commit();
+                LOGGER.log(Level.FINE, "JDBC 权益操作首次完成 operation=ABANDON");
+                return EntitlementProviderResult.success(candidate);
+            } catch (JdbcUsageReservationStore.CorruptUsageDataException corruption) {
+                rollbackQuietly(connection);
+                return corrupted("ABANDON_CORRUPT_DATA");
+            } catch (IllegalArgumentException invalidPersistedData) {
+                rollbackQuietly(connection);
+                return corrupted("ABANDON_INVALID_PERSISTED_RESULT");
+            } catch (SQLException sqlFailure) {
+                rollbackQuietly(connection);
+                return unavailable("ABANDON", sqlFailure);
+            } finally {
+                restoreAutoCommit(connection, previousAutoCommit);
+            }
+        } catch (SQLException connectionFailure) {
+            return unavailable("ABANDON_CONNECTION", connectionFailure);
+        }
+    }
+
+    /**
+     * 弃场操作的稳定重放。
+     *
+     * <p>相同摘要直接解码首次结果。摘要不同时只在预占已经 COMMITTED 且仍绑定
+     * 本场会议时返回成功：弃场用量由窗口推导，重算值可能变化，但“已经结算”
+     * 这个事实不能被第二笔扣减覆盖。其它情况仍按幂等冲突拒绝。</p>
+     */
+    private EntitlementProviderResult<UsageOperationResult> replayAbandoned(
+            Connection connection,
+            JdbcUsageReservationStore.UsageOperationRow row,
+            OperationIdentity identity,
+            SettleAbandonedRequest request) throws SQLException {
+        if (row.requestDigest().equals(identity.requestDigest())) {
+            return replayOrConflict(row, identity);
+        }
+        Optional<UsageReservation> locked = JdbcUsageReservationStore.lockReservation(
+                connection, engine, request.deploymentScope(), request.subjectScope(),
+                request.reservationId());
+        if (locked.isPresent()
+                && locked.get().state() == UsageReservation.State.COMMITTED
+                && request.meetingId().equals(locked.get().boundMeetingId())) {
+            return EntitlementProviderResult.success(identity.terminalResult(locked.get()));
+        }
+        return failure(EntitlementProviderError.Code.IDEMPOTENCY_CONFLICT, false,
+                "ABANDON_DIGEST_CONFLICT");
     }
 
     @Override
@@ -577,6 +717,33 @@ public class JdbcEntitlementProvider
             return new OperationIdentity(
                     request.deploymentScope(), request.subjectScope(), request.operationScope(),
                     request.idempotencyKey(), request.requestDigest(), "CANCEL");
+        }
+
+        /**
+         * 弃场结算沿用 COMMIT 操作 scope，但幂等键和摘要完全由服务端事实构造。
+         * 摘要包含会议、预占和用量，保证同一场会议的不同推导值不会被静默混淆；
+         * 已 COMMITTED 的兼容重放由调用方单独处理。
+         */
+        static OperationIdentity abandon(SettleAbandonedRequest request) {
+            return new OperationIdentity(
+                    request.deploymentScope(), request.subjectScope(),
+                    UsageOperationScopes.COMMIT, request.idempotencyKey(),
+                    abandonDigest(request), "ABANDON");
+        }
+
+        private static String abandonDigest(SettleAbandonedRequest request) {
+            String material = "meeting-abandon/v1\u0000" + request.deploymentScope()
+                    + "\u0000" + request.subjectScope()
+                    + "\u0000" + request.meetingId()
+                    + "\u0000" + request.reservationId()
+                    + "\u0000" + request.actual().unit()
+                    + "\u0000" + request.actual().amount();
+            try {
+                return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                        .digest(material.getBytes(StandardCharsets.UTF_8)));
+            } catch (NoSuchAlgorithmException impossible) {
+                throw new IllegalStateException("SHA-256 is unavailable");
+            }
         }
 
         UsageOperationResult reserveResult(

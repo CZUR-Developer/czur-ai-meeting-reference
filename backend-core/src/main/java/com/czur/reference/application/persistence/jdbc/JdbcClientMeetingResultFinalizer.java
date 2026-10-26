@@ -4,9 +4,11 @@ import com.czur.aimeeting.contract.realtime.v1.TranscriptUpsert;
 import com.czur.aimeeting.contract.realtime.v1.TranslationUpsert;
 import com.czur.reference.application.command.MeetingAccessGuard;
 import com.czur.reference.application.command.MeetingCommandContext;
+import com.czur.reference.application.port.AbandonedMeetingFinalizer;
 import com.czur.reference.application.port.ClientMeetingInputPort.Reason;
 import com.czur.reference.application.port.ClientMeetingResultFinalizer;
 import com.czur.reference.application.port.FinalizationReceiptGenerator;
+import com.czur.reference.application.port.ManifestStatus;
 import com.czur.reference.application.port.IdempotencyScopeCodec;
 import com.czur.reference.application.port.speaker.SpeakerIdentityProvider;
 import com.czur.reference.application.port.speaker.SpeakerIdentityProvider.MeetingSpeakers;
@@ -16,6 +18,7 @@ import com.czur.reference.domain.capability.CapabilityIds;
 import com.czur.reference.domain.capability.CapabilityDecision;
 import com.czur.reference.application.port.entitlement.CommitUsageRequest;
 import com.czur.reference.application.port.entitlement.EntitlementProvider;
+import com.czur.reference.application.port.entitlement.SettleAbandonedRequest;
 import com.czur.reference.application.port.entitlement.UsageActual;
 import com.czur.reference.application.port.entitlement.UsageOperationScopes;
 import com.czur.reference.application.port.entitlement.UsageUnit;
@@ -74,7 +77,8 @@ import java.util.logging.Logger;
  * 冻结无 Artifact 的 READY Manifest，不制造空字幕事件或空的最终字幕产物。
  * 本类只处理客户端事件链，不改变旧音频 Worker 的收口流程。</p>
  */
-public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResultFinalizer {
+public final class JdbcClientMeetingResultFinalizer
+        implements ClientMeetingResultFinalizer, AbandonedMeetingFinalizer {
     private static final Logger LOGGER = Logger.getLogger(
             JdbcClientMeetingResultFinalizer.class.getName());
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -375,148 +379,13 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
                     connection.rollback();
                     return true;
                 }
-                Projection projection = project(connection, engine, meetingId);
-                if (projection.hasArtifacts() && artifactStore == null) {
-                    throw new IllegalStateException("client result artifact store is unavailable");
-                }
                 Instant endedAt = clock.instant().truncatedTo(ChronoUnit.MICROS);
                 if (endedAt.isBefore(locked.snapshot().updatedAt())) {
                     endedAt = locked.snapshot().updatedAt();
                 }
-                String artifactId = null;
-                List<MeetingManifest.ArtifactRef> artifactRefs = new ArrayList<>();
-                if (projection.segmentCount() > 0) {
-                    artifactId = "art_client_" + sha256(meetingId.getBytes(
-                            StandardCharsets.UTF_8));
-                    ObjectNode artifact = JSON.createObjectNode();
-                    artifact.put("schemaVersion", "client-transcript/v1");
-                    artifact.put("artifactType", "transcript.final");
-                    artifact.put("language", projection.language());
-                    artifact.put("text", projection.text());
-                    ArrayNode segments = artifact.putArray("segments");
-                    for (TranscriptUpsert segment : projection.transcripts()) {
-                        ObjectNode item = segments.addObject();
-                        item.put("segmentId", segment.getSegmentId());
-                        item.put("startMs", segment.getStartMs());
-                        item.put("endMs", segment.getEndMs());
-                        item.put("language", segment.getLanguage());
-                        item.put("text", segment.getText());
-                        if (segment.hasSpeaker()) {
-                            item.put("sessionSpeakerId",
-                                    segment.getSpeaker().getSessionSpeakerId());
-                        }
-                    }
-                    artifactRefs.add(publishReady(connection, artifactId, meetingId,
-                            "transcript.final", projection.language(), artifact));
-                }
-                if (!projection.translations().isEmpty()) {
-                    String translationId = "art_client_translation_" + sha256(
-                            meetingId.getBytes(StandardCharsets.UTF_8));
-                    ObjectNode artifact = JSON.createObjectNode();
-                    artifact.put("schemaVersion", "client-translation/v1");
-                    artifact.put("artifactType", "translation.final");
-                    artifact.put("language", projection.translationLanguage());
-                    ArrayNode translations = artifact.putArray("translations");
-                    for (TranslationUpsert translation : projection.translations()) {
-                        ObjectNode item = translations.addObject();
-                        item.put("translationId", translation.getTranslationId());
-                        item.put("sourceSegmentId", translation.getSourceSegmentId());
-                        item.put("sourceLanguage", translation.getSourceLanguage());
-                        item.put("targetLanguage", translation.getTargetLanguage());
-                        item.put("text", translation.getText());
-                    }
-                    artifactRefs.add(publishReady(connection, translationId, meetingId,
-                            "translation.final", projection.translationLanguage(), artifact));
-                }
-                if (projection.summary() != null) {
-                    ObjectNode artifact = JSON.createObjectNode();
-                    artifact.put("schemaVersion", "client-summary/v1");
-                    artifact.put("artifactType", "summary.structured");
-                    artifact.setAll(projection.summary());
-                    String summaryId = "art_client_summary_" + sha256(
-                            meetingId.getBytes(StandardCharsets.UTF_8));
-                    artifactRefs.add(publishReady(connection, summaryId, meetingId,
-                            "summary.structured", projection.summary().path("language").asText(),
-                            artifact));
-                }
-                if (speakerArtifact != null) {
-                    String speakerId = "art_client_speaker_" + sha256(
-                            meetingId.getBytes(StandardCharsets.UTF_8)) + "_1";
-                    artifactRefs.add(publishReady(connection, speakerId, meetingId,
-                            "speaker.identity", null, speakerArtifact));
-                }
-                for (var capture : presentationCaptures(connection, engine, meetingId)) {
-                    WriteIntentSpec spec = capture.artifact().intent().spec();
-                    artifactRefs.add(new MeetingManifest.ArtifactRef(
-                            spec.artifactId(), spec.artifactType(), spec.mediaType(), null,
-                            spec.revision(), capture.artifact().content().size(),
-                            capture.artifact().content().checksum(),
-                            MeetingManifest.ArtifactStatus.READY, capture.recordedAt(),
-                            null, null));
-                }
-                ArtifactDescriptor audioArtifact = retainAudioRequested(connection, engine, meetingId)
-                        ? audioOriginal(connection, engine, meetingId) : null;
-                if (audioArtifact != null) {
-                    WriteIntentSpec spec = audioArtifact.intent().spec();
-                    artifactRefs.add(new MeetingManifest.ArtifactRef(
-                            spec.artifactId(), spec.artifactType(), spec.mediaType(),
-                            spec.language(), spec.revision(), audioArtifact.content().size(),
-                            audioArtifact.content().checksum(), MeetingManifest.ArtifactStatus.READY,
-                            audioReadyRecordedAt(connection, engine, meetingId, spec.artifactId()),
-                            null, null));
-                }
-                MeetingManifest manifest = new MeetingManifest(
-                        "0.1", meetingId, 1,
-                        new MeetingManifest.Profile(locked.snapshot().profileId(),
-                                locked.snapshot().profileRevision()),
-                        projection.summary() == null ? null
-                                : projection.summary().path("title").asText(),
-                        com.czur.reference.application.port.ManifestStatus.READY,
-                        startedAt, endedAt,
-                        capturedDurationMs == null
-                                ? durationMs(startedAt, endedAt, projection.durationMs())
-                                : capturedDurationMs,
-                        new MeetingManifest.Languages(projection.language(),
-                                projection.targetLanguages()),
-                        artifactRefs, List.of());
-                try (PreparedStatement statement = connection.prepareStatement("""
-                        INSERT INTO %s
-                            (meeting_id, artifact_id, manifest_json)
-                        VALUES (?, ?, ?)
-                        """.formatted(table(JdbcDatabaseTable.MEETING_CLIENT_RESULT)))) {
-                    JdbcValues.setText(statement, 1, engine, meetingId);
-                    // 该兼容列只指向字幕；仅译文或零产物时留空，双产物以 Manifest 为准。
-                    JdbcValues.setText(statement, 2, engine, artifactId);
-                    statement.setString(3, MeetingManifestJson.encode(manifest));
-                    statement.executeUpdate();
-                }
-
-                // 同一事务内按领域状态机依次前进；外部只会看到最终 READY。
-                MeetingAggregate aggregate = MeetingAggregate.fromSnapshot(locked.snapshot());
-                aggregate.apply(MeetingEvent.INPUT_ACCEPTED, endedAt);
-                JdbcMeetingRepository.updateOwnedExisting(connection, engine, locked,
-                        aggregate.snapshot());
-                var finalizing = new JdbcMeetingRepository.VersionedMeeting(
-                        aggregate.snapshot(), locked.aggregateVersion() + 1);
-                aggregate.apply(MeetingEvent.READY, endedAt);
-                JdbcMeetingRepository.updateOwnedExisting(connection, engine, finalizing,
-                        aggregate.snapshot());
-                try (PreparedStatement statement = connection.prepareStatement("""
-                        UPDATE %s SET input_state='INPUT_ACCEPTED',
-                            finalization_receipt_id=?, manifest_state='READY'
-                        WHERE meeting_id=? AND state='READY'
-                        """.formatted(table(JdbcDatabaseTable.MEETING)))) {
-                    JdbcValues.setText(statement, 1, engine, receipts.newReceipt());
-                    JdbcValues.setText(statement, 2, engine, meetingId);
-                    if (statement.executeUpdate() != 1) {
-                        throw new SQLException("client result state update failed");
-                    }
-                }
+                writeClientResult(connection, locked, startedAt, endedAt, capturedDurationMs,
+                        speakerArtifact, MeetingEvent.READY, ManifestStatus.READY);
                 connection.commit();
-                LOGGER.log(Level.INFO,
-                        "客户端结果已生成 segments={0} translations={1} summary={2}",
-                        new Object[]{projection.segmentCount(), projection.translations().size(),
-                                projection.summary() != null});
                 return true;
             } catch (SQLException | ArtifactStoreException | RuntimeException failure) {
                 connection.rollback();
@@ -527,6 +396,342 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
         } catch (SQLException failure) {
             throw new IllegalStateException("client result database unavailable");
         }
+    }
+
+    /**
+     * 服务端弃场收尾：在没有客户端 Stop 的情况下把已有心跳的会议收成
+     * READY_WITH_WARNINGS。
+     *
+     * <p>扫描器已按窗口筛过候选；本方法在会议行锁内重新核对状态、心跳陈旧与
+     * Stop 用量优先级，避免判定和真正收尾之间的竞态。收尾前先通过
+     * {@link EntitlementProvider} 的弃场结算提交零或时长用量；结算失败只返回
+     * false，会议保持原状态等待下一轮，不伪造成功。预占已经 COMMITTED 时由
+     * Provider 按重放成功处理。</p>
+     *
+     * <p>结果发布与状态前进复用正常 Stop 的同一段实现，只把终态和清单状态换成
+     * READY_WITH_WARNINGS。可选会后人物识别在本入口跳过：弃场可能没有任何最终
+     * 文字，扫描不应等待外部供应商。没有任何最终事件时仍写入空产物清单。</p>
+     *
+     * @return true 表示本场已收口（含此前已收口）；false 表示条件不再成立而跳过
+     * @throws IllegalStateException 数据库或产物存储暂时不可用，由调用方下轮重试
+     */
+    @Override
+    public boolean finalizeAbandoned(String meetingId, Duration heartbeatIdleWindow,
+            long maxMeetingDurationMs) {
+        MeetingIdPolicy.requireValid(meetingId);
+        Objects.requireNonNull(heartbeatIdleWindow, "heartbeatIdleWindow");
+        if (heartbeatIdleWindow.isNegative() || heartbeatIdleWindow.isZero()) {
+            throw new IllegalArgumentException("heartbeatIdleWindow must be positive");
+        }
+        if (maxMeetingDurationMs <= 0) {
+            throw new IllegalArgumentException("maxMeetingDurationMs must be positive");
+        }
+        try (Connection connection = dataSource.getConnection()) {
+            connection.setAutoCommit(false);
+            try {
+                JdbcMeetingRepository.VersionedMeeting locked =
+                        JdbcMeetingRepository.findVersionedForUpdate(connection, engine, meetingId)
+                                .orElse(null);
+                if (locked == null) {
+                    connection.rollback();
+                    return false;
+                }
+                MeetingState state = locked.snapshot().state();
+                if (state != MeetingState.STARTING && state != MeetingState.RUNNING) {
+                    connection.rollback();
+                    return false;
+                }
+                if (resultExists(connection, meetingId)) {
+                    connection.rollback();
+                    return true;
+                }
+                HeartbeatFacts heartbeat = lockHeartbeat(connection, meetingId);
+                if (heartbeat == null) {
+                    connection.rollback();
+                    return false;
+                }
+                Instant now = clock.instant().truncatedTo(ChronoUnit.MICROS);
+                if (!now.isAfter(heartbeat.lastActiveAt().plus(heartbeatIdleWindow))) {
+                    connection.rollback();
+                    return false;
+                }
+                if (stopUsageSubmitted(connection, meetingId)) {
+                    // 真实 Stop 已冻结采音用量，本场不是弃场；交给正常收尾链。
+                    connection.rollback();
+                    return false;
+                }
+                long usageMs = abandonedDurationMs(
+                        heartbeat.startedAt(), heartbeat.lastActiveAt(), maxMeetingDurationMs);
+                String reservationId = locked.snapshot().usageReservationId();
+                if (reservationId != null) {
+                    if (entitlementProvider == null) {
+                        throw new IllegalStateException(
+                                "client usage settlement is not configured");
+                    }
+                    var settlement = entitlementProvider.settleAbandoned(
+                            new SettleAbandonedRequest(
+                                    locked.snapshot().deploymentScope(),
+                                    locked.snapshot().subjectScope(),
+                                    reservationId, meetingId,
+                                    new UsageActual(UsageUnit.MEETING_DURATION_MS, usageMs)));
+                    if (!settlement.isSuccess()) {
+                        connection.rollback();
+                        LOGGER.log(Level.WARNING,
+                                "弃场会议用量尚未结算，保留原状态等待下轮 reason={0}",
+                                settlement.errorOrThrow().code());
+                        return false;
+                    }
+                }
+                // meeting_client_result 对 client_input 有外键；心跳已证明本场由客户端
+                // 驱动，缺失输入行时用心跳起点补齐，结果和查询才读得到同一场事实。
+                ensureClientInput(connection, meetingId, heartbeat.startedAt());
+                Instant endedAt = now.isBefore(locked.snapshot().updatedAt())
+                        ? locked.snapshot().updatedAt() : now;
+                writeClientResult(connection, locked, heartbeat.startedAt(), endedAt, usageMs,
+                        null, MeetingEvent.READY_WITH_WARNINGS,
+                        ManifestStatus.READY_WITH_WARNINGS);
+                connection.commit();
+                LOGGER.log(Level.INFO, "弃场会议已收口 durationMs={0}", usageMs);
+                return true;
+            } catch (SQLException | ArtifactStoreException | RuntimeException failure) {
+                connection.rollback();
+                LOGGER.log(Level.WARNING, "弃场会议收尾暂未完成 reason={0}",
+                        failure.getClass().getSimpleName());
+                throw new IllegalStateException("abandoned client result finalization unavailable");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("abandoned client result database unavailable");
+        }
+    }
+
+    /**
+     * 正常 Stop 与弃场共用的结果发布和终态前进。
+     *
+     * <p>调用方已锁定会议并检查本入口适用的前置状态；本方法在同一事务内写
+     * Client Result 行并按领域状态机从当前状态前进到给定终态。正常 Stop 从
+     * STOPPING 开始，弃场从 STARTING／RUNNING 开始并先补一次 STOP_REQUESTED，
+     * 不另建一套状态转移。</p>
+     */
+    private void writeClientResult(Connection connection,
+            JdbcMeetingRepository.VersionedMeeting locked, Instant startedAt, Instant endedAt,
+            Long capturedDurationMs, ObjectNode speakerArtifact, MeetingEvent terminalEvent,
+            ManifestStatus manifestStatus) throws SQLException, ArtifactStoreException {
+        String meetingId = locked.snapshot().meetingId();
+        if (terminalEvent != MeetingEvent.READY
+                && terminalEvent != MeetingEvent.READY_WITH_WARNINGS) {
+            throw new IllegalArgumentException("terminalEvent must be a ready event");
+        }
+        Projection projection = project(connection, engine, meetingId);
+        if (projection.hasArtifacts() && artifactStore == null) {
+            throw new IllegalStateException("client result artifact store is unavailable");
+        }
+        String artifactId = null;
+        List<MeetingManifest.ArtifactRef> artifactRefs = new ArrayList<>();
+        if (projection.segmentCount() > 0) {
+            artifactId = "art_client_" + sha256(meetingId.getBytes(StandardCharsets.UTF_8));
+            ObjectNode artifact = JSON.createObjectNode();
+            artifact.put("schemaVersion", "client-transcript/v1");
+            artifact.put("artifactType", "transcript.final");
+            artifact.put("language", projection.language());
+            artifact.put("text", projection.text());
+            ArrayNode segments = artifact.putArray("segments");
+            for (TranscriptUpsert segment : projection.transcripts()) {
+                ObjectNode item = segments.addObject();
+                item.put("segmentId", segment.getSegmentId());
+                item.put("startMs", segment.getStartMs());
+                item.put("endMs", segment.getEndMs());
+                item.put("language", segment.getLanguage());
+                item.put("text", segment.getText());
+                if (segment.hasSpeaker()) {
+                    item.put("sessionSpeakerId", segment.getSpeaker().getSessionSpeakerId());
+                }
+            }
+            artifactRefs.add(publishReady(connection, artifactId, meetingId,
+                    "transcript.final", projection.language(), artifact));
+        }
+        if (!projection.translations().isEmpty()) {
+            String translationId = "art_client_translation_" + sha256(
+                    meetingId.getBytes(StandardCharsets.UTF_8));
+            ObjectNode artifact = JSON.createObjectNode();
+            artifact.put("schemaVersion", "client-translation/v1");
+            artifact.put("artifactType", "translation.final");
+            artifact.put("language", projection.translationLanguage());
+            ArrayNode translations = artifact.putArray("translations");
+            for (TranslationUpsert translation : projection.translations()) {
+                ObjectNode item = translations.addObject();
+                item.put("translationId", translation.getTranslationId());
+                item.put("sourceSegmentId", translation.getSourceSegmentId());
+                item.put("sourceLanguage", translation.getSourceLanguage());
+                item.put("targetLanguage", translation.getTargetLanguage());
+                item.put("text", translation.getText());
+            }
+            artifactRefs.add(publishReady(connection, translationId, meetingId,
+                    "translation.final", projection.translationLanguage(), artifact));
+        }
+        if (projection.summary() != null) {
+            ObjectNode artifact = JSON.createObjectNode();
+            artifact.put("schemaVersion", "client-summary/v1");
+            artifact.put("artifactType", "summary.structured");
+            artifact.setAll(projection.summary());
+            String summaryId = "art_client_summary_" + sha256(
+                    meetingId.getBytes(StandardCharsets.UTF_8));
+            artifactRefs.add(publishReady(connection, summaryId, meetingId,
+                    "summary.structured", projection.summary().path("language").asText(),
+                    artifact));
+        }
+        if (speakerArtifact != null) {
+            String speakerId = "art_client_speaker_" + sha256(
+                    meetingId.getBytes(StandardCharsets.UTF_8)) + "_1";
+            artifactRefs.add(publishReady(connection, speakerId, meetingId,
+                    "speaker.identity", null, speakerArtifact));
+        }
+        for (var capture : presentationCaptures(connection, engine, meetingId)) {
+            WriteIntentSpec spec = capture.artifact().intent().spec();
+            artifactRefs.add(new MeetingManifest.ArtifactRef(
+                    spec.artifactId(), spec.artifactType(), spec.mediaType(), null,
+                    spec.revision(), capture.artifact().content().size(),
+                    capture.artifact().content().checksum(),
+                    MeetingManifest.ArtifactStatus.READY, capture.recordedAt(),
+                    null, null));
+        }
+        ArtifactDescriptor audioArtifact = retainAudioRequested(connection, engine, meetingId)
+                ? audioOriginal(connection, engine, meetingId) : null;
+        if (audioArtifact != null) {
+            WriteIntentSpec spec = audioArtifact.intent().spec();
+            artifactRefs.add(new MeetingManifest.ArtifactRef(
+                    spec.artifactId(), spec.artifactType(), spec.mediaType(),
+                    spec.language(), spec.revision(), audioArtifact.content().size(),
+                    audioArtifact.content().checksum(), MeetingManifest.ArtifactStatus.READY,
+                    audioReadyRecordedAt(connection, engine, meetingId, spec.artifactId()),
+                    null, null));
+        }
+        MeetingManifest manifest = new MeetingManifest(
+                "0.1", meetingId, 1,
+                new MeetingManifest.Profile(locked.snapshot().profileId(),
+                        locked.snapshot().profileRevision()),
+                projection.summary() == null ? null
+                        : projection.summary().path("title").asText(),
+                manifestStatus, startedAt, endedAt,
+                capturedDurationMs == null
+                        ? durationMs(startedAt, endedAt, projection.durationMs())
+                        : capturedDurationMs,
+                new MeetingManifest.Languages(projection.language(),
+                        projection.targetLanguages()),
+                artifactRefs, List.of());
+        try (PreparedStatement statement = connection.prepareStatement("""
+                INSERT INTO %s
+                    (meeting_id, artifact_id, manifest_json)
+                VALUES (?, ?, ?)
+                """.formatted(table(JdbcDatabaseTable.MEETING_CLIENT_RESULT)))) {
+            JdbcValues.setText(statement, 1, engine, meetingId);
+            // 该兼容列只指向字幕；仅译文或零产物时留空，双产物以 Manifest 为准。
+            JdbcValues.setText(statement, 2, engine, artifactId);
+            statement.setString(3, MeetingManifestJson.encode(manifest));
+            statement.executeUpdate();
+        }
+
+        // 同一事务内按领域状态机依次前进；外部只会看到最终终态。
+        MeetingAggregate aggregate = MeetingAggregate.fromSnapshot(locked.snapshot());
+        long version = locked.aggregateVersion();
+        JdbcMeetingRepository.VersionedMeeting current = locked;
+        if (aggregate.state() == MeetingState.STARTING
+                || aggregate.state() == MeetingState.RUNNING) {
+            aggregate.apply(MeetingEvent.STOP_REQUESTED, endedAt);
+            JdbcMeetingRepository.updateOwnedExisting(connection, engine, current,
+                    aggregate.snapshot());
+            version++;
+            current = new JdbcMeetingRepository.VersionedMeeting(
+                    aggregate.snapshot(), version);
+        }
+        if (aggregate.state() != MeetingState.STOPPING) {
+            throw new IllegalStateException("client result requires a stopping meeting");
+        }
+        aggregate.apply(MeetingEvent.INPUT_ACCEPTED, endedAt);
+        JdbcMeetingRepository.updateOwnedExisting(connection, engine, current,
+                aggregate.snapshot());
+        version++;
+        current = new JdbcMeetingRepository.VersionedMeeting(aggregate.snapshot(), version);
+        aggregate.apply(terminalEvent, endedAt);
+        JdbcMeetingRepository.updateOwnedExisting(connection, engine, current,
+                aggregate.snapshot());
+        try (PreparedStatement statement = connection.prepareStatement("""
+                UPDATE %s SET input_state='INPUT_ACCEPTED',
+                    finalization_receipt_id=?, manifest_state=?
+                WHERE meeting_id=? AND state=?
+                """.formatted(table(JdbcDatabaseTable.MEETING)))) {
+            JdbcValues.setText(statement, 1, engine, receipts.newReceipt());
+            JdbcValues.setText(statement, 2, engine, manifestStatus.name());
+            JdbcValues.setText(statement, 3, engine, meetingId);
+            JdbcValues.setText(statement, 4, engine, aggregate.state().name());
+            if (statement.executeUpdate() != 1) {
+                throw new SQLException("client result state update failed");
+            }
+        }
+        LOGGER.log(Level.INFO,
+                "客户端结果已生成 segments={0} translations={1} summary={2}",
+                new Object[]{projection.segmentCount(), projection.translations().size(),
+                        projection.summary() != null});
+    }
+
+    /** 已提交 Stop 采音用量时优先级高于心跳推导值；此查询在会议行锁内执行。 */
+    private boolean stopUsageSubmitted(Connection connection, String meetingId)
+            throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT 1 FROM " + table(JdbcDatabaseTable.MEETING_CLIENT_INPUT)
+                        + " WHERE meeting_id=? AND audio_duration_ms IS NOT NULL")) {
+            JdbcValues.setText(statement, 1, engine, meetingId);
+            try (ResultSet rows = statement.executeQuery()) {
+                return rows.next();
+            }
+        }
+    }
+
+    /** 读取并锁定本场心跳真实开始与最后活跃；无心跳行返回 null。 */
+    private HeartbeatFacts lockHeartbeat(Connection connection, String meetingId)
+            throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT started_at, last_active_at FROM "
+                        + table(JdbcDatabaseTable.MEETING_HEARTBEAT)
+                        + " WHERE meeting_id=?" + currentRead())) {
+            JdbcValues.setText(statement, 1, engine, meetingId);
+            try (ResultSet rows = statement.executeQuery()) {
+                if (!rows.next()) return null;
+                return new HeartbeatFacts(JdbcValues.instant(rows, "started_at"),
+                        JdbcValues.instant(rows, "last_active_at"));
+            }
+        }
+    }
+
+    /**
+     * 结果表对 client_input 有外键；心跳已证明本场由客户端驱动，缺失时补齐起点。
+     * 已有输入行（正常 startClient 写入）保持原 started_at，不被心跳覆盖。
+     */
+    private void ensureClientInput(Connection connection, String meetingId, Instant startedAt)
+            throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT started_at FROM " + table(JdbcDatabaseTable.MEETING_CLIENT_INPUT)
+                        + " WHERE meeting_id=?" + currentRead())) {
+            JdbcValues.setText(statement, 1, engine, meetingId);
+            try (ResultSet rows = statement.executeQuery()) {
+                if (rows.next()) return;
+            }
+        }
+        try (PreparedStatement statement = connection.prepareStatement(
+                "INSERT INTO " + table(JdbcDatabaseTable.MEETING_CLIENT_INPUT)
+                        + " (meeting_id, started_at) VALUES (?, ?)")) {
+            JdbcValues.setText(statement, 1, engine, meetingId);
+            JdbcValues.setInstant(statement, 2, startedAt);
+            if (statement.executeUpdate() != 1) {
+                throw new SQLException("abandoned client input insert did not create one row");
+            }
+        }
+    }
+
+    /** 弃场时长取最后一次活跃减真实开始，并按部署上限截断；不得为负。 */
+    static long abandonedDurationMs(Instant startedAt, Instant lastActiveAt,
+            long maxMeetingDurationMs) {
+        long elapsed = Duration.between(startedAt, lastActiveAt).toMillis();
+        return Math.max(0, Math.min(elapsed, maxMeetingDurationMs));
     }
 
     /**
@@ -584,6 +789,14 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
 
     private record FrozenClientUsage(String deploymentScope, String subjectScope,
             String reservationId, long audioDurationMs, Instant submittedAt, long expectedVersion) { }
+
+    /** 心跳行的真实开始与最后活跃；两列都由服务端时钟写入。 */
+    private record HeartbeatFacts(Instant startedAt, Instant lastActiveAt) {
+        HeartbeatFacts {
+            Objects.requireNonNull(startedAt, "startedAt");
+            Objects.requireNonNull(lastActiveAt, "lastActiveAt");
+        }
+    }
 
     private MeetingManifest.ArtifactRef publishReady(Connection connection, String artifactId,
             String meetingId, String type, String language, ObjectNode body)
