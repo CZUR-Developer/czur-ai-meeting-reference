@@ -38,6 +38,23 @@ Gradle 只读这个路径，不接受 `-PdeviceSdkAar` 之类的构建参数。
 AGP 不允许 Android library 直接依赖本地 `.aar` 再产出 AAR；构建时会把设备 AAR 解包成
 `classes.jar` 和 `jni/` 再打包，因此业务 AAR 是自包含的。
 
+## 宿主必须声明的权限
+
+业务 AAR 的 AndroidManifest 只带 `minSdkVersion`；设备 AAR 里的权限不会随解包带过来。
+只接入业务 AAR 的宿主**必须在自己的 AndroidManifest 里声明**：
+
+```xml
+<uses-permission android:name="android.permission.INTERNET" />
+<uses-permission android:name="android.permission.RECORD_AUDIO" />
+```
+
+缺少 `INTERNET` 表现为登录或服务请求失败，缺少 `RECORD_AUDIO` 表现为录音启动失败；
+两者都不会在编译期报错，所以要在最小宿主工程里先跑通一次再往下接。演示截图还需要
+屏幕采集相关的运行时授权，按宿主自己的权限流程申请。
+
+权限由宿主声明而不是库内合并，是为了让接入方能在自己的清单里审阅和裁剪；
+参考 App 也是按这个方式声明的。
+
 ## 可修改范围
 
 | 部分 | 位置 | 能否修改 |
@@ -49,6 +66,7 @@ AGP 不允许 Android library 直接依赖本地 `.aar` 再产出 AAR；构建�
 
 ## 版本与依赖
 
+- `minSdk`：业务 AAR 声明 31，参考 App 声明 34。参考产品的验收与承诺按 Android 14／API 34；API 31 只表示库可被更低版本加载，不代表设备能力（共享音源、系统级截图）可用。
 - 契约 0.4.0、SDK 0.5.0；设备 AAR 与业务 AAR 成对升级。设备 AAR 固定放在
   `libs/ai-meeting-device.aar`，版本 0.5.0，SHA-256 `150f5a52294036b7e273a91d4d59afa7df212021bb6825e9199384023cd28053`，ABI：实际打包 `arm64-v8a`、`armeabi-v7a`、`x86`、`x86_64`，产品保证只有 ARM 两种。
 - 业务 AAR 构造时校验设备 AAR 的 `AiMeetingSdkVersion.VALUE` 与自身编译版本；混用不同

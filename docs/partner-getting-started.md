@@ -253,9 +253,9 @@ bash tools/run-reference-web.sh
 先给地址：复制模板并填写（已被 Git 忽略），构建时注入 APK：
 
 ```bash
-cd android-reference-app
-cp deployment.local.properties.example deployment.local.properties
-# 编辑 deployment.local.properties：
+cp android-reference-app/deployment.local.properties.example \
+   android-reference-app/deployment.local.properties
+# 编辑 android-reference-app/deployment.local.properties：
 #   backendUrl=https://<PC_LAN_IP>:8443
 #   resultWebUrl=http://<PC_LAN_IP>:8090/index.html
 ```
@@ -263,15 +263,16 @@ cp deployment.local.properties.example deployment.local.properties
 Debug 联调还要让 APK 信任步骤 4 生成的开发 CA：把 PEM 命名为 `reference_debug_ca.pem`
 放到 `android-reference-app/app/src/debug/res/raw/`（已被 Git 忽略，
 生成方式见 [本机局域网 HTTPS 指南](local-lan-https.md)）；不放到时会只信任系统 CA。
-没建这份配置文件时 `./gradlew` 会直接失败，提示缺 `backendUrl`／`resultWebUrl`——不会
-产出一个指向作者本机地址的包。测试／生产各留一份，用 `REFERENCE_DEPLOYMENT_FILE` 切换。
+没建这份配置文件时 `android-reference-app/settings.gradle.kts` 不会把 `:app` 纳入构建，
+`./gradlew :app:assembleDebug` 会报 `project ':app' not found`；文件存在但缺键时才是
+`缺少部署配置：backendUrl` 这类提示。两种都不会产出指向作者本机地址的包。
+测试／生产各留一份，用 `REFERENCE_DEPLOYMENT_FILE` 切换。
 
-再构建并安装：
+再构建并安装（从仓库根目录执行，括号里的 `cd` 只作用于这一条命令）：
 
 ```bash
-cd android-reference-app
-./gradlew :app:assembleDebug
-adb install -r app/build/outputs/apk/debug/app-debug.apk
+(cd android-reference-app && ./gradlew :app:assembleDebug)
+adb install -r android-reference-app/app/build/outputs/apk/debug/app-debug.apk
 ```
 
 刚 clone 的机器上还要让 Gradle 找到 Android SDK：设置 `ANDROID_HOME`，或在
@@ -325,10 +326,9 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```bash
 cp .env.example deploy/.env
 # 编辑 deploy/.env，再执行：
-cd deploy
-bash migrate.sh --env-file .env
-bash healthcheck-db.sh --env-file .env
-docker compose up --build -d
+(cd deploy && bash migrate.sh --env-file .env)
+(cd deploy && bash healthcheck-db.sh --env-file .env)
+(cd deploy && docker compose up --build -d)
 ```
 
 `deploy/.env` 是本部署的环境配置文件。Dockerfile 构建代码，Compose 的 `env_file`
@@ -343,9 +343,8 @@ Compose 将容器 `8080` 映射到宿主 `API_PORT`（默认 `8080`），并为�
 Web 单独构建，一条命令同时产出页面和配置：
 
 ```bash
-cd ../web-reference
-cp deployment.local.example.json deployment.local.json   # 一次；填浏览器可达的 apiBaseUrl
-npm run build
+cp web-reference/deployment.local.example.json web-reference/deployment.local.json   # 一次；填浏览器可达的 apiBaseUrl
+npm --prefix web-reference run build
 ```
 
 `deployment.local.json` 的 `apiBaseUrl` 填浏览器可达的 API；正式 HTTPS 站点使用 HTTPS API，
