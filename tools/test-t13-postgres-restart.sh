@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# PostgreSQL 回归夹具已停用：deploy/migrate.sh 现在只初始化 MySQL 5.7，
+# 继续执行会在迁移阶段失败。需要旧 PG 路径时请独立保存夹具；
+# 当前交付的数据库支持范围见 docs/validation-scope.md。
+printf '[SKIP] PostgreSQL 回归夹具已停用（deploy/migrate.sh 仅支持 MySQL 5.7）\n' >&2
+exit 77
+
+
 # P2-T13 PostgreSQL 真重启门禁。脚本只管理本次随机命名的容器、数据卷和
 # mktemp 状态目录；不枚举、不挂载、不停止任何已有开发资源。
 
