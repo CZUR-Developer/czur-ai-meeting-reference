@@ -179,7 +179,8 @@ session.requestStop()
 活跃。宿主必须在会议开始后很快发出第一跳，不能等到失联窗口快结束才补：
 
 - **从未收到首跳**（会议仍停在 `CREATED`／`STARTING`）：创建 15 分钟后按“从未
-  开始”取消，按 0 用量结算，终态 `CANCELLED`，不产生结果清单。
+  开始”取消，按 0 用量结算，终态 `CANCELLED`，不产生结果清单。已提交冻结采音
+  用量（`audio_duration_ms`）的会议不参与这类取消，继续走正常 Stop 收尾。
 - **收到过首跳后失联**（`now - lastActive` 超过
   `max(3 × heartbeatIntervalMs, 10 分钟)`）：按弃场收口，终态
   `READY_WITH_WARNINGS`，结算时长取最后活跃减真正开始并按部署上限截断。这类

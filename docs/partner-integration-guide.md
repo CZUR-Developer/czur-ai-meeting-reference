@@ -200,7 +200,8 @@ Android 端通过 `ModelAdapter` 接收 Provider 数据，将原文、译文、�
 “真正开始”，也是会议被视为已开始的分界；没有首跳和首跳后失联的结果不同：
 
 - 从未收到首跳，会议仍停在 `CREATED`／`STARTING`：创建 15 分钟后按“从未开始”
-  取消，按 0 用量结算，终态 `CANCELLED`，不产生结果清单。
+  取消，按 0 用量结算，终态 `CANCELLED`，不产生结果清单。已经提交冻结采音用量
+  （`audio_duration_ms`）的会议不参与这类取消，继续走正常 Stop 收尾。
 - 收到过首跳后失联：`now - last_active_at` 超过
   `max(3 × heartbeatIntervalMs, 10 分钟)` 时按弃场收口：先把弃场决定落库（冻结
   结算时长、目标终态和决定时间），再调用权益端口结算，最后写结果和
