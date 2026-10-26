@@ -433,7 +433,7 @@ Artifact Store 或反向代理时，应对齐该最长会议预算，避免录�
 通过 `resultSpeakerEditingRequiresLogin=true` 告知 Web，再接入自己的认证方式。
 这不改变 App 登录、会议控制及独立人物库管理的授权。
 `speaker.identity` 是单独的标准产物，本场 speaker 编号与跨会议 `personId` 分开。
-参考讯飞插件、FFmpeg 依赖和可选环境项见 [后端说明](../backend-reference/README.md#可选跨会议声纹参考插件)
+参考讯飞插件、FFmpeg 依赖和可选环境项见 [后端说明](../backend-reference/README.md#可选跨会议声纹参考插件)。跨会议识别的业务范围由伙伴决定：参考实现只提供接口和最小示例（默认关闭），不定义“跨会议”的边界，也不保证示例在部分发布失败后的重试行为。
 及 [本机配置模板](../tools/reference-client.env.example)。未注册 Provider 时自动识别选项隐藏，
 字幕／译文／总结和录音照常交付；伙伴可用自己的 `SpeakerIdentityProvider` 替换供应商与人员库。
 写入协议、姓名优先级和登录扩展见 [Web 发言人编辑](../web-reference/README.md#发言人改名与可选跨会议记录)。
