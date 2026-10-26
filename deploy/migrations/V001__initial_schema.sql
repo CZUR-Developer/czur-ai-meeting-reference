@@ -265,6 +265,20 @@ CREATE TABLE ai_trans_meeting_client_result (
     CONSTRAINT ai_trans_meeting_client_result_artifact_id_uq UNIQUE (artifact_id)
 ) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
+-- 可选跨会议人物识别的首次结果冻结。人物产物以稳定 artifact_id 发布且不可覆盖，
+-- 同一场重试重新识别可能得到不同人物；发布前先把正文、大小与 checksum 落库，
+-- 重试只复用这一份正文。会议默认不依赖此表，只有显式启用会后人物 Provider 时才访问。
+CREATE TABLE ai_trans_meeting_speaker_identity (
+    meeting_id VARBINARY(1024) NOT NULL,
+    artifact_id VARBINARY(1024) NOT NULL,
+    content_size BIGINT NOT NULL,
+    content_checksum LONGTEXT NOT NULL,
+    body_json LONGTEXT NOT NULL,
+    frozen_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    PRIMARY KEY (meeting_id),
+    CONSTRAINT ai_trans_meeting_speaker_identity_artifact_uq UNIQUE (artifact_id)
+) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+
 -- 可选跨会议人物插件的私有人员映射。标准 person_id 与供应商 feature_id 分开；
 -- 会议默认不依赖此表，只有显式启用参考声纹 Provider 时才访问。
 CREATE TABLE ai_trans_speaker_identity_person (

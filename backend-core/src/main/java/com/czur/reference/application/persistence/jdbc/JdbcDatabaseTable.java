@@ -30,6 +30,8 @@ public enum JdbcDatabaseTable {
     MEETING_CLIENT_EVENT("meeting_client_event"),
     MEETING_CLIENT_SUMMARY("meeting_client_summary"),
     MEETING_CLIENT_RESULT("meeting_client_result"),
+    /** 可选会后人物插件的首次识别冻结；默认会议不读取也不依赖。 */
+    MEETING_SPEAKER_IDENTITY("meeting_speaker_identity"),
     MEETING_MANIFEST_REVISION("meeting_manifest_revision"),
     MEETING_REALTIME_TOKEN_GRANT("meeting_realtime_token_grant"),
     MEETING_STREAM("meeting_stream"),
@@ -64,6 +66,7 @@ public enum JdbcDatabaseTable {
 
     /** 可选插件只在显式装配时核对自己的表，不能阻断未启用它的 CZUR／伙伴宿主。 */
     public boolean requiredForBaseline(JdbcDatabaseEngine engine) {
-        return this != SPEAKER_IDENTITY_PERSON && requiredFor(engine);
+        return this != SPEAKER_IDENTITY_PERSON && this != MEETING_SPEAKER_IDENTITY
+                && requiredFor(engine);
     }
 }
