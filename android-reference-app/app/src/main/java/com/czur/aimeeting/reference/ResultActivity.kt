@@ -15,6 +15,9 @@ class ResultActivity : Activity() {
     private lateinit var webView: WebView
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 进程被回收后从最近任务恢复时，主页面的 onCreate 未必跑过；结果页先按
+        // 幂等初始化补齐部署地址，避免合法链接被当作未配置地址而直接关闭。
+        MeetingAppAssembly.initialize(applicationContext)
         setContentView(R.layout.reference_result_page)
         ReferenceUiScale.bind(findViewById(android.R.id.content))
         webView = findViewById(R.id.result_web)
