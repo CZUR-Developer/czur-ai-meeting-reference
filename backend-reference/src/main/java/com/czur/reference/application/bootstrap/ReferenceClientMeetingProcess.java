@@ -16,9 +16,17 @@ import com.czur.reference.application.speaker.ReferenceSpeakerIdentityConfig;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import com.czur.reference.application.entitlement.ExpiredReservationCleanupWorker;
+import com.czur.reference.application.persistence.jdbc.JdbcClientModelWorkers;
+import com.czur.reference.application.port.entitlement.LeaseAwareReservationCanceller;
+
 import java.time.Clock;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -40,16 +48,22 @@ public final class ReferenceClientMeetingProcess implements AutoCloseable {
     private static final Logger LOGGER = Logger.getLogger(
             ReferenceClientMeetingProcess.class.getName());
 
+    /** 过期预占清理周期；重复执行只会重新领取同一批已过期记录，结果幂等。 */
+    private static final long TICK_SECONDS = 30;
+
     private final ReferenceMeetingHttpAssembly assembly;
     private final MeetingJdkHttpServer http;
     private final ArtifactStore artifacts;
+    private final ScheduledExecutorService scheduler;
     private final AtomicBoolean closed = new AtomicBoolean();
 
     private ReferenceClientMeetingProcess(ReferenceMeetingHttpAssembly assembly,
-            MeetingJdkHttpServer http, ArtifactStore artifacts) {
+            MeetingJdkHttpServer http, ArtifactStore artifacts,
+            ScheduledExecutorService scheduler) {
         this.assembly = Objects.requireNonNull(assembly, "assembly");
         this.http = Objects.requireNonNull(http, "http");
         this.artifacts = Objects.requireNonNull(artifacts, "artifacts");
+        this.scheduler = Objects.requireNonNull(scheduler, "scheduler");
     }
 
     /**
@@ -81,6 +95,7 @@ public final class ReferenceClientMeetingProcess implements AutoCloseable {
         ArtifactStore artifacts = null;
         ReferenceMeetingHttpAssembly assembly = null;
         MeetingJdkHttpServer http = null;
+        ScheduledExecutorService scheduler = null;
         try {
             artifacts = ReferenceMeetingProcess.createArtifactStore(values);
             var identity = new ReferenceDevIdentityProvider(config.identity(), clock);
@@ -108,14 +123,49 @@ public final class ReferenceClientMeetingProcess implements AutoCloseable {
                     login, null, ReferenceSpeakerIdentityConfig.factory(values, clock));
             http = assembly.newJdkHttpServer(httpBind);
             http.start();
+            // 进程内定时执行后台清理：部署方不必额外配 cron 或 sidecar。
+            // 同一批过期预占被重复领取时由 lease 与幂等键兜底，不会重复扣减。
+            ExpiredReservationCleanupWorker cleanup = null;
+            if (assembly.entitlementProvider() instanceof LeaseAwareReservationCanceller canceller) {
+                cleanup = JdbcClientModelWorkers.expiredReservationCleanupWorker(
+                        assembly.databaseContext(), canceller,
+                        new ReferenceMeetingHttpAssembly.RandomEntitlementIds(),
+                        ExpiredReservationCleanupWorker.Config.defaults(
+                                config.deploymentScope(),
+                                "reference-client-cleanup-" + UUID.randomUUID()));
+            } else {
+                LOGGER.log(Level.INFO, "权益端口不支持 lease-aware cancel，跳过过期预占清理");
+            }
+            final ExpiredReservationCleanupWorker cleanupWorker = cleanup;
+            scheduler = Executors.newSingleThreadScheduledExecutor(task -> {
+                Thread thread = new Thread(task, "reference-client-meeting-worker");
+                thread.setDaemon(true);
+                return thread;
+            });
+            scheduler.scheduleWithFixedDelay(() -> tick(cleanupWorker), 0, TICK_SECONDS, TimeUnit.SECONDS);
             LOGGER.log(Level.INFO, "参考客户端直连后端已启动 httpPort={0} modelAdapter={1}",
                     new Object[]{http.address().getPort(), issuer.getClass().getSimpleName()});
-            return new ReferenceClientMeetingProcess(assembly, http, artifacts);
+            return new ReferenceClientMeetingProcess(assembly, http, artifacts, scheduler);
         } catch (IOException | RuntimeException | Error failure) {
+            if (scheduler != null) scheduler.shutdownNow();
             if (http != null) closeSuppressing(http, failure);
             if (assembly != null) closeSuppressing(assembly, failure);
             closeArtifacts(artifacts, failure);
             throw failure;
+        }
+    }
+
+    /** 一次清理；失败只记录，不打断后续周期。 */
+    static void tick(ExpiredReservationCleanupWorker cleanup) {
+        if (cleanup == null) return;
+        try {
+            ExpiredReservationCleanupWorker.RunResult result = cleanup.runOnce();
+            if (result.claimedCount() > 0) {
+                LOGGER.log(Level.INFO, "过期预占清理 claimed={0} items={1}",
+                        new Object[]{result.claimedCount(), result.items().size()});
+            }
+        } catch (RuntimeException failure) {
+            LOGGER.log(Level.WARNING, "过期预占清理失败，下个周期继续", failure);
         }
     }
 
@@ -128,6 +178,7 @@ public final class ReferenceClientMeetingProcess implements AutoCloseable {
     @Override
     public void close() {
         if (!closed.compareAndSet(false, true)) return;
+        scheduler.shutdownNow();
         try {
             http.close();
         } finally {
