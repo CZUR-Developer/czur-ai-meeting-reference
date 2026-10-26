@@ -19,15 +19,6 @@ final class JdbcIdempotencyLock {
         if (connection.getAutoCommit()) {
             throw new IllegalStateException("idempotency lock requires explicit transaction");
         }
-        if (engine == JdbcDatabaseEngine.POSTGRESQL) {
-            // 保留原 PG 编码；哈希碰撞仅增加串行化，不改变唯一事实裁决。
-            try (PreparedStatement statement = connection.prepareStatement(
-                    "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))")) {
-                statement.setString(1, scope.length() + ":" + scope + key.length() + ":" + key);
-                statement.execute();
-            }
-            return;
-        }
         String table = JdbcDatabaseTable.IDEMPOTENCY_LOCK.physicalName(engine);
         // 无 INSERT IGNORE；只有这个辅助表的二元主键可发生 no-op，影响行数不作事实依据。
         try (PreparedStatement statement = connection.prepareStatement(

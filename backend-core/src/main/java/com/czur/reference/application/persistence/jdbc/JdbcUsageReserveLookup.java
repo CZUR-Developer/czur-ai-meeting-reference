@@ -31,7 +31,7 @@ public final class JdbcUsageReserveLookup implements UsageReserveLookup {
     private final JdbcDatabaseEngine engine;
 
     public JdbcUsageReserveLookup(DataSource dataSource) {
-        this(dataSource, JdbcDatabaseEngine.POSTGRESQL);
+        this(dataSource, JdbcDatabaseEngine.MYSQL);
     }
 
     public JdbcUsageReserveLookup(JdbcDatabaseContext database) {

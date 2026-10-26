@@ -80,7 +80,7 @@ final class JdbcCreateMeetingFactStore implements CreateMeetingFactStore {
 
     /** 绑定调用方当前连接；构造过程不访问数据库，也不接管连接生命周期。 */
     JdbcCreateMeetingFactStore(Connection connection) {
-        this(connection, JdbcDatabaseEngine.POSTGRESQL);
+        this(connection, JdbcDatabaseEngine.MYSQL);
     }
 
     JdbcCreateMeetingFactStore(Connection connection, JdbcDatabaseEngine engine) {
@@ -102,8 +102,7 @@ final class JdbcCreateMeetingFactStore implements CreateMeetingFactStore {
         requireExplicitTransaction();
         try {
             pinSearchPath();
-            String sql = engine == JdbcDatabaseEngine.POSTGRESQL ? PROBE_DIGEST_SQL
-                    : "SELECT request_schema_version, request_digest, request_json FROM "
+            String sql = "SELECT request_schema_version, request_digest, request_json FROM "
                     + JdbcDatabaseTable.MEETING_CREATE_FACT.physicalName(engine)
                     + " WHERE scope = ? AND idempotency_key = ?" + mysqlWriteReadLock();
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
@@ -173,8 +172,7 @@ final class JdbcCreateMeetingFactStore implements CreateMeetingFactStore {
      * 因为旧数据库可能尚未安装 V013。</p>
      */
     Optional<CreateMeetingFactStore.Record> findByMeetingId(String meetingId) {
-        return findByMeetingIdUsing(meetingId, engine == JdbcDatabaseEngine.POSTGRESQL
-                ? FIND_BY_MEETING_SQL : mysqlFactColumns() + " WHERE meeting_id = ? LOCK IN SHARE MODE",
+        return findByMeetingIdUsing(meetingId, mysqlFactColumns() + " WHERE meeting_id = ? LOCK IN SHARE MODE",
                 "FIND_BY_MEETING");
     }
 
@@ -196,8 +194,7 @@ final class JdbcCreateMeetingFactStore implements CreateMeetingFactStore {
         } catch (SQLException failure) {
             throw sqlFailure("FIND_BY_MEETING_READ_ONLY", failure);
         }
-        return findByMeetingIdUsing(meetingId, engine == JdbcDatabaseEngine.POSTGRESQL
-                        ? FIND_BY_MEETING_BASE_SQL : mysqlFactColumns() + " WHERE meeting_id = ?",
+        return findByMeetingIdUsing(meetingId, mysqlFactColumns() + " WHERE meeting_id = ?",
                 "FIND_BY_MEETING_READ_ONLY");
     }
 
@@ -251,7 +248,7 @@ final class JdbcCreateMeetingFactStore implements CreateMeetingFactStore {
         try {
             pinSearchPath();
             int inserted;
-            String sql = engine == JdbcDatabaseEngine.POSTGRESQL ? INSERT_SQL : "INSERT INTO "
+            String sql = "INSERT INTO "
                     + JdbcDatabaseTable.MEETING_CREATE_FACT.physicalName(engine)
                     + " (scope, idempotency_key, request_schema_version, request_digest, request_json,"
                     + " response_schema_version, response_status, response_type, response_json,"
@@ -437,8 +434,7 @@ final class JdbcCreateMeetingFactStore implements CreateMeetingFactStore {
     }
 
     private String scopeKeySql() throws SQLException {
-        return engine == JdbcDatabaseEngine.POSTGRESQL ? FIND_SQL
-                : mysqlFactColumns() + " WHERE scope = ? AND idempotency_key = ?" + mysqlWriteReadLock();
+        return mysqlFactColumns() + " WHERE scope = ? AND idempotency_key = ?" + mysqlWriteReadLock();
     }
 
     private void requireExplicitTransaction() {

@@ -38,7 +38,7 @@ public final class JdbcRealtimeStartFactsLookup implements RealtimeStartFactsLoo
     private final JdbcDatabaseEngine engine;
 
     public JdbcRealtimeStartFactsLookup(DataSource dataSource) {
-        this(dataSource, JdbcDatabaseEngine.POSTGRESQL);
+        this(dataSource, JdbcDatabaseEngine.MYSQL);
     }
 
     /** 从唯一上下文读取同场事实；保留只读 RR 快照，不参与 Start 写事务。 */

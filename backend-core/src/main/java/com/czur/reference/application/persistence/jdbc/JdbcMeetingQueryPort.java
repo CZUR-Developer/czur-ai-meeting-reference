@@ -102,7 +102,7 @@ public final class JdbcMeetingQueryPort implements MeetingQueryPort {
     JdbcMeetingQueryPort(
             DataSource dataSource,
             HmacMeetingPageTokenCodec pageTokenCodec) {
-        this(dataSource, JdbcDatabaseEngine.POSTGRESQL, pageTokenCodec);
+        this(dataSource, JdbcDatabaseEngine.MYSQL, pageTokenCodec);
     }
 
     /** 从唯一 Context 的固定事实表读取；分页签名与原归属规则保持。 */

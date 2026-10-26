@@ -101,7 +101,7 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
     public JdbcClientMeetingResultFinalizer(DataSource dataSource,
             FinalizationReceiptGenerator receipts, Clock clock, ArtifactStore artifactStore,
             EntitlementProvider entitlementProvider) {
-        this(dataSource, JdbcDatabaseEngine.POSTGRESQL, receipts, clock, artifactStore,
+        this(dataSource, JdbcDatabaseEngine.MYSQL, receipts, clock, artifactStore,
                 entitlementProvider);
     }
 
@@ -170,7 +170,7 @@ public final class JdbcClientMeetingResultFinalizer implements ClientMeetingResu
      */
     public static SnapshotResult readFinalSnapshot(DataSource dataSource,
             MeetingCommandContext context, String meetingId) {
-        return readFinalSnapshot(dataSource, JdbcDatabaseEngine.POSTGRESQL, context, meetingId);
+        return readFinalSnapshot(dataSource, JdbcDatabaseEngine.MYSQL, context, meetingId);
     }
 
     /**

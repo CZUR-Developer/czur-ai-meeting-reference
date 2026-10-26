@@ -91,7 +91,7 @@ public final class JdbcMeetingStartExecutionUnitOfWork
     public JdbcMeetingStartExecutionUnitOfWork(
             DataSource dataSource,
             CapabilityPlanner capabilityPlanner) {
-        this(dataSource, JdbcDatabaseEngine.POSTGRESQL, capabilityPlanner);
+        this(dataSource, JdbcDatabaseEngine.MYSQL, capabilityPlanner);
     }
 
     /** 复用唯一连接上下文；引擎仅选择 SQL，不改变原 Start 状态机。 */

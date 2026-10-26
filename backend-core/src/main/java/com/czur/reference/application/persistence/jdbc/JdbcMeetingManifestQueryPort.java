@@ -94,7 +94,7 @@ public final class JdbcMeetingManifestQueryPort implements MeetingManifestPort {
     public JdbcMeetingManifestQueryPort(
             DataSource dataSource,
             ManifestResultAccessPolicy accessPolicy) {
-        this(dataSource, JdbcDatabaseEngine.POSTGRESQL, accessPolicy);
+        this(dataSource, JdbcDatabaseEngine.MYSQL, accessPolicy);
     }
 
     /** 同一池及原结果访问策略；MySQL 使用相关最新 revision，仍为单 statement 快照。 */
@@ -338,7 +338,6 @@ public final class JdbcMeetingManifestQueryPort implements MeetingManifestPort {
 
     /** 5.7 无 LATERAL；等价相关 MAX 连接保留原 latest／前序链及客户端优先规则。 */
     private String getSql() {
-        if (engine == JdbcDatabaseEngine.POSTGRESQL) return GET_SQL;
         return """
                 SELECT m.meeting_id, m.profile_id, m.profile_revision, m.state,
                        m.input_state, m.finalization_receipt_id, m.manifest_state, m.updated_at,

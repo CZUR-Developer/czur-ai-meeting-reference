@@ -35,7 +35,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /** JDBC 事件认证读取的故障分类、访问顺序、资源释放和脱敏门禁。 */
 class JdbcMeetingEventLogPortFailureTest {
     private static final String SENSITIVE =
-            "jdbc:postgresql://private-db/event-body?password=hidden";
+            "jdbc:mysql://private-db/event-body?password=hidden";
 
     @Test
     void sqlAndRuntimeFailuresMapToStableTypedResults() {
@@ -88,7 +88,9 @@ class JdbcMeetingEventLogPortFailureTest {
         Map<String, Object> row = validRow();
         row.put("subject_scope", "subject-other");
         DataSource dataSource = oneRowDataSource(row, resources, column -> {
-            if (!column.equals("deployment_scope") && !column.equals("subject_scope")) {
+            // MySQL 快照先读归属和删除状态；事件列必须在守卫放行后才读。
+            if (!java.util.Set.of("deployment_scope", "subject_scope", "state", "manifest_state")
+                    .contains(column)) {
                 eventColumnRead.set(true);
                 throw new AssertionError("access guard must run before event decoding");
             }
@@ -235,6 +237,13 @@ class JdbcMeetingEventLogPortFailureTest {
                         Object value = row.get(column);
                         yield value == null ? null : value.toString();
                     }
+                    case "getBytes" -> {
+                        String column = (String) arguments[0];
+                        columnAccess.onAccess(column);
+                        Object value = row.get(column);
+                        yield value == null ? null
+                                : value.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                    }
                     case "getBoolean" -> {
                         String column = (String) arguments[0];
                         columnAccess.onAccess(column);
@@ -262,9 +271,11 @@ class JdbcMeetingEventLogPortFailureTest {
                 PreparedStatement.class.getClassLoader(),
                 new Class<?>[]{PreparedStatement.class},
                 (proxy, method, arguments) -> switch (method.getName()) {
-                    case "setLong", "setInt", "setString" -> null;
+                    case "setLong", "setInt", "setString", "setBytes", "setBoolean" -> null;
                     case "executeQuery" -> {
                         resources.executions.incrementAndGet();
+                        // MySQL 路径先读归属再读事件，每条语句都从第一行开始。
+                        cursor.set(0);
                         yield resultSet;
                     }
                     case "close" -> {
@@ -283,6 +294,9 @@ class JdbcMeetingEventLogPortFailureTest {
                         resources.preparedStatements.incrementAndGet();
                         yield statement;
                     }
+                    case "setReadOnly", "setAutoCommit", "setTransactionIsolation",
+                         "rollback", "commit" -> null;
+                    case "getAutoCommit" -> false;
                     case "close" -> {
                         resources.connectionClosed.set(true);
                         yield null;

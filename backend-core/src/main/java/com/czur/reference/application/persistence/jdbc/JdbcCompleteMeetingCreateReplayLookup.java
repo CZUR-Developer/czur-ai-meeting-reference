@@ -30,7 +30,7 @@ public final class JdbcCompleteMeetingCreateReplayLookup
 
     /** @param dataSource 已完成 V013 readiness 校验的 PostgreSQL 数据源 */
     public JdbcCompleteMeetingCreateReplayLookup(DataSource dataSource) {
-        this(dataSource, JdbcDatabaseEngine.POSTGRESQL);
+        this(dataSource, JdbcDatabaseEngine.MYSQL);
     }
 
     public JdbcCompleteMeetingCreateReplayLookup(JdbcDatabaseContext database) {

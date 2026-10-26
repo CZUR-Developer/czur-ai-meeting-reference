@@ -128,9 +128,6 @@ public final class JdbcMeetingRepository implements MeetingRepository {
      * 返回 0 行，调用方按归属冲突处理。
      */
     private String legacySaveSql() {
-        if (engine == JdbcDatabaseEngine.POSTGRESQL) {
-            return SAVE_LEGACY_SQL;
-        }
         String table = JdbcDatabaseTable.MEETING.physicalName(engine);
         String guard = "subject_scope = 'LEGACY_UNOWNED' AND grant_id IS NULL"
                 + " AND grant_expires_at IS NULL AND usage_reservation_id IS NULL";
@@ -298,7 +295,7 @@ public final class JdbcMeetingRepository implements MeetingRepository {
     private final JdbcDatabaseEngine engine;
 
     public JdbcMeetingRepository(DataSource dataSource) {
-        this(dataSource, JdbcDatabaseEngine.POSTGRESQL);
+        this(dataSource, JdbcDatabaseEngine.MYSQL);
     }
 
     public JdbcMeetingRepository(JdbcDatabaseContext database) {
@@ -331,8 +328,7 @@ public final class JdbcMeetingRepository implements MeetingRepository {
         requireText("deploymentScope", deploymentScope);
         requireText("clientSessionId", clientSessionId);
         try (Connection connection = dataSource.getConnection();
-             PreparedStatement statement = connection.prepareStatement(engine == JdbcDatabaseEngine.POSTGRESQL
-                     ? FIND_BY_SCOPE_SQL : mysqlColumns(false) + " WHERE m.deployment_scope = ?"
+             PreparedStatement statement = connection.prepareStatement(mysqlColumns(false) + " WHERE m.deployment_scope = ?"
                      + " AND m.client_session_id = ? ORDER BY m.created_at, m.meeting_id LIMIT 1")) {
             JdbcValues.setText(statement, 1, engine, deploymentScope);
             JdbcValues.setText(statement, 2, engine, clientSessionId);
@@ -389,7 +385,7 @@ public final class JdbcMeetingRepository implements MeetingRepository {
      */
     static Optional<VersionedMeeting> findVersionedForUpdate(
             Connection connection, String meetingId) throws SQLException {
-        return findVersionedForUpdate(connection, JdbcDatabaseEngine.POSTGRESQL, meetingId);
+        return findVersionedForUpdate(connection, JdbcDatabaseEngine.MYSQL, meetingId);
     }
 
     static Optional<VersionedMeeting> findVersionedForUpdate(
@@ -397,8 +393,7 @@ public final class JdbcMeetingRepository implements MeetingRepository {
         Objects.requireNonNull(connection, "connection");
         requireText("meetingId", meetingId);
         try (PreparedStatement statement = connection.prepareStatement(
-                engine == JdbcDatabaseEngine.POSTGRESQL ? FIND_VERSIONED_FOR_UPDATE_SQL
-                        : findSql(engine, true) + " FOR UPDATE")) {
+                findSql(engine, true) + " FOR UPDATE")) {
             JdbcValues.setText(statement, 1, engine, meetingId);
             try (ResultSet resultSet = statement.executeQuery()) {
                 if (!resultSet.next()) {
@@ -456,7 +451,7 @@ public final class JdbcMeetingRepository implements MeetingRepository {
     static void insertOwned(
             Connection connection,
             MeetingAggregate.MeetingSnapshot meeting) throws SQLException {
-        insertOwned(connection, JdbcDatabaseEngine.POSTGRESQL, meeting);
+        insertOwned(connection, JdbcDatabaseEngine.MYSQL, meeting);
     }
 
     static void insertOwned(Connection connection, JdbcDatabaseEngine engine,
@@ -464,7 +459,7 @@ public final class JdbcMeetingRepository implements MeetingRepository {
         Objects.requireNonNull(connection, "connection");
         Objects.requireNonNull(meeting, "meeting");
         requireOwnedInitialSnapshot(meeting);
-        String sql = engine == JdbcDatabaseEngine.POSTGRESQL ? INSERT_OWNED_SQL : """
+        String sql = """
                 INSERT INTO %s (
                     meeting_id, deployment_scope, client_session_id, subject_scope,
                     grant_id, grant_expires_at, usage_reservation_id,
@@ -501,7 +496,7 @@ public final class JdbcMeetingRepository implements MeetingRepository {
             Connection connection,
             VersionedMeeting before,
             MeetingAggregate.MeetingSnapshot after) throws SQLException {
-        updateOwnedExisting(connection, JdbcDatabaseEngine.POSTGRESQL, before, after);
+        updateOwnedExisting(connection, JdbcDatabaseEngine.MYSQL, before, after);
     }
 
     static void updateOwnedExisting(Connection connection, JdbcDatabaseEngine engine,
@@ -513,7 +508,7 @@ public final class JdbcMeetingRepository implements MeetingRepository {
         requireOwnedExistingTransition(before.snapshot(), after);
         MeetingAggregate.MeetingSnapshot snapshot = before.snapshot();
         try (PreparedStatement statement = connection.prepareStatement(
-                engine == JdbcDatabaseEngine.POSTGRESQL ? UPDATE_OWNED_EXISTING_SQL : """
+                """
                 UPDATE %s
                    SET state = ?, updated_at = ?, aggregate_version = aggregate_version + 1
                  WHERE meeting_id = ? AND deployment_scope = ? AND client_session_id = ?
@@ -1089,12 +1084,11 @@ public final class JdbcMeetingRepository implements MeetingRepository {
     }
 
     private static String findSql(JdbcDatabaseEngine engine, boolean versioned) {
-        return engine == JdbcDatabaseEngine.POSTGRESQL ? FIND_SQL
-                : mysqlColumns(versioned) + " WHERE m.meeting_id = ?";
+        return mysqlColumns(versioned) + " WHERE m.meeting_id = ?";
     }
 
     private static MeetingAggregate.MeetingSnapshot readSnapshot(ResultSet resultSet) throws SQLException {
-        return readSnapshot(resultSet, JdbcDatabaseEngine.POSTGRESQL);
+        return readSnapshot(resultSet, JdbcDatabaseEngine.MYSQL);
     }
 
     private static MeetingAggregate.MeetingSnapshot readSnapshot(
@@ -1138,7 +1132,7 @@ public final class JdbcMeetingRepository implements MeetingRepository {
     private static void bindSnapshot(
             PreparedStatement statement,
             MeetingAggregate.MeetingSnapshot meeting) throws SQLException {
-        bindSnapshot(statement, meeting, JdbcDatabaseEngine.POSTGRESQL);
+        bindSnapshot(statement, meeting, JdbcDatabaseEngine.MYSQL);
     }
 
     private static void bindSnapshot(
@@ -1227,7 +1221,7 @@ public final class JdbcMeetingRepository implements MeetingRepository {
     }
 
     private static void requireSaved(int affectedRows) throws SQLException {
-        requireSaved(affectedRows, JdbcDatabaseEngine.POSTGRESQL);
+        requireSaved(affectedRows, JdbcDatabaseEngine.MYSQL);
     }
 
     private static void requireSaved(int affectedRows, JdbcDatabaseEngine engine)

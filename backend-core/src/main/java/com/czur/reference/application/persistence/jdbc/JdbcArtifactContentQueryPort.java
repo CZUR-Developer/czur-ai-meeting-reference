@@ -68,7 +68,7 @@ public class JdbcArtifactContentQueryPort
             DataSource dataSource,
             MeetingManifestPort manifestPort,
             ArtifactStore artifactStore) {
-        this(dataSource, JdbcDatabaseEngine.POSTGRESQL, manifestPort, artifactStore, null);
+        this(dataSource, JdbcDatabaseEngine.MYSQL, manifestPort, artifactStore, null);
     }
 
     /** 同一 Context／Manifest／Store 读取原产物字节；不另建池或产物状态机。 */
@@ -288,19 +288,6 @@ public class JdbcArtifactContentQueryPort
     private Optional<String> findOwner(String artifactId) throws SQLException {
         try (Connection connection = dataSource.getConnection()) {
             connection.setAutoCommit(false);
-            if (engine == JdbcDatabaseEngine.POSTGRESQL) {
-                try (PreparedStatement schema = connection.prepareStatement(
-                        "SELECT current_schema()");
-                     ResultSet rows = schema.executeQuery()) {
-                    if (!rows.next() || rows.getString(1) == null
-                            || rows.getString(1).startsWith("pg_temp")) {
-                        throw new SQLException("deployment schema is unavailable");
-                    }
-                }
-                try (PreparedStatement pin = connection.prepareStatement(PIN_SEARCH_PATH_SQL)) {
-                    pin.execute();
-                }
-            }
             try (PreparedStatement statement = connection.prepareStatement(OWNER_SQL.formatted(
                     JdbcDatabaseTable.ARTIFACT.physicalName(engine)))) {
                 JdbcValues.setText(statement, 1, engine, artifactId);

@@ -28,7 +28,7 @@ public final class JdbcModelSessionLanguageLookup implements ModelSessionLanguag
     private final JdbcDatabaseEngine engine;
 
     public JdbcModelSessionLanguageLookup(DataSource dataSource) {
-        this(dataSource, JdbcDatabaseEngine.POSTGRESQL);
+        this(dataSource, JdbcDatabaseEngine.MYSQL);
     }
 
     /** 读取本场冻结语言和能力，复用 Context 同一池及只读一致快照。 */

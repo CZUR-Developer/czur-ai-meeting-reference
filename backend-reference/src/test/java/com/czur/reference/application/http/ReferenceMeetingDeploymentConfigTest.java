@@ -644,7 +644,7 @@ class ReferenceMeetingDeploymentConfigTest {
     void malformedWssNumbersAndSecretsNeverEchoInput() {
         Map<String, String> urlWithSecret = valid();
         urlWithSecret.put(DatabaseRuntimeConfig.DATABASE_URL,
-                "jdbc:postgresql://unreachable.example.invalid:5432/demo?password=URL_SECRET_SENTINEL");
+                "jdbc:mysql://unreachable.example.invalid:5432/demo?password=URL_SECRET_SENTINEL");
         rejects(urlWithSecret, DatabaseRuntimeConfig.DATABASE_URL);
         for (String origin : new String[]{"http://secret.example.invalid",
                 "wss://secret.example.invalid/private", "wss://user:pass@secret.example.invalid",
@@ -665,7 +665,7 @@ class ReferenceMeetingDeploymentConfigTest {
         var config = ReferenceMeetingDeploymentConfig.fromEnvironment(values);
         String description = config.toString() + config.database() + config.identity();
         for (String sensitive : new String[]{TOKEN, SECRET, "db-secret-sentinel",
-                "jdbc:postgresql://unreachable.example.invalid:5432/demo",
+                "jdbc:mysql://unreachable.example.invalid:5432/demo",
                 "demo-subject", "trusted-audience"}) {
             assertFalse(description.contains(sensitive));
         }
@@ -719,7 +719,7 @@ class ReferenceMeetingDeploymentConfigTest {
     private static Map<String, String> valid() {
         Map<String, String> result = new HashMap<>();
         result.put(DatabaseRuntimeConfig.DATABASE_URL,
-                "jdbc:postgresql://unreachable.example.invalid:5432/demo");
+                "jdbc:mysql://unreachable.example.invalid:5432/demo");
         result.put(DatabaseRuntimeConfig.DATABASE_USER, "demo-user");
         result.put(DatabaseRuntimeConfig.DATABASE_PASSWORD, "db-secret-sentinel");
         result.put(ReferenceDevIdentityConfig.ENABLED, "true");

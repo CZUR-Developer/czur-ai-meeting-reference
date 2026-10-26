@@ -11,7 +11,7 @@ import java.util.Objects;
 public final class JdbcMeetingArtifactContentQueryPort extends JdbcArtifactContentQueryPort {
     public JdbcMeetingArtifactContentQueryPort(DataSource source,
             MeetingManifestPort manifest, ArtifactStore store) {
-        super(source, JdbcDatabaseEngine.POSTGRESQL, manifest, store,
+        super(source, JdbcDatabaseEngine.MYSQL, manifest, store,
                 JdbcMeetingArtifactContentQueryPort::matchesLegacy);
     }
     public JdbcMeetingArtifactContentQueryPort(JdbcDatabaseContext database,

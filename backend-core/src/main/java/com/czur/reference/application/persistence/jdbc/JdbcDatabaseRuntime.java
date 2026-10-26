@@ -380,7 +380,7 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
      */
     public static JdbcDatabaseRuntime start(DatabaseRuntimeConfig config) {
         Objects.requireNonNull(config, "config");
-        if (config.engine() != JdbcDatabaseEngine.POSTGRESQL) {
+        if (config.engine() != JdbcDatabaseEngine.MYSQL) {
             LOGGER.log(Level.WARNING, "完整会议 JDBC 运行时尚未适配所选引擎 engine={0}", config.engine());
             throw new DatabaseStartupException(
                     DatabaseReadiness.invalidConfiguration("MySQL M1 仅支持连接与初始化基线"));

@@ -62,7 +62,7 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
     private final JdbcDatabaseEngine engine;
 
     public JdbcIdempotencyStore(DataSource dataSource) {
-        this(dataSource, JdbcDatabaseEngine.POSTGRESQL);
+        this(dataSource, JdbcDatabaseEngine.MYSQL);
     }
 
     public JdbcIdempotencyStore(JdbcDatabaseContext database) {
@@ -170,7 +170,7 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
             Connection connection,
             IdempotencyRecord candidate,
             Instant createdAt) throws SQLException {
-        return reserve(connection, JdbcDatabaseEngine.POSTGRESQL, candidate, createdAt);
+        return reserve(connection, JdbcDatabaseEngine.MYSQL, candidate, createdAt);
     }
 
     static Reservation reserve(Connection connection, JdbcDatabaseEngine engine,
@@ -179,21 +179,17 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
         Objects.requireNonNull(candidate, "candidate");
         Objects.requireNonNull(createdAt, "createdAt");
         int inserted;
-        String sql = engine == JdbcDatabaseEngine.POSTGRESQL ? INSERT_SQL : "INSERT INTO "
+        String sql = "INSERT INTO "
                 + JdbcDatabaseTable.IDEMPOTENCY_RECORD.physicalName(engine)
                 + " (subject_scope, idempotency_key, request_hash, response_status, response_body, created_at)"
                 + " VALUES (?, ?, ?, ?, CAST(? AS JSON), ?)";
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
-            if (engine == JdbcDatabaseEngine.POSTGRESQL) {
-                bindCandidate(statement, candidate, createdAt);
-            } else {
-                JdbcValues.setText(statement, 1, engine, candidate.scope());
+            JdbcValues.setText(statement, 1, engine, candidate.scope());
                 JdbcValues.setText(statement, 2, engine, candidate.key());
                 statement.setString(3, candidate.requestDigest());
                 statement.setInt(4, 200);
                 statement.setString(5, IdempotencyResultJson.encode(candidate.result()));
                 JdbcValues.setInstant(statement, 6, createdAt);
-            }
             inserted = statement.executeUpdate();
         } catch (SQLException failure) {
             if (engine != JdbcDatabaseEngine.MYSQL || !JdbcSqlErrors.isDuplicate(engine, failure)) {
@@ -218,7 +214,7 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
     /** 在调用方事务连接上读取幂等记录。 */
     static Optional<IdempotencyRecord> find(Connection connection, String scope, String key)
             throws SQLException {
-        return find(connection, JdbcDatabaseEngine.POSTGRESQL, scope, key);
+        return find(connection, JdbcDatabaseEngine.MYSQL, scope, key);
     }
 
     static Optional<IdempotencyRecord> find(Connection connection, JdbcDatabaseEngine engine,
@@ -362,8 +358,7 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
     @Override
     public void release(IdempotencyRecord candidate) {
         Objects.requireNonNull(candidate, "candidate");
-        String sql = engine == JdbcDatabaseEngine.POSTGRESQL ? DELETE_SQL
-                : "DELETE FROM " + JdbcDatabaseTable.IDEMPOTENCY_RECORD.physicalName(engine)
+        String sql = "DELETE FROM " + JdbcDatabaseTable.IDEMPOTENCY_RECORD.physicalName(engine)
                 + " WHERE subject_scope = ? AND idempotency_key = ? AND request_hash = ?";
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement(sql)) {
@@ -384,8 +379,7 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
     }
 
     private static String findSql(JdbcDatabaseEngine engine, boolean currentRead) {
-        return engine == JdbcDatabaseEngine.POSTGRESQL ? FIND_SQL
-                : "SELECT subject_scope, idempotency_key, request_hash, response_status, response_body, created_at FROM "
+        return "SELECT subject_scope, idempotency_key, request_hash, response_status, response_body, created_at FROM "
                 + JdbcDatabaseTable.IDEMPOTENCY_RECORD.physicalName(engine)
                 + " WHERE subject_scope = ? AND idempotency_key = ?"
                 + (currentRead ? " LOCK IN SHARE MODE" : "");

@@ -162,7 +162,7 @@ public final class JdbcMeetingEventLogPort implements MeetingEventLogPort, Realt
      * @param dataSource 由参考后端数据库运行时统一管理的连接池
      */
     public JdbcMeetingEventLogPort(DataSource dataSource) {
-        this(dataSource, JdbcDatabaseEngine.POSTGRESQL);
+        this(dataSource, JdbcDatabaseEngine.MYSQL);
     }
 
     /** 复用唯一池；5.7 无 CTE/LATERAL 时以一个只读 RR 事务保持同一认证事件快照。 */

@@ -116,7 +116,7 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
      * @param dataSource 会议事实源的数据源；不能为 {@code null}
      */
     public JdbcMeetingEventLogStore(DataSource dataSource) {
-        this(dataSource, JdbcDatabaseEngine.POSTGRESQL);
+        this(dataSource, JdbcDatabaseEngine.MYSQL);
     }
 
     /** 显式消费唯一连接上下文；标准事件和去重语义仍由原端口定义。 */
@@ -177,7 +177,7 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
      * 中。调用方必须确保连接仍在事务内，并负责处理本方法抛出的异常。</p>
      */
     static AppendResult append(Connection connection, EventLog event) throws SQLException {
-        return append(connection, JdbcDatabaseEngine.POSTGRESQL, event);
+        return append(connection, JdbcDatabaseEngine.MYSQL, event);
     }
 
     /** MySQL 写路径先锁 Meeting 再当前读，PG 原先重放顺序保持。 */
@@ -200,10 +200,6 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
             return classifyExisting(connection, engine, event, existing.get());
         }
 
-        if (engine == JdbcDatabaseEngine.POSTGRESQL
-                && !lockMeeting(connection, engine, event.meetingId())) {
-            throw new IllegalStateException("追加事件的会议不存在");
-        }
         // 初次查询与会议行锁之间可能有另一个事务刚提交了相同 eventId。重新
         // 查询是并发重放的必要步骤；否则该请求会把已经成功的重放误判为序号错误。
         existing = findByEventId(connection, engine, event.eventId());
@@ -306,7 +302,7 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
 
     static Optional<EventLog> findByEventId(Connection connection, String eventId)
             throws SQLException {
-        return findByEventId(connection, JdbcDatabaseEngine.POSTGRESQL, eventId);
+        return findByEventId(connection, JdbcDatabaseEngine.MYSQL, eventId);
     }
 
     static Optional<EventLog> findByEventId(Connection connection, JdbcDatabaseEngine engine,
@@ -322,7 +318,7 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
     }
 
     static boolean lockMeeting(Connection connection, String meetingId) throws SQLException {
-        return lockMeeting(connection, JdbcDatabaseEngine.POSTGRESQL, meetingId);
+        return lockMeeting(connection, JdbcDatabaseEngine.MYSQL, meetingId);
     }
 
     static boolean lockMeeting(Connection connection, JdbcDatabaseEngine engine, String meetingId)
@@ -337,7 +333,7 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
     }
 
     static long currentSequence(Connection connection, String meetingId) throws SQLException {
-        return currentSequence(connection, JdbcDatabaseEngine.POSTGRESQL, meetingId);
+        return currentSequence(connection, JdbcDatabaseEngine.MYSQL, meetingId);
     }
 
     static long currentSequence(Connection connection, JdbcDatabaseEngine engine, String meetingId)

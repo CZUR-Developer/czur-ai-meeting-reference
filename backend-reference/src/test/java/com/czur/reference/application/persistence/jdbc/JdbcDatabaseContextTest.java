@@ -29,37 +29,19 @@ class JdbcDatabaseContextTest {
     }
 
     @Test
-    void postgresKeepsOriginalSocketSecondsAndUrlParameters() {
-        String url = "jdbc:postgresql://localhost/meeting?currentSchema=isolated&ApplicationName=reference";
-        HikariConfig pool = JdbcDatabaseContext.poolConfiguration(config(url));
-
-        assertEquals(url, pool.getJdbcUrl());
-        assertEquals("3", pool.getDataSourceProperties().getProperty("socketTimeout"));
-        assertEquals(1, pool.getDataSourceProperties().size());
-        assertNull(pool.getConnectionInitSql());
-    }
-
-    @Test
     void mapsOnlyCurrentBaselineTablesToFixedMysqlPrefix() {
-        Set<String> postgres = Arrays.stream(JdbcDatabaseTable.values())
-                .filter(table -> table.requiredForBaseline(JdbcDatabaseEngine.POSTGRESQL))
-                .map(table -> table.physicalName(JdbcDatabaseEngine.POSTGRESQL)).collect(Collectors.toSet());
         Set<String> mysql = Arrays.stream(JdbcDatabaseTable.values())
                 .filter(table -> table.requiredForBaseline(JdbcDatabaseEngine.MYSQL))
                 .map(table -> table.physicalName(JdbcDatabaseEngine.MYSQL)).collect(Collectors.toSet());
 
-        assertEquals(25, postgres.size());
         assertEquals(26, mysql.size());
-        assertFalse(JdbcDatabaseTable.IDEMPOTENCY_LOCK.requiredFor(JdbcDatabaseEngine.POSTGRESQL));
         assertEquals("ai_trans_idempotency_lock", JdbcDatabaseTable.IDEMPOTENCY_LOCK.physicalName(JdbcDatabaseEngine.MYSQL));
         assertTrue(mysql.stream().allMatch(name -> name.startsWith("ai_trans_")));
-        assertEquals("schema_migrations", JdbcDatabaseTable.SCHEMA_MIGRATIONS.physicalName(JdbcDatabaseEngine.POSTGRESQL));
         assertEquals("ai_trans_schema_migrations", JdbcDatabaseTable.SCHEMA_MIGRATIONS.physicalName(JdbcDatabaseEngine.MYSQL));
         assertEquals("ai_trans_meeting_client_event", JdbcDatabaseTable.MEETING_CLIENT_EVENT.physicalName(JdbcDatabaseEngine.MYSQL));
         assertEquals("ai_trans_speaker_identity_person",
                 JdbcDatabaseTable.SPEAKER_IDENTITY_PERSON.physicalName(JdbcDatabaseEngine.MYSQL));
         assertFalse(JdbcDatabaseTable.SPEAKER_IDENTITY_PERSON.requiredForBaseline(JdbcDatabaseEngine.MYSQL));
-        assertFalse(JdbcDatabaseTable.SPEAKER_IDENTITY_PERSON.requiredForBaseline(JdbcDatabaseEngine.POSTGRESQL));
     }
 
     private static DatabaseRuntimeConfig config(String url) {

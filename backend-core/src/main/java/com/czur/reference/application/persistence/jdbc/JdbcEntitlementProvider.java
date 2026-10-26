@@ -68,7 +68,7 @@ public class JdbcEntitlementProvider
             DataSource dataSource,
             EntitlementPolicy policy,
             Clock clock) {
-        this(dataSource, JdbcDatabaseEngine.POSTGRESQL, policy, clock);
+        this(dataSource, JdbcDatabaseEngine.MYSQL, policy, clock);
     }
 
     public JdbcEntitlementProvider(JdbcDatabaseContext database,

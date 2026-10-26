@@ -128,7 +128,7 @@ public final class JdbcOutboxStore implements OutboxStore {
     private final JdbcDatabaseEngine engine;
 
     public JdbcOutboxStore(DataSource dataSource) {
-        this(dataSource, JdbcDatabaseEngine.POSTGRESQL);
+        this(dataSource, JdbcDatabaseEngine.MYSQL);
     }
 
     public JdbcOutboxStore(JdbcDatabaseContext database) {
@@ -189,7 +189,7 @@ public final class JdbcOutboxStore implements OutboxStore {
      * 连接。调用方可因此把事件追加与会议快照、幂等记录放入同一事务。
      */
     static AppendResult append(Connection connection, OutboxEvent event) throws SQLException {
-        return append(connection, JdbcDatabaseEngine.POSTGRESQL, event);
+        return append(connection, JdbcDatabaseEngine.MYSQL, event);
     }
 
     static AppendResult append(Connection connection, JdbcDatabaseEngine engine, OutboxEvent event)
@@ -197,23 +197,19 @@ public final class JdbcOutboxStore implements OutboxStore {
         validateAppend(event);
         Objects.requireNonNull(connection, "connection");
         int inserted;
-        String sql = engine == JdbcDatabaseEngine.POSTGRESQL ? APPEND_SQL : "INSERT INTO "
+        String sql = "INSERT INTO "
                 + JdbcDatabaseTable.OUTBOX_EVENT.physicalName(engine)
                 + " (event_id, aggregate_type, aggregate_id, event_type, payload,"
                 + " occurred_at, available_at, status, attempt_count)"
                 + " VALUES (?, ?, ?, ?, CAST(? AS JSON), ?, ?, 'PENDING', 0)";
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
-            if (engine == JdbcDatabaseEngine.POSTGRESQL) {
-                bindAppend(statement, event);
-            } else {
-                JdbcValues.setText(statement, 1, engine, event.eventId());
+            JdbcValues.setText(statement, 1, engine, event.eventId());
                 JdbcValues.setText(statement, 2, engine, event.aggregateType());
                 JdbcValues.setText(statement, 3, engine, event.aggregateId());
                 JdbcValues.setText(statement, 4, engine, event.eventType());
                 statement.setString(5, event.payload());
                 JdbcValues.setInstant(statement, 6, event.occurredAt());
                 JdbcValues.setInstant(statement, 7, event.availableAt());
-            }
             inserted = statement.executeUpdate();
         } catch (SQLException failure) {
             if (engine != JdbcDatabaseEngine.MYSQL || !JdbcSqlErrors.isDuplicate(engine, failure)) {
@@ -575,12 +571,12 @@ public final class JdbcOutboxStore implements OutboxStore {
 
     private static Optional<StoredEvent> findStored(Connection connection, String eventId)
             throws SQLException {
-        return findStored(connection, JdbcDatabaseEngine.POSTGRESQL, eventId, false);
+        return findStored(connection, JdbcDatabaseEngine.MYSQL, eventId, false);
     }
 
     static Optional<StoredEvent> findStored(Connection connection, JdbcDatabaseEngine engine,
             String eventId, boolean currentRead) throws SQLException {
-        String sql = engine == JdbcDatabaseEngine.POSTGRESQL ? FIND_SQL : """
+        String sql = """
                 SELECT event_id, aggregate_type, aggregate_id, event_type, payload,
                        occurred_at, available_at, status, attempt_count,
                        lease_owner, lease_until, lease_token, lease_version, published_at, last_error
@@ -602,12 +598,12 @@ public final class JdbcOutboxStore implements OutboxStore {
      * 字符串相等判断，否则同一事件在首次写入后重放会被误判为冲突。</p>
      */
     private static boolean sameMessage(Connection connection, OutboxEvent event) throws SQLException {
-        return sameMessage(connection, JdbcDatabaseEngine.POSTGRESQL, event);
+        return sameMessage(connection, JdbcDatabaseEngine.MYSQL, event);
     }
 
     private static boolean sameMessage(Connection connection, JdbcDatabaseEngine engine, OutboxEvent event)
             throws SQLException {
-        String sql = engine == JdbcDatabaseEngine.POSTGRESQL ? SAME_MESSAGE_SQL : "SELECT aggregate_type = ?"
+        String sql = "SELECT aggregate_type = ?"
                 + " AND aggregate_id = ? AND event_type = ? AND payload = CAST(? AS JSON)"
                 + " AND occurred_at = ? AS same_message FROM "
                 + JdbcDatabaseTable.OUTBOX_EVENT.physicalName(engine) + " WHERE event_id = ? LOCK IN SHARE MODE";
@@ -616,12 +612,7 @@ public final class JdbcOutboxStore implements OutboxStore {
             JdbcValues.setText(statement, 2, engine, event.aggregateId());
             JdbcValues.setText(statement, 3, engine, event.eventType());
             statement.setString(4, event.payload());
-            if (engine == JdbcDatabaseEngine.POSTGRESQL) {
-                // 泛用PG Outbox允许纳秒输入，必须与原bindAppend的pgjdbc舍入一致。
-                statement.setTimestamp(5, Timestamp.from(event.occurredAt()));
-            } else {
-                JdbcValues.setInstant(statement, 5, event.occurredAt());
-            }
+            JdbcValues.setInstant(statement, 5, event.occurredAt());
             JdbcValues.setText(statement, 6, engine, event.eventId());
             try (ResultSet rows = statement.executeQuery()) {
                 return rows.next() && rows.getBoolean("same_message");

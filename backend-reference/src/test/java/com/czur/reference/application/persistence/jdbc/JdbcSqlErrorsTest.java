@@ -8,8 +8,6 @@ import static org.junit.jupiter.api.Assertions.*;
 class JdbcSqlErrorsTest {
     @Test
     void duplicateMatchesOnlyEngineSpecificUniqueViolation() {
-        assertTrue(JdbcSqlErrors.isDuplicate(JdbcDatabaseEngine.POSTGRESQL,
-                new SQLException("test", "23505")));
         assertTrue(JdbcSqlErrors.isDuplicate(JdbcDatabaseEngine.MYSQL,
                 new SQLException("test", "23000", 1062)));
         assertFalse(JdbcSqlErrors.isDuplicate(JdbcDatabaseEngine.MYSQL,
@@ -28,8 +26,6 @@ class JdbcSqlErrorsTest {
             assertEquals(JdbcReadLookupSupport.FailureKind.RETRYABLE_UNAVAILABLE,
                     JdbcReadLookupSupport.classify(JdbcDatabaseEngine.MYSQL, failure));
         }
-        assertTrue(JdbcSqlErrors.isTransientTransaction(JdbcDatabaseEngine.POSTGRESQL,
-                new SQLException("test", "40001")));
         assertFalse(JdbcSqlErrors.isTransientTransaction(JdbcDatabaseEngine.MYSQL,
                 new SQLException("test", "23000", 1452)));
     }

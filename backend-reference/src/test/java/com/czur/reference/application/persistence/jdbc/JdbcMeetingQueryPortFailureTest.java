@@ -20,7 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 
 class JdbcMeetingQueryPortFailureTest {
     private static final String SENSITIVE =
-            "jdbc:postgresql://private-db/token-secret?password=hidden";
+            "jdbc:mysql://private-db/token-secret?password=hidden";
     private static final byte[] SECRET = secret();
 
     @Test

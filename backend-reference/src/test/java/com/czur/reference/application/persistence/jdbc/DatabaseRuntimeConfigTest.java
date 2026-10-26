@@ -13,7 +13,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DatabaseRuntimeConfigTest {
-    private static final String URL = "jdbc:postgresql://localhost:5432/meeting";
+    private static final String URL = "jdbc:mysql://localhost:5432/meeting";
     private static final String DB_VALUE = "super-secret-value";
 
     @Test
@@ -69,20 +69,17 @@ class DatabaseRuntimeConfigTest {
     }
 
     @Test
-    void rejectsExactPgjdbcUrlSocketTimeoutOverrides() {
+    void rejectsMysqlManagedSocketTimeoutOverrides() {
         for (String suffix : List.of("?socketTimeout=0", "?socketTimeout",
-                "?ApplicationName=gate&socketTimeout=999")) {
+                "?useSSL=false&socketTimeout=999", "?socket%54imeout=0")) {
             Map<String, String> environment = validEnvironment();
             environment.put(DatabaseRuntimeConfig.DATABASE_URL, URL + suffix);
             assertSafeFailure(environment, DatabaseRuntimeConfig.DATABASE_URL);
         }
-        for (String suffix : List.of("?ApplicationName=gate&currentSchema=public",
-                "?SOCKETTIMEOUT=0", "?socket%54imeout=0")) {
-            Map<String, String> permitted = validEnvironment();
-            permitted.put(DatabaseRuntimeConfig.DATABASE_URL, URL + suffix);
-            assertEquals(permitted.get(DatabaseRuntimeConfig.DATABASE_URL),
-                    DatabaseRuntimeConfig.fromEnvironment(permitted).url());
-        }
+        Map<String, String> permitted = validEnvironment();
+        permitted.put(DatabaseRuntimeConfig.DATABASE_URL, URL + "?useSSL=false&allowPublicKeyRetrieval=true");
+        assertEquals(permitted.get(DatabaseRuntimeConfig.DATABASE_URL),
+                DatabaseRuntimeConfig.fromEnvironment(permitted).url());
     }
 
     @Test
@@ -98,8 +95,14 @@ class DatabaseRuntimeConfigTest {
         assertEquals(Duration.ofSeconds(3), config.socketTimeout());
         assertFalse(config.toString().contains(mysqlUrl));
         assertFalse(config.toString().contains(DB_VALUE));
-        assertEquals(JdbcDatabaseEngine.POSTGRESQL,
-                DatabaseRuntimeConfig.fromEnvironment(validEnvironment()).engine());
+    }
+
+    @Test
+    void postgresqlUrlIsRejectedNowThatDeliveryIsMysqlOnly() {
+        Map<String, String> environment = validEnvironment();
+        environment.put(DatabaseRuntimeConfig.DATABASE_URL, "jdbc:postgresql://127.0.0.1:5432/demo");
+        assertThrows(IllegalArgumentException.class,
+                () -> DatabaseRuntimeConfig.fromEnvironment(environment));
     }
 
     @Test
@@ -163,12 +166,12 @@ class DatabaseRuntimeConfigTest {
 
         Map<String, String> tabInUrl = validEnvironment();
         tabInUrl.put(DatabaseRuntimeConfig.DATABASE_URL,
-                "jdbc:postgresql://local\thost:5432/meeting");
+                "jdbc:mysql://local\thost:5432/meeting");
         assertSafeFailure(tabInUrl, DatabaseRuntimeConfig.DATABASE_URL);
 
         Map<String, String> embeddedCredential = validEnvironment();
         embeddedCredential.put(DatabaseRuntimeConfig.DATABASE_URL,
-                "jdbc:postgresql://app-user:password@localhost:5432/meeting");
+                "jdbc:mysql://app-user:password@localhost:5432/meeting");
         assertSafeFailure(embeddedCredential, DatabaseRuntimeConfig.DATABASE_URL);
 
         Map<String, String> badTimeout = validEnvironment();
@@ -264,16 +267,16 @@ class DatabaseRuntimeConfigTest {
     void acceptsOnlyExplicitPostgresJdbcUrl() {
         Map<String, String> environment = validEnvironment();
         environment.put(DatabaseRuntimeConfig.DATABASE_URL,
-                "jdbc:postgresql://localhost:not-a-port/meeting");
+                "jdbc:mysql://localhost:not-a-port/meeting");
         assertSafeFailure(environment, DatabaseRuntimeConfig.DATABASE_URL);
     }
 
     @Test
     void acceptsBracketedIpv6AuthorityWithOrWithoutPort() {
         for (String ipv6Url : List.of(
-                "jdbc:postgresql://[::1]/meeting",
-                "jdbc:postgresql://[::1]:5432/meeting",
-                "jdbc:postgresql://[2001:db8::10]:65535/meeting")) {
+                "jdbc:mysql://[::1]/meeting",
+                "jdbc:mysql://[::1]:5432/meeting",
+                "jdbc:mysql://[2001:db8::10]:65535/meeting")) {
             Map<String, String> environment = validEnvironment();
             environment.put(DatabaseRuntimeConfig.DATABASE_URL, ipv6Url);
             assertEquals(ipv6Url, DatabaseRuntimeConfig.fromEnvironment(environment).url());
@@ -283,21 +286,21 @@ class DatabaseRuntimeConfigTest {
     @Test
     void rejectsInvalidIpv6SuffixPortsAndMultiHostAuthority() {
         for (String ipv6Url : List.of(
-                "jdbc:postgresql://[::1/meeting",
-                "jdbc:postgresql://[]/meeting",
-                "jdbc:postgresql://[::1]:/meeting",
-                "jdbc:postgresql://[::1]:not-a-port/meeting",
-                "jdbc:postgresql://[::1]:0/meeting",
-                "jdbc:postgresql://[::1]:65536/meeting",
-                "jdbc:postgresql://[::1]garbage/meeting",
-                "jdbc:postgresql://[::1]::5432/meeting",
-                "jdbc:postgresql://[not-ipv6]/meeting",
-                "jdbc:postgresql://[:::]/meeting",
-                "jdbc:postgresql://[gggg::1]/meeting",
-                "jdbc:postgresql://[fe80::1%eth0]/meeting",
-                "jdbc:postgresql://host:65536/meeting",
-                "jdbc:postgresql://host:5432,other:5432/meeting",
-                "jdbc:postgresql://host,other/meeting")) {
+                "jdbc:mysql://[::1/meeting",
+                "jdbc:mysql://[]/meeting",
+                "jdbc:mysql://[::1]:/meeting",
+                "jdbc:mysql://[::1]:not-a-port/meeting",
+                "jdbc:mysql://[::1]:0/meeting",
+                "jdbc:mysql://[::1]:65536/meeting",
+                "jdbc:mysql://[::1]garbage/meeting",
+                "jdbc:mysql://[::1]::5432/meeting",
+                "jdbc:mysql://[not-ipv6]/meeting",
+                "jdbc:mysql://[:::]/meeting",
+                "jdbc:mysql://[gggg::1]/meeting",
+                "jdbc:mysql://[fe80::1%eth0]/meeting",
+                "jdbc:mysql://host:65536/meeting",
+                "jdbc:mysql://host:5432,other:5432/meeting",
+                "jdbc:mysql://host,other/meeting")) {
             Map<String, String> environment = validEnvironment();
             environment.put(DatabaseRuntimeConfig.DATABASE_URL, ipv6Url);
             assertSafeFailure(environment, DatabaseRuntimeConfig.DATABASE_URL);

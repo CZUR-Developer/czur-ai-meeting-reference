@@ -42,8 +42,7 @@ final class JdbcDatabaseBaseline {
                     }
                 }
             } catch (SQLException failure) {
-                if ((engine == JdbcDatabaseEngine.MYSQL && failure.getErrorCode() == 1146)
-                        || (engine == JdbcDatabaseEngine.POSTGRESQL && "42P01".equals(failure.getSQLState()))) {
+                if (engine == JdbcDatabaseEngine.MYSQL && failure.getErrorCode() == 1146) {
                     return DatabaseReadiness.migrationMissing(REQUIRED_MIGRATIONS);
                 }
                 throw failure;

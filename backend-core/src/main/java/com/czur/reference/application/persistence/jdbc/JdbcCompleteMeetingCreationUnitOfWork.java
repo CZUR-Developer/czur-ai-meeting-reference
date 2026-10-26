@@ -50,7 +50,7 @@ public final class JdbcCompleteMeetingCreationUnitOfWork
     private final JdbcDatabaseEngine engine;
 
     public JdbcCompleteMeetingCreationUnitOfWork(DataSource dataSource, Clock clock) {
-        this(dataSource, JdbcDatabaseEngine.POSTGRESQL, clock);
+        this(dataSource, JdbcDatabaseEngine.MYSQL, clock);
     }
 
     public JdbcCompleteMeetingCreationUnitOfWork(JdbcDatabaseContext database, Clock clock) {
@@ -158,10 +158,6 @@ public final class JdbcCompleteMeetingCreationUnitOfWork
             if (!JdbcUsageReservationStore.bindForOwnedMeeting(connection, engine, current, at)) {
                 rollbackConfirmed = rollbackQuietly(connection);
                 return failure(ErrorCode.INTERNAL, false);
-            }
-            if (engine == JdbcDatabaseEngine.POSTGRESQL) {
-                phase = Phase.MEETING_INSERT;
-                JdbcMeetingRepository.insertOwned(connection, engine, meeting);
             }
             phase = Phase.FACT_INSERT;
             CreateMeetingFactStore.PersistResult persisted = facts.persist(

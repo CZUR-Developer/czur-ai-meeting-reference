@@ -12,7 +12,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 /** 最终收口 JDBC 边界在非 SQLException 故障下的脱敏门禁。 */
 class JdbcMeetingFinalizationStoreFailureTest {
     private static final String SENSITIVE =
-            "jdbc:postgresql://secret-db Token=secret-token";
+            "jdbc:mysql://secret-db Token=secret-token";
 
     @Test
     void findSanitizesDataSourceRuntimeFailure() {

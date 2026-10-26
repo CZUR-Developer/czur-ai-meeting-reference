@@ -58,7 +58,7 @@ public final class JdbcOwnedMeetingStopUnitOfWork
     private final JdbcDatabaseEngine engine;
 
     public JdbcOwnedMeetingStopUnitOfWork(DataSource dataSource, Clock clock) {
-        this(dataSource, JdbcDatabaseEngine.POSTGRESQL, clock);
+        this(dataSource, JdbcDatabaseEngine.MYSQL, clock);
     }
 
     public JdbcOwnedMeetingStopUnitOfWork(JdbcDatabaseContext database, Clock clock) {

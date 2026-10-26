@@ -16,23 +16,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class JdbcDatabaseRuntimeTest {
     @Test
-    void mysqlM1CannotBeAssembledAsPostgresMeetingRuntime() {
-        DatabaseRuntimeConfig config = DatabaseRuntimeConfig.of(
-                "jdbc:mysql://127.0.0.1:1/meeting", "runtime-user", "runtime-secret",
-                Duration.ofMillis(250), Duration.ofMillis(250), 1, 0);
-
-        DatabaseStartupException failure = assertThrows(DatabaseStartupException.class,
-                () -> JdbcDatabaseRuntime.start(config));
-
-        // 即使数据库地址不可达，也必须在创建池及任何 PG Store 之前明确拒绝装配。
-        assertEquals(DatabaseReadiness.Status.INVALID_CONFIGURATION, failure.readiness().status());
-        assertNull(failure.getCause());
-    }
-
-    @Test
     void startupFailureIsFailClosedAndDoesNotExposeConnectionDetails() {
         String dbValue = "runtime-secret";
-        String url = "jdbc:postgresql://127.0.0.1:1/unavailable";
+        String url = "jdbc:mysql://127.0.0.1:1/unavailable";
         DatabaseRuntimeConfig config = DatabaseRuntimeConfig.of(
                 url, "runtime-user", dbValue,
                 Duration.ofMillis(250), Duration.ofMillis(250), 1, 0);
@@ -50,7 +36,7 @@ class JdbcDatabaseRuntimeTest {
     @Test
     void startupDiagnosticsUseJulAndRemainRedacted() {
         String dbValue = "runtime-log-value";
-        String url = "jdbc:postgresql://127.0.0.1:1/log-unavailable";
+        String url = "jdbc:mysql://127.0.0.1:1/log-unavailable";
         DatabaseRuntimeConfig config = DatabaseRuntimeConfig.of(
                 url, "runtime-log-user", dbValue,
                 Duration.ofMillis(250), Duration.ofMillis(250), 1, 0);

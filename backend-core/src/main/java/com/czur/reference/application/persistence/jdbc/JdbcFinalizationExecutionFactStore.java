@@ -57,7 +57,7 @@ final class JdbcFinalizationExecutionFactStore
 
     /** 绑定调用方当前连接；构造过程不获取或释放连接。 */
     JdbcFinalizationExecutionFactStore(Connection connection) {
-        this(connection, JdbcDatabaseEngine.POSTGRESQL);
+        this(connection, JdbcDatabaseEngine.MYSQL);
     }
 
     /** 显式选择引擎；连接及事务仍完全由外层工作单元持有。 */

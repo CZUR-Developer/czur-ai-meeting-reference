@@ -115,7 +115,7 @@ public final class JdbcMeetingFinalizationStore implements MeetingFinalizationSt
      */
     static Result requestInputCompletion(Connection connection, String meetingId)
             throws SQLException {
-        return requestInputCompletion(connection, JdbcDatabaseEngine.POSTGRESQL, meetingId);
+        return requestInputCompletion(connection, JdbcDatabaseEngine.MYSQL, meetingId);
     }
 
     /** 仅 Stop pending 闭包适配双引擎；不开放 MySQL 音频 Worker 的 acceptInput。 */
@@ -147,7 +147,7 @@ public final class JdbcMeetingFinalizationStore implements MeetingFinalizationSt
         if (row.state() != MeetingState.STOPPING) {
             return new Conflict(ConflictReason.INVALID_MEETING_STATE);
         }
-        String sql = engine == JdbcDatabaseEngine.POSTGRESQL ? MARK_PENDING_SQL : "UPDATE "
+        String sql = "UPDATE "
                 + JdbcDatabaseTable.MEETING.physicalName(engine)
                 + " SET input_state = 'INPUT_COMPLETE_PENDING' WHERE meeting_id = ?"
                 + " AND input_state = 'INPUT_OPEN' AND finalization_receipt_id IS NULL";
@@ -326,13 +326,12 @@ public final class JdbcMeetingFinalizationStore implements MeetingFinalizationSt
 
     private static Optional<Row> readRow(Connection connection, String meetingId)
             throws SQLException {
-        return readRow(connection, JdbcDatabaseEngine.POSTGRESQL, meetingId);
+        return readRow(connection, JdbcDatabaseEngine.MYSQL, meetingId);
     }
 
     private static Optional<Row> readRow(Connection connection, JdbcDatabaseEngine engine, String meetingId)
             throws SQLException {
-        String sql = engine == JdbcDatabaseEngine.POSTGRESQL ? FIND_SQL
-                : "SELECT state, input_state, finalization_receipt_id FROM "
+        String sql = "SELECT state, input_state, finalization_receipt_id FROM "
                 + JdbcDatabaseTable.MEETING.physicalName(engine) + " WHERE meeting_id = ? LOCK IN SHARE MODE";
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             JdbcValues.setText(statement, 1, engine, meetingId);

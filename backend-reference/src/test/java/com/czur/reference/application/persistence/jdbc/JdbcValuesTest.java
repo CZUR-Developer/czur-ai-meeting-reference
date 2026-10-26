@@ -22,9 +22,6 @@ class JdbcValuesTest {
         assertEquals("setBytes", call.get()[0]);
         assertArrayEquals(original.getBytes(StandardCharsets.UTF_8),
                 (byte[]) ((Object[]) call.get()[1])[1]);
-        JdbcValues.setText(statement, 1, JdbcDatabaseEngine.POSTGRESQL, original);
-        assertEquals("setString", call.get()[0]);
-        assertEquals(original, ((Object[]) call.get()[1])[1]);
         assertFalse(JdbcValues.sameCanonicalText("{} ", "{}"));
     }
 
@@ -39,6 +36,5 @@ class JdbcValuesTest {
                 ((Timestamp) arguments.get()[1]).toInstant());
         assertEquals("UTC", ((Calendar) arguments.get()[2]).getTimeZone().getID());
         assertEquals("CAST(? AS JSON)", JdbcValues.jsonParameter(JdbcDatabaseEngine.MYSQL));
-        assertEquals("payload::text", JdbcValues.jsonText(JdbcDatabaseEngine.POSTGRESQL, "payload"));
     }
 }

@@ -267,8 +267,7 @@ public final class DatabaseRuntimeConfig {
                     throw invalid(DATABASE_URL, "MySQL 地址参数编码非法");
                 }
             }
-            if ((engine == JdbcDatabaseEngine.POSTGRESQL && "socketTimeout".equals(key))
-                    || (engine == JdbcDatabaseEngine.MYSQL && MYSQL_MANAGED_PARAMETERS.contains(key))) {
+            if (MYSQL_MANAGED_PARAMETERS.contains(key)) {
                 return true;
             }
         }

@@ -210,7 +210,7 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
     public JdbcClientMeetingInputPort(DataSource dataSource,
             RealtimeMeetingStartCoordinator startCoordinator, Clock clock,
             ArtifactStore artifactStore) {
-        this(dataSource, JdbcDatabaseEngine.POSTGRESQL, startCoordinator, clock, artifactStore);
+        this(dataSource, JdbcDatabaseEngine.MYSQL, startCoordinator, clock, artifactStore);
     }
 
     /** 使用公共唯一池和原 Start 协调器；未装配存储时仅截图不可用。 */

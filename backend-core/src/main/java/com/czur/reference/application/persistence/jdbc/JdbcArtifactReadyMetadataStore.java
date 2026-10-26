@@ -83,7 +83,7 @@ final class JdbcArtifactReadyMetadataStore implements ArtifactReadyMetadataStore
 
     /** 绑定调用方当前连接；构造过程不获取或释放连接。 */
     JdbcArtifactReadyMetadataStore(Connection connection) {
-        this(connection, JdbcDatabaseEngine.POSTGRESQL);
+        this(connection, JdbcDatabaseEngine.MYSQL);
     }
 
     /** 截图和后续结果收口共用同一元数据原语，不接管连接或事务。 */

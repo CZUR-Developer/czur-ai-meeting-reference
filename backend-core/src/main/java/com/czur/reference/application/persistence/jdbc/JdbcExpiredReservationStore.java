@@ -89,7 +89,7 @@ public final class JdbcExpiredReservationStore implements ExpiredReservationStor
     public JdbcExpiredReservationStore(
             DataSource dataSource,
             com.czur.reference.application.port.entitlement.EntitlementIdGenerator idGenerator) {
-        this(dataSource, idGenerator, JdbcDatabaseEngine.POSTGRESQL);
+        this(dataSource, idGenerator, JdbcDatabaseEngine.MYSQL);
     }
 
     public JdbcExpiredReservationStore(
