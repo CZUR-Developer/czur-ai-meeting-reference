@@ -13,12 +13,9 @@ mvn -B -f pom.xml test
 python3 tools/contract-fixtures/validate.py
 python3 -m unittest discover -s tools/android-device -p 'test_*.py'
 npm --prefix web-reference run check
-if [[ -f web-reference/deployment.local.json || -n "${REFERENCE_API_BASE_URL:-}" ]]; then
-  npm --prefix web-reference run build
-else
-  # 干净仓库没有本地配置；给一个中性地址把构建跑通，不写回任何被跟踪文件。
-  REFERENCE_API_BASE_URL="http://127.0.0.1:8080" npm --prefix web-reference run build
-fi
+# 自检只验证构建流程：产物写到 dist-check，地址是固定测试值且明确标注不可部署。
+# 可部署产物必须用 npm run build 并配好真实 apiBaseUrl。
+npm --prefix web-reference run build:check
 
 if [[ -z "${REFERENCE_TEST_MYSQL_DATABASE_URL:-}" ]]; then
   printf '[INFO] 未设置 REFERENCE_TEST_MYSQL_DATABASE_URL；MySQL 5.7 集成测试按测试类约定跳过。\n'

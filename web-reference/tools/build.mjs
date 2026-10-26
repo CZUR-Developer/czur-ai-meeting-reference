@@ -6,7 +6,14 @@ import { fileURLToPath } from 'node:url';
 // 后端地址来自仓外本地配置（默认 deployment.local.json，可用 REFERENCE_WEB_DEPLOYMENT_FILE
 // 指定另一份，用来区分测试与生产）；缺失或没填时构建直接失败，不产出连不上后端的页面。
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const output = resolve(root, 'dist');
+
+// 两种构建模式，产物语义不同：
+//   默认：部署构建，必须拿到真实 apiBaseUrl，缺失或占位就失败，不产出跑不起来的页面。
+//   --check：只验证构建流程本身（CI／本机自检用）。输出到 dist-check，地址是固定测试值，
+//            明确告知不可部署；这样既不会把坏产物当成交付物，也不会让 CI 依赖仓外配置。
+const checkMode = process.argv.includes('--check');
+const output = resolve(root, checkMode ? 'dist-check' : 'dist');
+const CHECK_API_BASE_URL = 'http://127.0.0.1:8080';
 
 const configFileName = (process.env.REFERENCE_WEB_DEPLOYMENT_FILE || '').trim() || 'deployment.local.json';
 const configPath = resolve(root, configFileName);
@@ -26,8 +33,8 @@ function fail(reason) {
   process.exit(1);
 }
 
-let apiBaseUrl = directApiBaseUrl;
-if (!apiBaseUrl) {
+let apiBaseUrl = checkMode ? CHECK_API_BASE_URL : directApiBaseUrl;
+if (!checkMode && !apiBaseUrl) {
   try {
     const raw = await readFile(configPath, 'utf8');
     apiBaseUrl = (JSON.parse(raw).apiBaseUrl || '').trim();
@@ -46,8 +53,8 @@ if (apiUrl.protocol !== 'http:' && apiUrl.protocol !== 'https:') {
   fail('apiBaseUrl 必须是 http/https 地址');
 }
 const apiHost = apiUrl.hostname.toLowerCase();
-if (apiHost.includes('your-backend') || apiHost.endsWith('.example')
-    || apiHost === 'example.com' || apiHost.endsWith('.invalid')) {
+if (!checkMode && (apiHost.includes('your-backend') || apiHost.endsWith('.example')
+    || apiHost === 'example.com' || apiHost.endsWith('.invalid'))) {
   fail('apiBaseUrl 还是模板或测试占位值');
 }
 
@@ -56,5 +63,11 @@ await mkdir(output, { recursive: true });
 await cp(resolve(root, 'src'), output, { recursive: true });
 await writeFile(resolve(output, 'config.json'),
   JSON.stringify({ apiBaseUrl }) + '\n', 'utf8');
-console.log(`WEB_CONFIG ${directApiBaseUrl ? 'REFERENCE_API_BASE_URL' : configFileName} apiBaseUrl=${apiBaseUrl}`);
-console.log(`WEB_BUILD_OK output=${output}`);
+if (checkMode) {
+  console.warn('WEB_BUILD_CHECK 仅供自检：地址是固定测试值，产物不可部署；');
+  console.warn('  要出可部署产物，请配置 ' + configFileName + ' 或 REFERENCE_API_BASE_URL 后执行 npm run build。');
+  console.log(`WEB_BUILD_CHECK_OK output=${output}`);
+} else {
+  console.log(`WEB_CONFIG ${directApiBaseUrl ? 'REFERENCE_API_BASE_URL' : configFileName} apiBaseUrl=${apiBaseUrl}`);
+  console.log(`WEB_BUILD_OK output=${output}`);
+}

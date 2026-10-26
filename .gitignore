@@ -106,3 +106,4 @@ tmp/
 /web-reference/deployment.local.json
 /web-reference/deployment.*.json
 !/web-reference/deployment.local.example.json
+/web-reference/dist-check
