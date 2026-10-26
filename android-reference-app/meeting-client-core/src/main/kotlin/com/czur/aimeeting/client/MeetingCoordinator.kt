@@ -245,8 +245,13 @@ class MeetingCoordinator(
         LOG.info("原场纪要重跑开始")
         val grant = if (runtime.usesServerModelMaterials()) server.requestSummarySession(record.meetingId()) else null
         val adapter = if (grant == null) null else adapters.createSummary(grant.adapterId())
-        server.submitSummary(record.meetingId(), runtime.summarize(grant, adapter, input))
-        LOG.info("原场纪要已提交")
+        try {
+            server.submitSummary(record.meetingId(), runtime.summarize(grant, adapter, input))
+            LOG.info("原场纪要已提交")
+        } catch (conflict: MeetingHttpStatusException) {
+            if (conflict.status != 409) throw conflict
+            LOG.warning("原场纪要已存在且正文不同，保留服务端版本继续收尾")
+        }
     }
     /** 每次续办只调用一次同账号身份扩展，先持久保存新材料，再允许外部发布／Stop。 */
     private fun renewFinalizationIdentity(checkpoint: StoppedMeetingCheckpoint, store: StoppedMeetingStore): StoppedMeetingCheckpoint {
@@ -341,6 +346,9 @@ class MeetingCoordinator(
         private var usageRead = false
         private var usageSubmitted = false
         private var summarySubmitted = false
+        // 纪要一旦生成就冻结：提交确认丢失后重试必须原样重放，
+        // 否则模型每次生成不同正文，后端会判 EVENT_CONFLICT 导致永远停不下来。
+        private var pendingSummary: SummaryResult? = null
         /** 含失败在内，同场只读取一次 sealed 事实，仅 IO 队列访问。 */
         private var audioArtifactRead = false
         private var audioArtifactFailure: IOException? = null
@@ -779,11 +787,21 @@ class MeetingCoordinator(
                 }
                 if (input != null && !summarySubmitted) {
                     step = "生成/提交标准纪要"
-                    LOG.info("标准纪要生成开始")
-                    val grant = if (runtime.usesServerModelMaterials()) server.requestSummarySession(id) else null
-                    val adapter = if (grant == null) null else adapters.createSummary(grant.adapterId())
-                    server.submitSummary(id, runtime.summarize(grant, adapter, input))
-                    summarySubmitted = true; LOG.info("标准纪要已提交")
+                    val frozen = pendingSummary ?: run {
+                        LOG.info("标准纪要生成开始")
+                        val grant = if (runtime.usesServerModelMaterials()) server.requestSummarySession(id) else null
+                        val adapter = if (grant == null) null else adapters.createSummary(grant.adapterId())
+                        runtime.summarize(grant, adapter, input).also { pendingSummary = it }
+                    }
+                    try {
+                        server.submitSummary(id, frozen)
+                        summarySubmitted = true; LOG.info("标准纪要已提交")
+                    } catch (conflict: MeetingHttpStatusException) {
+                        if (conflict.status != 409) throw conflict
+                        // 服务端已有纪要（可能正是上次丢失确认的那次提交），保留服务端版本继续收尾。
+                        summarySubmitted = true
+                        LOG.warning("标准纪要已存在且正文不同，保留服务端版本并继续停止")
+                    }
                 }
                 if (cancelled || closed) return
                 // 只在原尾部全部 ACK 与 sealed 读取成功后保存候选，无痕继续 Stop→ENDED。

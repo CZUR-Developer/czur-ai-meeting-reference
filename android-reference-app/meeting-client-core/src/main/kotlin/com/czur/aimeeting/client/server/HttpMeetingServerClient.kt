@@ -340,7 +340,7 @@ class HttpMeetingServerClient(config: MeetingClientConfig) : MeetingServerClient
             connection.outputStream.use { it.write(bytes) }
             val status = connection.responseCode
             for (expected in accepted) if (status == expected) return connection.inputStream.use { Response(status, readUtf8(it)) }
-            throw IOException("后端请求失败，HTTP $status")
+            throw MeetingHttpStatusException(status)
         } finally { connection.disconnect() }
     }
 

@@ -608,6 +608,24 @@ class MeetingCoordinatorTest {
         }
     }
 
+    @Test fun summaryAckLossRetriesFrozenPayloadInsteadOfRegenerating() {
+        Fixture(true, ALL).use { f ->
+            f.runtime.varySummary = true
+            f.server.failSummaryOnce = true
+            f.start(MeetingOptions(MeetingOptions.Mode.MEETING_MINUTES, "zh-CN", "en-US", false,
+                MeetingOptions.ResultDelivery.WEB, "https://result.example.test", emptyList(), false))
+            f.runtime.emit("one", 1, "zh-CN", "你好", true)
+            f.session.requestStop()
+            f.probe.awaitPhase(MeetingSessionState.Phase.STOP_PENDING)
+            f.session.requestStop()
+            assertNotNull(f.probe.result())
+            assertEquals(2, f.server.summaryAttempts.size)
+            // 第一次确认丢失后重试必须原样重放；重新生成会导致后端 EVENT_CONFLICT。
+            assertEquals(f.server.summaryAttempts[0], f.server.summaryAttempts[1])
+            assertEquals(1, f.runtime.summaryCalls)
+        }
+    }
+
     @Test fun publicationFailureResumesOriginalSealedAccessWithoutOpeningMeetingOrModels() {
         val store: MemoryStore = MemoryStore()
         val firstPublisher: Publisher = Publisher()
@@ -2043,6 +2061,8 @@ class MeetingCoordinatorTest {
         var reconnector: ModelSessionReconnector? = null
         var audioMix: AudioMixOptions? = null
         var summaryInput: SummaryInput? = null
+        var varySummary = false
+        var summaryCalls = 0
         @Volatile var stopCalls = 0
         var emitTail = false
         var emitFinished = true
@@ -2134,6 +2154,10 @@ class MeetingCoordinatorTest {
         }
         override fun summarize(grant: SummarySessionGrant?, adapter: SummaryAdapter?, input: SummaryInput): SummaryResult {
             summaryInput = input
+            if (varySummary) {
+                summaryCalls += 1
+                return SummaryResult(input.language(), "总结", "概览$summaryCalls", listOf("要点"), emptyList())
+            }
             return SummaryResult(input.language(), "总结", "概览", listOf("要点"), emptyList())
         }
     }
@@ -2178,6 +2202,7 @@ class MeetingCoordinatorTest {
         var failContent = false
         var failUsageOnce = false
         var failSummaryOnce = false
+        val summaryAttempts: MutableList<SummaryResult> = Collections.synchronizedList(ArrayList())
         var loseStopAckOnce = false
         var failManifest = false
         var acceptedStopKey: String? = null
@@ -2272,6 +2297,7 @@ class MeetingCoordinatorTest {
         }
         override fun submitSummary(id: String, summary: SummaryResult) {
             steps.add("summary")
+            summaryAttempts.add(summary)
             if (failSummaryOnce) { failSummaryOnce = false; throw IOException("fixture-summary-ack-lost") }
         }
         override fun submitUsage(id: String, duration: Long) {

@@ -51,6 +51,8 @@ public final class ReferenceClientMeetingProcess implements AutoCloseable {
 
     /** 过期预占清理周期；重复执行只会重新领取同一批已过期记录，结果幂等。 */
     private static final long TICK_SECONDS = 30;
+    /** 启动失败收口在最大会议时长之后的宽限，避免卡在自动停止边界。 */
+    private static final java.time.Duration STALE_START_GRACE = java.time.Duration.ofMinutes(15);
 
     private final ReferenceMeetingHttpAssembly assembly;
     private final MeetingJdkHttpServer http;
@@ -140,8 +142,13 @@ public final class ReferenceClientMeetingProcess implements AutoCloseable {
             final ExpiredReservationCleanupWorker cleanupWorker = cleanup;
             // 启动失败的会议停在 CREATED／STARTING，过期预占清理不覆盖已绑定预占；
             // 这里按超时把它们收口为 CANCELLED 并释放预占，避免永远留一条空会议。
+            // 窗口跟随部署的最大会议时长：静音会议也要等到自身时长上限之后才可能被收口，
+            // 不能把"暂时没有识别文字"当成启动失败。
             final JdbcStaleStartSweeper staleStartSweeper = new JdbcStaleStartSweeper(
-                    assembly.databaseContext(), config.deploymentScope(), clock);
+                    assembly.databaseContext(), config.deploymentScope(), clock,
+                    java.time.Duration.ofMillis(config.runtimeLimits().maxMeetingDurationMs())
+                            .plus(STALE_START_GRACE),
+                    JdbcStaleStartSweeper.DEFAULT_BATCH_LIMIT);
             scheduler = Executors.newSingleThreadScheduledExecutor(task -> {
                 Thread thread = new Thread(task, "reference-client-meeting-worker");
                 thread.setDaemon(true);

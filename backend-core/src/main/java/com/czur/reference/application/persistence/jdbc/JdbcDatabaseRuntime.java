@@ -380,38 +380,11 @@ public final class JdbcDatabaseRuntime implements AutoCloseable {
      */
     public static JdbcDatabaseRuntime start(DatabaseRuntimeConfig config) {
         Objects.requireNonNull(config, "config");
-        if (config.engine() != JdbcDatabaseEngine.MYSQL) {
-            LOGGER.log(Level.WARNING, "完整会议 JDBC 运行时尚未适配所选引擎 engine={0}", config.engine());
-            throw new DatabaseStartupException(
-                    DatabaseReadiness.invalidConfiguration("MySQL M1 仅支持连接与初始化基线"));
-        }
-        HikariDataSource pool = null;
-        JdbcDatabaseRuntime runtime = null;
-        try {
-            pool = createPool(config);
-            runtime = new JdbcDatabaseRuntime(config, pool);
-            DatabaseReadiness readiness = runtime.checkReadiness();
-            if (!readiness.ready()) {
-                LOGGER.log(Level.WARNING, "数据库运行时启动 readiness 失败 status={0}", readiness.status());
-                runtime.close();
-                throw new DatabaseStartupException(readiness);
-            }
-            LOGGER.log(Level.INFO, "数据库运行时启动成功 pool={0}", config);
-            return runtime;
-        } catch (DatabaseStartupException failure) {
-            throw failure;
-        } catch (RuntimeException failure) {
-            if (runtime != null) {
-                runtime.close();
-            } else if (pool != null) {
-                closeQuietly(pool);
-            }
-            DatabaseReadiness readiness = DatabaseReadiness.unavailable(
-                    "数据库运行时初始化异常：" + failure.getClass().getSimpleName());
-            LOGGER.log(Level.WARNING, "数据库运行时启动异常 status={0} exception={1}",
-                    new Object[]{readiness.status(), failure.getClass().getSimpleName()});
-            throw new DatabaseStartupException(readiness);
-        }
+        // 参考交付只支持客户端直连模型入口（startClientModel）；本完整运行时仍按旧 PG 基线
+        // 读取 schema_migrations 和系统目录，未适配 MySQL。与其在 readiness 阶段给出误导性的
+        // schema 错误，不如在创建连接池前明确拒绝。
+        throw new DatabaseStartupException(DatabaseReadiness.invalidConfiguration(
+                "完整会议 JDBC 运行时未适配 MySQL；请使用 ReferenceClientMeetingProcess 入口"));
     }
 
     /** 兼容装配代码的显式别名；仍然执行同样的启动 readiness。 */

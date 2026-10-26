@@ -233,8 +233,9 @@ if (snapshot instanceof JdbcClientMeetingResultFinalizer.Ready ready) {
 连接池与借出连接由对应所有者释放，不为每个插件建立第二套会议事实源。
 
 持久层只支持 MySQL 5.7：`JdbcDatabaseEngine` 只有 `MYSQL`，PostgreSQL 适配与
-相关测试夹具已移除；非默认服务端 WSS／Mock 入口仍通过
-`ReferenceMeetingHttpAssembly.start(...)` 装配，但同样使用 MySQL 基线。
+相关测试夹具已移除。非默认的完整运行时入口（`MeetingHttpAssembly.startWithLegacy` →
+`JdbcDatabaseRuntime`）仍按旧 PostgreSQL 基线读取迁移表和系统目录，本版未适配 MySQL，
+启动时会明确拒绝；请使用 `ReferenceClientMeetingProcess`（客户端直连模型）入口。
 
 `startClientModel(...)` 不创建服务端音频 Worker、WSS、删除或实时 Token 续签组件，
 相关有效 HTTP DELETE／renew 路由返回 501；Create 的 `realtime` 字段仅保留协议兼容。

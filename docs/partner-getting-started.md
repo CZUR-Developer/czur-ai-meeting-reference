@@ -119,7 +119,7 @@ Maven 的开发环境中打开。
 要区分测试与生产，就多留几份文件，用环境变量选择：
 
 ```bash
-REFERENCE_DEPLOYMENT_FILE=deployment.prod.properties ./gradlew :app:assembleDebug
+(cd android-reference-app && REFERENCE_DEPLOYMENT_FILE=deployment.prod.properties ./gradlew :app:assembleDebug)
 REFERENCE_WEB_DEPLOYMENT_FILE=deployment.prod.json npm --prefix web-reference run build
 ```
 

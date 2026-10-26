@@ -158,6 +158,8 @@ verifiedContext, meetingId)` 可在模型尾事件和采音用量保存后读取
 
 持久层只支持 MySQL 5.7 兼容基线：`JdbcDatabaseEngine` 只有 `MYSQL`，
 `DATABASE_URL` 必须是 `jdbc:mysql://`，其他协议在启动期被拒绝。
+完整运行时入口 `JdbcDatabaseRuntime` 依赖旧 PostgreSQL 基线、本版未适配 MySQL，
+启动时明确拒绝；请使用客户端直连模型入口。
 `startClientModel(...)` 不装配服务端 WSS／Mock 音频 Worker、删除或实时 Token 续签组件；
 相关有效 HTTP DELETE／renew 路由返回 501。
 公开交付的 MySQL V001 只对应默认客户端会议链，不能据此认为全部可选组件都已验收。
