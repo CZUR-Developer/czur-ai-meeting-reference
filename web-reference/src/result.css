@@ -22,6 +22,9 @@ h1 { font-size: 28px; line-height: 1.5; font-weight: 700; overflow: hidden; text
 .text-button { color: var(--accent); font-size: 14px; padding: 8px 12px; border-radius: 6px; white-space: nowrap; }
 #status { color: var(--muted); margin-top: 12px; font-size: 14px; }
 body[data-ready="true"] #status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.result-status, .result-warnings { margin: 8px 0 0; color: #8a6200; font-size: 14px; line-height: 1.6; }
+.result-warnings { padding-left: 20px; }
+.result-warnings li { margin-top: 4px; }
 .result-columns { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 28px; flex: 1; min-height: 0; margin-top: 24px; padding-bottom: 20px; }
 .result-columns.single-panel { grid-template-columns: minmax(0,1fr); }
 .original-panel, .insight-panel { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; }

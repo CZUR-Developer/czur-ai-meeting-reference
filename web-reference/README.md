@@ -47,6 +47,7 @@ READY 的 `presentation.capture` 截图包按修订序号读取，画面按会�
 | 发言人姓名 | 段落 `speakerDisplayName` 优先，再按 `sessionSpeakerId` 读取标准人物产物 | 无姓名时显示本场编号；人工改名不代表跨场登记成功 |
 | 总结／待办 | `summary.structured` 的 `title`、`overview`、`keyPoints`、`actionItems` | 隐藏未生成的总结能力 |
 | 媒体 | `audio.original` 的 Artifact URL；`presentation.capture` 的标准截图序列 | 隐藏相应控制 |
+| 结果状态与告警 | Manifest 的 `status`、`warnings[].code`、`warnings[].capability` | 保留正文阅读；`READY_WITH_WARNINGS` 展示告警但隐藏姓名编辑入口 |
 
 代码按三层拆分，均为原生 ES modules，无前端框架或运行时 npm 依赖：
 
@@ -60,7 +61,9 @@ READY 的 `presentation.capture` 截图包按修订序号读取，画面按会�
 
 ## 发言人改名与可选跨会议记录
 
-参考宿主通过能力发现的 `resultSpeakerEditingEnabled=true` 开放原文姓名按钮。
+参考宿主通过能力发现的 `resultSpeakerEditingEnabled=true` 开放原文姓名按钮；
+只有本场 Manifest 状态为 `READY` 时才真正渲染按钮。`READY_WITH_WARNINGS` 仍正常展示
+正文和降级告警，但后端姓名编辑端口只接受 `READY`，页面不再显示必然 409 的入口。
 持有有效结果链接即可输入昵称，不要求再次登录；选择“单个”（所选原文段）或“全局”（本场同一
 `sessionSpeakerId` 的全部原文段）。修改持久化到标准原文，不依赖声纹 Provider。
 无本场分人数据时没有姓名按钮。复制和 TXT 导出使用同一名称投影。

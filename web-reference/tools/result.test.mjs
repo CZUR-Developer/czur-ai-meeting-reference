@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createSpeakerIdentityActions, readFinalTranscript, renderFinalResult,
-  resultLinkExpired } from '../src/result.mjs';
+  resultLinkExpired, speakerEditingAllowed } from '../src/result.mjs';
 
 /** 人物注册后会重绘同一页；textContent 赋值像浏览器 DOM 一样清除原有子节点。 */
 function identityTestPage() {
@@ -13,6 +13,20 @@ function identityTestPage() {
     '#result', '#translations', '#translation-result', '#summary-result', '#summary-content',
     '#presentation-result', '#presentation-frames', '#audio-result', '#audio-player']
     .map(selector => [selector, node()]));
+  return { nodes, querySelector: selector => nodes[selector], createElement: node };
+}
+
+/** 含清单状态／告警区和可承载姓名按钮 dataset 的最小结果页。 */
+function noticesTestPage() {
+  const node = tagName => ({ tagName, hidden: true, children: [], dataset: {}, value: '',
+    get textContent() { return this.text || ''; },
+    set textContent(value) { this.text = value; this.children = []; },
+    append(...items) { this.children.push(...items); },
+    setAttribute() {} });
+  const nodes = Object.fromEntries(['#status', '#title', '#result-status', '#result-warnings',
+    '#transcript', '#transcript-segments', '#result', '#translations', '#translation-result',
+    '#summary-result', '#summary-content', '#presentation-result', '#presentation-frames',
+    '#audio-result', '#audio-player'].map(selector => [selector, node()]));
   return { nodes, querySelector: selector => nodes[selector], createElement: node };
 }
 
@@ -476,4 +490,54 @@ test('结构化纪要与字幕、译文和演示画面正交展示，缺席时�
   assert.equal(withSummary.nodes['#presentation-result'].hidden, false);
   assert.deepEqual(withSummary.nodes['#summary-content'].children.map(item => item.textContent),
     ['纪要标题', '概述']);
+});
+
+test('READY_WITH_WARNINGS 清单展示告警但隐藏姓名编辑，READY 清单正常开放', async () => {
+  const transcript = { text: '你好', segments: [
+    { segmentId: 'seg-1', text: '你好', sessionSpeakerId: 'speaker-1' }
+  ] };
+  const warnings = [{ code: 'PROVIDER_CAPABILITY_MISSING', capability: 'speaker.identity',
+    messageKey: 'ai_meeting.capability.provider_capability_missing', diagnosticId: null }];
+  const fetcher = manifest => async url => ({ ok: true, status: 200,
+    json: async () => url.includes('/manifest') ? manifest : transcript });
+  const discovery = { resultSpeakerEditingEnabled: true };
+
+  const warnedManifest = { title: '告警会议', status: 'READY_WITH_WARNINGS', warnings,
+    artifacts: [{ type: 'transcript.final', status: 'READY', artifactId: 'art_transcript' }] };
+  const warned = await readFinalTranscript('http://api.test', 'mtg_warned', '123',
+    fetcher(warnedManifest));
+  assert.equal(warned.status, 'READY_WITH_WARNINGS');
+  assert.deepEqual(warned.warnings, warnings);
+  assert.equal(speakerEditingAllowed(warned, discovery), false);
+  warned.speakerEditingEnabled = speakerEditingAllowed(warned, discovery);
+
+  const warnedPage = noticesTestPage();
+  renderFinalResult(warned, warnedPage);
+  const warnedSpeaker = warnedPage.nodes['#transcript-segments'].children[0].children[0];
+  assert.equal(warnedSpeaker.tagName, 'h3', '告警清单不应生成可点击的姓名按钮');
+  assert.equal(warnedSpeaker.children.length, 0);
+  assert.equal(warnedSpeaker.dataset.editSpeaker, undefined);
+  assert.equal(warnedSpeaker.textContent, '发言人 speaker-1');
+  assert.equal(warnedPage.nodes['#result-warnings'].hidden, false);
+  assert.equal(warnedPage.nodes['#result-warnings'].children.length, 1);
+  assert.match(warnedPage.nodes['#result-warnings'].children[0].textContent, /speaker\.identity/);
+  assert.equal(warnedPage.nodes['#result-status'].hidden, false);
+  assert.match(warnedPage.nodes['#result-status'].textContent, /降级告警/);
+  assert.equal(warnedPage.nodes['#status'].textContent, '结果已生成（有降级告警）');
+
+  const readyManifest = { ...warnedManifest, status: 'READY', warnings: [] };
+  const ready = await readFinalTranscript('http://api.test', 'mtg_ready', '456',
+    fetcher(readyManifest));
+  assert.equal(speakerEditingAllowed(ready, discovery), true);
+  assert.equal(speakerEditingAllowed(ready, { resultSpeakerEditingEnabled: false }), false);
+  ready.speakerEditingEnabled = speakerEditingAllowed(ready, discovery);
+
+  const readyPage = noticesTestPage();
+  renderFinalResult(ready, readyPage);
+  const readySpeaker = readyPage.nodes['#transcript-segments'].children[0].children[0];
+  const readyEdit = readySpeaker.children[0];
+  assert.equal(readyEdit.tagName, 'button');
+  assert.equal(readyEdit.dataset.editSpeaker, 'seg-1');
+  assert.equal(readyPage.nodes['#result-warnings'].hidden, true);
+  assert.equal(readyPage.nodes['#result-status'].hidden, true);
 });

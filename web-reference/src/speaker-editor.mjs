@@ -73,7 +73,9 @@ export function bindSpeakerNameEditing(page, actions, initialResult, render, dis
     try {
       const saved = await actions.rename(selected.sessionSpeakerId,
         get('speaker-edit-name').value, scope, selected.segmentId, remember);
-      current = { ...saved.result, speakerEditingEnabled: true };
+      // 重读的清单若不再是 READY，仍展示新名称但收起编辑入口，避免下一次写入 409。
+      current = { ...saved.result, speakerEditingEnabled:
+        initialResult.speakerEditingEnabled === true && saved.result.status === 'READY' };
       render(current, page);
       const message = registrationMessage(saved.registration);
       status.textContent = message;

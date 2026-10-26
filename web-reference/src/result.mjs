@@ -34,6 +34,9 @@ export async function readFinalTranscript(apiBaseUrl, meetingId, genTime,
   const presentation = artifacts.filter(item => item.type === 'presentation.capture'
     && item.status === 'READY').sort((a, b) => a.revision - b.revision);
   const result = { title: manifest.title, text: null };
+  // 清单状态和告警属于结果本身；页面据此展示降级信息并限制姓名编辑。
+  if (typeof manifest.status === 'string') result.status = manifest.status;
+  if (Array.isArray(manifest.warnings)) result.warnings = manifest.warnings;
   if (manifest.startedAt != null) result.startedAt = manifest.startedAt;
   if (manifest.durationMs != null) result.durationMs = manifest.durationMs;
   const audio = artifacts.find(item => item.type === 'audio.original'
@@ -180,8 +183,52 @@ function meetingTime(offsetMs) {
   return formatTime(offsetMs / 1000);
 }
 
+/** 姓名编辑只在本场清单为 READY 且部署开放时启用；告警清单后端只读，写入必然 409。 */
+export function speakerEditingAllowed(result, discovery) {
+  return result?.status === 'READY' && discovery?.resultSpeakerEditingEnabled === true;
+}
+
+const WARNING_REASONS = {
+  NOT_GRANTED: '本场未授权该能力',
+  DEPLOYMENT_LIMIT: '该能力受部署限制',
+  PROVIDER_CAPABILITY_MISSING: '模型服务未提供该能力'
+};
+
+/** 只投影标准告警字段；messageKey 是本地化键，不直接当成人话显示。 */
+export function warningText(warning) {
+  const code = typeof warning?.code === 'string' ? warning.code.trim() : '';
+  const capability = typeof warning?.capability === 'string' ? warning.capability.trim() : '';
+  const reason = WARNING_REASONS[code] || (code ? `该能力已降级（${code}）` : '该能力已降级');
+  return capability ? `${reason}：${capability}` : reason;
+}
+
+function renderResultNotices(result, page) {
+  const status = typeof result.status === 'string' ? result.status : '';
+  const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+  const notice = page.querySelector('#result-status');
+  if (notice) {
+    notice.textContent = status === 'READY_WITH_WARNINGS'
+      ? (warnings.length > 0 ? `结果已生成，存在 ${warnings.length} 条降级告警`
+        : '结果已生成，存在降级告警')
+      : '';
+    notice.hidden = status !== 'READY_WITH_WARNINGS';
+  }
+  const list = page.querySelector('#result-warnings');
+  if (list) {
+    list.textContent = '';
+    for (const warning of warnings) {
+      const item = page.createElement('li');
+      item.textContent = warningText(warning);
+      list.append(item);
+    }
+    list.hidden = warnings.length === 0;
+  }
+  return { status, warnings };
+}
+
 export function renderFinalResult(result, page) {
   const status = page.querySelector('#status');
+  const { status: manifestStatus } = renderResultNotices(result, page);
   page.querySelector('#title').textContent = result.title || '会议结果';
   // 注册后重读的是同一场完整结果；先清已有内容，避免字幕、纪要及人物名单重复追加。
   for (const selector of ['#result', '#translation-result', '#summary-result', '#todos-result',
@@ -206,7 +253,8 @@ export function renderFinalResult(result, page) {
   const segmentElements = new Map();
   const groupedTranslations = translationsBySegment(result.translations);
   if (!hasTranscript && !hasTranslation && !hasSummary && !hasPresentation && !hasAudio) {
-    status.textContent = '本场会议没有识别到字幕';
+    status.textContent = manifestStatus === 'READY_WITH_WARNINGS'
+      ? '本场会议没有识别到字幕（有降级告警）' : '本场会议没有识别到字幕';
     bindResultUi(result, page);
     return;
   }
@@ -225,7 +273,9 @@ export function renderFinalResult(result, page) {
         const id = typeof item.sessionSpeakerId === 'string'
           ? item.sessionSpeakerId.trim() : '';
         const label = speakerDisplayName(item, identities);
-        if (result.speakerEditingEnabled && id && item.segmentId) {
+        // 后端姓名编辑端口只接受 READY；READY_WITH_WARNINGS 仍可阅读，但不给入口。
+        if (result.speakerEditingEnabled === true && manifestStatus === 'READY'
+            && id && item.segmentId) {
           const edit = page.createElement('button');
           edit.type = 'button'; edit.className = 'speaker-edit-trigger';
           edit.textContent = label;
@@ -320,7 +370,8 @@ export function renderFinalResult(result, page) {
     if (player.src !== result.audio.url) player.src = result.audio.url;
     page.querySelector('#audio-result').hidden = false;
   }
-  status.textContent = '结果已生成';
+  status.textContent = manifestStatus === 'READY_WITH_WARNINGS'
+    ? '结果已生成（有降级告警）' : '结果已生成';
   bindResultUi(result, page);
 }
 
@@ -350,7 +401,7 @@ async function showResult() {
     const result = await readFinalTranscript(config.apiBaseUrl || '', meetingId, genTime,
       globalThis.fetch, ms => new Promise(resolve => setTimeout(resolve, ms)),
       () => { status.textContent = '结果生成中…'; });
-    result.speakerEditingEnabled = discovery.resultSpeakerEditingEnabled === true;
+    result.speakerEditingEnabled = speakerEditingAllowed(result, discovery);
     renderFinalResult(result, document);
     const actions = createSpeakerIdentityActions(config.apiBaseUrl || '', meetingId, genTime,
       globalThis.fetch, undefined, { requiresLogin: discovery.resultSpeakerEditingRequiresLogin !== false });
