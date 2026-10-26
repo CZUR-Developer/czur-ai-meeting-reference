@@ -350,12 +350,12 @@ npm --prefix web-reference run build
 `deployment.local.json` 的 `apiBaseUrl` 填浏览器可达的 API；正式 HTTPS 站点使用 HTTPS API，
 配置相应跨域读取或同源路由。再以正式后端和结果站点地址重建 App。
 
-这份文件缺了或没填，`npm run build` 会直接失败并指出缺哪个文件，不会产出打开就报“缺少后端配置”
+这份文件缺了或没填，`npm --prefix web-reference run build` 会直接失败并指出缺哪个文件，不会产出打开就报“缺少后端配置”
 的页面。测试／生产各留一份，用 `REFERENCE_WEB_DEPLOYMENT_FILE=deployment.prod.json` 切换；
 临时验证也可以直接给值，不必落文件：
 
 ```bash
-REFERENCE_API_BASE_URL='https://your-backend:8443' npm run build
+REFERENCE_API_BASE_URL='https://192.0.2.10:8443' npm --prefix web-reference run build
 ```
 生产 Release 使用部署方正式证书，不携带本机 Debug CA。完整说明见[部署文档](../deploy/README.md)。
 

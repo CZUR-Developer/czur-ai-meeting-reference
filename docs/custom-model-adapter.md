@@ -88,7 +88,7 @@ public final class MyBackendMain {
         // 先拿内置注册表，再追加自己的实现；同 ID 重复注册会报错，不会静默覆盖。
         ModelSessionIssuerRegistry issuers = ReferenceMeetingHttpAssembly.defaultRegistry(
                 ReferenceMeetingDeploymentConfig.fromEnvironment(env), clock)
-            .register("my-asr", context -> new MySessionIssuer(
+            .register("my-asr", context -> new MyModelSessionIssuer(
                 URI.create(context.environment().get("MY_MODEL_ENDPOINT")),
                 context.environment().get("MY_MODEL_API_KEY"),
                 context.clock()));
