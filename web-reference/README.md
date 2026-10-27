@@ -123,6 +123,21 @@ npm run build             # 生成 web-reference/dist/
 生成的 `dist/config.json` 一起放进产物。缺少这份文件或字段为空时构建直接失败，不会产出
 打开就报"缺少后端配置"的页面。测试／生产各留一份，用 `REFERENCE_WEB_DEPLOYMENT_FILE` 切换。
 
+手工打开结果页时两个参数都要带：
+
+```text
+http://<主机>:8090/index.html?meetingId=<mtg_...>&genTime=<毫秒时间戳>
+```
+
+`meetingId` 是 Create 响应里的 `mtg_...`；`genTime` 是生成链接时的 Unix 毫秒
+（`date +%s%3N`），服务端按 `resultLinkTtlMs` 判断过期，`-1` 只在诊断时表示永不过期。
+缺 `genTime` 时页面拿不到有效期上下文，会直接报错；链接过期后重新取一个 `genTime`。
+
+`dist/` 和其中的 `config.json` 是按仓库路径固定的，同一份 clone 上并行跑两份部署会互相覆盖：
+`tools/run-reference-web.sh` 每次启动都会重新构建，把当前的 `REFERENCE_HTTP_BASE_URL`
+写进同一个 `web-reference/dist/config.json`，已经在提供服务的 8090／8091 实例也会跟着换
+地址。要并行对比，用独立的 clone 或 `git worktree`，各自构建自己的 `dist/`。
+
 静态 Web 与后端不在同一来源时，需要部署侧允许结果接口跨域读取。不要把真实地址或令牌
 提交到 Git；HTTPS 后端需使用浏览器／设备实际信任的证书。
 

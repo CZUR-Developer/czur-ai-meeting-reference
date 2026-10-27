@@ -21,8 +21,13 @@ bash ./migrate.sh
 bash ./healthcheck-db.sh
 ```
 
-脚本只新增 `ai_trans_*` 会议专用表，不创建数据库／账号，不读写旧业务表。部署方先建库
-和账号；迁移账号需要一次性 DDL，应用账号只保留运行期 DML，不要复用旧业务库：
+`DATABASE_URL` 必须整段带单引号：值里的 `?` 和 `&` 不加引号会被 shell 当成通配符和
+后台运算符，命令会被截断或直接报错。写进 `deploy/.env` 或仓外运行配置时同理。
+
+脚本只新增 `ai_trans_*` 会议专用表，不创建数据库／账号，不读写旧业务表。
+开发期图省事可以用一个高权限账号（例如本机 root）一次建库、建号并执行 V001；
+**交付和生产的口径是分账号、最小权限**：迁移账号只要一次性 DDL，应用账号只保留运行期
+DML，不要复用旧业务库，也不要把 root 凭据写进 `.env` 或仓外运行配置：
 
 ```sql
 CREATE DATABASE meeting_reference CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
@@ -66,14 +71,37 @@ docker compose up --build
 不使用容器做开发检查时，直接运行：
 
 ```bash
+# 运行配置放仓外，默认 ~/.config/ai-meeting/reference-client.env；
+# 换路径时先 export REFERENCE_ENV_FILE=<仓外路径>。
 bash ../tools/migrate-reference-client.sh
 bash ../tools/run-reference-client-backend.sh
 ```
+
+这两个脚本读同一份仓外 `KEY=VALUE` 配置，不读 `deploy/.env`，也不自动加载仓库内
+其他文件。不要把这份配置改放回 `tools/`：`tools/check-public-boundary.py` 按工作区
+扫描文件内容，仓库里填好密码的 `*.env` 会让交付检查判失败。
 
 Compose 中的 `DATABASE_URL` 必须从应用容器可达；宿主机初始化也需要访问该数据库。
 建议填写两端都能访问的数据库 DNS／地址，不能把容器内的 `127.0.0.1` 当作宿主机
 或数据库容器。仅绑定宿主 loopback 的临时 MySQL 是本机 JVM 联调依赖，不能直接
 套用为独立容器的数据库地址。数据库连接／网络策略由部署方按自己的外部 MySQL 配置。
+
+## 改端口和地址要同步哪些地方
+
+后端端口不是一处配置。改动前先确认下面五处指向同一个端口，否则健康检查和 HTTPS
+入口会稳定 502，设备登录也会连到没人监听的地址：
+
+| 位置 | 配置项 | 默认值 | 改哪里 |
+| --- | --- | --- | --- |
+| 后端监听 | `AI_MEETING_HTTP_BIND` | `0.0.0.0:8080` | 仓外运行配置；容器内由 `deploy/docker-compose.yml` 固定为 `0.0.0.0:8080` |
+| 本机健康检查 | `REFERENCE_HTTP_BASE_URL` | `http://127.0.0.1:8080` | `tools/check-reference-backend.sh` 读取的环境变量，不改脚本 |
+| HTTPS 入口上游 | `REFERENCE_TLS_UPSTREAM` | `http://127.0.0.1:8080` | 启动 `tools/run-reference-lan-https.mjs` 时的环境变量 |
+| Web 的 API 地址 | `REFERENCE_HTTP_BASE_URL` | 同健康检查 | `tools/run-reference-web.sh` 用它生成 `dist/config.json` 的 `apiBaseUrl` |
+| App 的后端地址 | `backendUrl` | 无默认值 | `android-reference-app/deployment.local.properties`，改后必须重建 APK |
+
+容器部署时宿主端口另由 `deploy/.env` 的 `API_PORT` 映射到容器 `8080`；此时只改
+`API_PORT` 和上面四处引用宿主端口的值，不要改 Compose 里的容器内监听。
+HTTPS 入口自身端口（默认 `8443`）不在这个清单里，见下节的 `REFERENCE_TLS_PORT`。
 
 ## Android HTTPS 与静态 Web
 
@@ -82,6 +110,9 @@ Compose 中的 `DATABASE_URL` 必须从应用容器可达；宿主机初始化�
 入口时，按[本机局域网 HTTPS 联调](../docs/local-lan-https.md)生成仓外证书、
 启动现有 Node TLS 入口并构建信任该公开 CA 的 Debug APK；上游使用
 `http://127.0.0.1:<API_PORT>`，App 后端构建地址为 `https://<PC_LAN_IP>:8443`。
+`8443` 被其他服务占用时，用 `REFERENCE_TLS_PORT` 换一个端口（例如 `18443`），
+同时把 App 的 `backendUrl` 改成 `https://<PC_LAN_IP>:18443` 并重建 APK；证书 SAN
+里写的是 IP，与端口无关，不用重签。
 部署地址由开发者在 PC 上配置并注入 APK，终端用户只输入账号／密码。不要把设备自己的
 `127.0.0.1` 或上游 HTTP 地址当作 LAN 登录入口。
 
@@ -102,11 +133,40 @@ App Web 结果构建地址使用 `http://<PC_LAN_IP>:8090/index.html`；Web 的
 应使用同样可达的 HTTPS API，避免混合内容。仓库只交付后端应用镜像，不新增 Web
 或数据库镜像。
 
+手工打开结果页时必须同时带会议 ID 和链接生成时间：
+
+```text
+http://<PC_LAN_IP>:8090/index.html?meetingId=<mtg_...>&genTime=<毫秒时间戳>
+```
+
+`meetingId` 是 Create 响应里的 `mtg_...`，`genTime` 是生成这条链接时的 Unix 毫秒
+（`date +%s%3N`），服务端按部署配置的 `AI_MEETING_RESULT_LINK_TTL_MS` 判断过期；
+`genTime=-1` 表示永不过期，只用于本机诊断。只给 `meetingId` 时页面拿不到有效期上下文，
+会直接报错；链接过期后页面显示结果不可读，重新取一次 `genTime` 即可。
+
 Android 的部署参数在 `android-reference-app/deployment.local.properties`
 （已被 Git 忽略，模板为同目录 `.example`）：`backendUrl` 填设备可达的 HTTPS 后端，
 `resultWebUrl` 填结果页地址，构建时注入；缺配置时 `./gradlew` 直接失败。
 Debug 联调的自签 CA 放在 `app/src/debug/res/raw/reference_debug_ca.pem`（已被 Git 忽略）。
 完整命令见 [Android 构建／启动工具](../tools/android-device/README.md)。
+
+## 同机跑多份部署
+
+构建产物目录是按仓库路径固定的，不是按配置隔离的：`web-reference/dist/`、
+`web-reference/dist-check/`、`backend-core/target/` 和 `backend-reference/target/`
+都被同一份 clone 的所有配置共用。
+
+- `tools/run-reference-web.sh` 每次启动都会先 `npm run build`，并把当前的
+  `REFERENCE_HTTP_BASE_URL` 重新写进 `web-reference/dist/config.json`。也就是说，
+  在同一份 clone 上再起一个 8091，会把已经跑着的 8090／8091 实例正在提供的
+  `config.json` 一起改掉，旧实例的页面会悄悄换成新地址。要并行对比两份部署，
+  每份用独立的 clone／`git worktree`，各自构建自己的 `dist/`。
+- `run-reference-client-backend.sh` 不加 `SKIP_BUILD=1` 时会先 `mvn install`，
+  写的是同一份 `target/`；两个进程同时构建会互相覆盖 JAR 和 `runtime-libs/`，
+  启动的可能是对方刚构建出来的产物。并行部署时用独立 clone，或先分别构建再
+  以 `SKIP_BUILD=1` 启动。
+- 部署配置、证书、产物目录和数据库仍各自独立；不要用同一份仓外配置同时跑两个
+  监听地址不同的后端，端口与地址会互相覆盖。
 
 ## 本机常驻运行（可选）
 

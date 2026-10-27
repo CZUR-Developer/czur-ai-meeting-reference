@@ -79,7 +79,10 @@
 ## 3. 模型资源与配置入口
 
 本机配置使用 [`tools/reference-client.env.example`](../tools/reference-client.env.example)
-复制出的本地文件，容器使用根 [`.env.example`](../.env.example) 复制出的 `deploy/.env`。
+复制到**仓库外**的本地文件（默认 `~/.config/ai-meeting/reference-client.env`，用
+`REFERENCE_ENV_FILE` 可换路径），容器使用根 [`.env.example`](../.env.example) 复制出的
+`deploy/.env`。不要把它复制成仓库里的 `tools/reference-client.env`：公开边界检查按
+工作区扫描，填好密码的仓库内配置会让交付检查失败。
 以下片段编辑到正在使用的同一配置文件中，替换同名旧值；省略号和占位值不代表可直接运行。
 修改后重启后端，刷新 App 能力并开新会议。
 

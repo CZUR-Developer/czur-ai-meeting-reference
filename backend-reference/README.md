@@ -28,13 +28,19 @@ Android App → SDK → 实时模型
 在仓库根目录运行：
 
 ```bash
-cp tools/reference-client.env.example tools/reference-client.env
-# 先编辑本机配置，再初始化与启动；不要提交填好凭据的配置。
+mkdir -p ~/.config/ai-meeting
+cp tools/reference-client.env.example ~/.config/ai-meeting/reference-client.env
+export REFERENCE_ENV_FILE=~/.config/ai-meeting/reference-client.env
+# 先编辑仓外这份配置，再初始化与启动；不要提交填好凭据的配置。
 bash tools/migrate-reference-client.sh
 bash tools/run-reference-client-backend.sh
 # 另一个终端检查：
 bash tools/check-reference-backend.sh
 ```
+
+运行配置默认读 `~/.config/ai-meeting/reference-client.env`，可用 `REFERENCE_ENV_FILE`
+换成别的仓外路径；不要放回仓库的 `tools/`，`tools/check-public-boundary.py` 会把
+工作区里填好密码的配置判为失败。
 
 部署方须先创建 MySQL 5.7 专用数据库与账号。初始化脚本只执行仓库唯一的
 [MySQL V001](../deploy/migrations/V001__initial_schema.sql)，应用启动只检查基线，

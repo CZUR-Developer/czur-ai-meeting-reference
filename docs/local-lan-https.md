@@ -77,6 +77,10 @@ node tools/run-reference-lan-https.mjs
 `0.0.0.0`。上游地址须指向实际 HTTP 监听端口。日志只报告启动端口和固定错误，
 不会展开请求正文、认证头或仓外文件内容。
 
+`8443` 被其他服务占用时，把 `REFERENCE_TLS_PORT` 换成空闲端口（例如 `18443`），
+设备访问地址随之变成 `https://<PC_LAN_IP>:18443`；App 构建时注入的 `backendUrl`
+必须同步改端口并重建 APK。证书的 SAN 写的是局域网 IP，与端口无关，不用重签。
+
 可在 PC 使用相同 CA 做一次正常读取：
 
 ```bash
@@ -118,7 +122,10 @@ HTTPS 证书。运维提供正式 CA 后，替换调试 CA 文件或改走系统
 Web 仍沿用已有静态 Web 启动脚本；`REFERENCE_HTTP_BASE_URL` 可使用 PC 的局域网
 HTTP 后端地址，App 的 Web 结果构建地址指向设备可达的静态站点（例如
 `http://<PC_LAN_IP>:8090/index.html`），与后端 API 地址分开配置。结果页无需与 Android 入口采用
-相同协议。生产 HTTPS 页面应连接 HTTPS API，避免混合内容。若浏览器结果页也指向该
+相同协议。手工打开结果页要带上会议 ID 和生成时间，例如
+`http://<PC_LAN_IP>:8090/index.html?meetingId=<mtg_...>&genTime=<毫秒时间戳>`：
+`genTime` 取 `date +%s%3N`，服务端按统一有效期判断过期，缺了页面会直接报错。
+生产 HTTPS 页面应连接 HTTPS API，避免混合内容。若浏览器结果页也指向该
 开发 HTTPS 入口，浏览器需要自行信任这份本机 CA；Android Debug 的信任不影响浏览器。
 
 正常启动可用 [`meeting-device.py`](../tools/android-device/README.md) 的

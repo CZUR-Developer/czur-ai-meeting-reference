@@ -98,7 +98,9 @@
 python3 -m pip install 'websockets>=13,<14'
 python3 tools/sample-json-ws-model.py --host 0.0.0.0 --port 19091
 
-# 2) 后端配置（参考模板默认就是这条路径）
+# 2) 后端配置：模板默认就是这条 adapter 路径。
+#    配置文件放仓外，例如 ~/.config/ai-meeting/reference-client.env，
+#    并用 REFERENCE_ENV_FILE 指向它；不要复制成仓库里的 tools/reference-client.env。
 AI_MEETING_MODEL_ADAPTER=sample-json-ws
 AI_MEETING_SAMPLE_JSON_WS_ENDPOINT=ws://<开发机局域网 IP>:19091
 ```
@@ -118,6 +120,9 @@ AI_MEETING_SAMPLE_JSON_WS_ENDPOINT=ws://<开发机局域网 IP>:19091
 - [ ] `mysql -h <host> -u <user> -p <db>` 能连上，且已通过 `deploy/migrate.sh`
       （本机模板用 `bash tools/migrate-reference-client.sh`）登记 `V001__initial_schema`；
       只手工执行 SQL 文件不算完成。
+- [ ] 后端运行配置在仓外（默认 `~/.config/ai-meeting/reference-client.env`，或用
+      `REFERENCE_ENV_FILE` 指定）；仓库里没有 `tools/reference-client.env`。
+      `python3 tools/check-public-boundary.py` 输出 `PUBLIC_BOUNDARY_OK`。
 - [ ] `deployment.local.properties` 里 `backendUrl`、`resultWebUrl` 已填，构建时不再报“缺少部署配置”。
 - [ ] `backendUrl` 是设备可达的 HTTPS 地址；开发自签证书已按
       [本机局域网 HTTPS](local-lan-https.md) 放到 Debug CA 路径，正式环境由部署方提供证书。

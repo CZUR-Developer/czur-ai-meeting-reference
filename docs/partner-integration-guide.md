@@ -39,11 +39,17 @@ Android App、Java 21 后端和静态 Web 结果页，并指出各项能力的�
 
 ```bash
 cd czur-ai-meeting-reference
-cp tools/reference-client.env.example tools/reference-client.env
-# 编辑 tools/reference-client.env：数据库、演示账号、模型 Adapter 和可写产物目录
+mkdir -p ~/.config/ai-meeting
+cp tools/reference-client.env.example ~/.config/ai-meeting/reference-client.env
+export REFERENCE_ENV_FILE=~/.config/ai-meeting/reference-client.env
+# 编辑仓外这份文件：数据库、演示账号、模型 Adapter 和可写产物目录
 bash tools/migrate-reference-client.sh
 bash tools/run-reference-client-backend.sh
 ```
+
+运行配置放仓外（也可以换成别的仓外目录，用 `REFERENCE_ENV_FILE` 指过去）。
+不要复制成仓库里的 `tools/reference-client.env`：公开边界检查按工作区扫描，
+仓库内填好密码的配置会让 `python3 tools/check-public-boundary.py` 判失败。
 
 另开终端检查后端和 Web：
 

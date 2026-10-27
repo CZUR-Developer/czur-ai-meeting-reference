@@ -106,15 +106,21 @@ Maven 的开发环境中打开。
 本机开发检查直接使用这些工具。后端 Docker 镜像是另一条交付部署路径，见第 6 节；
 没有 MySQL 实例时可自行使用临时测试容器，数据库容器不属于本工程交付物。
 
-### 3.3 两个本地配置文件（都不在仓库里）
+### 3.3 三个本地配置文件（都不在仓库里）
 
-部署地址不进仓库，由本地文件提供；Android 和 Web 各一份，都已被 `.gitignore` 忽略。
-缺少时**构建直接失败**，不会产出连不上后端的包或页面。
+部署地址和运行配置不进仓库：Android 和 Web 各一份构建期文件，后端运行配置一份放仓外。
+三者都不随仓库走；前两份缺少时**构建直接失败**，第三份默认从仓外路径读取，脚本找不到会明确报错。
 
 | 文件 | 从哪来 | 作用 | 缺了会怎样 |
 | --- | --- | --- | --- |
 | `android-reference-app/deployment.local.properties` | 复制同目录的 `.example` | APK 的后端地址与结果页地址，构建时注入 `BuildConfig` | `./gradlew` 直接失败，提示填 `backendUrl`／`resultWebUrl` |
 | `web-reference/deployment.local.json` | 复制同目录的 `.example` | 结果页的后端地址，构建时生成 `dist/config.json` | `npm run build` 直接失败，提示填 `apiBaseUrl` |
+| `~/.config/ai-meeting/reference-client.env` | 复制 `tools/reference-client.env.example`，**复制到仓外** | 后端监听、数据库、示例登录、模型 Adapter 和产物目录 | 启动脚本报 `未找到配置文件`，不会带着默认值启动 |
+
+后端运行配置不要放回仓库的 `tools/` 目录：`tools/check-public-boundary.py` 扫描的是
+工作区文件而不是 Git 跟踪文件，仓库内只要躺着一份填好密码的 `reference-client.env`，
+交付检查就会输出 `PUBLIC_BOUNDARY_FAILED`。换位置时用
+`export REFERENCE_ENV_FILE=<仓外绝对路径>` 指向；两个本机脚本都认这个变量。
 
 要区分测试与生产，就多留几份文件，用环境变量选择：
 
@@ -132,16 +138,33 @@ REFERENCE_WEB_DEPLOYMENT_FILE=deployment.prod.json npm --prefix web-reference ru
 下面所有相对路径均以仓库根目录为起点，另有说明的命令除外。
 先只启用中文／英语字幕、文件结果存储和示例登录，避免同时排查多个外部服务。
 
-### 第 1 步：建立本机配置
+### 第 1 步：建立本机运行配置（放仓外）
 
 ```bash
 cd czur-ai-meeting-reference
-cp tools/reference-client.env.example tools/reference-client.env
+mkdir -p ~/.config/ai-meeting
+cp tools/reference-client.env.example ~/.config/ai-meeting/reference-client.env
+export REFERENCE_ENV_FILE=~/.config/ai-meeting/reference-client.env
 ```
 
-编辑新文件，而非 `.example` 模板。新文件已被 Git 忽略。该模板默认使用
-`sample-json-ws` 协议样例，其地址没有随工程启动真实模型。使用听悟时，必须将
-下列设置改为自己的值，保留模板中的其他必需配置：
+**不要**照旧复制成 `tools/reference-client.env`。`tools/check-public-boundary.py` 按工作区
+扫描，不看 Git 是否忽略；仓库里有一份填好密码的配置文件就会让交付检查输出
+`PUBLIC_BOUNDARY_FAILED`。两个本机脚本默认读 `~/.config/ai-meeting/reference-client.env`，
+换路径时在每个新终端重新 `export REFERENCE_ENV_FILE=<仓外路径>`。
+
+编辑刚复制到仓外的文件，而非 `.example` 模板。该模板默认使用 `sample-json-ws` 协议样例，
+其地址没有随工程启动真实模型。**先改模型端点**：它是设备直连的地址，模板默认的
+`127.0.0.1` 在真机上指设备自己，设备只会连到自己，表现为会议开起来但没有字幕。
+
+```dotenv
+# 开发机的局域网 IP，不是 127.0.0.1
+AI_MEETING_SAMPLE_JSON_WS_ENDPOINT=ws://192.168.1.20:19091/model
+```
+
+保留 `ws://127.0.0.1:19091/model` 只在 App、后端、样例模型都跑在同一台机器、并用
+`adb reverse` 把 19091 映射到设备的单机自测里成立；真机联调一律改局域网 IP。
+
+使用听悟时，必须将下列设置改为自己的值，保留模板中的其他必需配置：
 
 ```dotenv
 DATABASE_URL='jdbc:mysql://127.0.0.1:3306/meeting_reference?useSSL=false&allowPublicKeyRetrieval=true'
@@ -171,17 +194,22 @@ AI_MEETING_ARTIFACT_ROOT=.local/reference-artifacts
 AI_MEETING_SPEAKER_IDENTITY_PROVIDER=none
 ```
 
+`DATABASE_URL` 这一行必须带单引号：值里的 `&` 不加引号会被 Bash 当成后台运算符，
+后面的参数会被截断或报错。凡是含空格、`$`、`&`、`?`、`#` 的值都用单引号包住。
+
 将同名项修改为唯一有效赋值，避免在文件后部留下旧值覆盖新值。首次不用设置
 `AI_MEETING_PROFILE_OPTIONAL_CAPABILITIES`，也不用开启总结。
-本地文件由 Bash 加载，使用 shell 兼容的 `KEY=VALUE` 格式；密码等值含空格、`$`
-或其他特殊字符时应正确加引号，建议使用单引号包裹。
+本地文件由 Bash 直接 `source`，按 shell 规则解析 `KEY=VALUE`；值里含空格、`$`、`&`
+或其他特殊字符时用单引号包住。
 
 还需检查：
 
 - 会话 Token 和分页 Secret 分别生成至少 32 个 UTF-8 字节的随机值，可各运行一次 `openssl rand -hex 32`；示例占位值不能用于登录。
 - 将 `REFERENCE_DEV_IDENTITY_ISSUED_AT`／`REFERENCE_DEV_IDENTITY_EXPIRES_AT` 改为覆盖当前部署时刻的 UTC 时间，分别表示签发与过期时间；不要长期照抄模板年份。
 - `AI_MEETING_PROFILE_ID=reference-asr` 和 `AI_MEETING_PROFILE_REVISION=1` 与当前参考 App 匹配，首次接入保留。
-- 初次使用模板的 `0.0.0.0:8080` HTTP 监听；MySQL 的 `127.0.0.1` 仅表示数据库就在开发电脑上。
+- 初次使用模板的 `0.0.0.0:8080` HTTP 监听；改端口要同步四处（后端监听、健康检查、
+  Web 的 `apiBaseUrl`、App 的 `backendUrl`），清单见[部署文档](../deploy/README.md#改端口和地址要同步哪些地方)。
+- MySQL 的 `127.0.0.1` 仅表示数据库就在开发电脑上。
 - 模型永久凭据只填本机后端配置，不写入 Android 部署文件、APK、Web 配置或 Git。
 
 配置在后端启动时读取。修改后需要重启该后端进程，并在下一场会议验证。
@@ -191,11 +219,18 @@ AI_MEETING_SPEAKER_IDENTITY_PROVIDER=none
 由数据库管理员先创建专用数据库及账号，例如数据库名 `meeting_reference`，
 编码使用 `utf8mb4`；确认第 1 步连接信息与之对应。
 
+开发期图省事，可以直接用本机 root 建库、建号并只跑一次迁移；**交付和生产的口径是
+最小权限**：迁移账号只要一次性 DDL（`CREATE/ALTER/INDEX/REFERENCES` 加读写），
+应用账号只保留运行期 `SELECT/INSERT/UPDATE/DELETE`，两者分开申请，不复用旧业务库。
+完整的建库建号 SQL 与边界见[部署文档](../deploy/README.md#数据库)。
+
 ```bash
 bash tools/migrate-reference-client.sh
 ```
 
-该脚本委托唯一初始化入口 [deploy/migrate.sh](../deploy/migrate.sh) 执行
+脚本默认读取 `~/.config/ai-meeting/reference-client.env`；第 1 步换过位置时，
+执行前先 `export REFERENCE_ENV_FILE=<仓外路径>`。它委托唯一初始化入口
+[deploy/migrate.sh](../deploy/migrate.sh) 执行
 [`V001__initial_schema.sql`](../deploy/migrations/V001__initial_schema.sql)，创建
 `ai_trans_*` 专用表并登记 `V001__initial_schema`。它不创建数据库或账号，不迁移其他
 业务表。应用启动只检查登记结果，不自动建表；只手工执行 SQL 文件不会写登记，后端会
@@ -226,7 +261,7 @@ curl --fail http://127.0.0.1:8080/v1/capabilities
 
 先确定开发电脑的局域网 IP。以下 `192.0.2.10` 是文档占位地址，执行前换成实际值。
 
-1. 依照[本机局域网 HTTPS 指南](local-lan-https.md#1-在仓外生成本机-ca-和-ip-san-证书)第 1、2 节生成开发 CA／服务端证书并启动 TLS 入口：设备访问 `https://<PC_LAN_IP>:8443`，上游转到本机 `http://127.0.0.1:8080`。若已有可信域名／HTTPS 代理，可直接使用。
+1. 依照[本机局域网 HTTPS 指南](local-lan-https.md#1-在仓外生成本机-ca-和-ip-san-证书)第 1、2 节生成开发 CA／服务端证书并启动 TLS 入口：设备访问 `https://<PC_LAN_IP>:8443`，上游转到本机 `http://127.0.0.1:8080`。`8443` 被别的服务占用时，给入口加 `REFERENCE_TLS_PORT=18443`（换成实际空闲端口），再把第 5 步 App 的 `backendUrl` 改成 `https://<PC_LAN_IP>:18443`；证书 SAN 写的是 IP，不用重签。若已有可信域名／HTTPS 代理，可直接使用。
 2. 另开终端 C，启动会后 Web：
 
 ```bash
@@ -286,6 +321,7 @@ adb install -r android-reference-app/app/build/outputs/apk/debug/app-debug.apk
 
 地址在打包时确定，终端用户没有手填 IP 的步骤。App 保存当前后端的有效登录；
 保留数据覆盖安装或重开后可恢复登录，退出会清除会话，更换后端的 APK 不复用旧身份。
+
 ### 第 6 步：登录、开会、停止并看结果
 
 1. 在设备上打开参考 App，使用第 1 步设置的参考用户名／密码登录。
@@ -300,8 +336,116 @@ adb install -r android-reference-app/app/build/outputs/apk/debug/app-debug.apk
 步骤完成后，您拥有自己的真实字幕闭环。结果就绪 `READY` 表示本场标准产物已发布；
 没有启用的可选能力不会生成空结果区。不要通过杀进程或清数据代替正常停止。
 
+手工打开结果页时不要把 URL 截短，`meetingId` 和 `genTime` 两个参数缺一不可：
+
+```text
+http://<PC_LAN_IP>:8090/index.html?meetingId=mtg_xxxxxxxxxxxx&genTime=<毫秒时间戳>
+```
+
+| 参数 | 含义 | 从哪来 |
+| --- | --- | --- |
+| `meetingId` | 本场会议 ID，形如 `mtg_...` | Create 响应或本场 Manifest |
+| `genTime` | 生成这条链接时的 Unix 毫秒时间戳 | 取当前时间，例如 `date +%s%3N`；`-1` 表示永不过期，只用于本机诊断 |
+
+服务端用 `genTime + AI_MEETING_RESULT_LINK_TTL_MS` 判断链接是否过期，过期后页面显示
+结果不可读；重新取一个当前 `genTime` 就能打开。只带 `meetingId` 时页面没有有效期上下文，
+会直接报错。
+
 自动启动、正常停止和 Web 检查可使用[现有脚本](../tools/android-device/README.md#日常会议流程)，
 脚本走原有 App 入口，不需要修改会议核心。
+
+### 只用 HTTP 走完一场会议（不装 App）
+
+想在接 Android 前确认后端本身没问题，可以只用 curl 走完同一场会议。下面的顺序就是
+参考 App 的真实调用顺序：登录 → Create → startClient → 事件 → usage → stop → manifest。
+路由和字段的权威定义在[公开契约](../contracts/ai-meeting-openapi.yaml)，这里只给能抄起来
+跑的最小片段；先按第 2、3 步初始化数据库并启动后端，再另开一个终端。片段里的
+`profile.id=reference-asr` 和 `languages` 要跟第 1 步的 `AI_MEETING_PROFILE_ID`、
+`AI_MEETING_MODEL_LANGUAGES` 一致，改过就同步改。`python3` 只用来从 JSON 里取字段，
+命令行已经装好则不必额外依赖。
+
+```bash
+BASE='http://127.0.0.1:8080'
+
+# 1. 登录：换回参考实现签发的 Bearer Token
+TOKEN=$(curl -sS -X POST "$BASE/v1/reference/session:login" \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"meeting-user","password":"<第 1 步的 REFERENCE_DEV_LOGIN_PASSWORD>"}' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["accessToken"])')
+
+# 2. Create：Idempotency-Key 必填（16–128 字符）；同键重试返回同一场会议。
+#    clientSessionId 也不能和已有会议重复，拼一个时间戳，重复执行才不会冲突。
+RUN_ID="$(date +%s%3N)"
+CREATE_BODY=$(cat <<JSON
+{
+  "clientSessionId": "curl-demo-$RUN_ID",
+  "profile": {"id": "reference-asr", "revision": 1},
+  "client": {"appId": "curl-demo", "appVersion": "1", "contractVersion": "v1", "deviceId": "curl-demo-device"},
+  "timezone": "Asia/Shanghai",
+  "languages": {"source": "zh-CN", "targets": []},
+  "audioProfile": {"encoding": "PCM_S16LE", "sampleRateHz": 16000, "channelCount": 1, "frameDurationMs": 100},
+  "requestedCapabilities": ["transcript.realtime"],
+  "artifactPolicy": {"retainAudio": false, "presentationCapture": false}
+}
+JSON
+)
+CREATE=$(curl -sS -X POST "$BASE/v1/meetings" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: curl-demo-create-$RUN_ID" \
+  -d "$CREATE_BODY")
+MEETING=$(printf '%s' "$CREATE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["meetingId"])')
+echo "meeting=$MEETING"
+
+# 3. startClient：建立客户端事件输入，之后 events:append 才被接受
+curl -sS -X POST "$BASE/v1/meetings/$MEETING:startClient" -H "Authorization: Bearer $TOKEN"
+
+# 4. 提交 2–3 条标准原文事件；clientEventId 唯一，clientSequence 从 1 递增
+for n in 1 2 3; do
+  curl -sS -X POST "$BASE/v1/meetings/$MEETING/events:append" \
+    -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -d "{\"clientEventId\":\"curl-evt-$n\",\"clientSequence\":$n,\"transcriptUpsert\":{\"segmentId\":\"curl-seg-$n\",\"revision\":1,\"operation\":\"UPSERT_OPERATION_UPSERT\",\"startMs\":$((n*1000-1000)),\"endMs\":$((n*1000)),\"language\":\"zh-CN\",\"text\":\"第 $n 句 curl 提交的原文\",\"final\":true}}" \
+    > /dev/null
+done
+
+# 5. 停止采音后冻结用量（毫秒）；Stop 用它完成结算
+curl -sS -X POST "$BASE/v1/meetings/$MEETING/usage:submit" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"audioDurationMs":3000}'
+
+# 6. Stop：同样必填 Idempotency-Key；和上面的 RUN_ID 一样按次生成
+curl -sS -X POST "$BASE/v1/meetings/$MEETING:stop" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Idempotency-Key: curl-demo-stop-$RUN_ID"
+
+# 7. 读 Manifest：genTime 必填，单位毫秒；-1 表示永不过期
+GEN_TIME=$(date +%s%3N)
+curl -sS "$BASE/v1/meetings/$MEETING/manifest?genTime=$GEN_TIME"
+```
+
+成功判据，按顺序核对，任何一步不符就先停下排查：
+
+| 步骤 | 期望 |
+| --- | --- |
+| 登录 | HTTP 200，响应含 `accessToken` |
+| Create | HTTP 201，返回 `meetingId`（`mtg_...`）和 `state=CREATED` |
+| startClient | HTTP 200，`state` 为 `STARTING`，`inputSource=CLIENT_EVENTS` |
+| events:append | 每条 HTTP 201，响应带 `eventSequence` |
+| usage:submit | HTTP 201，`accepted=true`（同值重放是 200） |
+| stop | HTTP 200，`state=READY`，`manifestState=READY`（`READY_WITH_WARNINGS` 表示有降级，正文仍可读） |
+| manifest | HTTP 200，`status=READY`，`artifacts` 非空；刚停止可能短暂 202，重试即可 |
+
+最后确认产物可读，取 Manifest 里第一个 `artifactId`：
+
+```bash
+ARTIFACT=$(curl -sS "$BASE/v1/meetings/$MEETING/manifest?genTime=$GEN_TIME" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["artifacts"][0]["artifactId"])')
+curl -sS "$BASE/v1/artifacts/$ARTIFACT?genTime=$GEN_TIME"
+```
+
+这一步拿到的是本场最终原文 JSON，说明登录、建会、事件、用量、收口和产物发布整条链都通了。
+真实语音字幕仍要按第 5、6 步装 App 验证：这条 HTTP 路径不经过麦克风和模型，只证明
+控制面与数据库可用。会话 Token、`Idempotency-Key` 和 `genTime` 都不要写进仓库文件。
 
 ## 5. 在字幕闭环上逐项扩展
 
