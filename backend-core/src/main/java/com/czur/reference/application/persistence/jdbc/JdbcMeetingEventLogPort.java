@@ -56,7 +56,7 @@ public final class JdbcMeetingEventLogPort implements MeetingEventLogPort, Realt
         this(dataSource, JdbcDatabaseEngine.MYSQL);
     }
 
-    /** 复用唯一池；5.7 无 CTE/LATERAL 时以一个只读 RR 事务保持同一认证事件快照。 */
+    /** 复用唯一池；以一个只读 RR 事务保持同一认证事件快照。 */
     public JdbcMeetingEventLogPort(JdbcDatabaseContext database) {
         this(database.dataSource(), database.engine());
     }

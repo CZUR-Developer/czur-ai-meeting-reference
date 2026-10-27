@@ -53,7 +53,6 @@ public final class JdbcWorkflowStepStore implements WorkflowStepStore {
                 content_digest, initial_available_at, status, attempt_count,
                 next_attempt_at, lease_version, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, ?, 0, ?)
-            ON CONFLICT (meeting_id, step_type, step_key) DO NOTHING
             """;
     private static final String CLAIM_SELECT_SQL = """
             SELECT meeting_id, step_type, step_key, checkpoint_type, canonical_payload,
@@ -61,7 +60,7 @@ public final class JdbcWorkflowStepStore implements WorkflowStepStore {
                    next_attempt_at, lease_owner, lease_until, lease_token, lease_version,
                    error_code, error_message, updated_at
               FROM workflow_step
-             WHERE step_type = ANY (?::text[])
+             WHERE step_type IN (%s)
                AND ((status = 'PENDING' AND next_attempt_at <= ?)
                     OR (status = 'LEASED' AND lease_until <= ?))
              ORDER BY CASE WHEN status = 'PENDING' THEN next_attempt_at ELSE lease_until END,
@@ -89,8 +88,8 @@ public final class JdbcWorkflowStepStore implements WorkflowStepStore {
              WHERE meeting_id = ? AND step_type = ? AND step_key = ?
                AND status = 'LEASED' AND lease_owner = ? AND lease_token = ?
                AND lease_version = ? AND lease_until = ? AND updated_at = ?
-               AND error_code IS NOT DISTINCT FROM CAST(? AS text)
-               AND error_message IS NOT DISTINCT FROM CAST(? AS text)
+               AND error_code <=> CAST(? AS CHAR)
+               AND error_message <=> CAST(? AS CHAR)
                AND updated_at <= ? AND lease_until > ?
             """;
     private static final String COMPLETE_SQL = """
@@ -393,7 +392,15 @@ public final class JdbcWorkflowStepStore implements WorkflowStepStore {
             statement.setTimestamp(7, Timestamp.from(candidate.nextAttemptAt()));
             statement.setTimestamp(8, Timestamp.from(candidate.nextAttemptAt()));
             statement.setTimestamp(9, Timestamp.from(candidate.updatedAt()));
-            inserted = statement.executeUpdate();
+            try {
+                inserted = statement.executeUpdate();
+            } catch (SQLException duplicate) {
+                // 唯一键 (meeting_id, step_type, step_key) 重复 = 已有赢家。
+                if (!JdbcSqlErrors.isDuplicate(JdbcDatabaseEngine.MYSQL, duplicate)) {
+                    throw duplicate;
+                }
+                inserted = 0;
+            }
         }
         StoredStep current = queryStored(connection, candidate.key(), false)
                 .orElseThrow(() -> new IllegalStateException(
@@ -496,35 +503,34 @@ public final class JdbcWorkflowStepStore implements WorkflowStepStore {
         }
         Instant expiry = leaseExpiry(request.now(), request.leaseDuration());
 
+        List<String> stepTypes = List.copyOf(request.allowedStepTypes());
         List<ClaimPlan> plans = new ArrayList<>();
-        try (PreparedStatement select = connection.prepareStatement(CLAIM_SELECT_SQL)) {
-            java.sql.Array types = connection.createArrayOf(
-                    "text", request.allowedStepTypes().toArray(String[]::new));
-            try {
-                select.setArray(1, types);
-                select.setTimestamp(2, Timestamp.from(request.now()));
-                select.setTimestamp(3, Timestamp.from(request.now()));
-                select.setInt(4, request.limit());
-                try (ResultSet rows = select.executeQuery()) {
-                    while (rows.next()) {
-                        StoredStep stored = readStoredStep(rows);
-                        WorkflowStep previous = stored.step();
-                        long version = Math.addExact(previous.leaseVersion(), 1L);
-                        String token = UUID.randomUUID().toString();
-                        WorkflowStep leased = new WorkflowStep(
-                                previous.key(), previous.checkpointType(),
-                                previous.canonicalPayload(), previous.contentDigest(),
-                                WorkflowStep.Status.LEASED, previous.attempt(), null,
-                                request.leaseOwner(), expiry, version,
-                                previous.errorCode(), previous.errorSummary(), request.now());
-                        LeaseToken lease = new LeaseToken(
-                                leased.key(), request.leaseOwner(), token, expiry,
-                                request.now(), version);
-                        plans.add(new ClaimPlan(leased, token, lease));
-                    }
+        try (PreparedStatement select = connection.prepareStatement(
+                CLAIM_SELECT_SQL.formatted(placeholders(stepTypes.size())))) {
+            int index = 0;
+            for (String stepType : stepTypes) {
+                select.setString(++index, stepType);
+            }
+            select.setTimestamp(++index, Timestamp.from(request.now()));
+            select.setTimestamp(++index, Timestamp.from(request.now()));
+            select.setInt(++index, request.limit());
+            try (ResultSet rows = select.executeQuery()) {
+                while (rows.next()) {
+                    StoredStep stored = readStoredStep(rows);
+                    WorkflowStep previous = stored.step();
+                    long version = Math.addExact(previous.leaseVersion(), 1L);
+                    String token = UUID.randomUUID().toString();
+                    WorkflowStep leased = new WorkflowStep(
+                            previous.key(), previous.checkpointType(),
+                            previous.canonicalPayload(), previous.contentDigest(),
+                            WorkflowStep.Status.LEASED, previous.attempt(), null,
+                            request.leaseOwner(), expiry, version,
+                            previous.errorCode(), previous.errorSummary(), request.now());
+                    LeaseToken lease = new LeaseToken(
+                            leased.key(), request.leaseOwner(), token, expiry,
+                            request.now(), version);
+                    plans.add(new ClaimPlan(leased, token, lease));
                 }
-            } finally {
-                types.free();
             }
         }
 
@@ -939,6 +945,26 @@ public final class JdbcWorkflowStepStore implements WorkflowStepStore {
         Objects.requireNonNull(request, "request");
         validateLease(request.lease());
         requirePersistentTimestamp("markedAt", request.markedAt());
+    }
+
+    /**
+     * 按白名单元素个数展开 MySQL 5.7 的 {@code IN} 占位符。
+     *
+     * <p>白名单只来自端口请求，元素数量决定占位符串长度，值仍由参数绑定传入；
+     * 不把集合绑定为数组参数，也不拼接任何标识符或值。</p>
+     */
+    private static String placeholders(int count) {
+        if (count <= 0) {
+            throw new IllegalArgumentException("allowedStepTypes must not be empty");
+        }
+        StringBuilder sql = new StringBuilder(count * 3);
+        for (int i = 0; i < count; i++) {
+            if (i > 0) {
+                sql.append(", ");
+            }
+            sql.append('?');
+        }
+        return sql.toString();
     }
 
     private static void bindKey(

@@ -65,7 +65,6 @@ public final class JdbcRenewRealtimeTokenUnitOfWork
                 meeting_id, idempotency_key, grant_json, grant_sha256,
                 token_sha256, issued_at, expires_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT DO NOTHING
             """;
 
     private final DataSource dataSource;
@@ -350,7 +349,15 @@ public final class JdbcRenewRealtimeTokenUnitOfWork
             statement.setBytes(5, tokenDigest);
             statement.setTimestamp(6, Timestamp.from(issuedAt));
             statement.setTimestamp(7, Timestamp.from(expiresAt));
-            return statement.executeUpdate();
+            try {
+                return statement.executeUpdate();
+            } catch (SQLException duplicate) {
+                // 两个唯一轴（同键、token digest）任一重复都表示本次未取得写入权。
+                if (!JdbcSqlErrors.isDuplicate(JdbcDatabaseEngine.MYSQL, duplicate)) {
+                    throw duplicate;
+                }
+                return 0;
+            }
         }
     }
 

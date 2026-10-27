@@ -9,7 +9,6 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.Objects;
 import java.util.Optional;
@@ -19,8 +18,8 @@ import java.util.logging.Logger;
 /**
  * 基于数据库唯一键的幂等记录适配器。
  *
- * <p>{@link #reserve(IdempotencyRecord)} 在同一连接事务内执行
- * {@code INSERT ... ON CONFLICT DO NOTHING}，随后读取数据库中最终记录，
+ * <p>{@link #reserve(IdempotencyRecord)} 在同一连接事务内执行普通 {@code INSERT}：
+ * 唯一键重复（MySQL 1062）解释为未取得写入权，随后读取数据库中最终记录，
  * 因此多个应用实例对同一个范围/键并发请求时只有一个实例获得
  * {@link ReservationStatus#ACQUIRED}。响应正文以固定 JSON 结构保存，不记录
  * 密码、Token、音频或模型响应。</p>
@@ -31,32 +30,24 @@ import java.util.logging.Logger;
 public final class JdbcIdempotencyStore implements IdempotencyStore {
     private static final Logger LOGGER = Logger.getLogger(JdbcIdempotencyStore.class.getName());
 
-    private static final String FIND_SQL = """
-            SELECT subject_scope, idempotency_key, request_hash,
-                   response_status, response_body, created_at
-              FROM idempotency_record
-             WHERE subject_scope = ? AND idempotency_key = ?
-            """;
+    /** 固定基线物理表名；所有读写共用同一映射，不拼接任意标识符。 */
+    private static final String TABLE =
+            JdbcDatabaseTable.IDEMPOTENCY_RECORD.physicalName(JdbcDatabaseEngine.MYSQL);
 
-    private static final String INSERT_SQL = """
-            INSERT INTO idempotency_record (
-                subject_scope, idempotency_key, request_hash,
-                response_status, response_body, created_at)
-            VALUES (?, ?, ?, ?, ?::jsonb, ?)
-            ON CONFLICT (subject_scope, idempotency_key) DO NOTHING
-            """;
+    /** MySQL 5.7 基线写入；重复键由调用点按 1062 解释为“已有赢家”。 */
+    private static String insertSql(JdbcDatabaseEngine engine) {
+        return "INSERT INTO " + JdbcDatabaseTable.IDEMPOTENCY_RECORD.physicalName(engine)
+                + " (subject_scope, idempotency_key, request_hash,"
+                + " response_status, response_body, created_at)"
+                + " VALUES (?, ?, ?, ?, CAST(? AS JSON), ?)";
+    }
 
-    private static final String DELETE_SQL = """
-            DELETE FROM idempotency_record
-             WHERE subject_scope = ? AND idempotency_key = ? AND request_hash = ?
-            """;
+    private static final String DELETE_SQL = "DELETE FROM " + TABLE
+            + " WHERE subject_scope = ? AND idempotency_key = ? AND request_hash = ?";
 
     /** 删除端口必须先比较摘要，再决定是否解析响应正文。 */
-    private static final String FIND_DELETION_SQL = """
-            SELECT request_hash, response_status, response_body
-              FROM idempotency_record
-             WHERE subject_scope = ? AND idempotency_key = ?
-            """;
+    private static final String FIND_DELETION_SQL = "SELECT request_hash, response_status, response_body"
+            + " FROM " + TABLE + " WHERE subject_scope = ? AND idempotency_key = ?";
 
     private final DataSource dataSource;
     private final JdbcDatabaseEngine engine;
@@ -92,19 +83,8 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
 
     @Override
     public void save(IdempotencyRecord record) {
-        if (engine == JdbcDatabaseEngine.MYSQL) {
-            reserve(record); // 保留只插入首次事实的语义，绝不覆盖赢家。
-            return;
-        }
-        Objects.requireNonNull(record, "record");
-        try (Connection connection = dataSource.getConnection();
-             PreparedStatement statement = connection.prepareStatement(INSERT_SQL)) {
-            bindCandidate(statement, record);
-            statement.executeUpdate();
-            LOGGER.log(Level.FINE, "JDBC 幂等记录已保存");
-        } catch (SQLException failure) {
-            throw fail("保存幂等记录失败", failure);
-        }
+        // 唯一键只插入首次事实：已有赢家时保留赢家，绝不覆盖。
+        reserve(record);
     }
 
     @Override
@@ -114,29 +94,9 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
             boolean previousAutoCommit = connection.getAutoCommit();
             connection.setAutoCommit(false);
             try {
-                if (engine == JdbcDatabaseEngine.MYSQL) {
-                    Reservation result = reserve(connection, engine, candidate, Instant.now());
-                    connection.commit();
-                    return result;
-                }
-                int inserted;
-                try (PreparedStatement statement = connection.prepareStatement(INSERT_SQL)) {
-                    bindCandidate(statement, candidate);
-                    inserted = statement.executeUpdate();
-                }
-                IdempotencyRecord current = find(connection, candidate.scope(), candidate.key())
-                        .orElseThrow(() -> new IllegalStateException("幂等记录插入后不可见"));
+                Reservation result = reserve(connection, engine, candidate, Instant.now());
                 connection.commit();
-                if (inserted == 1) {
-                    LOGGER.log(Level.FINE, "JDBC 幂等预占成功");
-                    return new Reservation(ReservationStatus.ACQUIRED, candidate);
-                }
-                if (!current.requestDigest().equals(candidate.requestDigest())) {
-                    LOGGER.log(Level.WARNING, "JDBC 幂等键摘要冲突");
-                    return new Reservation(ReservationStatus.CONFLICT, current);
-                }
-                LOGGER.log(Level.INFO, "JDBC 幂等请求重放");
-                return new Reservation(ReservationStatus.REPLAY, current);
+                return result;
             } catch (RuntimeException | SQLException failure) {
                 rollbackQuietly(connection);
                 throw failure instanceof SQLException
@@ -179,11 +139,7 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
         Objects.requireNonNull(candidate, "candidate");
         Objects.requireNonNull(createdAt, "createdAt");
         int inserted;
-        String sql = "INSERT INTO "
-                + JdbcDatabaseTable.IDEMPOTENCY_RECORD.physicalName(engine)
-                + " (subject_scope, idempotency_key, request_hash, response_status, response_body, created_at)"
-                + " VALUES (?, ?, ?, ?, CAST(? AS JSON), ?)";
-        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+        try (PreparedStatement statement = connection.prepareStatement(insertSql(engine))) {
             JdbcValues.setText(statement, 1, engine, candidate.scope());
                 JdbcValues.setText(statement, 2, engine, candidate.key());
                 statement.setString(3, candidate.requestDigest());
@@ -241,12 +197,24 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
         }
     }
 
-    /** 在调用方事务连接上保存幂等记录；不会自行提交事务。 */
+    /**
+     * 在调用方事务连接上保存幂等记录；不会自行提交事务。
+     *
+     * <p>更新语义保持“只插入首次事实”：唯一键重复表示已有赢家，本次保存不覆盖、
+     * 也不向上抛错；其它完整性错误仍然传播。</p>
+     */
     static void save(Connection connection, IdempotencyRecord record) throws SQLException {
         Objects.requireNonNull(record, "record");
-        try (PreparedStatement statement = connection.prepareStatement(INSERT_SQL)) {
+        try (PreparedStatement statement =
+                     connection.prepareStatement(insertSql(JdbcDatabaseEngine.MYSQL))) {
             bindCandidate(statement, record);
-            statement.executeUpdate();
+            try {
+                statement.executeUpdate();
+            } catch (SQLException duplicate) {
+                if (!JdbcSqlErrors.isDuplicate(JdbcDatabaseEngine.MYSQL, duplicate)) {
+                    throw duplicate;
+                }
+            }
         }
     }
 
@@ -312,14 +280,23 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
         Objects.requireNonNull(accepted, "accepted");
         Objects.requireNonNull(createdAt, "createdAt");
         int inserted;
-        try (PreparedStatement statement = connection.prepareStatement(INSERT_SQL)) {
-            statement.setString(1, scope);
-            statement.setString(2, key);
+        try (PreparedStatement statement =
+                     connection.prepareStatement(insertSql(JdbcDatabaseEngine.MYSQL))) {
+            JdbcValues.setText(statement, 1, JdbcDatabaseEngine.MYSQL, scope);
+            JdbcValues.setText(statement, 2, JdbcDatabaseEngine.MYSQL, key);
             statement.setString(3, requestDigest);
             statement.setInt(4, 202);
             statement.setString(5, MeetingDeletionResultJson.encode(accepted));
-            statement.setTimestamp(6, Timestamp.from(createdAt));
-            inserted = statement.executeUpdate();
+            JdbcValues.setInstant(statement, 6, createdAt);
+            try {
+                inserted = statement.executeUpdate();
+            } catch (SQLException duplicate) {
+                // 同键已有删除受理事实：本次没有取得写入权，随后按最终行裁决。
+                if (!JdbcSqlErrors.isDuplicate(JdbcDatabaseEngine.MYSQL, duplicate)) {
+                    throw duplicate;
+                }
+                inserted = 0;
+            }
         }
         DeletionRawRecord current = findDeletion(connection, scope, key)
                 .orElseThrow(() -> new IllegalStateException(
@@ -387,19 +364,12 @@ public final class JdbcIdempotencyStore implements IdempotencyStore {
 
     private static void bindCandidate(PreparedStatement statement, IdempotencyRecord candidate)
             throws SQLException {
-        bindCandidate(statement, candidate, Instant.now());
-    }
-
-    private static void bindCandidate(
-            PreparedStatement statement,
-            IdempotencyRecord candidate,
-            Instant createdAt) throws SQLException {
-        statement.setString(1, candidate.scope());
-        statement.setString(2, candidate.key());
+        JdbcValues.setText(statement, 1, JdbcDatabaseEngine.MYSQL, candidate.scope());
+        JdbcValues.setText(statement, 2, JdbcDatabaseEngine.MYSQL, candidate.key());
         statement.setString(3, candidate.requestDigest());
         statement.setInt(4, 200);
         statement.setString(5, IdempotencyResultJson.encode(candidate.result()));
-        statement.setTimestamp(6, Timestamp.from(createdAt));
+        JdbcValues.setInstant(statement, 6, Instant.now());
     }
 
     private static IdempotencyRecord readRecord(ResultSet resultSet) throws SQLException {

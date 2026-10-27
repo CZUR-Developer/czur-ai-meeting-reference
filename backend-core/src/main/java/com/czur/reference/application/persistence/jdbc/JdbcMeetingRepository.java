@@ -32,8 +32,8 @@ import java.util.logging.Logger;
  * 数据库专有 Java API。独立查询可直接使用本类；会议命令需要跨会议、
  * 幂等和 Outbox 原子提交时，应通过 {@link JdbcMeetingUnitOfWork} 执行。</p>
  *
- * <p>读取同时兼容 V001/V002 与 V003：查询通过 {@code to_jsonb(meeting)} 读取
- * 可选列，旧表缺少归属列时明确恢复为 {@code LEGACY_UNOWNED}，不会猜测真实主体。
+ * <p>读取同时兼容 V001/V002 与 V003：查询按基线物理列读取归属与版本事实，
+ * 旧表缺少归属列时明确恢复为 {@code LEGACY_UNOWNED}，不会猜测真实主体。
  * 当前公开 {@code save} 只允许 legacy SQL，且不引用 V003 列。owned 快照通过
  * package-private {@link #insertOwned(Connection, MeetingAggregate.MeetingSnapshot)}
  * 首次写入；该原语只允许未来 owned 创建工作单元在同一连接中调用，普通
@@ -53,35 +53,10 @@ public final class JdbcMeetingRepository implements MeetingRepository {
             ManifestStatus.READY_WITH_WARNINGS,
             ManifestStatus.FAILED);
     /**
-     * V001/V002/V003 都可执行的兼容写入。冲突更新只有在数据库行仍是 legacy
-     * 形态时才允许；因此旧命令不能用相同 meetingId 覆盖真实主体会议。
+     * 兼容写入的单条 UPSERT。冲突更新必须对每一列使用同一个 legacy 行守卫，
+     * 避免旧命令覆盖已经绑定权益的会议；守卫不命中时冲突分支不改变任何列。
      */
-    private static final String SAVE_LEGACY_SQL = """
-            INSERT INTO meeting (
-                meeting_id, deployment_scope, client_session_id, subject_scope,
-                profile_id, profile_revision, state, aggregate_version,
-                created_at, updated_at, metadata)
-            VALUES (?, ?, ?, 'LEGACY_UNOWNED', ?, ?, ?, 0, ?, ?, '{}'::jsonb)
-            ON CONFLICT (meeting_id) DO UPDATE SET
-                deployment_scope = EXCLUDED.deployment_scope,
-                client_session_id = EXCLUDED.client_session_id,
-                profile_id = EXCLUDED.profile_id,
-                profile_revision = EXCLUDED.profile_revision,
-                state = EXCLUDED.state,
-                updated_at = EXCLUDED.updated_at
-            WHERE NOT jsonb_exists(to_jsonb(meeting), 'grant_id')
-               OR (meeting.subject_scope = 'LEGACY_UNOWNED'
-                   AND to_jsonb(meeting) ->> 'grant_id' IS NULL
-                   AND to_jsonb(meeting) ->> 'grant_expires_at' IS NULL
-                   AND to_jsonb(meeting) ->> 'usage_reservation_id' IS NULL)
-            """;
-
-    /**
-     * MySQL 5.7 没有 ON CONFLICT ... WHERE。冲突更新必须对每一列使用同一个
-     * legacy 行守卫，避免旧命令覆盖已经绑定权益的会议；守卫不命中时 MySQL
-     * 返回 0 行，调用方按归属冲突处理。
-     */
-    private String legacySaveSql() {
+    private static String legacySaveSql(JdbcDatabaseEngine engine) {
         String table = JdbcDatabaseTable.MEETING.physicalName(engine);
         String guard = "subject_scope = 'LEGACY_UNOWNED' AND grant_id IS NULL"
                 + " AND grant_expires_at IS NULL AND usage_reservation_id IS NULL";
@@ -101,21 +76,6 @@ public final class JdbcMeetingRepository implements MeetingRepository {
                 + " state = IF(" + guard + ", VALUES(state), state),"
                 + " updated_at = IF(" + guard + ", VALUES(updated_at), updated_at)";
     }
-
-    /**
-     * 新归属会议只能首次插入，不能通过 UPSERT 覆盖已存在的会议归属。
-     * 该 SQL 只由 connection-scoped 创建工作单元调用；三个权益引用与真实主体
-     * 一次性写入，数据库的延迟外键在整个事务提交时检查 Meeting 与
-     * Reservation 双向引用的存在性；绑定状态仍由同事务 bind CAS 保证。
-     */
-    private static final String INSERT_OWNED_SQL = """
-            INSERT INTO meeting (
-                meeting_id, deployment_scope, client_session_id, subject_scope,
-                grant_id, grant_expires_at, usage_reservation_id,
-                profile_id, profile_revision, state, aggregate_version,
-                created_at, updated_at, metadata)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, '{}'::jsonb)
-            """;
 
     /**
      * 更新既有 owned 会议的可变生命周期事实。
@@ -203,15 +163,15 @@ public final class JdbcMeetingRepository implements MeetingRepository {
                AND deployment_scope = ?
                AND client_session_id = ?
                AND subject_scope = ?
-               AND grant_id IS NOT DISTINCT FROM ?
-               AND grant_expires_at IS NOT DISTINCT FROM ?
-               AND usage_reservation_id IS NOT DISTINCT FROM ?
+               AND grant_id <=> ?
+               AND grant_expires_at <=> ?
+               AND usage_reservation_id <=> ?
                AND profile_id = ?
                AND profile_revision = ?
                AND created_at = ?
                AND state = ?
                AND input_state = ?
-               AND finalization_receipt_id IS NOT DISTINCT FROM ?
+               AND finalization_receipt_id <=> ?
                AND manifest_state = ?
                AND updated_at = ?
                AND aggregate_version = ?
@@ -239,7 +199,7 @@ public final class JdbcMeetingRepository implements MeetingRepository {
                AND created_at = ?
                AND state = ?
                AND input_state = ?
-               AND finalization_receipt_id IS NOT DISTINCT FROM ?
+               AND finalization_receipt_id <=> ?
                AND manifest_state = ?
                AND updated_at = ?
                AND aggregate_version = ?
@@ -299,7 +259,7 @@ public final class JdbcMeetingRepository implements MeetingRepository {
         Objects.requireNonNull(meeting, "meeting");
         requireLegacySave(meeting);
         try (Connection connection = dataSource.getConnection();
-             PreparedStatement statement = connection.prepareStatement(legacySaveSql())) {
+             PreparedStatement statement = connection.prepareStatement(legacySaveSql(engine))) {
             bindSnapshot(statement, meeting, engine);
             requireSaved(statement.executeUpdate(), engine);
             LOGGER.log(Level.FINE, "JDBC 会议快照已保存 meetingId={0} state={1}",
@@ -391,7 +351,8 @@ public final class JdbcMeetingRepository implements MeetingRepository {
     static void save(Connection connection, MeetingAggregate.MeetingSnapshot meeting) throws SQLException {
         Objects.requireNonNull(meeting, "meeting");
         requireLegacySave(meeting);
-        try (PreparedStatement statement = connection.prepareStatement(SAVE_LEGACY_SQL)) {
+        try (PreparedStatement statement = connection.prepareStatement(
+                legacySaveSql(JdbcDatabaseEngine.MYSQL))) {
             bindSnapshot(statement, meeting);
             requireSaved(statement.executeUpdate());
         }
@@ -859,9 +820,9 @@ public final class JdbcMeetingRepository implements MeetingRepository {
                        aggregate_version = aggregate_version + 1
                  WHERE meeting_id = ?
                    AND deployment_scope = ? AND client_session_id = ?
-                   AND subject_scope = ? AND grant_id IS NOT DISTINCT FROM ?
-                   AND grant_expires_at IS NOT DISTINCT FROM ?
-                   AND usage_reservation_id IS NOT DISTINCT FROM ?
+                   AND subject_scope = ? AND grant_id <=> ?
+                   AND grant_expires_at <=> ?
+                   AND usage_reservation_id <=> ?
                    AND profile_id = ? AND profile_revision = ? AND created_at = ?
                    AND state = 'DELETION_PENDING'
                    AND manifest_state = 'DELETION_PENDING'

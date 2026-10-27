@@ -28,8 +28,8 @@ import java.util.regex.Pattern;
  * 显式事务中，避免多条读取与插入语句在不同数据库事务中执行。</p>
  *
  * <p>写入只接受 {@link MeetingManifestJson#encode(MeetingManifest)} 产生的 canonical
- * 文本。JSONB 参数来自同一文本，摘要是该文本 UTF-8 字节的原始 SHA-256。读取会
- * 重新计算摘要、严格解码并重新编码 canonical 文本、验证 JSONB 镜像，并核对行键、
+ * 文本。JSON 参数来自同一文本，摘要是该文本 UTF-8 字节的原始 SHA-256。读取会
+ * 重新计算摘要、严格解码并重新编码 canonical 文本、验证 JSON 镜像，并核对行键、
  * 文档身份和 revision 链；任一不一致都关闭式失败。</p>
  *
  * <p>日志和异常只包含固定阶段、结果类别、revision、异常类别及白名单 SQLState，
@@ -42,7 +42,7 @@ final class JdbcManifestFactStore implements ManifestFactStore {
 
     private static final String FIND_LATEST_SQL = """
             SELECT meeting_id, manifest_revision, previous_revision,
-                   canonical_json, manifest_json::text AS manifest_json_text,
+                   canonical_json, manifest_json AS manifest_json_text,
                    content_sha256, recorded_at
               FROM meeting_manifest_revision
              WHERE meeting_id = ?
@@ -51,7 +51,7 @@ final class JdbcManifestFactStore implements ManifestFactStore {
             """;
     private static final String FIND_REVISION_SQL = """
             SELECT meeting_id, manifest_revision, previous_revision,
-                   canonical_json, manifest_json::text AS manifest_json_text,
+                   canonical_json, manifest_json AS manifest_json_text,
                    content_sha256, recorded_at
               FROM meeting_manifest_revision
              WHERE meeting_id = ? AND manifest_revision = ?
@@ -60,8 +60,7 @@ final class JdbcManifestFactStore implements ManifestFactStore {
             INSERT INTO meeting_manifest_revision (
                 meeting_id, manifest_revision, previous_revision,
                 canonical_json, manifest_json, content_sha256)
-            VALUES (?, ?, ?, ?, ?::jsonb, ?)
-            ON CONFLICT (meeting_id, manifest_revision) DO NOTHING
+            VALUES (?, ?, ?, ?, CAST(? AS JSON), ?)
             """;
 
     private final Connection connection;
@@ -128,7 +127,7 @@ final class JdbcManifestFactStore implements ManifestFactStore {
      *
      * <p>先读取目标 revision 能使超时重试即使落后于后续 revision，也稳定返回
      * REPLAYED 或 CONTENT_CONFLICT。只有目标不存在时才读取 latest 并比较调用方
-     * 声明的前序。插入使用 {@code ON CONFLICT DO NOTHING}；并发输家必须重读赢家
+     * 声明的前序。插入把重复键 1062 解释为“未取得写入权”；并发输家必须重读赢家
      * 的完整事实后再分类，不能仅凭摘要判断重放。</p>
      */
     @Override
@@ -265,10 +264,18 @@ final class JdbcManifestFactStore implements ManifestFactStore {
                 statement.setNull(3, Types.INTEGER);
             }
             statement.setString(4, canonical);
-            // canonical_json 与 JSONB 参数必须来自同一个 String 实例的内容。
+            // canonical_json 与 JSON 参数必须来自同一个 String 实例的内容。
             statement.setString(5, canonical);
             statement.setBytes(6, contentSha256);
-            return statement.executeUpdate();
+            try {
+                return statement.executeUpdate();
+            } catch (SQLException duplicate) {
+                // 复合主键重复 = 并发输家；其它完整性错误必须回到调用方。
+                if (JdbcSqlErrors.isDuplicate(JdbcDatabaseEngine.MYSQL, duplicate)) {
+                    return 0;
+                }
+                throw duplicate;
+            }
         }
     }
 

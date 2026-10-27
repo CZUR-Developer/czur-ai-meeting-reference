@@ -32,7 +32,7 @@ import java.util.logging.Logger;
  * 内全局唯一；相同标识且完整 envelope（包括 canonical JSON 原文）一致时返回
  * {@link AppendStatus#REPLAYED}，任意不可变字段不同都返回
  * {@link AppendStatus#CONFLICT}，原记录永远不会被覆盖。数据库同时保存原始
- * {@code canonical_payload} 和可查询的 JSONB {@code payload}，V004 约束保证
+ * {@code canonical_payload} 和可查询的 JSON {@code payload}，V004 约束保证
  * 两者逻辑一致；重放和对外读取只使用前者，因此与内存适配器保持字符串精确
  * 相等语义。</p>
  *
@@ -65,15 +65,14 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
             """;
 
     /**
-     * ON CONFLICT 不更新旧事件。并发请求如果同时使用相同 eventId，失败的一方
-     * 会在唯一键冲突后读取已经提交的原记录并按完整 envelope 分类。
+     * 普通 INSERT 不更新旧事件。并发请求如果同时使用相同 eventId，失败的一方
+     * 会在 MySQL 1062 唯一键冲突后读取已经提交的原记录并按完整 envelope 分类。
      */
     private static final String INSERT_SQL = """
             INSERT INTO %s (
                 meeting_id, event_sequence, event_id, event_type, payload,
                 canonical_payload, occurred_at, spec_version, stream_id)
             VALUES (?, ?, ?, ?, %s, ?, ?, ?, ?)
-            %s
             """;
 
     private static final String HISTORICAL_ENVELOPE_SQL = """
@@ -215,8 +214,7 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
 
         int inserted;
         try (PreparedStatement statement = connection.prepareStatement(INSERT_SQL.formatted(
-                JdbcDatabaseTable.MEETING_EVENT.physicalName(engine), JdbcValues.jsonParameter(engine),
-                engine == JdbcDatabaseEngine.MYSQL ? "" : "ON CONFLICT (event_id) DO NOTHING"))) {
+                JdbcDatabaseTable.MEETING_EVENT.physicalName(engine), JdbcValues.jsonParameter()))) {
             bindAppend(statement, engine, event);
             try {
                 inserted = statement.executeUpdate();
@@ -227,8 +225,8 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
             }
         }
 
-        // INSERT ... ON CONFLICT 可能是另一个事务刚刚提交了相同 eventId；无论
-        // 是否插入成功，都重新读取数据库原记录，确保返回值来自事实源。
+        // 1062 可能是另一个事务刚刚提交了相同 eventId；无论是否插入成功，
+        // 都重新读取数据库原记录，确保返回值来自事实源。
         EventLog current = findByEventId(connection, engine, event.eventId())
                 .orElseThrow(() -> new IllegalStateException("事件插入后不可见"));
         if (inserted == 1) {

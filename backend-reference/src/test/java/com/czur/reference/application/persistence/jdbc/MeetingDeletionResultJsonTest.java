@@ -14,7 +14,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-/** 删除首次受理幂等正文的稳定字节、JSONB 重排和关闭式失败门禁。 */
+/** 删除首次受理幂等正文的稳定字节、JSON 重排和关闭式失败门禁。 */
 class MeetingDeletionResultJsonTest {
     private static final Instant UPDATED_AT =
             Instant.parse("2026-09-20T09:10:11.123456Z");

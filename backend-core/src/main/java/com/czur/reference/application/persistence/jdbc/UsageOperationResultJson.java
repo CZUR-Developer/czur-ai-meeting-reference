@@ -29,7 +29,7 @@ import java.util.TreeSet;
  *
  * <p>解码必须由调用方再次提供数据库查询所使用的 deployment、subject、
  * operation、idempotency key 和 request digest。正文中的任一范围与期望不一致
- * 都会 fail-fast，避免只凭 JSONB 或 reservationId 跨主体重放。异常只包含固定
+ * 都会 fail-fast，避免只凭 JSON 正文或 reservationId 跨主体重放。异常只包含固定
  * 字段名和解析位置，不包含 JSON 正文、摘要或动态字段值。</p>
  */
 final class UsageOperationResultJson {

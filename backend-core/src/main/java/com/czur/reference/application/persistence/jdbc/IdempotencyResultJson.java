@@ -52,7 +52,7 @@ final class IdempotencyResultJson {
         try {
             return decodeStrict(json);
         } catch (RuntimeException malformed) {
-            // JSONB 可能来自历史版本或被外部工具破坏。这里刻意不保留 cause：
+            // JSON 正文可能来自历史版本或被外部工具破坏。这里刻意不保留 cause：
             // Enum、Instant、未知字段名和原始 JSON 都可能包含主体或攻击者文本。
             throw new IllegalArgumentException("幂等响应格式非法");
         }

@@ -209,7 +209,7 @@ final class JdbcArtifactReadyMetadataStore implements ArtifactReadyMetadataStore
                         matches.get(0));
             }
             if (matches.isEmpty()) {
-                // ON CONFLICT 返回 0 但读不到任一身份轴，说明事务快照或表内容已
+                // 插入未命中唯一键却读不到任一身份轴，说明事务快照或表内容已
                 // 不一致；不能把这种不可解释的情况伪装成普通业务冲突。
                 throw corruptData();
             }

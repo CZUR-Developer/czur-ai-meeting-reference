@@ -100,7 +100,7 @@ final class JdbcFinalizationExecutionFactStore
             int inserted;
             try (PreparedStatement statement = connection.prepareStatement(INSERT_SQL.formatted(
                     JdbcDatabaseTable.FINALIZATION_EXECUTION_FACT.physicalName(engine),
-                    JdbcValues.jsonParameter(engine)))) {
+                    JdbcValues.jsonParameter()))) {
                 JdbcValues.setText(statement, 1, engine, candidate.meetingId());
                 statement.setString(2, canonical);
                 statement.setString(3, canonical);
@@ -219,7 +219,7 @@ final class JdbcFinalizationExecutionFactStore
 
     /** 普通 find 可用于只读快照；插入裁决才使用 MySQL 当前读，避免 RR 旧快照。 */
     private String findSql(boolean currentRead) {
-        return FIND_SQL.formatted(JdbcValues.jsonText(engine, "execution_fact_json"),
+        return FIND_SQL.formatted(JdbcValues.jsonText("execution_fact_json"),
                 JdbcDatabaseTable.FINALIZATION_EXECUTION_FACT.physicalName(engine))
                 + (currentRead ? " FOR UPDATE" : "");
     }

@@ -30,41 +30,6 @@ import java.util.Optional;
  * 契约。小数或溢出表示持久事实损坏，不能截断、四舍五入或伪装为合法用量。</p>
  */
 final class JdbcUsageReservationStore {
-    private static final String FIND_OPERATION_SQL = """
-            SELECT request_digest, reservation_id, result_body::text
-              FROM usage_operation
-             WHERE deployment_scope = ? AND subject_scope = ?
-               AND operation_scope = ? AND idempotency_key = ?
-            """;
-
-    /**
-     * 通过 Meeting 持久保存的主 Reservation 反查首次 reserve 结果。
-     *
-     * <p>V003 没有把 reserve 的幂等键复制到 Meeting；稳定关联链是
-     * {@code meeting.usage_reservation_id -> usage_operation.reservation_id}。
-     * 正常创建事务只会产生一条 RESERVE 行。这里最多读取两条，若同一个
-     * Reservation 出现多个首次 reserve 赢家则按损坏事实关闭式失败，绝不按
-     * created_at 或字典序挑选一个“看起来最早”的结果。</p>
-     */
-    private static final String FIND_RESERVE_OPERATION_BY_RESERVATION_SQL = """
-            SELECT operation_scope, idempotency_key, request_digest,
-                   reservation_id, result_body::text
-              FROM usage_operation
-             WHERE deployment_scope = ? AND subject_scope = ?
-               AND reservation_id = ? AND operation_scope = 'usage.reserve.v1'
-             ORDER BY idempotency_key
-             LIMIT 2
-            """;
-
-    private static final String INSERT_OPERATION_SQL = """
-            INSERT INTO usage_operation (
-                deployment_scope, subject_scope, operation_scope, idempotency_key,
-                request_digest, reservation_id, result_body, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?::jsonb, ?)
-            ON CONFLICT (deployment_scope, subject_scope, operation_scope, idempotency_key)
-            DO NOTHING
-            """;
-
     private static final String INSERT_RESERVATION_SQL = """
             INSERT INTO usage_reservation (
                 reservation_id, meeting_id, usage_type, status, quantity, provider_ref,

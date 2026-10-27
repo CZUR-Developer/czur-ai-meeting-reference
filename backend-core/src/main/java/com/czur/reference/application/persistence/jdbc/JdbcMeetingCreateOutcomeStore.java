@@ -47,8 +47,7 @@ public final class JdbcMeetingCreateOutcomeStore implements MeetingCreateOutcome
             INSERT INTO idempotency_record (
                 subject_scope, idempotency_key, request_hash,
                 response_status, response_body, created_at)
-            VALUES (?, ?, ?, ?, ?::jsonb, ?)
-            ON CONFLICT (subject_scope, idempotency_key) DO NOTHING
+            VALUES (?, ?, ?, ?, CAST(? AS JSON), ?)
             """;
 
     private final DataSource dataSource;
@@ -166,7 +165,15 @@ public final class JdbcMeetingCreateOutcomeStore implements MeetingCreateOutcome
         int inserted;
         try (PreparedStatement statement = connection.prepareStatement(INSERT_SQL)) {
             bindCandidate(statement, candidate, createdAt);
-            inserted = statement.executeUpdate();
+            try {
+                inserted = statement.executeUpdate();
+            } catch (SQLException duplicate) {
+                // 唯一轴是 (subject_scope, idempotency_key)：重复即未取得写入权。
+                if (!JdbcSqlErrors.isDuplicate(JdbcDatabaseEngine.MYSQL, duplicate)) {
+                    throw duplicate;
+                }
+                inserted = 0;
+            }
         }
         OutcomeRecord current = find(connection, candidate.scope(), candidate.key())
                 .orElseThrow(() -> corruptFact("插入后终态不可见"));

@@ -51,13 +51,14 @@ final class JdbcValues {
         return value == null ? null : new String(value, StandardCharsets.UTF_8);
     }
 
-    static String jsonParameter(JdbcDatabaseEngine engine) {
-        return engine == JdbcDatabaseEngine.MYSQL ? "CAST(? AS JSON)" : "?::jsonb";
+    /** MySQL 5.7 的 JSON 参数占位符；JSON 列不接受裸字符串类型推断。 */
+    static String jsonParameter() {
+        return "CAST(? AS JSON)";
     }
 
     /** column 仅由编译期 SQL 列名提供，不接收协议或用户输入。 */
-    static String jsonText(JdbcDatabaseEngine engine, String column) {
-        return engine == JdbcDatabaseEngine.MYSQL ? column : column + "::text";
+    static String jsonText(String column) {
+        return column;
     }
 
     /** LONGTEXT 的 PAD SPACE 比较不能证明规范原文相等，明确保留 Java 精确比较。 */

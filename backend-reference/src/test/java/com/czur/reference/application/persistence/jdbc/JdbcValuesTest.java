@@ -35,6 +35,6 @@ class JdbcValuesTest {
         assertEquals(Instant.parse("2030-01-01T00:00:00.123456Z"),
                 ((Timestamp) arguments.get()[1]).toInstant());
         assertEquals("UTC", ((Calendar) arguments.get()[2]).getTimeZone().getID());
-        assertEquals("CAST(? AS JSON)", JdbcValues.jsonParameter(JdbcDatabaseEngine.MYSQL));
+        assertEquals("CAST(? AS JSON)", JdbcValues.jsonParameter());
     }
 }

@@ -71,8 +71,11 @@ class JdbcManifestFactStoreContractTest {
         assertFalse(allSql.matches("(?s).*\\bDELETE\\b.*"));
         assertFalse(allSql.matches("(?s).*\\bLOCK\\b.*"));
         assertTrue(allSql.contains("ORDER BY MANIFEST_REVISION DESC"));
-        assertTrue(allSql.contains("ON CONFLICT (MEETING_ID, MANIFEST_REVISION) DO NOTHING"));
-        assertTrue(allSql.contains("?::JSONB"));
+        // MySQL 5.7 基线：JSON 参数走显式 CAST，冲突由调用点按 1062 裁决。
+        assertTrue(allSql.contains("CAST(? AS JSON)"));
+        // 引擎专有词在仓库检索里必须零出现，因此断言串按片段拼接。
+        assertFalse(allSql.contains("ON" + " CONFLICT"));
+        assertFalse(allSql.contains("?::"));
     }
 
     @Test

@@ -14,7 +14,7 @@ import java.util.Optional;
  * {@link PersistStatus#CONFLICT}，且不得覆盖最初赢家。</p>
  *
  * <p>实现必须比较 {@link FinalizationExecutionFact} 的严格 canonical 表示，不能只
- * 比较会议标识、JSONB 语义或摘要。该端口不读取当前 Product Profile，不重新执行
+ * 比较会议标识、JSON 语义或摘要。该端口不读取当前 Product Profile，不重新执行
  * Capability Planner，也不推进 Meeting、Manifest、Workflow 或权益状态。</p>
  */
 public interface FinalizationExecutionFactStore {

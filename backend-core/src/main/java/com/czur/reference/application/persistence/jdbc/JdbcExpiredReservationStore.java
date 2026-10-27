@@ -20,8 +20,7 @@ import java.util.logging.Logger;
 /**
  * V3 到期 Reservation 领取适配器。
  *
- * <p>claim 在支持 {@code FOR UPDATE SKIP LOCKED} 的引擎上直接跳过已锁定行，在 MySQL 5.7
- * 使用事务内 {@code FOR UPDATE} 加条件 UPDATE；两者都按 {@code expires_at,
+ * <p>claim 在 MySQL 5.7 使用事务内 {@code FOR UPDATE} 加条件 UPDATE，并按 {@code expires_at,
  * reservation_id} 确定顺序选择单部署范围内的到期未绑定记录。候选条件同时要求
  * {@code bound_meeting_id} 和 {@code bound_at} 为空：任一绑定证据存在都说明该行
  * 可能已归属会议或持久事实不一致，清理 Worker 不得触碰。单行解码失败只跳过该
@@ -36,32 +35,6 @@ import java.util.logging.Logger;
  */
 public final class JdbcExpiredReservationStore implements ExpiredReservationStore {
     private static final Logger LOGGER = Logger.getLogger(JdbcExpiredReservationStore.class.getName());
-
-    private static final String CLAIM_SQL = """
-            SELECT reservation_id, deployment_scope, subject_scope, grant_id,
-                   expected_meeting_id, bound_meeting_id, bound_at, usage_unit,
-                   reserved_amount, actual_amount, created_at, expires_at, status,
-                   version, committed_at, cancelled_at, cancellation_reason_code,
-                   lease_owner, lease_token, lease_until, lease_version
-              FROM usage_reservation
-             WHERE record_format = 'V3' AND deployment_scope = ?
-               AND status = 'RESERVED' AND bound_meeting_id IS NULL AND bound_at IS NULL
-               AND expires_at <= ?
-               AND (lease_until IS NULL OR lease_until <= ?)
-             ORDER BY expires_at, reservation_id
-             FOR UPDATE SKIP LOCKED
-             LIMIT ?
-            """;
-
-    private static final String CLAIM_UPDATE_SQL = """
-            UPDATE usage_reservation
-               SET lease_owner = ?, lease_token = ?, lease_until = ?,
-                   lease_version = lease_version + 1
-             WHERE record_format = 'V3' AND deployment_scope = ?
-               AND subject_scope = ? AND reservation_id = ?
-               AND status = 'RESERVED' AND bound_meeting_id IS NULL AND bound_at IS NULL
-               AND expires_at <= ? AND (lease_until IS NULL OR lease_until <= ?)
-            """;
 
     private static final String FIND_FOR_RELEASE_SQL = """
             SELECT reservation_id, deployment_scope, subject_scope, grant_id,
@@ -312,8 +285,7 @@ public final class JdbcExpiredReservationStore implements ExpiredReservationStor
                 + " AND expires_at <= ?"
                 + " AND (lease_until IS NULL OR lease_until <= ?)"
                 + " ORDER BY expires_at, reservation_id"
-                + (engine == JdbcDatabaseEngine.MYSQL
-                    ? " LIMIT ? FOR UPDATE" : " FOR UPDATE SKIP LOCKED LIMIT ?");
+                + " LIMIT ? FOR UPDATE";
     }
 
     private String claimUpdateSql() {

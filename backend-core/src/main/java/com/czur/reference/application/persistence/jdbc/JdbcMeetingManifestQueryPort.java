@@ -27,7 +27,7 @@ import java.util.logging.Logger;
  * 结果 URL 使用的 JDBC Manifest 查询端口。
  *
  * <p>一次 {@code SELECT} statement 读取 meeting 行和该会议的最新 Manifest revision。
- * 非 MySQL 分支使用 {@code LATERAL}，MySQL5.7 使用相关 {@code MAX} 连接；两个读取共享
+ * latest 走 MySQL 5.7 的相关 {@code MAX} 连接；两个读取共享
  * 同一个 statement snapshot，避免先查会议、再查结果时把生成中的状态和另一版
  * Manifest 拼成不存在的组合。该类只读取事实，不创建独立业务事务，也不负责
  * 登录、结果链接生成或 Artifact 内容下载。</p>
@@ -40,46 +40,6 @@ public final class JdbcMeetingManifestQueryPort implements MeetingManifestPort {
     private static final Logger LOGGER = Logger.getLogger(
             JdbcMeetingManifestQueryPort.class.getName());
 
-    /**
-     * latest 使用单条 lateral 查询；previous_exists 也在同一 statement snapshot
-     * 中确认，避免把一个不存在前序的 latest 当成完整结果。
-     */
-    private static final String GET_SQL = """
-            SELECT m.meeting_id, m.profile_id, m.profile_revision, m.state,
-                   m.input_state, m.finalization_receipt_id, m.manifest_state,
-                   m.updated_at,
-                   latest.manifest_revision, latest.previous_revision,
-                   latest.canonical_json, latest.manifest_json_text,
-                   latest.content_sha256, latest.chain_valid,
-                   ci.meeting_id AS client_meeting_id,
-                   client_result.manifest_json AS client_manifest_json
-              FROM meeting AS m
-              LEFT JOIN meeting_client_input AS ci ON ci.meeting_id=m.meeting_id
-              LEFT JOIN meeting_client_result AS client_result
-                     ON client_result.meeting_id=ci.meeting_id
-              LEFT JOIN LATERAL (
-                   SELECT r.manifest_revision,
-                          r.previous_revision,
-                          r.canonical_json,
-                          r.manifest_json::text AS manifest_json_text,
-                          r.content_sha256,
-                          CASE
-                            WHEN r.manifest_revision = 1
-                              THEN r.previous_revision IS NULL
-                            ELSE r.previous_revision IS NOT NULL
-                              AND EXISTS (
-                                  SELECT 1
-                                    FROM meeting_manifest_revision AS p
-                                   WHERE p.meeting_id = r.meeting_id
-                                     AND p.manifest_revision = r.previous_revision)
-                          END AS chain_valid
-                     FROM meeting_manifest_revision AS r
-                    WHERE r.meeting_id = m.meeting_id
-                    ORDER BY r.manifest_revision DESC
-                    LIMIT 1
-              ) AS latest ON TRUE
-             WHERE m.meeting_id = ?
-            """;
 
     private final DataSource dataSource;
     private final JdbcDatabaseEngine engine;
@@ -336,7 +296,7 @@ public final class JdbcMeetingManifestQueryPort implements MeetingManifestPort {
         return rows.wasNull() ? null : value;
     }
 
-    /** 5.7 无 LATERAL；等价相关 MAX 连接保留原 latest／前序链及客户端优先规则。 */
+    /** 相关 MAX 连接保留原 latest／前序链及客户端优先规则，单 statement 快照。 */
     private String getSql() {
         return """
                 SELECT m.meeting_id, m.profile_id, m.profile_revision, m.state,

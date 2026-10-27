@@ -36,7 +36,7 @@ import java.util.logging.Logger;
  * 外部持有计划行锁时则明确返回 {@link StoreErrorCode#LOCK_CONFLICT}。本切片不推进
  * Meeting、Workflow 或 Artifact Store。</p>
  *
- * <p>读取会重新解码 canonical JSON、核对原始 SHA-256、JSONB 语义镜像、来源列、
+ * <p>读取会重新解码 canonical JSON、核对原始 SHA-256、JSON 语义镜像、来源列、
  * target_count 以及逐项 ordinal/type/revision/status。任何持久事实漂移都以
  * CORRUPT_DATA 关闭式失败；异常和日志不携带会议、产物、正文、摘要、binding 或
  * 底层 SQL 信息。</p>
@@ -48,8 +48,8 @@ public final class JdbcArtifactDeletionPlanStore implements ArtifactDeletionPlan
             SELECT meeting_id, accepted_at, source_manifest_revision,
                    source_workflow_step_type, source_workflow_step_key,
                    source_workflow_checkpoint_type, source_workflow_content_digest,
-                   target_count, canonical_json, deletion_plan_json::text AS jsonb_text,
-                   deletion_plan_json = canonical_json::jsonb AS jsonb_matches,
+                   target_count, canonical_json, deletion_plan_json AS jsonb_text,
+                   deletion_plan_json = CAST(canonical_json AS JSON) AS jsonb_matches,
                    content_sha256, status, completed_at
               FROM meeting_deletion_plan
              WHERE meeting_id = ?
@@ -65,8 +65,7 @@ public final class JdbcArtifactDeletionPlanStore implements ArtifactDeletionPlan
                 source_workflow_step_type, source_workflow_step_key,
                 source_workflow_checkpoint_type, source_workflow_content_digest,
                 target_count, canonical_json, deletion_plan_json, content_sha256, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, 'PENDING')
-            ON CONFLICT (meeting_id) DO NOTHING
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS JSON), ?, 'PENDING')
             """;
     private static final String INSERT_ITEM_SQL = """
             INSERT INTO artifact_deletion_item (
@@ -127,7 +126,15 @@ public final class JdbcArtifactDeletionPlanStore implements ArtifactDeletionPlan
             int inserted;
             try (PreparedStatement statement = connection.prepareStatement(INSERT_PLAN_SQL)) {
                 bindPlan(statement, candidate, canonical, digest);
-                inserted = statement.executeUpdate();
+                try {
+                    inserted = statement.executeUpdate();
+                } catch (SQLException duplicate) {
+                    // meeting_id 是主键：1062 表示已有赢家，读回后按计划正文裁决。
+                    if (!JdbcSqlErrors.isDuplicate(JdbcDatabaseEngine.MYSQL, duplicate)) {
+                        throw duplicate;
+                    }
+                    inserted = 0;
+                }
             } catch (SQLException failure) {
                 if (isLockConflict(failure)) {
                     throw new StoredFactException(StoreErrorCode.LOCK_CONFLICT);

@@ -55,7 +55,15 @@ class JdbcWorkflowStepStoreContractTest {
     @Test
     void claimSortsByReadyTimeAndStableKeyAndUsesExplicitWhitelist() {
         String source = readSource();
-        assertTrue(source.contains("step_type = ANY (?::text[])"));
+        // MySQL 5.7 没有数组参数：白名单按元素个数展开为 IN (?, ?, ...)。
+        assertTrue(source.contains("step_type IN (%s)"));
+        assertTrue(source.contains("CLAIM_SELECT_SQL.formatted(placeholders(stepTypes.size()))"));
+        assertTrue(source.contains("private static String placeholders(int count)"));
+        // 引擎专有词在仓库检索里必须零出现，因此断言串按片段拼接。
+        assertFalse(source.contains("ANY" + " (?"));
+        assertFalse(source.contains("text" + "[]"));
+        assertFalse(source.contains("ON" + " CONFLICT"));
+        assertFalse(source.contains("IS NOT" + " DISTINCT FROM"));
         assertTrue(source.contains("ORDER BY CASE WHEN status = 'PENDING'"));
         assertTrue(source.contains("meeting_id, step_type, step_key"));
         assertTrue(source.contains("allowedStepTypes().isEmpty()"));
