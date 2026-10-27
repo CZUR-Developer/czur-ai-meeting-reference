@@ -102,7 +102,7 @@ python3 tools/sample-json-ws-model.py --host 0.0.0.0 --port 19091
 #    配置文件放仓外，例如 ~/.config/ai-meeting/reference-client.env，
 #    并用 REFERENCE_ENV_FILE 指向它；不要复制成仓库里的 tools/reference-client.env。
 AI_MEETING_MODEL_ADAPTER=sample-json-ws
-AI_MEETING_SAMPLE_JSON_WS_ENDPOINT=ws://<开发机局域网 IP>:19091
+AI_MEETING_SAMPLE_JSON_WS_ENDPOINT=ws://<开发机局域网 IP>:19091/model
 ```
 
 然后按[从零接入指南](partner-getting-started.md)第 2–6 步走完建库、起后端、起 HTTPS、

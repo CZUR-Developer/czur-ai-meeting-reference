@@ -80,7 +80,7 @@ SDK 会探测设备能力：有兼容系统共享音源接口时使用该接口�
 | SDK 交付包 | 设备 AAR 已随仓（0.5.0，SHA-256 `150f5a52294036b7e273a91d4d59afa7df212021bb6825e9199384023cd28053`）；业务 AAR 由本仓源码构建 | 真实音频与模型运行、字幕控件 |
 | 开发电脑／服务主机 | 可被 Android 设备访问，具有可写结果目录 | 运行后端和静态 Web |
 | MySQL | MySQL 5.7 兼容实例、专用数据库及可初始化／读写的账号 | 保存会议状态与元数据 |
-| 一个实时语音服务 | 本指南默认路径使用您自己的阿里云听悟 AppKey、AccessKey ID／Secret及已开通服务 | 将真实语音转为字幕 |
+| 可选实时语音服务 | 默认用仓库自带 `sample-json-ws` 样例；接真实字幕时使用您自己的阿里云听悟 AppKey、AccessKey ID／Secret及已开通服务 | 将真实语音转为字幕 |
 | 示例登录信息 | 部署者自行设定的参考用户名、密码及会话配置 | 让终端用户正常登录 App |
 | 网络和 HTTPS | 设备到后端、Web、模型均可达；App 登录入口有可信 HTTPS | 设备连接与模型交互 |
 | Android 测试设备 | 优先 StarryHub 系列等兼容固件设备；普通 Android 14 设备只保证基础字幕链路 | 运行 App 和验证真实语音 |
@@ -164,6 +164,12 @@ AI_MEETING_SAMPLE_JSON_WS_ENDPOINT=ws://192.168.1.20:19091/model
 保留 `ws://127.0.0.1:19091/model` 只在 App、后端、样例模型都跑在同一台机器、并用
 `adb reverse` 把 19091 映射到设备的单机自测里成立；真机联调一律改局域网 IP。
 
+启动样例模型（在仓库根目录，单独一个终端；端口与上面的端点一致）：
+
+```bash
+python3 tools/sample-json-ws-model.py --host 0.0.0.0 --port 19091
+```
+
 使用听悟时，必须将下列设置改为自己的值，保留模板中的其他必需配置：
 
 ```dotenv
@@ -207,8 +213,9 @@ AI_MEETING_SPEAKER_IDENTITY_PROVIDER=none
 - 会话 Token 和分页 Secret 分别生成至少 32 个 UTF-8 字节的随机值，可各运行一次 `openssl rand -hex 32`；示例占位值不能用于登录。
 - 将 `REFERENCE_DEV_IDENTITY_ISSUED_AT`／`REFERENCE_DEV_IDENTITY_EXPIRES_AT` 改为覆盖当前部署时刻的 UTC 时间，分别表示签发与过期时间；不要长期照抄模板年份。
 - `AI_MEETING_PROFILE_ID=reference-asr` 和 `AI_MEETING_PROFILE_REVISION=1` 与当前参考 App 匹配，首次接入保留。
-- 初次使用模板的 `0.0.0.0:8080` HTTP 监听；改端口要同步四处（后端监听、健康检查、
-  Web 的 `apiBaseUrl`、App 的 `backendUrl`），清单见[部署文档](../deploy/README.md#改端口和地址要同步哪些地方)。
+- 初次使用模板的 `0.0.0.0:8080` HTTP 监听；改端口要同步五处（后端监听、健康检查、
+  HTTPS 入口的 `REFERENCE_TLS_UPSTREAM`、Web 的 `apiBaseUrl`、App 的 `backendUrl`），
+  清单见[部署文档](../deploy/README.md#改端口和地址要同步哪些地方)。
 - MySQL 的 `127.0.0.1` 仅表示数据库就在开发电脑上。
 - 模型永久凭据只填本机后端配置，不写入 Android 部署文件、APK、Web 配置或 Git。
 
@@ -370,7 +377,7 @@ BASE='http://127.0.0.1:8080'
 # 1. 登录：换回参考实现签发的 Bearer Token
 TOKEN=$(curl -sS -X POST "$BASE/v1/reference/session:login" \
   -H 'Content-Type: application/json' \
-  -d '{"username":"meeting-user","password":"<第 1 步的 REFERENCE_DEV_LOGIN_PASSWORD>"}' \
+  -d '{"username":"<第 1 步的 REFERENCE_DEV_LOGIN_USERNAME>","password":"<第 1 步的 REFERENCE_DEV_LOGIN_PASSWORD>"}' \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["accessToken"])')
 
 # 2. Create：Idempotency-Key 必填（16–128 字符）；同键重试返回同一场会议。

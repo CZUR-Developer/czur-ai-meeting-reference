@@ -13,6 +13,11 @@ Android 通过服务端签发的临时材料直连已配置的模型 Adapter；�
 参考方案统一使用 MySQL 5.7 兼容模式。部署方先创建一个专用数据库，再执行仓库唯一
 初始化脚本：
 
+```sql
+-- 只建库；最小权限账号的 DDL 见本节末尾
+CREATE DATABASE meeting_reference CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+```
+
 ```bash
 export DATABASE_URL='jdbc:mysql://127.0.0.1:3306/meeting_reference?useSSL=false&allowPublicKeyRetrieval=true'
 export DATABASE_USER='meeting'
@@ -30,7 +35,6 @@ bash ./healthcheck-db.sh
 DML，不要复用旧业务库，也不要把 root 凭据写进 `.env` 或仓外运行配置：
 
 ```sql
-CREATE DATABASE meeting_reference CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 CREATE USER 'meeting_migrator'@'%' IDENTIFIED BY '<迁移密码>';
 GRANT CREATE, ALTER, INDEX, REFERENCES, SELECT, INSERT, UPDATE, DELETE
   ON meeting_reference.* TO 'meeting_migrator'@'%';

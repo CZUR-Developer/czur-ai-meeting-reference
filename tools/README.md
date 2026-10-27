@@ -43,7 +43,7 @@ python3 tools/sample-json-ws-model.py --host 0.0.0.0 --port 19091
 
 后端配置 `AI_MEETING_MODEL_ADAPTER=sample-json-ws`，并把
 `AI_MEETING_SAMPLE_JSON_WS_ENDPOINT` 设为开发机可被设备访问的
-`ws://<开发机局域网 IP>:19091`；设备上不能使用 `127.0.0.1` 指代开发机。
+`ws://<开发机局域网 IP>:19091/model`；设备上不能使用 `127.0.0.1` 指代开发机。
 服务收到 `start` 返回 `ready`，收到 PCM 二进制帧后返回同一片段的
 partial/final，收到 `stop` 返回 `finished`。这只验证第二 Adapter 的选择、
 音频发送与字幕修订，不代表第二个真实模型已接入。
