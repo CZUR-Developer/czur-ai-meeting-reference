@@ -27,7 +27,7 @@ import java.util.logging.Logger;
  * 结果 URL 使用的 JDBC Manifest 查询端口。
  *
  * <p>一次 {@code SELECT} statement 读取 meeting 行和该会议的最新 Manifest revision。
- * PG 使用 {@code LATERAL}，MySQL5.7 使用相关 {@code MAX} 连接；两个读取共享
+ * 非 MySQL 分支使用 {@code LATERAL}，MySQL5.7 使用相关 {@code MAX} 连接；两个读取共享
  * 同一个 statement snapshot，避免先查会议、再查结果时把生成中的状态和另一版
  * Manifest 拼成不存在的组合。该类只读取事实，不创建独立业务事务，也不负责
  * 登录、结果链接生成或 Artifact 内容下载。</p>

@@ -22,7 +22,7 @@ import java.util.Set;
  *
  * <p>编码字段及顺序固定为
  * {@code schemaVersion/operation/outcome/meetingId/state/inputState/
- * finalizationReceipt/manifestState/updatedAt}。解码允许 PostgreSQL JSONB 重排
+ * finalizationReceipt/manifestState/updatedAt}。解码允许数据库 JSON 重排
  * 字段，但拒绝未知、缺失、重复字段、尾逗号、错误类型、未知枚举、非法时间和
  * 尾随内容。对外异常使用固定文本，不携带原始 JSON、receipt 或攻击者字段名。</p>
  *

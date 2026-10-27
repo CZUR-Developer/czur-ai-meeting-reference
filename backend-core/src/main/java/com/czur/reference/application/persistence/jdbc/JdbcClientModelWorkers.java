@@ -8,7 +8,7 @@ import com.czur.reference.application.port.entitlement.LeaseAwareReservationCanc
 import java.util.Collection;
 
 /**
- * client-model 宿主的 MySQL/PG Worker 装配点。
+ * client-model 宿主的 Worker 装配点。
  *
  * <p>该类只复用调用方唯一的 {@link JdbcDatabaseContext} 连接池和引擎，
  * 不创建第二套数据源、不启动线程，也不猜测调度周期。宿主负责在自己的

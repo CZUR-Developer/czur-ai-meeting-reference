@@ -19,7 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** 收口执行事实的完整性、Profile/Plan 防漂移和 PostgreSQL 时间门禁。 */
+/** 收口执行事实的完整性、Profile/Plan 防漂移和数据库时间门禁。 */
 class FinalizationExecutionFactTest {
     private static final String MEETING_ID = "meeting-secret-20260928";
     private static final String TITLE = "secret meeting title";

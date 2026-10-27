@@ -53,7 +53,7 @@ public final class ArtifactDeletionPlan {
      * 构造完整删除 Definition。
      *
      * @param meetingId 被删除会议的稳定身份
-     * @param acceptedAt 删除受理时冻结的 PostgreSQL 微秒精度时间
+     * @param acceptedAt 删除受理时冻结的数据库微秒精度时间
      * @param sourceManifestRevision 受理时观察到的最新 Manifest revision；从未发布则为空
      * @param sourceFinalizationWorkflow 最终收口 Workflow 的不可变身份；严格早期终态可为空
      * @param targets 完整写入 spec 组成的删除目标；允许严格空集合

@@ -149,7 +149,7 @@ public final class JdbcCompleteMeetingCreationUnitOfWork
                     profile.profileId(), profile.profileRevision(), at).snapshot();
 
             // MySQL 的双向外键即时检查：先插入引用已存在预占的 Meeting，再条件绑定。
-            // PG 保留原延迟外键路径的 bind -> Meeting 顺序，不复制业务状态机。
+            // 保留延迟外键路径的 bind -> Meeting 顺序，不复制业务状态机。
             if (engine == JdbcDatabaseEngine.MYSQL) {
                 phase = Phase.MEETING_INSERT;
                 JdbcMeetingRepository.insertOwned(connection, engine, meeting);

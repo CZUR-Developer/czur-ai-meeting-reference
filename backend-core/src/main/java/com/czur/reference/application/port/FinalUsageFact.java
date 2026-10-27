@@ -96,7 +96,7 @@ public final class FinalUsageFact {
         Objects.requireNonNull(sourceAcceptedAt, "sourceAcceptedAt");
         if (sourceAcceptedAt.getNano() % 1_000 != 0) {
             throw new IllegalArgumentException(
-                    "sourceAcceptedAt must use PostgreSQL microsecond precision");
+                    "sourceAcceptedAt must use database microsecond precision");
         }
         return new FinalUsageFact(
                 meetingId,

@@ -179,8 +179,8 @@ final class JdbcFinalizationExecutionFactStore
             requireStored(fact.meetingId().equals(meetingId));
             requireStored(canonical.equals(FinalizationExecutionFactJson.encode(fact)));
 
-            // JSONB 文本的对象字段顺序由 PostgreSQL 规范化，不能直接与 canonical
-            // 文本比较；解码并重新 canonicalize 可以同时验证 JSONB 镜像语义完整。
+            // JSON 列读出的对象字段顺序会被重新规范化，不能直接与 canonical
+            // 文本比较；解码并重新 canonicalize 可以同时验证 JSON 镜像语义完整。
             FinalizationExecutionFact mirrorFact = FinalizationExecutionFactJson.decode(mirror);
             requireStored(mirrorFact.equals(fact));
             requireStored(FinalizationExecutionFactJson.encode(mirrorFact).equals(canonical));

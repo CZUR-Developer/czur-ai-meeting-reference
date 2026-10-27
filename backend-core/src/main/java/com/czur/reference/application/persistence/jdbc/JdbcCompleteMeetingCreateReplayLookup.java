@@ -28,7 +28,7 @@ public final class JdbcCompleteMeetingCreateReplayLookup
     private final DataSource dataSource;
     private final JdbcDatabaseEngine engine;
 
-    /** @param dataSource 已完成 V013 readiness 校验的 PostgreSQL 数据源 */
+    /** @param dataSource 已完成 V013 readiness 校验的数据源 */
     public JdbcCompleteMeetingCreateReplayLookup(DataSource dataSource) {
         this(dataSource, JdbcDatabaseEngine.MYSQL);
     }

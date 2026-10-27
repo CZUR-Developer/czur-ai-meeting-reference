@@ -243,11 +243,11 @@ public class MeetingHttpAssembly implements AutoCloseable {
     }
 
     /**
-     * 显式装配 SDK 直连模型的正常客户端会议入口，支持已初始化的 PG／MySQL5.7。
+     * 显式装配 SDK 直连模型的正常客户端会议入口，支持已初始化的 MySQL 5.7。
      *
      * <p>与原 start 共用唯一装配核心、创建／Stop 服务、领域状态机和持久权益 Provider。
      * 只拥有一个 Context 池；不构造旧音频 Worker、WSS、删除或实时 Token 续签组件。
-     * 这些 HTTP 路由使用既有 501，非 HTTP 访问器明确拒绝，不能借默认 PG Store 冒充可用。
+     * 这些 HTTP 路由使用既有 501，非 HTTP 访问器明确拒绝，不能借默认 Store 冒充可用。
      * Create 的旧 realtime 字段保留协议兼容；实际模型材料来自 modelSession 发行器。</p>
      *
      * <p>身份、资格、模型与存储必须由部署方明确提供；本入口无演示登录、模型或存储兜底。

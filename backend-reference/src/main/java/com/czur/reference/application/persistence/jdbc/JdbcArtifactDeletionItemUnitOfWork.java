@@ -30,7 +30,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * PostgreSQL connection-scoped fenced confirmation for one deletion item.
+ * Connection-scoped fenced confirmation for one deletion item.
  *
  * <p>The workflow row is locked before any external Store call. The frozen plan and item
  * are then checked against the request, and READY metadata is checked against the binding

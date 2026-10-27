@@ -38,7 +38,7 @@ public interface ArtifactDeletionItemUnitOfWork {
             Objects.requireNonNull(spec, "spec");
             Objects.requireNonNull(deletedAt, "deletedAt");
             if (deletedAt.getNano() % 1_000 != 0) {
-                throw new IllegalArgumentException("deletedAt must use PostgreSQL microsecond precision");
+                throw new IllegalArgumentException("deletedAt must use database microsecond precision");
             }
         }
 

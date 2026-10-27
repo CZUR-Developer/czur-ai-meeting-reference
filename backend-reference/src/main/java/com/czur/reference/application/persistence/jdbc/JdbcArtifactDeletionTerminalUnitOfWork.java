@@ -30,7 +30,7 @@ import java.util.logging.Logger;
  * 删除 Workflow 的最终收口事务。
  *
  * <p>该类不启动后台线程，也不访问 ArtifactStore。调用方必须先逐项确认删除；
- * 本工作单元只在同一 PostgreSQL 事务中按 Meeting → deletion Workflow → item/
+ * 本工作单元只在同一数据库事务中按 Meeting → deletion Workflow → item/
  * metadata → Manifest 的顺序加锁，并一次性写入会议、计划、Workflow 和 Outbox
  * 终态。任何 item 未确认都回滚，会议保持 DELETION_PENDING。</p>
  */

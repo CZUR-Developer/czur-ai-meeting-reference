@@ -53,7 +53,7 @@ public final class FinalizationExecutionFactJson {
     private static final String DECODE_FAILURE = "Finalization execution fact JSON is invalid";
     private static final String ENCODE_FAILURE = "Finalization execution fact JSON encoding failed";
     /** 固定四位年份、禁止 24:00/闰秒、小数秒最多六位的 RFC 3339 子集。 */
-    private static final Pattern POSTGRES_MICROSECOND_INSTANT = Pattern.compile(
+    private static final Pattern MICROSECOND_INSTANT = Pattern.compile(
             "^(?:(?:0000|9999)-[0-9]{2}-[0-9]{2}T"
                     + "(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]"
                     + "(?:\\.[0-9]{1,6})?Z|"
@@ -467,7 +467,7 @@ public final class FinalizationExecutionFactJson {
 
     private static Instant requiredInstant(ObjectNode parent, String field) {
         String value = requiredText(parent, field);
-        if (!POSTGRES_MICROSECOND_INSTANT.matcher(value).matches()) {
+        if (!MICROSECOND_INSTANT.matcher(value).matches()) {
             throw invalid(field + " must use the frozen RFC 3339 subset");
         }
         return OffsetDateTime.parse(value).toInstant();

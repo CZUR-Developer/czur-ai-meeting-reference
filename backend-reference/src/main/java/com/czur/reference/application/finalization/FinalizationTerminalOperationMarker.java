@@ -34,7 +34,7 @@ import java.util.Set;
 /**
  * 在执行最终收口数据库事务前持久化的 canonical 终态操作 marker。
  *
- * <p>Artifact Store、权益 Provider 与 PostgreSQL 之间没有跨资源事务。Worker 在
+ * <p>Artifact Store、权益 Provider 与数据库之间没有跨资源事务。Worker 在
  * 调用 {@code complete}/{@code fail} 前必须先把完整终态请求写入 Workflow 行；
  * 如果提交确认未知，后续 owner 只能按本 marker 恢复原请求，不能重新运行 Artifact、
  * 权益或失败裁决。marker 因而包含旧 lease 的私有 token、终态时间、checkpoint
@@ -471,7 +471,7 @@ public final class FinalizationTerminalOperationMarker {
         Objects.requireNonNull(value, name);
         if (value.getNano() % 1_000 != 0) {
             throw new IllegalArgumentException(
-                    name + " must use PostgreSQL microsecond precision");
+                    name + " must use database microsecond precision");
         }
         return value;
     }

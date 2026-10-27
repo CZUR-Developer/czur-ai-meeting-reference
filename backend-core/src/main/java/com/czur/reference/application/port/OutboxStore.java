@@ -193,7 +193,7 @@ public interface OutboxStore {
                       long leaseVersion) {
         /**
          * 兼容 P2-T08 之前的内存适配器；未连接数据库时版本使用 0。
-         * PostgreSQL 适配器必须使用数据库返回的单调版本构造完整令牌。
+         * 持久化适配器必须使用数据库返回的单调版本构造完整令牌。
          */
         public LeaseToken(String eventId, String owner, String token, Instant expiresAt, Instant claimedAt) {
             this(eventId, owner, token, expiresAt, claimedAt, 0);

@@ -51,7 +51,7 @@ class CreateMeetingFactStoreTest {
     }
 
     @Test
-    void recordNormalizesCreatedAtToPostgresTimestampPrecision() {
+    void recordNormalizesCreatedAtToMicrosecondPrecision() {
         Instant supplied = Instant.parse("2030-01-01T00:00:00.123456789Z");
         CreateMeetingFactStore.Record record = new CreateMeetingFactStore.Record(
                 "opaque-scope", KEY, request(), response(), supplied);

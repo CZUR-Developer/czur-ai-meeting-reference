@@ -12,8 +12,8 @@ Maven、Python 3 和 npm，检查工程结构、Java 测试、公开协议 Fixtu
 完整会议运行测试会创建并清理自己的随机 `ai_trans_*` 隔离库，任何测试都不能使用承载用户数据的库。
 没有测试库时，数据库集成测试会跳过；这不等于数据库验收通过。
 
-数据库交付与验证只走 MySQL 5.7：不再提供 PostgreSQL 容器夹具或跨进程重启脚本，
-历史 PostgreSQL 回归入口已随引擎支持一起移除。交付后端的 Dockerfile 和
+数据库交付与验证只走 MySQL 5.7：交付只有一份 V001 基线和显式指定的隔离测试库，
+不提供容器夹具或跨进程重启脚本。交付后端的 Dockerfile 和
 Compose 用法见[`部署说明`](../deploy/README.md)，与开发验证分开。
 
 公开发布前单独运行 `python3 tools/check-public-boundary.py`；它是发布内容检查，

@@ -36,7 +36,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * PostgreSQL 单连接实现的最终收口 Completion 工作单元。
+ * 单连接实现的最终收口 Completion 工作单元。
  *
  * <p>写路径固定使用 Meeting -> Workflow -> 排序 Artifact metadata -> Manifest ->
  * Meeting CAS -> Workflow terminal 的锁序。成功和死信路径都只执行一次数据库提交；

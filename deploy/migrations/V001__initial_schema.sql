@@ -10,7 +10,7 @@
 -- 正文 LONGTEXT 使用 utf8mb4；JSON 与 canonical 原文分列，摘要读取原文。
 -- target_languages 使用 JSON 字符串数组；32字节摘要 BINARY(32)，音频 BLOB。
 -- DATETIME(6) 一律表示 UTC；初始化与运行时连接都设置会话时区 +00:00。
--- 5.7 不执行 CHECK，不复制 PG 指纹体系；领域及事务工作单元继续负责业务校验。
+-- 5.7 不执行 CHECK，不复制约束指纹体系；领域及事务工作单元继续负责业务校验。
 -- 5.7 的 JSON 无 DEFAULT；写入方须显式提供 metadata（通常为 {}）。
 -- media_type、删除计划storage_binding等不索引的正文标识使用LONGTEXT，不缩小原文本边界。
 SET NAMES utf8mb4 COLLATE utf8mb4_bin;
@@ -78,7 +78,7 @@ CREATE TABLE ai_trans_finalization_execution_fact (
     PRIMARY KEY (meeting_id)
 ) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
--- MySQL 没有 PG advisory transaction lock；完整 Create 只锁既有 scope/key 行。
+-- MySQL 没有 advisory 事务锁；完整 Create 只锁既有 scope/key 行。
 -- 仅持久化原编码范围/键，不保存请求、摘要、响应或业务状态，不接入旧业务服务。
 CREATE TABLE ai_trans_idempotency_lock (
     scope VARBINARY(2048) NOT NULL,

@@ -77,7 +77,7 @@ public interface MeetingStartExecutionUnitOfWork {
      * 首次可执行性核对；已存在 execution
      * fact 的重放直接返回已冻结 Plan，不依赖旧 reserve 行仍然可读。</p>
      *
-     * <p>{@code startedAt} 必须已经是 PostgreSQL {@code timestamptz(6)} 可无损
+     * <p>{@code startedAt} 必须已经是数据库时间列可无损
      * 保存的微秒精度值。title 显式允许为 null；空字符串不是 null，会作为真实标题
      * 参与 execution fact 的严格相等比较。</p>
      */
@@ -254,7 +254,7 @@ public interface MeetingStartExecutionUnitOfWork {
         }
     }
 
-    /** 与 execution fact 共用四位年份和 PostgreSQL 微秒精度的协议值域。 */
+    /** 与 execution fact 共用四位年份和数据库微秒精度的协议值域。 */
     private static void requireStartedAt(Instant value) {
         Objects.requireNonNull(value, "startedAt");
         Instant minimum = Instant.parse("0000-01-01T00:00:00Z");

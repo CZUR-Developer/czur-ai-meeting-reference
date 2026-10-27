@@ -198,7 +198,7 @@ public final class JdbcClientMeetingResultFinalizer
 
     /**
      * 使用显式公共连接上下文读取最终快照；不构造 Finalizer，不结算或写入结果。
-     * 原 DataSource 入口仍按 PG 解释，部署方切换引擎时必须使用本重载。
+     * 原 DataSource 入口固定按 MySQL 解释，部署方切换引擎时必须使用本重载。
      *
      * @param database 已启动的唯一会议连接上下文，连接由本次只读调用释放
      * @param context 已由上游核验归属及权限的上下文

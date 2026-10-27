@@ -19,9 +19,9 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * PostgreSQL/MySQL V3 到期 Reservation 领取适配器。
+ * V3 到期 Reservation 领取适配器。
  *
- * <p>claim 在 PostgreSQL 使用 {@code FOR UPDATE SKIP LOCKED}，在 MySQL 5.7
+ * <p>claim 在支持 {@code FOR UPDATE SKIP LOCKED} 的引擎上直接跳过已锁定行，在 MySQL 5.7
  * 使用事务内 {@code FOR UPDATE} 加条件 UPDATE；两者都按 {@code expires_at,
  * reservation_id} 确定顺序选择单部署范围内的到期未绑定记录。候选条件同时要求
  * {@code bound_meeting_id} 和 {@code bound_at} 为空：任一绑定证据存在都说明该行
@@ -110,7 +110,7 @@ public final class JdbcExpiredReservationStore implements ExpiredReservationStor
     public ClaimBatch claimExpired(ClaimRequest request) {
         Objects.requireNonNull(request, "request");
         /*
-         * PostgreSQL 的 TIMESTAMPTZ（以及 pgjdbc 的 Timestamp 绑定）只保留微秒，
+         * 数据库时间列（以及驱动的 Timestamp 绑定）只保留微秒，
          * 并且采用四舍五入而不是简单截断。claim 返回的 LeaseToken 会在后续
          * release/lease-aware cancel 中作为 fencing 条件再次与数据库比较，因此
          * 写入值和返回句柄必须先经过同一套规范化。这里同时规范 now 与 leaseUntil，
@@ -352,7 +352,7 @@ public final class JdbcExpiredReservationStore implements ExpiredReservationStor
     private Instant normalizedTimestamp(Instant value) {
         return engine == JdbcDatabaseEngine.MYSQL
                 ? value.truncatedTo(java.time.temporal.ChronoUnit.MICROS)
-                : postgresTimestamp(value);
+                : roundedMicrosecondTimestamp(value);
     }
 
     private void bindInstant(PreparedStatement statement, int index, Instant value)
@@ -365,14 +365,14 @@ public final class JdbcExpiredReservationStore implements ExpiredReservationStor
     }
 
     /**
-     * 使用 PostgreSQL/pgjdbc 对 TIMESTAMPTZ 的微秒四舍五入规则规范化时间。
+     * 使用驱动对时间戳的微秒四舍五入规则规范化时间。
      *
      * <p>不能使用 {@link Instant#truncatedTo(java.time.temporal.TemporalUnit)}：
-     * 那会向下截断，并在纳秒部分达到 999999500 时与 pgjdbc 的跨秒进位结果
+     * 那会向下截断，并在纳秒部分达到 999999500 时与驱动的跨秒进位结果
      * 不一致。LeaseToken 的 expiresAt 是后续 release 与 lease-aware cancel 的
      * 栅栏字段，必须和实际写入数据库的 {@code lease_until} 精确相等。</p>
      */
-    private static Instant postgresTimestamp(Instant value) {
+    private static Instant roundedMicrosecondTimestamp(Instant value) {
         int nanos = value.getNano();
         int roundedMicros = (nanos + 500) / 1_000;
         if (roundedMicros == 1_000_000) {

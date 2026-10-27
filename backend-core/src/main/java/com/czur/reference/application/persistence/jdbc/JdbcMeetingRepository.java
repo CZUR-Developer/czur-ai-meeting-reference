@@ -26,10 +26,10 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * 基于 JDBC 的 PostgreSQL 会议仓库参考实现。
+ * 基于 JDBC 的会议仓库参考实现。
  *
  * <p>该类只依赖标准 {@link DataSource} 和 SQL，不依赖 Gateway、Web 框架或
- * PostgreSQL 专有 Java API。独立查询可直接使用本类；会议命令需要跨会议、
+ * 数据库专有 Java API。独立查询可直接使用本类；会议命令需要跨会议、
  * 幂等和 Outbox 原子提交时，应通过 {@link JdbcMeetingUnitOfWork} 执行。</p>
  *
  * <p>读取同时兼容 V001/V002 与 V003：查询通过 {@code to_jsonb(meeting)} 读取
@@ -1113,9 +1113,9 @@ public final class JdbcMeetingRepository implements MeetingRepository {
     private static final class DeletionSnapshotException extends Exception {
     }
 
-    /** MySQL 当前 V001 直接选择固定归属列，PG 历史列兼容查询保持不变。 */
+    /** MySQL 当前 V001 直接选择固定归属列，历史列兼容查询保持不变。 */
     private static String mysqlColumns(boolean versioned) {
-        // STORED 为 MySQL 5.7 生成列关键字，不复用 PG 的未引用 stored 别名。
+        // STORED 为 MySQL 5.7 生成列关键字，不使用未加引号的 stored 别名。
         return "SELECT m.meeting_id, m.deployment_scope, m.client_session_id,"
                 + " m.subject_scope, m.profile_id, m.profile_revision, m.state,"
                 + (versioned ? " m.aggregate_version," : "")

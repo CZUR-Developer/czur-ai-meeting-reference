@@ -138,7 +138,7 @@ public final class JdbcMeetingStartExecutionUnitOfWork
             connection.setAutoCommit(false);
             transactionStarted = true;
 
-            // PostgreSQL 会把 pg_temp 隐式放在普通 search_path 之前。必须在第一次
+            // 数据库会把 pg_temp 隐式放在普通 search_path 之前。必须在第一次
             // Meeting 锁读前固定部署 schema；若等到 execution fact Store 才固定，
             // 同名 TEMP meeting 已经可以伪造 owner/Profile 并污染重放结果。
             phase = Phase.SCHEMA_PIN;

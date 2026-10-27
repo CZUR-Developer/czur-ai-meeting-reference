@@ -180,7 +180,7 @@ final class JdbcCreateMeetingFactStore implements CreateMeetingFactStore {
      * 在调用方的只读 REPEATABLE_READ 事务中，无行锁读取同一份 V013 严格事实。
      *
      * <p>实时凭据核验需要在同一 MVCC 快照里读取 Meeting、首次会话和续期；
-     * PostgreSQL 只读事务不能执行上面的 {@code FOR SHARE}。此入口只更换 SQL 的
+     * 只读事务不能执行上面的 {@code FOR SHARE}。此入口只更换 SQL 的
      * 锁定方式，仍复用完整的字段、规范 JSON、摘要、scope/key 和会议 ID 校验；
      * 它不适用于需要与会议更新串行化的 Start/续期写事务。</p>
      */
@@ -403,7 +403,7 @@ final class JdbcCreateMeetingFactStore implements CreateMeetingFactStore {
 
     private void pinSearchPath() throws SQLException {
         if (engine == JdbcDatabaseEngine.MYSQL) {
-            return; // MySQL 固定当前数据库 ai_trans_* 表，不执行 PG search_path 指令。
+            return; // MySQL 固定当前数据库 ai_trans_* 表，不需要额外固定 search_path。
         }
         try (PreparedStatement statement = connection.prepareStatement(
                 "SELECT current_schema()")) {

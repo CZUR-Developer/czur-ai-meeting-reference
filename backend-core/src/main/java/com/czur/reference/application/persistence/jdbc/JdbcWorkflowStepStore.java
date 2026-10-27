@@ -20,7 +20,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * PostgreSQL {@link WorkflowStepStore} 参考实现。
+ * {@link WorkflowStepStore} 参考实现。
  *
  * <p>公共方法自行取得连接并管理短事务；包可见的 connection-scoped 原语要求
  * 调用方已经关闭 auto-commit，并且绝不提交、回滚、关闭连接或另取第二个连接。
@@ -31,7 +31,7 @@ import java.util.logging.Logger;
  * 仍可按完整原始 Definition 裁决。每次 lease 操作同时比较 owner、数据库 token、
  * version、expiresAt 和 claimedAt；旧消费者不能覆盖新赢家。</p>
  *
- * <p>PostgreSQL {@code TIMESTAMPTZ} 只能无损保存到微秒。所有进入持久化比较的
+ * <p>数据库时间列只能无损保存到微秒。所有进入持久化比较的
  * {@link Instant} 都必须已经是微秒精度，本实现不会静默四舍五入。日志只记录固定
  * 分类、状态和数量，不输出 Key、checkpoint、错误正文、SQL 或 token。</p>
  */
@@ -992,7 +992,7 @@ public final class JdbcWorkflowStepStore implements WorkflowStepStore {
         Objects.requireNonNull(value, name);
         if (value.getNano() % 1_000 != 0) {
             throw new IllegalArgumentException(
-                    name + " must use PostgreSQL microsecond precision");
+                    name + " must use database microsecond precision");
         }
     }
 

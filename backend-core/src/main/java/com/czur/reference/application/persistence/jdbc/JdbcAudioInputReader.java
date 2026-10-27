@@ -22,7 +22,7 @@ import java.util.logging.Logger;
  * V015 单流输入的只读 JDBC 组件，由持久写端复用读取与帧事实核验。
  *
  * <p>一次读取使用一个只读 REPEATABLE_READ 事务：游标、完成声明和帧页来自同一
- * PostgreSQL 快照。{@code readCursor} 核对末帧与游标终点，
+ * 数据库快照。{@code readCursor} 核对末帧与游标终点，
  * {@code replay} 校验本页从请求下一序号起连续；读取帧时重新计算 v1 完整内容
  * 摘要。损坏事实返回独立结果，不能伪装成缺失或空页。本组件不取得写权、不签发
  * ACK、不读取模型处理游标，也不向 EventLog 写原始音频。</p>

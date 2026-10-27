@@ -17,7 +17,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * durable input fact 与会议级 receipt 的 PostgreSQL 协同工作单元。
+ * durable input fact 与会议级 receipt 的协同工作单元。
  *
  * <p>每次 {@link #accept(AcceptRequest)} 只取得一条连接，并在该连接的本地事务
  * 中按固定顺序锁定 meeting、写入或重放 V008 durable input fact，再调用已有的

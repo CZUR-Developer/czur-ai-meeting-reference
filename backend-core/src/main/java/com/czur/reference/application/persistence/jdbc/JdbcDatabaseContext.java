@@ -29,7 +29,7 @@ public final class JdbcDatabaseContext implements AutoCloseable {
     private final HikariDataSource pool;
     private final AtomicBoolean closed = new AtomicBoolean(false);
 
-    /** 接管已经创建的唯一池；供旧 PG runtime 保持原构造入口和生命周期。 */
+    /** 接管已经创建的唯一池；供完整运行时保持原构造入口和生命周期。 */
     JdbcDatabaseContext(DatabaseRuntimeConfig config, HikariDataSource pool) {
         this.config = Objects.requireNonNull(config, "config");
         this.pool = Objects.requireNonNull(pool, "pool");
@@ -116,7 +116,7 @@ public final class JdbcDatabaseContext implements AutoCloseable {
         }
     }
 
-    /** 唯一池装配点；旧 PG runtime 和 MySQL 客户端链都不额外创建连接池。 */
+    /** 唯一池装配点；完整运行时和 MySQL 客户端链都不额外创建连接池。 */
     static HikariDataSource createPool(DatabaseRuntimeConfig config) {
         return new HikariDataSource(poolConfiguration(config));
     }
@@ -134,7 +134,7 @@ public final class JdbcDatabaseContext implements AutoCloseable {
         hikari.setReadOnly(false);
         if (config.engine() == JdbcDatabaseEngine.MYSQL) {
             hikari.setDriverClassName(config.engine().driverClassName());
-            // Connector/J 的 socketTimeout 为毫秒，pgjdbc 为秒；配置入口仍统一用秒。
+            // Connector/J 的 socketTimeout 为毫秒；配置入口仍统一用秒，装配时换算。
             hikari.addDataSourceProperty("socketTimeout", Long.toString(config.socketTimeout().toMillis()));
             hikari.addDataSourceProperty("characterEncoding", "UTF-8");
             hikari.addDataSourceProperty("connectionCollation", "utf8mb4_bin");

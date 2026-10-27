@@ -61,7 +61,7 @@ public interface ArtifactReadyMetadataStore {
     /**
      * 数据库中已经确认 READY 的 descriptor 及首次记录时间。
      *
-     * <p>PostgreSQL {@code TIMESTAMPTZ} 只能无损表示到微秒；构造时拒绝更高精度，
+     * <p>数据库时间列只能无损表示到微秒；构造时拒绝更高精度，
      * 防止读回值在不同 JVM/驱动中产生不稳定比较。诊断文本不输出 descriptor 或
      * 时间值。</p>
      */

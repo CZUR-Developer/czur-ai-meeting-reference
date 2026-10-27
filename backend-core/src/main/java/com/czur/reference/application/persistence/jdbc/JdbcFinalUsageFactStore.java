@@ -26,8 +26,8 @@ import java.util.Optional;
  * 结算和其它收口事实组成单个本地事务。</p>
  *
  * <p>{@code source_accepted_at} 来源必须已经经过 V008 durable input 持久化，
- * 因而必须是 PostgreSQL {@code TIMESTAMPTZ} 可无损表达的微秒精度。这里在执行
- * SQL 前拒绝更高精度时间，避免 pgjdbc 舍入后把同一 Java 候选在重试时错误分类为
+ * 因而必须是数据库时间列可无损表达的微秒精度。这里在执行
+ * SQL 前拒绝更高精度时间，避免驱动舍入后把同一 Java 候选在重试时错误分类为
  * 冲突或重放。</p>
  */
 final class JdbcFinalUsageFactStore {
@@ -96,7 +96,7 @@ final class JdbcFinalUsageFactStore {
         requireTransactionalConnection(connection);
         Objects.requireNonNull(fact, "fact");
         // 在读取既有赢家或来源事实前校验精度，避免纳秒候选因比较顺序不同
-        // 被误报为 REPLAYED/CONFLICT，而不是明确指出无法无损写入 TIMESTAMPTZ。
+        // 被误报为 REPLAYED/CONFLICT，而不是明确指出无法无损写入数据库时间列。
         requirePersistentTimestamp(fact.sourceAcceptedAt());
         Optional<FinalUsageFact> existing = find(connection, fact.meetingId());
         if (existing.isPresent()) {
@@ -221,7 +221,7 @@ final class JdbcFinalUsageFactStore {
         Objects.requireNonNull(value, "sourceAcceptedAt");
         if (value.getNano() % 1_000 != 0) {
             throw new IllegalArgumentException(
-                    "sourceAcceptedAt must use PostgreSQL microsecond precision");
+                    "sourceAcceptedAt must use database microsecond precision");
         }
     }
 

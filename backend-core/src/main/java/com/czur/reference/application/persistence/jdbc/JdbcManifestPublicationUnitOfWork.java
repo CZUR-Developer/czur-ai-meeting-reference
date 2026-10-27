@@ -22,7 +22,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * PostgreSQL Manifest 发布的参考 JDBC 工作单元。
+ * Manifest 发布的参考 JDBC 工作单元。
  *
  * <p>本类刻意独立于 {@link JdbcMeetingUnitOfWork}：Manifest 事实表和会议状态
  * 必须在一条显式事务中提交，而现有会议工作单元不暴露 T14-03-01 的事实存储

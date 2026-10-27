@@ -35,8 +35,8 @@ import java.util.Set;
  * {@code NOT_REQUESTED}。此外，fallback 目标以及 {@code ENABLE} 能力的全部依赖必须在
  * 同一 Plan 中可用。验证后决策按 capability 排序，使等价计划产生稳定的 canonical 表示。</p>
  *
- * <p>{@code startedAt} 必须位于四位年份协议值域，且纳秒部分能够被 PostgreSQL
- * {@code timestamp(6) with time zone} 无损保存（即微秒精度）。实现拒绝而不是截断
+ * <p>{@code startedAt} 必须位于四位年份协议值域，且纳秒部分能够被数据库
+ * 时间列无损保存（即微秒精度）。实现拒绝而不是截断
  * 亚微秒输入，避免首次执行和数据库恢复后的事实发生漂移。标题和 Plan 决策中的
  * 全部动态文本同样必须是严格合法 UTF-8，防止不同非法 UTF-16 输入在编码时被替换成
  * 相同 canonical 字节和摘要。</p>
@@ -61,7 +61,7 @@ public final class FinalizationExecutionFact {
      * 因而损坏、缺项或映射漂移的数据不能进入 Worker。</p>
      *
      * @param meetingId 会议稳定标识；满足共享领域策略的严格 UTF-8 与 1024 字节上限
-     * @param startedAt 会议开始时间；必须为 PostgreSQL 微秒精度
+     * @param startedAt 会议开始时间；必须为数据库微秒精度
      * @param title 显式可空标题；非空时最多 256 个 Unicode code point
      * @param productProfile 创建会议时捕获的完整 Profile 快照
      * @param capabilityPlan 创建会议时确定的完整能力计划
@@ -136,7 +136,7 @@ public final class FinalizationExecutionFact {
         return meetingId;
     }
 
-    /** 返回已验证可由 PostgreSQL 微秒精度无损保存的开始时间。 */
+    /** 返回已验证可由数据库微秒精度无损保存的开始时间。 */
     public Instant startedAt() {
         return startedAt;
     }

@@ -42,8 +42,8 @@ public interface FinalizationAdmissionUnitOfWork {
      * Admission 的完整可信输入。
      *
      * <p>部署与主体仅用于核对数据库中的 owned Meeting，不能改变会议归属。
-     * {@code inputFact} 必须完整属于同一会议；其接管时间必须是 PostgreSQL
-     * {@code timestamptz(6)} 可以无损保存的微秒精度值。</p>
+     * {@code inputFact} 必须完整属于同一会议；其接管时间必须是数据库
+     * 时间列可以无损保存的微秒精度值。</p>
      */
     record AdmissionRequest(
             String deploymentScope,
@@ -61,7 +61,7 @@ public interface FinalizationAdmissionUnitOfWork {
             }
             if (inputFact.acceptedAt().getNano() % 1_000 != 0) {
                 throw new IllegalArgumentException(
-                        "inputFact.acceptedAt must use PostgreSQL microsecond precision");
+                        "inputFact.acceptedAt must use database microsecond precision");
             }
         }
 

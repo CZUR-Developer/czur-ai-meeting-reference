@@ -16,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 防止 OpenAPI 中独立声明的 MeetingId 属性与领域/数据库字节上限漂移。
  *
  * <p>OpenAPI {@code maxLength} 按 Unicode code point 计数，而 Java 领域和
- * PostgreSQL 按 UTF-8 bytes 限制为 1024。如果属性遗漏 ASCII pattern，协议会
+ * 数据库列按 UTF-8 bytes 限制为 1024。如果属性遗漏 ASCII pattern，协议会
  * 错误接受 1024 个中文字符。因此路径参数和每一个公开 {@code meetingId}
  * 属性都必须同时声明同一个 ASCII pattern 与 {@code maxLength: 1024}。</p>
  */

@@ -15,7 +15,7 @@ import java.util.Set;
  *
  * <p>成功路径只接受已经由 Artifact Store 确认 READY 的完整 descriptor 集合，并且
  * 必须先从本地持久事实证明 checkpoint 中冻结的权益提交已经完成。实现随后在一个
- * PostgreSQL 事务中保存 READY metadata、追加 Manifest revision 1、推进 Meeting，
+ * 数据库事务中保存 READY metadata、追加 Manifest revision 1、推进 Meeting，
  * 并把同一 lease 完成为 {@code COMPLETED}。</p>
  *
  * <p>失败路径允许保留已经 READY 的 descriptor 子集；其余 checkpoint artifact 会
@@ -46,7 +46,7 @@ public interface FinalizationCompletionUnitOfWork {
      *
      * <p>{@code readyArtifacts} 必须与 checkpoint 的 artifact 集合一一对应；顺序不
      * 参与身份。{@code completedAt} 同时是 Workflow 终态时间与 Meeting 更新时间，
-     * 必须严格位于 lease 有效区间内并可由 PostgreSQL 微秒精度无损保存。</p>
+     * 必须严格位于 lease 有效区间内并可由数据库微秒精度无损保存。</p>
      */
     record CompletionRequest(
             LeaseToken lease,
@@ -259,7 +259,7 @@ public interface FinalizationCompletionUnitOfWork {
         Objects.requireNonNull(value, name);
         if (value.getNano() % 1_000 != 0) {
             throw new IllegalArgumentException(
-                    name + " must use PostgreSQL microsecond precision");
+                    name + " must use database microsecond precision");
         }
     }
 

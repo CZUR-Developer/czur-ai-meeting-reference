@@ -13,7 +13,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * 当前 V001 的最小只读基线检查，不承担会议业务或 PG 约束指纹验收。
+ * 当前 V001 的最小只读基线检查，不承担会议业务或约束指纹验收。
  * MySQL 只核对独立登记与固定表的存在／InnoDB，不复制第二套 catalog 契约体系。
  */
 final class JdbcDatabaseBaseline {

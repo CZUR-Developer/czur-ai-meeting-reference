@@ -28,7 +28,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * 从 PG／MySQL 的同一会议权威事实表读取会议详情和归属列表。
+ * 从同一会议权威事实表读取会议详情和归属列表。
  *
  * <p>{@link #get(GetRequest)} 使用一条 SELECT 同时读取聚合归属、会议状态、
  * meeting-level 输入状态、finalization receipt、Manifest 状态和时间，再复用

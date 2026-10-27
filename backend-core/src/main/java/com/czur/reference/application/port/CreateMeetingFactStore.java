@@ -63,9 +63,9 @@ public interface CreateMeetingFactStore {
             Objects.requireNonNull(request, "request");
             Objects.requireNonNull(response, "response");
             Objects.requireNonNull(createdAt, "createdAt");
-            // PostgreSQL TIMESTAMPTZ stores microseconds.  Normalize at the port
-            // boundary so a record read back from JDBC compares equal to the
-            // candidate that was persisted, even when callers supplied nanos.
+            // Database timestamp columns store microseconds.  Normalize at the
+            // port boundary so a record read back from JDBC compares equal to
+            // the candidate that was persisted, even when callers supplied nanos.
             createdAt = createdAt.truncatedTo(ChronoUnit.MICROS);
             if (!key.equals(request.requestSnapshot().idempotencyKey())) {
                 throw new IllegalArgumentException(

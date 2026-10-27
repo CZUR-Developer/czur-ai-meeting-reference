@@ -29,7 +29,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * 基于 PostgreSQL 单连接事务的 owned 会议原子创建工作单元。
+ * 基于单连接事务的 owned 会议原子创建工作单元。
  *
  * <p>本实现只消费已经完成首次 reserve 的稳定结果，不调用身份 Provider、权益
  * Provider 或其它外部系统。每次首次创建在同一个 JDBC 事务中完成成功 Outcome
@@ -39,7 +39,7 @@ import java.util.logging.Logger;
  * 它只会在产生业务副作用前读取并重放上层已经持久化的确定失败。</p>
  *
  * <p>事务在锁定 Reservation 后只读取一次注入的 {@link Clock}，并截断到
- * PostgreSQL {@code timestamptz} 的微秒精度。同一个 {@code bindAt} 同时写入
+ * 数据库时间列的微秒精度。同一个 {@code bindAt} 同时写入
  * Reservation、Meeting、幂等记录和 Outbox。调用方传入的 reserve 对象不会被
  * 直接信任：实现会按完整四元组读取 {@code usage_operation}，严格解码 v2
  * 首次授权快照，再与锁定行和请求逐项核对。</p>

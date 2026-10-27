@@ -59,7 +59,7 @@ public final class JdbcMeetingCreateOutcomeStore implements MeetingCreateOutcome
         this(dataSource, Clock.systemUTC());
     }
 
-    /** 注入时钟便于部署装配和确定性测试；时间会截断为 PostgreSQL 微秒精度。 */
+    /** 注入时钟便于部署装配和确定性测试；时间会截断为数据库微秒精度。 */
     public JdbcMeetingCreateOutcomeStore(DataSource dataSource, Clock clock) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
         this.clock = Objects.requireNonNull(clock, "clock");

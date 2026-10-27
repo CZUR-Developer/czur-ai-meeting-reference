@@ -55,7 +55,7 @@ public final class FinalizationOperationIdentity {
      * 从 Admission 已锁定的完整提交材料生成 identity。
      *
      * @param expectedVersion Admission 行锁下观察并冻结的 Reservation version
-     * @param sourceAcceptedAt durable input 的 PostgreSQL 微秒精度接管时间
+     * @param sourceAcceptedAt durable input 的数据库微秒精度接管时间
      */
     public static FinalizationOperationIdentity commit(
             String deploymentScope,

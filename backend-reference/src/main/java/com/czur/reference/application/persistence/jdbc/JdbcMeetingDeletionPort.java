@@ -43,7 +43,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * PostgreSQL 单连接事务实现的会议删除受理端口。
+ * 单连接事务实现的会议删除受理端口。
  *
  * <p>调用方负责验证 credential 和 {@code meeting:delete} 权限；本端口负责在
  * {@code meeting FOR UPDATE} 行锁内再次按数据库原始部署/主体校验归属。访问

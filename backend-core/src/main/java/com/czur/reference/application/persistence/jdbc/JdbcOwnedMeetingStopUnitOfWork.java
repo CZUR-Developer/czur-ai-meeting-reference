@@ -28,7 +28,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * 基于 PostgreSQL 单连接事务的 owned 会议原子停止工作单元。
+ * 基于单连接事务的 owned 会议原子停止工作单元。
  *
  * <p>每次调用先按 meetingId 锁定会议行，再通过 {@link MeetingAccessGuard}
  * 校验部署和真实主体。归属拒绝发生在任何停止幂等查询之前，防止跨部署、跨
@@ -44,7 +44,7 @@ import java.util.logging.Logger;
  * {@link ErrorCode#INVALID_MEETING_STATE}。Grant 截止时间不参与停止判断。</p>
  *
  * <p>事务在行锁和状态校验后只读取一次注入的 {@link Clock}，并截断到
- * PostgreSQL {@code timestamptz} 的微秒精度。首次状态更新时，同一时刻用于
+ * 数据库时间列的微秒精度。首次状态更新时，同一时刻用于
  * Meeting、pending、停止幂等记录和 Outbox。日志不输出部署、主体、幂等 scope/key/
  * digest、Grant、Reservation、数据库地址或会议正文。</p>
  */

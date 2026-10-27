@@ -49,7 +49,7 @@ bash tools/mysql57-compatibility/run.sh --compile-only
 
 | 实验 | 实际断言 | 适配影响 |
 | --- | --- | --- |
-| 1 原子建会提交 | 事务前预占冻结 expected ID、未绑定；同事务锁预占→插入会议→按版本及 expected ID 条件绑定→写事实／Outbox→提交，全部读回一致 | 保留双向即时外键，调整写入顺序可行；不能继续依赖 PG 的双向延迟外键 |
+| 1 原子建会提交 | 事务前预占冻结 expected ID、未绑定；同事务锁预占→插入会议→按版本及 expected ID 条件绑定→写事实／Outbox→提交，全部读回一致 | 保留双向即时外键，调整写入顺序可行；不能继续依赖双向延迟外键 |
 | 2 建会中途回滚 | 插入会议后、写完事实／Outbox 后各注入一次失败；会议、事实及 Outbox 均不存在，原预占仍未绑定且版本未变 | 业务 DML（数据操作语句）可以保持事务原子性；只是两个针对性回归，不是故障矩阵 |
 | 3 孤儿立即拒绝 | 在 INSERT 调用时收到外键错误 1452，尚未 COMMIT，孤儿行不存在 | 即时外键不能当作延迟校验使用 |
 | 4 同行锁累计 | 两个 JDBC 事务通过 latch 组织顺序，各用同一锁行 `FOR UPDATE`；锁定读值依次为 0、11，最终累计为 25 | 行锁可保护读后累计，无丢失更新；不借助 sleep 推断阻塞时间，不验证旧生产扣费 |
@@ -57,7 +57,7 @@ bash tools/mysql57-compatibility/run.sh --compile-only
 | 6 CHECK 与业务校验 | 声明 `CHECK(used_ms >= 0)` 的表实际接受 -1；Java 业务入口拒绝 -1、正常接受 7 | MySQL 5.7 不执行 CHECK，非负等业务不变量必须有实际入口校验 |
 | 7 字段精确读回 | JSON 中文及 emoji、32 字节 SHA-256 digest、显式 UTC `DATETIME(6)` 微秒读回一致；两个大小写 ID 各自唯一 | 用 `utf8mb4` 和二进制排序规则保存标识；UTC 时间约定须由连接及读写映射维持 |
 | 8 不可用语法 | `FOR UPDATE SKIP LOCKED`、`DEFERRABLE INITIALLY DEFERRED` 各收到语法错误 1064 | 5.7 不能直接沿用这些锁队列／延迟约束 SQL，正式适配需对应处理 |
-| 9 DDL 隐式提交 | 事务内先写标记再 CREATE TABLE，随后写第二标记并 ROLLBACK；独立连接仍看到第一标记和新表，第二标记不存在 | DDL（结构定义语句）与会议 DML 原子性不同；不能承诺整份建表脚本像 PG 一样整体回滚 |
+| 9 DDL 隐式提交 | 事务内先写标记再 CREATE TABLE，随后写第二标记并 ROLLBACK；独立连接仍看到第一标记和新表，第二标记不存在 | DDL（结构定义语句）与会议 DML 原子性不同；不能承诺整份建表脚本整体回滚 |
 
 第一项的双向关联由先创建两张表、再 `ALTER TABLE` 加第二条外键完成，所有连接保持
 `foreign_key_checks=1`。该最小模型没有复制生产会议状态机，不替代全部生产约束。

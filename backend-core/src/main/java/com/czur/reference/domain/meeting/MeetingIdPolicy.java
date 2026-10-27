@@ -8,7 +8,7 @@ import java.nio.charset.StandardCharsets;
 /**
  * 会议标识在领域、数据库、公开协议和分页游标之间共享的长度策略。
  *
- * <p>PostgreSQL 使用 UTF-8，分页 token 也编码 UTF-8 字节，因此边界按字节而不是
+ * <p>数据库列按 UTF-8 字节限长，分页 token 也编码 UTF-8 字节，因此边界按字节而不是
  * Java UTF-16 字符数计算。公开 OpenAPI 的 MeetingId 当前限制为 ASCII 格式，
  * 其 {@code maxLength=1024} 与本字节上限等价；领域层仍按严格 UTF-8 校验，避免
  * 未配对 surrogate 被编码器静默替换后产生不同标识。</p>

@@ -17,7 +17,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * 基于 PostgreSQL 唯一键的幂等记录适配器。
+ * 基于数据库唯一键的幂等记录适配器。
  *
  * <p>{@link #reserve(IdempotencyRecord)} 在同一连接事务内执行
  * {@code INSERT ... ON CONFLICT DO NOTHING}，随后读取数据库中最终记录，

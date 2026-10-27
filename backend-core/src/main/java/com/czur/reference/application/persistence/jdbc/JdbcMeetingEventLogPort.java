@@ -18,9 +18,9 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * 基于 PG／MySQL 同一会议事实源的认证事件补拉适配器。
+ * 基于同一会议事实源的认证事件补拉适配器。
  *
- * <p>PG 一次调用只执行一条 SELECT；MySQL5.7 在一个只读 REPEATABLE READ 事务内
+ * <p>非 MySQL 分支一次调用只执行一条 SELECT；MySQL5.7 在一个只读 REPEATABLE READ 事务内
  * 读取会议和事件。会议存在性、原始归属、会议与 Manifest 删除状态、整场事件完整性、
  * 最高已提交事件序号和 {@code afterSequence} 之后的事件页都来自同一快照，
  * 不会出现先鉴权、后查询时读到两份数据库状态的竞态。结果行到达后
@@ -48,9 +48,9 @@ public final class JdbcMeetingEventLogPort implements MeetingEventLogPort, Realt
     /**
      * MATERIALIZED 单行 CTE 强制整场异常扫描每次请求只执行一次；随后
      * LEFT JOIN LATERAL 让“存在但无新事件”的会议仍返回一行。归属、两处删除状态、整场异常
-     * 标记和分页事件仍由同一个 PostgreSQL statement snapshot 解释。
+     * 标记和分页事件仍由同一个 statement snapshot 解释。
      *
-     * <p>PostgreSQL 的 POSIX {@code [:space:]} 与 Java 21
+     * <p>数据库的 POSIX {@code [:space:]} 与 Java 21
      * {@link String#isBlank()} 基本一致，但缺少 U+001C～U+001F 四个信息分隔符。
      * 每个必填文本先用 {@code translate} 删除这四个字符，再检查剩余字符是否
      * 全属于 POSIX whitespace，等价覆盖二者并集；这种写法也能正确处理 TAB 与
@@ -231,7 +231,7 @@ public final class JdbcMeetingEventLogPort implements MeetingEventLogPort, Realt
     }
 
     /**
-     * 5.7 读取与 PG 使用同一守卫、EventLog 解码及页值对象。
+     * 5.7 读取与非 MySQL 分支使用同一守卫、EventLog 解码及页值对象。
      * 先读归属／删除状态，后在同一 RR 快照扫描整场完整性；只保留本页 limit+1 条。
      * 不使用锁定读，不把历史坏事件隐藏在游标之前，也不另建事件事实源。
      */

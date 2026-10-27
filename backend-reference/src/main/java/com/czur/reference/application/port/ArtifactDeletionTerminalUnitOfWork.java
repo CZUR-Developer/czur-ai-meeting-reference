@@ -30,7 +30,7 @@ public interface ArtifactDeletionTerminalUnitOfWork {
             Objects.requireNonNull(completedAt, "completedAt");
             if (completedAt.getNano() % 1_000 != 0) {
                 throw new IllegalArgumentException(
-                        "completedAt must use PostgreSQL microsecond precision");
+                        "completedAt must use database microsecond precision");
             }
         }
     }

@@ -284,7 +284,7 @@ public final class MeetingAggregate {
     }
 
     /**
-     * PostgreSQL {@code timestamptz} 以微秒保存。领域快照在进入事实源前统一截断，
+     * 数据库时间列以微秒保存。领域快照在进入事实源前统一截断，
      * 避免纳秒输入经过 JDBC 往返后因精度变化破坏相等性与幂等重放。
      */
     private static Instant canonicalTimestamp(Instant value) {

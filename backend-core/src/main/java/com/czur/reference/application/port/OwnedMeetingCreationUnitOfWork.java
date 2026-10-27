@@ -42,7 +42,7 @@ public interface OwnedMeetingCreationUnitOfWork {
      * 快照取得，调用方没有第二套字段可以覆盖它们。</p>
      *
      * <p>事务时间故意不属于本请求。数据库实现应在锁定并验证 Reservation 后
-     * 从注入时钟读取一次 PostgreSQL 微秒精度时间，并把同一个时间用于 bind、
+     * 从注入时钟读取一次数据库微秒精度时间，并把同一个时间用于 bind、
      * Meeting、会议幂等和 Outbox，避免一次请求产生互相矛盾的时间事实。</p>
      */
     record CreateRequest(

@@ -15,7 +15,7 @@ class ArtifactDeletionTerminalUnitOfWorkContractTest {
     private static final Instant AT = Instant.parse("2026-09-29T08:00:00.000001Z");
 
     @Test
-    void requestRequiresDeletionWorkflowAndPostgresPrecision() {
+    void requestRequiresDeletionWorkflowAndMicrosecondPrecision() {
         WorkflowStepStore.LeaseToken lease = new WorkflowStepStore.LeaseToken(
                 new WorkflowStep.Key("mtg_contract", ArtifactDeletionPlan.STEP_TYPE, "k"),
                 "owner", "token", AT.plusSeconds(10), AT, 1);

@@ -79,7 +79,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * 会议 HTTP adapter 的 transport contract 测试。
  *
- * <p>只使用 fake query/deletion ports，不启动 HTTP server、不连接 PostgreSQL；
+ * <p>只使用 fake query/deletion ports，不启动 HTTP server、不连接数据库；
  * create/stop 额外验证关闭式响应不会进入旧命令服务。</p>
  */
 class MeetingHttpAdapterContractTest {

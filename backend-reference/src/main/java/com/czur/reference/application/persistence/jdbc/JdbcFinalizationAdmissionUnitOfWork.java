@@ -33,7 +33,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * PostgreSQL 单连接实现的最终收口 Admission 工作单元。
+ * 单连接实现的最终收口 Admission 工作单元。
  *
  * <p>首次路径只取得一条连接并按固定顺序完成：固定部署 schema、锁定 Meeting、
  * 核对 owner/Profile/execution fact、锁定主 Reservation、保存 V008、从 V008 保存

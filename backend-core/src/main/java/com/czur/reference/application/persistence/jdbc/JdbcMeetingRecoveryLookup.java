@@ -18,7 +18,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * 基于 PostgreSQL 已提交事实的 owned 会议创建恢复查询。
+ * 基于已提交事实的 owned 会议创建恢复查询。
  *
  * <p>实现先复用 {@link JdbcMeetingCreateReplayLookup} 核对创建 Outcome，
  * 再用同一 {@link DataSource} 的主库连接联合读取 meetingId、
@@ -28,7 +28,7 @@ import java.util.logging.Logger;
  *
  * <p>全路径只执行 {@code SELECT}：不禁用 auto-commit、不开启显式
  * 事务，不加行锁，不提交、回滚、取消、补写或修复任何业务事实。
- * PostgreSQL 默认 READ COMMITTED 下，若首读未发现 Outcome，但随后看到
+ * 默认 READ COMMITTED 隔离级别下，若首读未发现 Outcome，但随后看到
  * Meeting 或已绑定 Reservation，实现会二次查询 Outcome；二读出现
  * Success 时重新读取一次当前事实，避免把创建事务刚好在多条
  * SELECT 之间提交误判为单边 Meeting。</p>

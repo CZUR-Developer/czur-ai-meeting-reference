@@ -31,7 +31,7 @@ public record EventLog(
             throw new IllegalArgumentException("eventSequence must be positive");
         }
         Objects.requireNonNull(emittedAt, "emittedAt");
-        // PostgreSQL timestamptz 和参考 JDBC 事实源都以微秒为持久化精度。统一在
+        // 数据库时间列和参考 JDBC 事实源都以微秒为持久化精度。统一在
         // 端口对象构造时截断，确保内存实现、JDBC 首次写入和同 eventId 重放
         // 比较观察到同一个时间事实，而不是由各适配器各自静默舍入。
         emittedAt = emittedAt.truncatedTo(ChronoUnit.MICROS);

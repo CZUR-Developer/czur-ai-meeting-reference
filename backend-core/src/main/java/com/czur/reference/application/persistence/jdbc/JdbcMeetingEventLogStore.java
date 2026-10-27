@@ -180,7 +180,7 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
         return append(connection, JdbcDatabaseEngine.MYSQL, event);
     }
 
-    /** MySQL 写路径先锁 Meeting 再当前读，PG 原先重放顺序保持。 */
+    /** MySQL 写路径先锁 Meeting 再当前读，重放顺序保持不变。 */
     static AppendResult append(Connection connection, JdbcDatabaseEngine engine, EventLog event)
             throws SQLException {
         Objects.requireNonNull(connection, "connection");
@@ -493,7 +493,7 @@ public final class JdbcMeetingEventLogStore implements EventLogStore {
     }
 
     private static RuntimeException databaseFailure(String message, SQLException cause) {
-        // PostgreSQL 的异常 message/detail 可能回显无法解析的 JSON 参数，即会议
+        // 数据库异常的 message/detail 可能回显无法解析的 JSON 参数，即会议
         // 正文。公开异常只保留经过白名单校验的 SQLState，不挂载原始 cause。
         IllegalStateException safe = new IllegalStateException(
                 message + " sqlState=" + safeSqlState(cause));

@@ -23,7 +23,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * 从一次 PostgreSQL 只读快照还原会议输入收口所需的可信上下文。
+ * 从一次只读快照还原会议输入收口所需的可信上下文。
  *
  * <p>Meeting 的归属、状态、V013 首次 Create 与 V011 冻结 Start 必须在同一
  * REPEATABLE_READ 快照中核对。源语言只取首次 Create；有效能力只取 Start 的

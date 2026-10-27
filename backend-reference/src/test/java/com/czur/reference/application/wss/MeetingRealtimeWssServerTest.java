@@ -83,7 +83,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** 真实 TLS loopback 传输门禁；业务端口均为伪实现，不代替第 ③ 步 PostgreSQL 门。 */
+/** 真实 TLS loopback 传输门禁；业务端口均为伪实现，不代替第 ③ 步数据库门。 */
 class MeetingRealtimeWssServerTest {
     private static final String MEETING = "mtg_wss_connection_test";
     private static final String TOKEN = "test_session_token_000001";

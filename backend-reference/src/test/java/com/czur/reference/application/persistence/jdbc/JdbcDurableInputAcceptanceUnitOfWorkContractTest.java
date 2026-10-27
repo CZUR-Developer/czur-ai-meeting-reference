@@ -10,9 +10,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * 不依赖 PostgreSQL 的 JDBC 协同边界静态契约门。
+ * 不依赖数据库的 JDBC 协同边界静态契约门。
  *
- * <p>真实锁、数组编码、约束、回滚和跨进程提交门禁必须在显式 PostgreSQL 环境
+ * <p>真实锁、数组编码、约束、回滚和跨进程提交门禁必须在显式提供的数据库环境
  * 通过集成测试验证；本测试只防止适配器退回到双连接或泄漏底层事务资源。</p>
  */
 class JdbcDurableInputAcceptanceUnitOfWorkContractTest {

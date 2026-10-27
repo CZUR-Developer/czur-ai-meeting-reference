@@ -21,7 +21,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * PostgreSQL {@code meeting} 表上的会议级最终收口事实适配器。
+ * {@code meeting} 表上的会议级最终收口事实适配器。
  *
  * <p>该实现要求 V005。{@code meeting.input_state} 与
  * {@code finalization_receipt_id} 是公开 Stop/查询使用的会议级权威事实；

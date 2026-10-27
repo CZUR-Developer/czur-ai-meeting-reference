@@ -219,7 +219,7 @@ public final class HmacMeetingPageTokenCodec {
     }
 
     /**
-     * PostgreSQL 降序 keyset 游标。
+     * 降序 keyset 游标。
      *
      * <p>{@code createdAt} 和 {@code meetingId} 必须来自同一条已返回数据库记录，
      * 不能使用客户端时间或额外探测的第 {@code limit + 1} 条记录。</p>

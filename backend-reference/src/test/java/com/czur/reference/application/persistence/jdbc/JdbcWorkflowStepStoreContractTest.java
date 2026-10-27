@@ -10,7 +10,7 @@ import java.nio.file.Path;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** 不依赖 PostgreSQL 的 JDBC 工作流步骤边界契约。 */
+/** 不依赖数据库的 JDBC 工作流步骤边界契约。 */
 class JdbcWorkflowStepStoreContractTest {
     @Test
     void adapterKeepsConnectionScopedPrimitivesAndIndependentPublicOperations() {
@@ -34,7 +34,7 @@ class JdbcWorkflowStepStoreContractTest {
                 source.indexOf("static RenewResult renew(")));
         assertFalse(source.contains("ClaimRequest request,\n            Instant expiry"));
         assertFalse(source.contains("Instant renewedAt,\n            Instant expiry"));
-        assertFalse(source.contains("postgresTimestamp("));
+        assertFalse(source.contains("roundedMicrosecondTimestamp("));
     }
 
     @Test
@@ -65,7 +65,7 @@ class JdbcWorkflowStepStoreContractTest {
     void timestampsAreRejectedInsteadOfRoundedAndRetryCannotMoveBeforeFailure() {
         String source = readSource();
         assertTrue(source.contains("value.getNano() % 1_000 != 0"));
-        assertTrue(source.contains("must use PostgreSQL microsecond precision"));
+        assertTrue(source.contains("must use database microsecond precision"));
         assertTrue(source.contains("nextAttemptAt.isBefore(failedAt)"));
         assertFalse(source.contains("(value.getNano() + 500) / 1_000"));
     }

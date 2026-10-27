@@ -10,7 +10,7 @@ import java.util.Objects;
 import java.util.TreeMap;
 
 /**
- * V014 实时续期事实的只读 PostgreSQL 16 物理契约探针。
+ * V014 实时续期事实的只读物理契约探针。
  *
  * <p>此探针只在显式启用续期/WSS 时由可选 readiness 调用；默认关闭的旧 HTTP、
  * V013 Create 和 T14 Worker 不因尚未迁移 V014 而停止启动。探针不读业务行、

@@ -53,7 +53,7 @@ import java.util.regex.Pattern;
  * 的 canonical checkpoint 恢复 Artifact 内容和权益提交请求；它不会重新运行
  * Planner，也不会读取当前 Product Profile、当前模型能力或当前配置。</p>
  *
- * <p>Artifact Store、权益 Provider 与 PostgreSQL 之间没有跨资源事务。Worker 先按
+ * <p>Artifact Store、权益 Provider 与数据库之间没有跨资源事务。Worker 先按
  * 稳定 Artifact identity 幂等发布内容，再用 checkpoint 冻结的幂等键提交权益，
  * 最后调用 {@link FinalizationCompletionUnitOfWork} 原子提交数据库终态。任一步骤
  * 崩溃后，下一次领取都重放相同 identity。Worker 本身不执行 SQL，也不把外部成功
@@ -1000,7 +1000,7 @@ public final class MockFinalizationWorker {
     }
 
     private Instant now() {
-        // JDBC Workflow 与 Completion 契约都要求 PostgreSQL 微秒精度；Worker 在
+        // JDBC Workflow 与 Completion 契约都要求数据库微秒精度；Worker 在
         // 最外层统一规范，避免驱动静默舍入后 lease 栅栏出现两个时间语义。
         return Objects.requireNonNull(config.clock().instant(), "clock.instant()")
                 .truncatedTo(ChronoUnit.MICROS);

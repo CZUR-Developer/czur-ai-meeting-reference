@@ -49,7 +49,7 @@ class DatabaseRuntimeConfigTest {
     }
 
     @Test
-    void rejectsInvalidSocketReadTimeoutWithoutDisablingPgjdbcBound() {
+    void rejectsInvalidSocketReadTimeoutWithoutDisablingDriverBound() {
         for (String value : List.of("", " ", "0", "-1", "1.5", "not-a-number", "2147484",
                 "2147483648")) {
             Map<String, String> environment = validEnvironment();
@@ -98,9 +98,9 @@ class DatabaseRuntimeConfigTest {
     }
 
     @Test
-    void postgresqlUrlIsRejectedNowThatDeliveryIsMysqlOnly() {
+    void nonMysqlJdbcUrlIsRejectedNowThatDeliveryIsMysqlOnly() {
         Map<String, String> environment = validEnvironment();
-        environment.put(DatabaseRuntimeConfig.DATABASE_URL, "jdbc:postgresql://127.0.0.1:5432/demo");
+        environment.put(DatabaseRuntimeConfig.DATABASE_URL, "jdbc:oracle:thin:@127.0.0.1:1521/demo");
         assertThrows(IllegalArgumentException.class,
                 () -> DatabaseRuntimeConfig.fromEnvironment(environment));
     }
@@ -161,7 +161,7 @@ class DatabaseRuntimeConfigTest {
         assertSafeFailure(blankCredential, DatabaseRuntimeConfig.DATABASE_PASSWORD);
 
         Map<String, String> badUrl = validEnvironment();
-        badUrl.put(DatabaseRuntimeConfig.DATABASE_URL, "postgresql://localhost/meeting");
+        badUrl.put(DatabaseRuntimeConfig.DATABASE_URL, "jdbc:localhost/meeting");
         assertSafeFailure(badUrl, DatabaseRuntimeConfig.DATABASE_URL);
 
         Map<String, String> tabInUrl = validEnvironment();
@@ -264,7 +264,7 @@ class DatabaseRuntimeConfigTest {
     }
 
     @Test
-    void acceptsOnlyExplicitPostgresJdbcUrl() {
+    void mysqlUrlRequiresNumericPort() {
         Map<String, String> environment = validEnvironment();
         environment.put(DatabaseRuntimeConfig.DATABASE_URL,
                 "jdbc:mysql://localhost:not-a-port/meeting");

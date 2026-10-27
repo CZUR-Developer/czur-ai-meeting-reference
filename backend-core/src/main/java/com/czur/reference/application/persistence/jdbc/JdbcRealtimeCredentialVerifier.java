@@ -26,7 +26,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * 从一个 PostgreSQL 一致性快照核验实时连接凭据。
+ * 从一个一致性快照核验实时连接凭据。
  *
  * <p>部署范围由服务端装配注入，绝不从连接请求取得。读取顺序刻意从会议行原始
  * 部署和主体开始：异部署或旧版无主会议统一拒绝，在此前不解码 V013/V014 或状态，

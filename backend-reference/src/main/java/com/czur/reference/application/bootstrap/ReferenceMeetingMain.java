@@ -13,7 +13,7 @@ public final class ReferenceMeetingMain {
     private ReferenceMeetingMain() { }
 
     public static void main(String[] args) {
-        // PostgreSQL 时间戳只有微秒精度；毫秒刻度避免业务事实发生纳秒截断。
+        // 数据库时间戳只有微秒精度；毫秒刻度避免业务事实发生纳秒截断。
         try (ReferenceMeetingProcess process =
                      ReferenceMeetingProcess.start(System.getenv(),
                              Clock.tickMillis(ZoneOffset.UTC))) {

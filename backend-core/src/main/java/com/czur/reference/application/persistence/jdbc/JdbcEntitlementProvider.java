@@ -549,7 +549,7 @@ public class JdbcEntitlementProvider
                 Instant persistedCancelledAt = persistedOperationTime(cancelledAt);
                 UsageReservation cancelled;
                 try {
-                    // PostgreSQL timestamptz 只保留微秒；先用原始时刻校验 lease，
+                    // 数据库时间列只保留微秒；先用原始时刻校验 lease，
                     // 再规范持久化时刻，避免 +1ns 被驱动舍入回有效窗口。
                     cancelled = current.cancel(
                             cancel.reasonCode(), persistedCancelledAt, cancel.expectedVersion());

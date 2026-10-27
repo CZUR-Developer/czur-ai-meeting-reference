@@ -32,7 +32,7 @@ import static com.czur.reference.application.port.OutboxStore.RenewResult;
 import static com.czur.reference.application.port.OutboxStore.RenewStatus;
 
 /**
- * PostgreSQL/MySQL Outbox 适配器参考实现。
+ * Outbox 适配器参考实现。
  *
  * <p>所有领取和完成操作都在数据库条件更新中校验 owner、token、版本和
  * lease 到期时间。{@code lease_version} 在每次成功领取时递增；端口的
@@ -251,11 +251,11 @@ public final class JdbcOutboxStore implements OutboxStore {
         if (request.registeredEventTypes().isEmpty()) {
             return List.of();
         }
-        Instant claimedAt = postgresTimestamp(request.now());
-        Instant leaseUntil = postgresTimestamp(request.now().plus(request.leaseDuration()));
+        Instant claimedAt = roundedMicrosecondTimestamp(request.now());
+        Instant leaseUntil = roundedMicrosecondTimestamp(request.now().plus(request.leaseDuration()));
         if (!leaseUntil.isAfter(claimedAt)) {
             throw new IllegalArgumentException(
-                    "leaseDuration must advance expiry at PostgreSQL microsecond precision");
+                    "leaseDuration must advance expiry at database microsecond precision");
         }
         try (Connection connection = dataSource.getConnection()) {
             boolean previousAutoCommit = connection.getAutoCommit();
@@ -336,8 +336,8 @@ public final class JdbcOutboxStore implements OutboxStore {
         if (leaseDuration.isZero() || leaseDuration.isNegative()) {
             throw new IllegalArgumentException("leaseDuration must be positive");
         }
-        Instant effectiveRenewedAt = postgresTimestamp(renewedAt);
-        Instant newExpiry = postgresTimestamp(renewedAt.plus(leaseDuration));
+        Instant effectiveRenewedAt = roundedMicrosecondTimestamp(renewedAt);
+        Instant newExpiry = roundedMicrosecondTimestamp(renewedAt.plus(leaseDuration));
         try (Connection connection = dataSource.getConnection()) {
             boolean previousAutoCommit = connection.getAutoCommit();
             connection.setAutoCommit(false);
@@ -408,7 +408,7 @@ public final class JdbcOutboxStore implements OutboxStore {
         }
         Objects.requireNonNull(lease, "lease");
         Objects.requireNonNull(publishedAt, "publishedAt");
-        Instant effectivePublishedAt = postgresTimestamp(publishedAt);
+        Instant effectivePublishedAt = roundedMicrosecondTimestamp(publishedAt);
         try (Connection connection = dataSource.getConnection()) {
             int updated = 0;
             if (hasCanonicalLeaseExpiry(lease)
@@ -452,8 +452,8 @@ public final class JdbcOutboxStore implements OutboxStore {
         if (nextAvailableAt.isBefore(failedAt)) {
             throw new IllegalArgumentException("nextAvailableAt cannot be before failedAt");
         }
-        Instant effectiveFailedAt = postgresTimestamp(failedAt);
-        Instant effectiveNextAvailableAt = postgresTimestamp(nextAvailableAt);
+        Instant effectiveFailedAt = roundedMicrosecondTimestamp(failedAt);
+        Instant effectiveNextAvailableAt = roundedMicrosecondTimestamp(nextAvailableAt);
         try (Connection connection = dataSource.getConnection()) {
             int updated = 0;
             if (hasCanonicalLeaseExpiry(lease)
@@ -592,7 +592,7 @@ public final class JdbcOutboxStore implements OutboxStore {
     }
 
     /**
-     * 使用 PostgreSQL JSONB 相等语义比较不可变消息字段。
+     * 使用数据库 JSON 相等语义比较不可变消息字段。
      *
      * <p>JSONB 读取后可能改变无意义空白或对象键顺序，不能继续使用 Java 原始
      * 字符串相等判断，否则同一事件在首次写入后重放会被误判为冲突。</p>
@@ -652,8 +652,8 @@ public final class JdbcOutboxStore implements OutboxStore {
     }
 
     /**
-     * expiresAt 是 LeaseToken 中唯一会与数据库 TIMESTAMPTZ 直接比较的时间栅栏。
-     * 非微秒规范值若先交给 pgjdbc 舍入，可能伪装成当前 lease_until，因此必须在
+     * expiresAt 是 LeaseToken 中唯一会与数据库时间列直接比较的时间栅栏。
+     * 非微秒规范值若先交给驱动舍入，可能伪装成当前 lease_until，因此必须在
      * 绑定 SQL 前拒绝。claimedAt 只用于操作时间窗口，不擅自扩大为数据库栅栏字段。
      */
     private boolean hasCanonicalLeaseExpiry(LeaseToken lease) {
@@ -663,7 +663,7 @@ public final class JdbcOutboxStore implements OutboxStore {
     private Instant canonicalTimestamp(Instant value) {
         return engine == JdbcDatabaseEngine.MYSQL
                 ? value.truncatedTo(java.time.temporal.ChronoUnit.MICROS)
-                : postgresTimestamp(value);
+                : roundedMicrosecondTimestamp(value);
     }
 
     static OutboxEvent withLease(OutboxEvent event, String owner, java.time.Instant until) {
@@ -676,8 +676,8 @@ public final class JdbcOutboxStore implements OutboxStore {
         return timestamp == null ? null : timestamp.toInstant();
     }
 
-    /** PostgreSQL/pgjdbc 把 TIMESTAMPTZ 四舍五入到最近微秒，lease 句柄必须使用相同规则。 */
-    private static Instant postgresTimestamp(Instant value) {
+    /** 驱动把时间戳四舍五入到最近微秒，lease 句柄必须使用相同规则。 */
+    private static Instant roundedMicrosecondTimestamp(Instant value) {
         int nanos = value.getNano();
         int roundedMicros = (nanos + 500) / 1_000;
         if (roundedMicros == 1_000_000) {

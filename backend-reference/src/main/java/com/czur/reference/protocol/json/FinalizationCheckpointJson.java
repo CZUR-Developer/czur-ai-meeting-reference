@@ -51,7 +51,7 @@ public final class FinalizationCheckpointJson {
 
     private static final String DECODE_FAILURE = "Finalization checkpoint JSON is invalid";
     private static final String ENCODE_FAILURE = "Finalization checkpoint JSON encoding failed";
-    private static final Pattern POSTGRES_MICROSECOND_INSTANT = Pattern.compile(
+    private static final Pattern MICROSECOND_INSTANT = Pattern.compile(
             "^(?:(?:0000|9999)-[0-9]{2}-[0-9]{2}T"
                     + "(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]"
                     + "(?:\\.[0-9]{1,6})?Z|"
@@ -392,7 +392,7 @@ public final class FinalizationCheckpointJson {
 
     private static Instant requiredInstant(ObjectNode parent, String field) {
         String value = requiredText(parent, field);
-        if (!POSTGRES_MICROSECOND_INSTANT.matcher(value).matches()) {
+        if (!MICROSECOND_INSTANT.matcher(value).matches()) {
             throw invalid();
         }
         return OffsetDateTime.parse(value).toInstant();

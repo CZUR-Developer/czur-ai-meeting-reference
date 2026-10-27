@@ -16,7 +16,7 @@ import java.util.TimeZone;
 final class JdbcValues {
     private JdbcValues() { }
 
-    /** DATETIME(6)/timestamptz 都只持久化 UTC 微秒，避免 JVM 默认时区参与解释。 */
+    /** 数据库时间列只持久化 UTC 微秒，避免 JVM 默认时区参与解释。 */
     static void setInstant(PreparedStatement statement, int index, Instant value)
             throws SQLException {
         if (value == null) {
@@ -34,7 +34,7 @@ final class JdbcValues {
     /**
      * 仅用于固定基线中 VARBINARY 标识/范围/幂等键的 UTF-8 精确存储。
      * 不用于 canonical 原文、JSON 或其它正文；这些列沿用各原语的 setString。
-     * PG 的相应文本标识仍使用原 setString，不能把所有字段一律二进制化。
+     * 非 MySQL 分支的相应文本标识仍使用原 setString，不能把所有字段一律二进制化。
      */
     static void setText(PreparedStatement statement, int index,
                         JdbcDatabaseEngine engine, String value) throws SQLException {

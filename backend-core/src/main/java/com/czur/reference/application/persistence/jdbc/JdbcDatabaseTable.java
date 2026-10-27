@@ -5,7 +5,7 @@ import java.util.Objects;
 /**
  * 当前 V001 的固定会议专用表映射。
  *
- * <p>PostgreSQL 保留原表名；MySQL 统一使用 {@code ai_trans_} 前缀，包含独立
+ * <p>逻辑表名不带引擎前缀；MySQL 统一使用 {@code ai_trans_} 前缀，包含独立
  * 基线登记表。本枚举只接受封闭的逻辑表，不接收可配置前缀或任意 SQL 标识符，
  * 因而业务调用者不能借映射访问旧业务表。后续 Store 适配应消费同一映射。</p>
  */
@@ -42,10 +42,10 @@ public enum JdbcDatabaseTable {
     /** 可选参考人物插件使用；默认会议 readiness 不要求这张表。 */
     SPEAKER_IDENTITY_PERSON("speaker_identity_person");
 
-    private final String postgresName;
+    private final String logicalName;
 
-    JdbcDatabaseTable(String postgresName) {
-        this.postgresName = postgresName;
+    JdbcDatabaseTable(String logicalName) {
+        this.logicalName = logicalName;
     }
 
     /** 返回指定引擎的固定物理表名，只供公共 JDBC SQL 装配使用。 */
@@ -54,10 +54,10 @@ public enum JdbcDatabaseTable {
         if (!requiredFor(engine)) {
             throw new IllegalArgumentException("idempotency lock table is MySQL-only");
         }
-        return engine == JdbcDatabaseEngine.MYSQL ? "ai_trans_" + postgresName : postgresName;
+        return engine == JdbcDatabaseEngine.MYSQL ? "ai_trans_" + logicalName : logicalName;
     }
 
-    /** PG 沿用 advisory lock，不要求或访问 MySQL 专用的辅助行锁表。 */
+    /** 非 MySQL 分支沿用 advisory lock，不要求或访问 MySQL 专用的辅助行锁表。 */
     public boolean requiredFor(JdbcDatabaseEngine engine) {
         Objects.requireNonNull(engine, "engine");
         return this != IDEMPOTENCY_LOCK || engine == JdbcDatabaseEngine.MYSQL;

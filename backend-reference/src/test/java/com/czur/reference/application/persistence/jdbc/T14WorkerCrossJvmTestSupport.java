@@ -46,7 +46,7 @@ import java.util.Set;
  * <p>只有父测试进程调用 {@link #prepare(DataSource, Path, String)} 建立会议、
  * Reservation、execution fact、durable input、final usage、receipt 和 Workflow。
  * 子进程不调用本方法，也不能从环境变量接收 checkpoint 或模拟正文；恢复进程只能
- * 从 PostgreSQL 的 Workflow payload 和同一持久文件根读取这些材料。</p>
+ * 从数据库的 Workflow payload 和同一持久文件根读取这些材料。</p>
  *
  * <p>本类位于测试源码，不是参考后端公共 API。固定时间和固定业务范围仅用于让
  * 五个真实进程退出窗口产生可逐字比较的事实，不能进入生产装配。</p>

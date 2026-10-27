@@ -256,7 +256,7 @@ final class JdbcUsageReservationStore {
      * 插入首次完整 Reservation 快照；ID 碰撞交给数据库唯一约束拒绝。
      *
      * <p>首次结果 JSON 保留策略返回的原始时间。这里明确写入其微秒截断值，
-     * 与 {@link OwnedMeetingCreationFacts} 的持久事实投影一致，避免 PostgreSQL
+     * 与 {@link OwnedMeetingCreationFacts} 的持久事实投影一致，避免数据库
      * 对纳秒值向上舍入后跨微秒边界，导致正常 Create 被误判为事实损坏。</p>
      */
     static void insertReservation(Connection connection, UsageReservation reservation)

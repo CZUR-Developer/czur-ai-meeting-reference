@@ -15,7 +15,7 @@ import java.util.Objects;
  * 各调用场景根据自己的语义额外判断。这样创建事务与恢复查询不会
  * 各自维护一份容易漂移的不可变字段列表。</p>
  *
- * <p>PostgreSQL {@code timestamptz} 按微秒持久化。时间比较统一在
+ * <p>数据库时间列按微秒持久化。时间比较统一在
  * 这里截断到微秒，避免调用方因 JDBC 往返精度不同做出不一致的
  * 判定。</p>
  */
@@ -45,7 +45,7 @@ final class OwnedMeetingCreationFacts {
                 && samePersistentInstant(current.expiresAt(), firstReserved.expiresAt());
     }
 
-    /** 以 PostgreSQL 实际持久化精度比较两个非空时间事实。 */
+    /** 以数据库实际持久化精度比较两个非空时间事实。 */
     static boolean samePersistentInstant(Instant left, Instant right) {
         Objects.requireNonNull(left, "left");
         Objects.requireNonNull(right, "right");

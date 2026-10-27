@@ -7,7 +7,7 @@ import java.sql.SQLException;
 import java.util.Map;
 import java.util.TreeMap;
 
-/** V015 音频输入所需的只读 PG16 物理门禁；不读取业务行或执行迁移。 */
+/** V015 音频输入所需的只读物理门禁；不读取业务行或执行迁移。 */
 final class JdbcDurableAudioSchema {
     private static final String INPUT_COLUMNS = "meeting_id:text:true:<NULL>|"
             + "writer_id:uuid:true:<NULL>|writer_epoch:bigint:true:<NULL>|"
@@ -28,7 +28,7 @@ final class JdbcDurableAudioSchema {
 
     /**
      * 核对当前 schema 的两张永久表、运行时读写列及有效 PK/FK/CHECK。
-     * CHECK 固定 V015 在 PG16 的 pg_get_constraintdef 摘要，防止同名同列的
+     * CHECK 固定 V015 在 catalog 中的 pg_get_constraintdef 摘要，防止同名同列的
      * 弱谓词通过；只涉及三条音频约束，不复制 SQL 谓词解释器。
      */
     static boolean matches(Connection connection) throws SQLException {

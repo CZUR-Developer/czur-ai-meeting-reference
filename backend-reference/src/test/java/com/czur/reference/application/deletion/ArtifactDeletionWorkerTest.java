@@ -22,7 +22,7 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Pure Java orchestration checks; PostgreSQL and file-root gates live in integration tests. */
+/** Pure Java orchestration checks; database and file-root gates live in integration tests. */
 class ArtifactDeletionWorkerTest {
     private static final String MEETING = "mtg_artifact_worker";
     private static final Instant T0 = Instant.parse("2026-09-29T08:00:00.000000Z");
