@@ -372,17 +372,40 @@ public final class JdbcClientMeetingResultFinalizer
         public Rejected { Objects.requireNonNull(reason, "reason"); }
     }
 
+    /**
+     * 读取本场待办并按登记原因收口。
+     *
+     * <p>Stop 受理后同步收口失败时，待办由 Stop 事务保留；后台扫描再次调用本
+     * 入口。{@code USAGE_TIMEOUT} 表示客户端已冻结采音用量但超时没发 Stop，
+     * 会议在决定事务中已推进到 {@code STOPPING}，这里按冻结用量结算并按本场
+     * 结果能力选择 READY／READY_WITH_WARNINGS；其余原因沿用正常 Stop 语义。
+     * 没有待办时回落为普通客户端收口，兼容旧数据与直接调用。</p>
+     */
+    @Override
+    public boolean finalizePendingClient(String meetingId) {
+        MeetingIdPolicy.requireValid(meetingId);
+        var pending = JdbcClientFinalizationPendingStore.find(dataSource, engine, meetingId);
+        if (pending.isEmpty()) {
+            return finalizeIfClient(meetingId);
+        }
+        return switch (pending.orElseThrow().reason()) {
+            case STOP_ACCEPTED -> finalizeIfClient(meetingId);
+            case USAGE_TIMEOUT -> finalizeUsageTimeout(meetingId);
+        };
+    }
+
     @Override
     public boolean finalizeIfClient(String meetingId) {
         // 已落弃场决定的会议只由扫描器收口；正常 Stop 不能把它改写成 READY，
-        // 也不能抢在弃场结算前提交采音用量。
+        // 也不能抢在弃场结算前提交采音用量。待办由弃场链自然清除。
         if (abandonmentDecided(meetingId)) {
             LOGGER.log(Level.FINE, "弃场决定已存在，正常收尾让位");
+            clearPendingQuietly(meetingId);
             return true;
         }
         // 先释放读取冻结事实的连接，再调用Provider，避免结果事务占用连接等待第二个池位。
         // 本入口每次均经过账本，包括下方resultExists早返的正常Stop重放。
-        Long capturedDurationMs = commitClientUsage(meetingId);
+        Long capturedDurationMs = commitClientUsage(meetingId, false);
         // 可选供应商网络和音频切片只在连接释放后运行，不能放进下面的会议行锁事务。
         ObjectNode speakerArtifact = identifySpeakers(meetingId);
         try (Connection connection = dataSource.getConnection()) {
@@ -398,16 +421,19 @@ public final class JdbcClientMeetingResultFinalizer
                 }
                 // 复核与早检之间可能刚落决定；同一事务内再查一次才允许写结果。
                 if (JdbcMeetingAbandonmentStore.exists(connection, engine, meetingId)) {
-                    connection.rollback();
+                    JdbcClientFinalizationPendingStore.delete(connection, engine, meetingId);
+                    connection.commit();
                     return true;
                 }
                 if (resultExists(connection, meetingId)) {
-                    connection.rollback();
+                    // 上一次尝试已提交结果但待办未删（崩溃窗口）：只补删除，不重复发布。
+                    JdbcClientFinalizationPendingStore.delete(connection, engine, meetingId);
+                    connection.commit();
                     return true;
                 }
                 if (locked.snapshot().state() != MeetingState.STOPPING) {
                     connection.rollback();
-                    return true;
+                    return false;
                 }
                 Instant endedAt = clock.instant().truncatedTo(ChronoUnit.MICROS);
                 if (endedAt.isBefore(locked.snapshot().updatedAt())) {
@@ -415,6 +441,7 @@ public final class JdbcClientMeetingResultFinalizer
                 }
                 writeClientResult(connection, locked, startedAt, endedAt, capturedDurationMs,
                         speakerArtifact, MeetingEvent.READY, ManifestStatus.READY, List.of());
+                JdbcClientFinalizationPendingStore.delete(connection, engine, meetingId);
                 connection.commit();
                 return true;
             } catch (SQLException | ArtifactStoreException | RuntimeException failure) {
@@ -425,6 +452,85 @@ public final class JdbcClientMeetingResultFinalizer
             }
         } catch (SQLException failure) {
             throw new IllegalStateException("client result database unavailable");
+        }
+    }
+
+    /**
+     * 按冻结采音用量收口“已提交用量但长期没有 Stop”的会议。
+     *
+     * <p>决策事务已经把会议推进到 {@code STOPPING} 并写入 {@code USAGE_TIMEOUT}
+     * 待办；本方法只负责用同场冻结用量结算并发布最终结果。结算键与正常 Stop
+     * 完全相同，Provider 账本保证只扣一次；结果写入与待办删除在同一事务内。
+     * 终态按首次 Create 冻结的能力计划选择 READY／READY_WITH_WARNINGS，不套用
+     * 弃场警告语义，也不做零结算。</p>
+     *
+     * @return true 表示已收口或由弃场链接管；false 表示冻结用量/输入事实尚不满足
+     * @throws IllegalStateException 数据库、结算端口或产物存储暂时不可用
+     */
+    public boolean finalizeUsageTimeout(String meetingId) {
+        MeetingIdPolicy.requireValid(meetingId);
+        if (abandonmentDecided(meetingId)) {
+            LOGGER.log(Level.FINE, "弃场决定已存在，冻结用量收尾让位");
+            clearPendingQuietly(meetingId);
+            return true;
+        }
+        Long capturedDurationMs = commitClientUsage(meetingId, true);
+        if (capturedDurationMs == null) {
+            // 没有冻结用量就不能假装零结算；保留待办供人工或下一轮核对。
+            LOGGER.log(Level.WARNING, "冻结用量收尾缺少冻结事实，保留待办");
+            return false;
+        }
+        ObjectNode speakerArtifact = identifySpeakers(meetingId);
+        try (Connection connection = dataSource.getConnection()) {
+            connection.setAutoCommit(false);
+            try {
+                JdbcMeetingRepository.VersionedMeeting locked =
+                        JdbcMeetingRepository.findVersionedForUpdate(connection, engine, meetingId)
+                                .orElse(null);
+                Instant startedAt = locked == null ? null : clientStartedAt(connection, meetingId);
+                if (startedAt == null) {
+                    connection.rollback();
+                    return false;
+                }
+                if (JdbcMeetingAbandonmentStore.exists(connection, engine, meetingId)) {
+                    JdbcClientFinalizationPendingStore.delete(connection, engine, meetingId);
+                    connection.commit();
+                    return true;
+                }
+                if (resultExists(connection, meetingId)) {
+                    JdbcClientFinalizationPendingStore.delete(connection, engine, meetingId);
+                    connection.commit();
+                    return true;
+                }
+                MeetingState state = locked.snapshot().state();
+                if (state != MeetingState.STARTING && state != MeetingState.RUNNING
+                        && state != MeetingState.STOPPING) {
+                    // 其它收口链已把会议推进到终态：只清理待办，不重复发布。
+                    JdbcClientFinalizationPendingStore.delete(connection, engine, meetingId);
+                    connection.commit();
+                    return true;
+                }
+                Instant endedAt = clock.instant().truncatedTo(ChronoUnit.MICROS);
+                if (endedAt.isBefore(locked.snapshot().updatedAt())) {
+                    endedAt = locked.snapshot().updatedAt();
+                }
+                ResultTerminal terminal = resultTerminal(connection, meetingId);
+                writeClientResult(connection, locked, startedAt, endedAt, capturedDurationMs,
+                        speakerArtifact, terminal.event(), terminal.manifestStatus(),
+                        terminal.warnings());
+                JdbcClientFinalizationPendingStore.delete(connection, engine, meetingId);
+                connection.commit();
+                LOGGER.log(Level.INFO, "冻结用量超时会议已按正常收尾 durationMs={0}",
+                        capturedDurationMs);
+                return true;
+            } catch (SQLException | ArtifactStoreException | RuntimeException failure) {
+                connection.rollback();
+                LOGGER.log(Level.WARNING, "冻结用量超时收尾暂未完成 reason={0}",
+                        failure.getClass().getSimpleName());
+                throw new IllegalStateException("usage timeout finalization unavailable");
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("usage timeout result database unavailable");
         }
     }
 
@@ -536,55 +642,23 @@ public final class JdbcClientMeetingResultFinalizer
         List<MeetingManifest.ArtifactRef> artifactRefs = new ArrayList<>();
         if (projection.segmentCount() > 0) {
             artifactId = "art_client_" + sha256(meetingId.getBytes(StandardCharsets.UTF_8));
-            ObjectNode artifact = JSON.createObjectNode();
-            artifact.put("schemaVersion", "client-transcript/v1");
-            artifact.put("artifactType", "transcript.final");
-            artifact.put("language", projection.language());
-            artifact.put("text", projection.text());
-            ArrayNode segments = artifact.putArray("segments");
-            for (TranscriptUpsert segment : projection.transcripts()) {
-                ObjectNode item = segments.addObject();
-                item.put("segmentId", segment.getSegmentId());
-                item.put("startMs", segment.getStartMs());
-                item.put("endMs", segment.getEndMs());
-                item.put("language", segment.getLanguage());
-                item.put("text", segment.getText());
-                if (segment.hasSpeaker()) {
-                    item.put("sessionSpeakerId", segment.getSpeaker().getSessionSpeakerId());
-                }
-            }
             artifactRefs.add(publishReady(connection, artifactId, meetingId,
-                    "transcript.final", projection.language(), artifact));
+                    "transcript.final", projection.language(),
+                    transcriptArtifactBody(projection)));
         }
         if (!projection.translations().isEmpty()) {
             String translationId = "art_client_translation_" + sha256(
                     meetingId.getBytes(StandardCharsets.UTF_8));
-            ObjectNode artifact = JSON.createObjectNode();
-            artifact.put("schemaVersion", "client-translation/v1");
-            artifact.put("artifactType", "translation.final");
-            artifact.put("language", projection.translationLanguage());
-            ArrayNode translations = artifact.putArray("translations");
-            for (TranslationUpsert translation : projection.translations()) {
-                ObjectNode item = translations.addObject();
-                item.put("translationId", translation.getTranslationId());
-                item.put("sourceSegmentId", translation.getSourceSegmentId());
-                item.put("sourceLanguage", translation.getSourceLanguage());
-                item.put("targetLanguage", translation.getTargetLanguage());
-                item.put("text", translation.getText());
-            }
             artifactRefs.add(publishReady(connection, translationId, meetingId,
-                    "translation.final", projection.translationLanguage(), artifact));
+                    "translation.final", projection.translationLanguage(),
+                    translationArtifactBody(projection)));
         }
         if (projection.summary() != null) {
-            ObjectNode artifact = JSON.createObjectNode();
-            artifact.put("schemaVersion", "client-summary/v1");
-            artifact.put("artifactType", "summary.structured");
-            artifact.setAll(projection.summary());
             String summaryId = "art_client_summary_" + sha256(
                     meetingId.getBytes(StandardCharsets.UTF_8));
             artifactRefs.add(publishReady(connection, summaryId, meetingId,
                     "summary.structured", projection.summary().path("language").asText(),
-                    artifact));
+                    summaryArtifactBody(projection)));
         }
         if (speakerArtifact != null) {
             String speakerId = "art_client_speaker_" + sha256(
@@ -715,22 +789,93 @@ public final class JdbcClientMeetingResultFinalizer
     }
 
     /**
+     * 结果已由弃场链接管或已存在时，尽力清理遗留待办。
+     *
+     * <p>清理失败只记录类别：待办会在下一轮扫描再次遇到同一终态，收口入口仍会
+     * 尝试删除，不会重复发布结果。不能因为待办表暂时不可用而把已完成的会议
+     * 改报为失败。</p>
+     */
+    private void clearPendingQuietly(String meetingId) {
+        try (Connection connection = dataSource.getConnection()) {
+            connection.setAutoCommit(false);
+            try {
+                JdbcClientFinalizationPendingStore.delete(connection, engine, meetingId);
+                connection.commit();
+            } catch (SQLException failure) {
+                connection.rollback();
+                throw failure;
+            }
+        } catch (SQLException failure) {
+            LOGGER.log(Level.WARNING, "最终收口待办清理暂未完成 reason={0}",
+                    failure.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * 按首次 Create 冻结的能力计划选择冻结用量超时收口的终态。
+     *
+     * <p>能力计划里非 {@code NOT_REQUESTED} 的告警码与普通最终 Manifest 使用同一
+     * 规则：有告警时终态为 {@code READY_WITH_WARNINGS} 并携带对应 warning；
+     * 否则为 READY。没有 Create 事实的历史夹具按 READY 处理，不伪造告警。</p>
+     */
+    private ResultTerminal resultTerminal(Connection connection, String meetingId)
+            throws SQLException {
+        var first = new JdbcCreateMeetingFactStore(connection, engine)
+                .findByMeetingId(meetingId).orElse(null);
+        return terminalFor(first == null ? List.of()
+                : first.response().capabilityDecisions());
+    }
+
+    /**
+     * 纯函数：能力计划中的非 {@code NOT_REQUESTED} 告警码决定终态与 Manifest 告警。
+     * 与普通最终 Manifest 使用同一告警归类，避免两条收尾链对同一计划给出不同状态。
+     */
+    static ResultTerminal terminalFor(
+            List<com.czur.reference.domain.capability.CapabilityDecision> decisions) {
+        List<MeetingManifest.Warning> warnings = new ArrayList<>();
+        for (com.czur.reference.domain.capability.CapabilityDecision decision : decisions) {
+            String code = decision.warningCode();
+            if (code == null || "NOT_REQUESTED".equals(code)) continue;
+            warnings.add(new MeetingManifest.Warning(code, decision.capability(),
+                    "ai_meeting.capability." + warningCategory(code), null));
+        }
+        if (warnings.isEmpty()) {
+            return new ResultTerminal(MeetingEvent.READY, ManifestStatus.READY, List.of());
+        }
+        return new ResultTerminal(MeetingEvent.READY_WITH_WARNINGS,
+                ManifestStatus.READY_WITH_WARNINGS, List.copyOf(warnings));
+    }
+
+    private static String warningCategory(String code) {
+        int separator = code.indexOf(':');
+        String category = separator < 0 ? code : code.substring(0, separator);
+        return category.matches("[A-Z_]+") ? category : "UNAVAILABLE";
+    }
+
+    /** 冻结用量超时收口使用的终态、Manifest 状态和告警。 */
+    record ResultTerminal(MeetingEvent event, ManifestStatus manifestStatus,
+            List<MeetingManifest.Warning> warnings) { }
+
+    /**
      * 只从已持久的客户端输入事实恢复Commit，不制造durable_input_fact。
      *
      * <p>首次提交保存的expectedVersion不会随Reservation演进而变化。幂等键和摘要
      * 只依赖同场稳定字段，Provider账本负责首次提交／重放。失败抛回原Stop编排，
      * 维持已提交停止意图和待收口状态；本类不会在未结算时发布READY。</p>
      */
-    private Long commitClientUsage(String meetingId) {
+    private Long commitClientUsage(String meetingId, boolean allowActiveState) {
         FrozenClientUsage usage = null;
+        String states = allowActiveState
+                ? "'STARTING', 'RUNNING', 'STOPPING', 'READY'"
+                : "'STOPPING', 'READY'";
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement("""
                      SELECT m.deployment_scope, m.subject_scope, m.usage_reservation_id,
                             i.audio_duration_ms, i.usage_submitted_at, i.usage_expected_version
                      FROM %s m JOIN %s i USING (meeting_id)
-                     WHERE m.meeting_id=? AND m.state IN ('STOPPING', 'READY')
+                     WHERE m.meeting_id=? AND m.state IN (%s)
                      """.formatted(table(JdbcDatabaseTable.MEETING),
-                             table(JdbcDatabaseTable.MEETING_CLIENT_INPUT)))) {
+                             table(JdbcDatabaseTable.MEETING_CLIENT_INPUT), states))) {
             JdbcValues.setText(statement, 1, engine, meetingId);
             try (ResultSet rows = statement.executeQuery()) {
                 if (rows.next() && rows.getObject("audio_duration_ms", Long.class) != null) {
@@ -964,8 +1109,86 @@ public final class JdbcClientMeetingResultFinalizer
         return first != null && first.request().requestSnapshot().artifactPolicy().retainAudio();
     }
 
+    /**
+     * 最终字幕产物的唯一序列化口径，发布与追加受理共用，避免两处正文大小漂移。
+     *
+     * <p>整场文字同时进入顶层 {@code text} 与每个 {@code segments[].text}，预算
+     * 统计必须按这份完整 JSON 的 UTF-8 字节数计算。</p>
+     */
+    static ObjectNode transcriptArtifactBody(Projection projection) {
+        ObjectNode artifact = JSON.createObjectNode();
+        artifact.put("schemaVersion", "client-transcript/v1");
+        artifact.put("artifactType", "transcript.final");
+        artifact.put("language", projection.language());
+        artifact.put("text", projection.text());
+        ArrayNode segments = artifact.putArray("segments");
+        for (TranscriptUpsert segment : projection.transcripts()) {
+            ObjectNode item = segments.addObject();
+            item.put("segmentId", segment.getSegmentId());
+            item.put("startMs", segment.getStartMs());
+            item.put("endMs", segment.getEndMs());
+            item.put("language", segment.getLanguage());
+            item.put("text", segment.getText());
+            if (segment.hasSpeaker()) {
+                item.put("sessionSpeakerId", segment.getSpeaker().getSessionSpeakerId());
+            }
+        }
+        return artifact;
+    }
+
+    /** 最终译文产物的唯一序列化口径，与发布端相同。 */
+    static ObjectNode translationArtifactBody(Projection projection) {
+        ObjectNode artifact = JSON.createObjectNode();
+        artifact.put("schemaVersion", "client-translation/v1");
+        artifact.put("artifactType", "translation.final");
+        artifact.put("language", projection.translationLanguage());
+        ArrayNode translations = artifact.putArray("translations");
+        for (TranslationUpsert translation : projection.translations()) {
+            ObjectNode item = translations.addObject();
+            item.put("translationId", translation.getTranslationId());
+            item.put("sourceSegmentId", translation.getSourceSegmentId());
+            item.put("sourceLanguage", translation.getSourceLanguage());
+            item.put("targetLanguage", translation.getTargetLanguage());
+            item.put("text", translation.getText());
+        }
+        return artifact;
+    }
+
+    /** 结构化纪要产物的唯一序列化口径，与发布端相同。 */
+    static ObjectNode summaryArtifactBody(Projection projection) {
+        ObjectNode artifact = JSON.createObjectNode();
+        artifact.put("schemaVersion", "client-summary/v1");
+        artifact.put("artifactType", "summary.structured");
+        artifact.setAll(projection.summary());
+        return artifact;
+    }
+
+    /**
+     * 返回当前最终序列化正文的 UTF-8 字节数，供追加受理和测试核对同一预算。
+     * 只统计实际会发布的字幕／译文／纪要 JSON；不含 Manifest 或无关元数据。
+     */
+    static long serializedClientBodyBytes(Connection connection, JdbcDatabaseEngine engine,
+            String meetingId) throws SQLException {
+        Projection projection = project(connection, engine, meetingId);
+        long total = 0;
+        if (projection.segmentCount() > 0) {
+            total = Math.addExact(total, utf8Length(transcriptArtifactBody(projection)));
+        }
+        if (!projection.translations().isEmpty()) {
+            total = Math.addExact(total, utf8Length(translationArtifactBody(projection)));
+        }
+        if (projection.summary() != null) {
+            total = Math.addExact(total, utf8Length(summaryArtifactBody(projection)));
+        }
+        return total;
+    }
+
+    private static long utf8Length(ObjectNode body) {
+        return body.toString().getBytes(StandardCharsets.UTF_8).length;
+    }
+
     /** 两引擎共享既有最终修订规则；只读快照不使用锁定读取。 */
-    private static Projection project(Connection connection, JdbcDatabaseEngine engine, String meetingId)
+    static Projection project(Connection connection, JdbcDatabaseEngine engine, String meetingId)
             throws SQLException {
         Map<String, TranscriptUpsert> latest = new HashMap<>();
         Map<String, TranslationRevision> latestTranslations = new HashMap<>();
@@ -1063,7 +1286,7 @@ public final class JdbcClientMeetingResultFinalizer
 
     private record TranslationRevision(TranslationUpsert value, long sequence) { }
 
-    private record Projection(String text, String language, long durationMs,
+    record Projection(String text, String language, long durationMs,
             List<TranscriptUpsert> transcripts, List<TranslationUpsert> translations,
             List<String> targetLanguages, String translationLanguage, ObjectNode summary) {
         int segmentCount() { return transcripts.size(); }

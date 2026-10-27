@@ -11,4 +11,17 @@ package com.czur.reference.application.port;
 @FunctionalInterface
 public interface ClientMeetingResultFinalizer {
     boolean finalizeIfClient(String meetingId);
+
+    /**
+     * 读取持久待办并按登记原因收口；没有待办时回落为普通客户端收口。
+     *
+     * <p>后台扫描只对已落待办的会议调用本入口。默认实现供旧装配与测试替身
+     * 保持原行为；JDBC 实现会在结果事务内删除待办，重复调用按结果存在性幂等。</p>
+     *
+     * @param meetingId 已有待办或需要普通客户端收口的会议标识
+     * @return true 表示本场已收口或由弃场链接管；false 表示输入事实尚不满足
+     */
+    default boolean finalizePendingClient(String meetingId) {
+        return finalizeIfClient(meetingId);
+    }
 }

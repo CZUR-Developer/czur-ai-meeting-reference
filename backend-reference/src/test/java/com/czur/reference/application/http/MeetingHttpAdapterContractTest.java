@@ -521,6 +521,35 @@ class MeetingHttpAdapterContractTest {
     }
 
     @Test
+    void clientAppendMapsCumulativeBudgetRejectionTo413() {
+        ClientMeetingInputPort rejecting = new ClientMeetingInputPort() {
+            @Override public StartResult start(MeetingCommandContext context, String meetingId) {
+                return new Started(MeetingState.STARTING);
+            }
+
+            @Override public AppendResult append(MeetingCommandContext context, String meetingId,
+                    ClientEvent event) {
+                return new Rejected(Reason.CONTENT_TOO_LARGE);
+            }
+        };
+        adapter = new MeetingHttpAdapter(query, deletion, decoder,
+                new HttpErrorMapper(() -> "budget-diagnostic"), stopService(),
+                null, null, false, null, null, null, null, rejecting);
+        String body = """
+                {"clientEventId":"budget-1","clientSequence":1,
+                 "transcriptUpsert":{"segmentId":"budget-segment","revision":1,
+                 "operation":"UPSERT_OPERATION_UPSERT","startMs":0,"endMs":1000,
+                 "language":"zh-CN","text":"预算","final":true}}
+                """;
+        HttpResponse response = adapter.handle(new HttpRequest("POST",
+                "/v1/meetings/mtg_client/events:append",
+                Map.of("content-type", "application/json"), body), context());
+        assertEquals(413, response.status());
+        assertTrue(response.body().contains("CONTENT_TOO_LARGE"));
+        assertTrue(response.body().contains("ai_meeting.contract.content_too_large"));
+    }
+
+    @Test
     void clientTranscriptAcceptsOnlySessionSpeakerId() {
         RecordingClientInput client = new RecordingClientInput();
         adapter = new MeetingHttpAdapter(query, deletion, decoder,

@@ -1,5 +1,6 @@
 package com.czur.reference.application.persistence.jdbc;
 
+import com.czur.reference.application.artifact.MeetingBodyArtifactBudget;
 import com.czur.reference.application.command.MeetingAccessGuard;
 import com.czur.reference.application.command.MeetingCommandContext;
 import com.czur.reference.application.port.ClientMeetingInputPort;
@@ -53,6 +54,7 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
     private final RealtimeMeetingStartCoordinator startCoordinator;
     private final Clock clock;
     private final ArtifactStore artifactStore;
+    private final long maxClientArtifactBytes;
 
     @Override
     public UsageSubmitResult submitUsage(MeetingCommandContext context,
@@ -196,6 +198,11 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
                     JdbcValues.setInstant(statement, 3, clock.instant());
                     statement.executeUpdate();
                 }
+                if (!withinClientBodyBudget(connection, meetingId)) {
+                    connection.rollback();
+                    LOGGER.log(Level.INFO, "客户端纪要累计超过部署预算，已拒绝");
+                    return new Rejected(Reason.CONTENT_TOO_LARGE);
+                }
                 connection.commit();
                 LOGGER.log(Level.FINE, "客户端标准纪要已保存");
                 return new SummarySubmitted(true);
@@ -218,14 +225,16 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
     public JdbcClientMeetingInputPort(DataSource dataSource,
             RealtimeMeetingStartCoordinator startCoordinator, Clock clock,
             ArtifactStore artifactStore) {
-        this(dataSource, JdbcDatabaseEngine.MYSQL, startCoordinator, clock, artifactStore);
+        this(dataSource, JdbcDatabaseEngine.MYSQL, startCoordinator, clock, artifactStore,
+                MeetingBodyArtifactBudget.LEGACY_MAX_BYTES);
     }
 
     /** 使用公共唯一池和原 Start 协调器；未装配存储时仅截图不可用。 */
     public JdbcClientMeetingInputPort(JdbcDatabaseContext database,
             RealtimeMeetingStartCoordinator startCoordinator, Clock clock,
             ArtifactStore artifactStore) {
-        this(database.dataSource(), database.engine(), startCoordinator, clock, artifactStore);
+        this(database.dataSource(), database.engine(), startCoordinator, clock, artifactStore,
+                MeetingBodyArtifactBudget.LEGACY_MAX_BYTES);
     }
 
     /** 不需要截图存储的客户端输入兼容入口。 */
@@ -234,14 +243,31 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
         this(database, startCoordinator, clock, null);
     }
 
+    /**
+     * 显式注入与发布、读取和 HTTP 响应相同的最终正文预算。
+     *
+     * <p>append 受理必须使用该部署值累计最终序列化正文，提前拒绝 Stop 必然
+     * 超限的会议；旧构造器沿用 2 MiB 兼容下限，生产装配不得使用。</p>
+     */
+    public JdbcClientMeetingInputPort(JdbcDatabaseContext database,
+            RealtimeMeetingStartCoordinator startCoordinator, Clock clock,
+            ArtifactStore artifactStore, long maxClientArtifactBytes) {
+        this(database.dataSource(), database.engine(), startCoordinator, clock, artifactStore,
+                maxClientArtifactBytes);
+    }
+
     private JdbcClientMeetingInputPort(DataSource dataSource, JdbcDatabaseEngine engine,
             RealtimeMeetingStartCoordinator startCoordinator, Clock clock,
-            ArtifactStore artifactStore) {
+            ArtifactStore artifactStore, long maxClientArtifactBytes) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
         this.engine = Objects.requireNonNull(engine, "engine");
         this.startCoordinator = Objects.requireNonNull(startCoordinator, "startCoordinator");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.artifactStore = artifactStore;
+        if (maxClientArtifactBytes <= 0) {
+            throw new IllegalArgumentException("client artifact budget must be positive");
+        }
+        this.maxClientArtifactBytes = maxClientArtifactBytes;
     }
 
     @Override
@@ -517,6 +543,15 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
                     JdbcValues.setText(statement, 4, engine, eventId);
                     statement.executeUpdate();
                 }
+                // 单条请求上限之外还必须按“最终聚合正文”累计：同一 segment 的
+                // 后续修订可能让最终产物超过部署预算，Stop 时再拒绝只会把会议卡在
+                // STOPPING。这里在受理事务内按发布端同一序列化口径预检并回滚。
+                if (!withinClientBodyBudget(connection, meetingId)) {
+                    connection.rollback();
+                    LOGGER.log(Level.INFO, "客户端正文累计超过部署预算，已拒绝 type={0}",
+                            event.eventType());
+                    return new Rejected(Reason.CONTENT_TOO_LARGE);
+                }
                 connection.commit();
                 LOGGER.log(Level.FINE, "客户端标准事件已保存 type={0}", event.eventType());
                 return new Appended(event, true);
@@ -529,6 +564,18 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
         } catch (SQLException failure) {
             return new Rejected(Reason.STORAGE_UNAVAILABLE);
         }
+    }
+
+    /**
+     * 在受理事务内按最终序列化口径核对部署正文预算。
+     *
+     * <p>与发布、读取和 HTTP 响应共用同一个部署预算；恰好等于预算允许，超出
+     * 1 字节即拒绝，让客户端在 Stop 前得到明确错误而不是停止后卡住。</p>
+     */
+    private boolean withinClientBodyBudget(Connection connection, String meetingId)
+            throws SQLException {
+        return JdbcClientMeetingResultFinalizer.serializedClientBodyBytes(
+                connection, engine, meetingId) <= maxClientArtifactBytes;
     }
 
     /** 能力以本场首次持久化 Create 决策为准；全局配置变动不改变既有会议。 */

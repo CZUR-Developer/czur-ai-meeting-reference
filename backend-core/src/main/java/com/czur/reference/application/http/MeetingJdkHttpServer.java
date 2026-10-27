@@ -5,6 +5,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.ByteBuffer;
@@ -19,6 +20,9 @@ import java.util.Objects;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -45,6 +49,8 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
     private static final int DEFAULT_WORKERS = 4;
     private static final int DEFAULT_QUEUE_CAPACITY = 16;
     private static final Duration DEFAULT_CLOSE_TIMEOUT = Duration.ofSeconds(5);
+    /** 认证前请求正文的读取期限；慢速连接到点即断开，不再无限占用 worker。 */
+    private static final Duration DEFAULT_BODY_READ_TIMEOUT = Duration.ofSeconds(10);
     /** 仅供受信网络调用的精确存活路径；不属于公开会议协议。 */
     public static final String LIVENESS_PATH = "/internal/health/liveness";
     /** 仅供受信网络调用的精确就绪路径；不属于公开会议协议。 */
@@ -63,6 +69,8 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
     private final HttpErrorMapper errors;
     private final BooleanSupplier readinessCheck;
     private final long maxBinaryContentBytes;
+    private final Duration bodyReadTimeout;
+    private final ScheduledExecutorService bodyReadWatchdog;
     private final RequestExecutor requests;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final AtomicBoolean started = new AtomicBoolean();
@@ -112,7 +120,7 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
             AuthenticatedMeetingHttpContextResolver contextResolver,
             BooleanSupplier readinessCheck, ResultEmailEndpoint resultEmail) throws IOException {
         this(address, runtime, errors, contextResolver, readinessCheck, resultEmail,
-                DEFAULT_WORKERS, DEFAULT_QUEUE_CAPACITY);
+                DEFAULT_WORKERS, DEFAULT_QUEUE_CAPACITY, DEFAULT_BODY_READ_TIMEOUT);
     }
 
     /**
@@ -146,32 +154,67 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
             AuthenticatedMeetingHttpContextResolver contextResolver,
             BooleanSupplier readinessCheck, int workers, int queueCapacity) throws IOException {
         this(address, runtime, errors, contextResolver, readinessCheck, null,
-                workers, queueCapacity);
+                workers, queueCapacity, DEFAULT_BODY_READ_TIMEOUT);
+    }
+
+    /**
+     * 仅供同包网络门禁显式缩短正文读取期限；生产装配使用默认十秒。
+     */
+    MeetingJdkHttpServer(
+            InetSocketAddress address, MeetingHttpRuntime runtime, HttpErrorMapper errors,
+            AuthenticatedMeetingHttpContextResolver contextResolver,
+            BooleanSupplier readinessCheck, int workers, int queueCapacity,
+            Duration bodyReadTimeout) throws IOException {
+        this(address, runtime, errors, contextResolver, readinessCheck, null,
+                workers, queueCapacity, bodyReadTimeout);
     }
 
     private MeetingJdkHttpServer(
             InetSocketAddress address, MeetingHttpRuntime runtime, HttpErrorMapper errors,
             AuthenticatedMeetingHttpContextResolver contextResolver,
             BooleanSupplier readinessCheck, ResultEmailEndpoint resultEmail,
-            int workers, int queueCapacity) throws IOException {
+            int workers, int queueCapacity, Duration bodyReadTimeout) throws IOException {
         this(address, new MeetingHttpDispatcher(runtime, errors, contextResolver, resultEmail),
-                readinessCheck, workers, queueCapacity);
+                readinessCheck, workers, queueCapacity, bodyReadTimeout);
     }
 
     private MeetingJdkHttpServer(InetSocketAddress address, MeetingHttpDispatcher dispatcher,
             BooleanSupplier readinessCheck, int workers, int queueCapacity) throws IOException {
         this(address, dispatcher, readinessCheck, workers, queueCapacity,
-                BinaryHttpRequest.MAX_CONTENT_BYTES);
+                BinaryHttpRequest.MAX_CONTENT_BYTES, DEFAULT_BODY_READ_TIMEOUT);
     }
 
     private MeetingJdkHttpServer(InetSocketAddress address, MeetingHttpDispatcher dispatcher,
             BooleanSupplier readinessCheck, int workers, int queueCapacity,
             long maxBinaryContentBytes) throws IOException {
+        this(address, dispatcher, readinessCheck, workers, queueCapacity,
+                maxBinaryContentBytes, DEFAULT_BODY_READ_TIMEOUT);
+    }
+
+    private MeetingJdkHttpServer(InetSocketAddress address, MeetingHttpDispatcher dispatcher,
+            BooleanSupplier readinessCheck, int workers, int queueCapacity,
+            Duration bodyReadTimeout) throws IOException {
+        this(address, dispatcher, readinessCheck, workers, queueCapacity,
+                BinaryHttpRequest.MAX_CONTENT_BYTES, bodyReadTimeout);
+    }
+
+    private MeetingJdkHttpServer(InetSocketAddress address, MeetingHttpDispatcher dispatcher,
+            BooleanSupplier readinessCheck, int workers, int queueCapacity,
+            long maxBinaryContentBytes, Duration bodyReadTimeout) throws IOException {
         if (maxBinaryContentBytes <= 0) throw new IllegalArgumentException("media budget must be positive");
+        if (bodyReadTimeout == null || bodyReadTimeout.isZero() || bodyReadTimeout.isNegative()) {
+            throw new IllegalArgumentException("body read timeout must be positive");
+        }
         this.dispatcher = Objects.requireNonNull(dispatcher, "dispatcher");
         this.errors = dispatcher.errorMapper();
         this.readinessCheck = Objects.requireNonNull(readinessCheck, "readinessCheck");
         this.maxBinaryContentBytes = maxBinaryContentBytes;
+        this.bodyReadTimeout = bodyReadTimeout;
+        this.bodyReadWatchdog = Executors.newSingleThreadScheduledExecutor(task -> {
+            Thread thread = new Thread(task, "meeting-http-body-watchdog");
+            thread.setDaemon(true);
+            return thread;
+        });
         this.requests = new RequestExecutor(workers, queueCapacity);
         this.bindAddress = Objects.requireNonNull(address, "address");
         HttpServer bound;
@@ -179,6 +222,7 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
             bound = HttpServer.create();
         } catch (IOException | RuntimeException | Error failure) {
             requests.forceStop();
+            bodyReadWatchdog.shutdownNow();
             throw failure;
         }
         try {
@@ -188,6 +232,7 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
         } catch (RuntimeException | Error failure) {
             bound.stop(0);
             requests.forceStop();
+            bodyReadWatchdog.shutdownNow();
             throw failure;
         }
     }
@@ -220,6 +265,7 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
                 failure.addSuppressed(cleanupFailure);
             }
             requests.forceStop();
+            bodyReadWatchdog.shutdownNow();
             LOGGER.log(Level.WARNING, "meeting HTTP 网络启动失败 reason={0}",
                     failure.getClass().getSimpleName());
             throw failure;
@@ -269,6 +315,10 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
                         response = dispatch(request);
                     }
                 }
+            } catch (RequestBodyTimeoutException timeout) {
+                // watchdog 已关闭连接，worker 立即释放；不再尝试向已关闭 socket 写响应。
+                LOGGER.log(Level.WARNING, "meeting HTTP 请求正文读取超时，连接已断开");
+                return;
             } catch (IllegalArgumentException badRequest) {
                 LOGGER.log(Level.WARNING, "meeting HTTP 原始请求被拒绝 reason=INVALID_TRANSPORT");
                 response = errors.exception(badRequest);
@@ -336,7 +386,7 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
         }
     }
 
-    private static HttpRequest decode(HttpExchange exchange) throws IOException {
+    private HttpRequest decode(HttpExchange exchange) throws IOException {
         URI uri = exchange.getRequestURI();
         String path = uri.getRawPath();
         if (uri.isAbsolute() || uri.getRawAuthority() != null || uri.getRawFragment() != null
@@ -352,13 +402,56 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
         byte[] body;
         try (var input = exchange.getRequestBody()) {
             // 不信任 Content-Length；chunked 请求也只会读取上限加一个字节。
-            body = input.readNBytes(HttpRequest.MAX_BODY_BYTES + 1);
+            // 读取本身受期限约束：慢速连接不能在鉴权前无限占用共享 worker。
+            body = readBodyWithinDeadline(exchange, input, HttpRequest.MAX_BODY_BYTES + 1);
         }
         if (body.length > HttpRequest.MAX_BODY_BYTES) {
             throw new IllegalArgumentException("body exceeds transport limit");
         }
         return new HttpRequest(exchange.getRequestMethod(), path, headers, query,
                 decodeUtf8(body));
+    }
+
+    /**
+     * 在认证前的 JSON 正文读取上施加期限。
+     *
+     * <p>JDK HttpServer 的请求流读取没有内置超时；四个共享 worker 若各被一个慢速
+     * 上传占住，心跳会排队并被误判为弃场。这里用单独的单线程 watchdog 到点关闭
+     * exchange，读取线程随 socket 关闭立即返回；不调大线程池掩盖问题。</p>
+     */
+    private byte[] readBodyWithinDeadline(HttpExchange exchange, InputStream input,
+            int maxBytes) throws IOException {
+        java.util.concurrent.atomic.AtomicBoolean timedOut =
+                new java.util.concurrent.atomic.AtomicBoolean();
+        ScheduledFuture<?> watchdog = bodyReadWatchdog.schedule(() -> {
+            timedOut.set(true);
+            try {
+                exchange.close();
+            } catch (RuntimeException ignored) {
+                // 连接可能已由对端关闭；读取端会按关闭的流返回错误。
+            }
+        }, Math.max(1L, bodyReadTimeout.toMillis()), TimeUnit.MILLISECONDS);
+        try {
+            byte[] body = input.readNBytes(maxBytes);
+            if (timedOut.get()) {
+                throw new RequestBodyTimeoutException();
+            }
+            return body;
+        } catch (IOException failure) {
+            if (timedOut.get()) {
+                throw new RequestBodyTimeoutException();
+            }
+            throw failure;
+        } finally {
+            watchdog.cancel(false);
+        }
+    }
+
+    /** 认证前正文读取超过期限；watchdog 已关闭连接。 */
+    private static final class RequestBodyTimeoutException extends IOException {
+        private RequestBodyTimeoutException() {
+            super("request body read deadline exceeded");
+        }
     }
 
     /**
@@ -647,6 +740,8 @@ public final class MeetingJdkHttpServer implements AutoCloseable {
         // stop(0) 仅在本执行器已受理任务排空之后作为正常路径使用。
         // 超时路径强制断开 socket，并把遗留任务明确标记为非洁净。
         server.stop(0);
+        // 监听器已停止；不再需要为未完成的请求正文读取保留 watchdog。
+        bodyReadWatchdog.shutdownNow();
         int discarded = 0;
         if (unfinished == 0 && !interrupted) {
             requests.orderlyStop();

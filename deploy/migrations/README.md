@@ -13,6 +13,11 @@ MySQL 5.7 的 DDL（数据定义语句）会隐式提交，脚本只有在整份
 
 数据库使用 InnoDB、`utf8mb4`、二进制排序和 UTC `DATETIME(6)`。MySQL 5.7 不执行 PostgreSQL 的 CHECK 约束，领域校验和工作单元关系由公共持久层承担。JSON、规范化正文、音频和摘要按当前公共 core 的 MySQL 映射保存。表名固定为 `ai_trans_*`，不支持通过配置改前缀，避免误写现有业务表。
 
+已有开发库升级：本仓仍只维护一份 V001 基线，已登记 `V001__initial_schema` 的库
+不会自动重跑。新增 `ai_trans_meeting_finalization_pending` 时，只需对已有库执行
+与 V001 完全等价的单表 `CREATE TABLE`（字段、主键、索引、InnoDB／utf8mb4／
+`ROW_FORMAT=DYNAMIC` 一致），不要重跑整份基线，也不要改写已有业务数据。
+
 本机局域网测试示例：
 
 ```bash

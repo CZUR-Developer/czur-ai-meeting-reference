@@ -198,6 +198,13 @@ public final class JdbcOwnedMeetingStopUnitOfWork
                         connection, transactionResolution, ErrorCode.INTERNAL);
             }
 
+            // 客户端事件会议在 Stop 提交的同一事务登记待收尾事实：同步 Finalizer
+            // 失败或进程中断后，后台扫描仍能重试同一场收口。旧音频会议没有
+            // meeting_client_input 行，不写待办，继续由原收口链处理。
+            phase = Phase.FINALIZATION_PENDING;
+            JdbcClientFinalizationPendingStore.markIfClient(
+                    connection, engine, request.meetingId(), acceptedAt);
+
             if (advancesState) {
                 phase = Phase.OUTBOX_APPEND;
                 OutboxStore.AppendResult append = JdbcOutboxStore.append(
@@ -433,6 +440,7 @@ public final class JdbcOwnedMeetingStopUnitOfWork
         IDEMPOTENCY_RESERVE,
         MEETING_UPDATE,
         INPUT_COMPLETION_PENDING,
+        FINALIZATION_PENDING,
         OUTBOX_APPEND,
         COMMIT,
         BUSINESS_VALIDATION

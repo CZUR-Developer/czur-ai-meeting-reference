@@ -231,6 +231,24 @@ CREATE TABLE ai_trans_meeting_abandonment (
     PRIMARY KEY (meeting_id)
 ) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
+-- Stop 已受理但客户端结果尚未收口的持久待办。正常 Stop 事务在把会议推进到
+-- STOPPING 的同一事务写入本行，随后同步尝试结果收口；失败或进程中断时由后台
+-- 扫描按 requested_at 超时重试同一个 Finalizer 与稳定结算键。
+-- pending_reason：STOP_ACCEPTED（正常 Stop 待收尾）或 USAGE_TIMEOUT（客户端
+-- 已冻结采音用量但超时未发送 Stop，后台按冻结用量进入正常收尾）。
+-- 成功写入 READY／READY_WITH_WARNINGS 后在收尾事务内删除；主键保证同一会议
+-- 最多一条待办，重复 Stop、重复扫描不会重复发布结果。
+CREATE TABLE ai_trans_meeting_finalization_pending (
+    meeting_id VARBINARY(1024) NOT NULL,
+    deployment_scope VARBINARY(256) NOT NULL,
+    pending_reason VARBINARY(32) NOT NULL,
+    requested_at DATETIME(6) NOT NULL,
+    attempt_count INT DEFAULT 0 NOT NULL,
+    last_attempt_at DATETIME(6),
+    PRIMARY KEY (meeting_id),
+    KEY ai_trans_meeting_finalization_pending_due (deployment_scope, requested_at)
+) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+
 CREATE TABLE ai_trans_meeting_client_input (
     meeting_id VARBINARY(1024) NOT NULL,
     started_at DATETIME(6) NOT NULL,

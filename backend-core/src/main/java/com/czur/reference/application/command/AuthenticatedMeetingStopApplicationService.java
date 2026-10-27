@@ -158,7 +158,9 @@ public final class AuthenticatedMeetingStopApplicationService {
     private void triggerInputClosure(String meetingId) {
         if (clientResultFinalizer != null) {
             try {
-                if (clientResultFinalizer.finalizeIfClient(meetingId)) return;
+                // Stop 事务已经持久登记待收尾；这里只尝试同步收口。失败时待办
+                // 保留，后台扫描按超时重试同一 Finalizer 与稳定结算键。
+                if (clientResultFinalizer.finalizePendingClient(meetingId)) return;
             } catch (RuntimeException failure) {
                 LOGGER.log(Level.WARNING, "客户端结果同步收口暂未完成 category=INTERNAL");
                 return;

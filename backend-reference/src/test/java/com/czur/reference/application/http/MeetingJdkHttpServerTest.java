@@ -9,6 +9,9 @@ import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
 import java.net.InetAddress;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.time.Duration;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
@@ -187,6 +190,51 @@ class MeetingJdkHttpServerTest {
         }
     }
 
+    @Test
+    void slowBodyConnectionsReleaseWorkersAfterReadDeadline() throws Exception {
+        try (Fixture fixture = new Fixture(null, Duration.ofMillis(300))) {
+            try (Socket first = slowUpload(fixture);
+                 Socket second = slowUpload(fixture)) {
+                long activeDeadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+                while (fixture.server.liveWorkersForTest() < 2
+                        && System.nanoTime() < activeDeadline) {
+                    Thread.sleep(10);
+                }
+                assertEquals(2, fixture.server.liveWorkersForTest(),
+                        "两个慢速正文请求应各占一个 worker");
+
+                long started = System.nanoTime();
+                String normal = fixture.send(request(
+                        "GET", "/v1/meetings?pageSize=7", "", ""));
+                long elapsedMs = (System.nanoTime() - started) / 1_000_000;
+                assertEquals(401, status(normal));
+                assertTrue(elapsedMs < 3_000,
+                        "正文读取超时后 worker 必须释放，实际耗时 " + elapsedMs + "ms");
+
+                // watchdog 关闭连接后，慢速客户端读到 EOF，不会把 worker 留到永久。
+                first.setSoTimeout(3_000);
+                second.setSoTimeout(3_000);
+                try (InputStream ignored = first.getInputStream()) {
+                    assertEquals(-1, ignored.read());
+                }
+                try (InputStream ignored = second.getInputStream()) {
+                    assertEquals(-1, ignored.read());
+                }
+            }
+        }
+    }
+
+    private static Socket slowUpload(Fixture fixture) throws Exception {
+        Socket socket = new Socket();
+        socket.connect(new InetSocketAddress(HOST, fixture.server.address().getPort()));
+        OutputStream output = socket.getOutputStream();
+        output.write(("POST /v1/meetings HTTP/1.1\r\nHost: localhost\r\n"
+                + "Content-Length: 64\r\nConnection: close\r\n\r\nx")
+                .getBytes(StandardCharsets.US_ASCII));
+        output.flush();
+        return socket;
+    }
+
     private static int findHeaderEnd(byte[] response) {
         for (int i = 0; i <= response.length - 4; i++) {
             if (response[i] == '\r' && response[i + 1] == '\n'
@@ -229,10 +277,14 @@ class MeetingJdkHttpServerTest {
         private int queries;
 
         private Fixture() throws Exception {
-            this(null);
+            this(null, null);
         }
 
         private Fixture(Long mediaBudget) throws Exception {
+            this(mediaBudget, null);
+        }
+
+        private Fixture(Long mediaBudget, Duration bodyReadTimeout) throws Exception {
             MeetingQueryPort query = new MeetingQueryPort() {
                 @Override
                 public Result get(GetRequest request) {
@@ -262,9 +314,15 @@ class MeetingJdkHttpServerTest {
             runtime = new MeetingHttpRuntime(new MeetingHttpAdapter(
                     query, deletion, decoder, errors), errors);
             var address = new InetSocketAddress(InetAddress.getLoopbackAddress(), 0);
-            server = mediaBudget == null ? new MeetingJdkHttpServer(address, runtime, errors)
-                    : new MeetingJdkHttpServer(address,
-                            new MeetingHttpDispatcher(runtime, errors, null, null), () -> true, mediaBudget);
+            if (bodyReadTimeout != null) {
+                server = new MeetingJdkHttpServer(address, runtime, errors, null, () -> true,
+                        2, 16, bodyReadTimeout);
+            } else if (mediaBudget == null) {
+                server = new MeetingJdkHttpServer(address, runtime, errors);
+            } else {
+                server = new MeetingJdkHttpServer(address,
+                        new MeetingHttpDispatcher(runtime, errors, null, null), () -> true, mediaBudget);
+            }
             server.start();
         }
 

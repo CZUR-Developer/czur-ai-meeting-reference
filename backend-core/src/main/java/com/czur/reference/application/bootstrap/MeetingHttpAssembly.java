@@ -54,6 +54,7 @@ import com.czur.reference.application.persistence.jdbc.DatabaseStartupException;
 import com.czur.reference.application.persistence.jdbc.JdbcEntitlementProvider;
 import com.czur.reference.application.persistence.jdbc.JdbcUsageReserveLookup;
 import com.czur.reference.application.port.AbandonedMeetingFinalizer;
+import com.czur.reference.application.port.ClientMeetingResultFinalizer;
 import com.czur.reference.application.port.MeetingIdGenerator;
 import com.czur.reference.application.port.MeetingManifestPort;
 import com.czur.reference.application.port.MeetingArtifactContentPort;
@@ -123,7 +124,7 @@ public class MeetingHttpAssembly implements AutoCloseable {
     private final Clock clock;
     private final MeetingArtifactMediaPort artifactMedia;
     private final EntitlementProvider entitlementProvider;
-    private final AbandonedMeetingFinalizer abandonedMeetingFinalizer;
+    private final JdbcClientMeetingResultFinalizer abandonedMeetingFinalizer;
     private final long audioArtifactMaxBytes;
     private final long bodyArtifactMaxBytes;
     private final AtomicBoolean closed;
@@ -140,7 +141,7 @@ public class MeetingHttpAssembly implements AutoCloseable {
             JdbcMeetingEventLogPort eventLog, Clock clock,
             ResultEmailEndpoint resultEmail, MeetingArtifactMediaPort artifactMedia,
             EntitlementProvider entitlementProvider,
-            AbandonedMeetingFinalizer abandonedMeetingFinalizer,
+            JdbcClientMeetingResultFinalizer abandonedMeetingFinalizer,
             MeetingArtifactHttpEndpoint artifactEndpoint,
             SpeakerIdentityEnrollmentEndpoint speakerEnrollment, SpeakerNameEditEndpoint speakerEditing,
             MeetingHeartbeatEndpoint heartbeat,
@@ -493,8 +494,10 @@ public class MeetingHttpAssembly implements AutoCloseable {
             var realtimeVerifier = clientModel ? null : new JdbcRealtimeCredentialVerifier(
                     dataSource, config.deploymentScope(), clock);
 
+            // append 受理与发布、读取、HTTP 响应共用同一个部署正文预算：超限在
+            // 追加时提前拒绝，避免 Stop 才 CONTENT_TOO_LARGE 而永久停在 STOPPING。
             var clientInput = new JdbcClientMeetingInputPort(databaseContext,
-                    startCoordinator, clock, artifactStore);
+                    startCoordinator, clock, artifactStore, bodyArtifactMaxBytes);
             MeetingManifestPort manifest = config.resultLinkTtl()
                     .<MeetingManifestPort>map(ttl -> new JdbcMeetingManifestQueryPort(
                             databaseContext, new ManifestResultAccessPolicy(clock, ttl)))
@@ -656,6 +659,14 @@ public class MeetingHttpAssembly implements AutoCloseable {
      * 关闭前停止调用。</p>
      */
     public AbandonedMeetingFinalizer abandonedMeetingFinalizer() {
+        return abandonedMeetingFinalizer;
+    }
+
+    /**
+     * 返回与 Stop、弃场共用同一实例的客户端结果收口端口，供待办/冻结用量
+     * 扫描器重试。调用方不得替换或关闭该实例；它不拥有连接池。
+     */
+    public ClientMeetingResultFinalizer clientResultFinalizer() {
         return abandonedMeetingFinalizer;
     }
 

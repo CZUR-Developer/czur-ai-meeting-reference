@@ -18,6 +18,8 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import com.czur.reference.application.entitlement.ExpiredReservationCleanupWorker;
 import com.czur.reference.application.persistence.jdbc.JdbcAbandonedMeetingSweeper;
+import com.czur.reference.application.persistence.jdbc.JdbcClientFinalizationPendingSweep;
+import com.czur.reference.application.persistence.jdbc.JdbcFrozenUsageTimeoutSweeper;
 import com.czur.reference.application.persistence.jdbc.JdbcClientModelWorkers;
 import com.czur.reference.application.port.entitlement.LeaseAwareReservationCanceller;
 
@@ -147,12 +149,26 @@ public final class ReferenceClientMeetingProcess implements AutoCloseable {
                     assembly.entitlementProvider(), assembly.abandonedMeetingFinalizer(),
                     JdbcAbandonedMeetingSweeper.Config.defaults(config.heartbeatIntervalMs(),
                             config.runtimeLimits().maxMeetingDurationMs()));
+            // Stop 受理与结果收口分离：同步 Finalizer 失败时由待办扫描按宽限窗口
+            // 重试；同一 Finalizer 也负责“冻结用量后超时未 Stop”的会议。
+            final JdbcClientFinalizationPendingSweep pendingSweep =
+                    new JdbcClientFinalizationPendingSweep(assembly.databaseContext(),
+                            config.deploymentScope(), clock,
+                            assembly.clientResultFinalizer(),
+                            JdbcClientFinalizationPendingSweep.Config.defaults());
+            final JdbcFrozenUsageTimeoutSweeper frozenUsageSweeper =
+                    new JdbcFrozenUsageTimeoutSweeper(assembly.databaseContext(),
+                            config.deploymentScope(), clock,
+                            assembly.clientResultFinalizer(),
+                            JdbcFrozenUsageTimeoutSweeper.Config.defaults(
+                                    config.heartbeatIntervalMs()));
             scheduler = Executors.newSingleThreadScheduledExecutor(task -> {
                 Thread thread = new Thread(task, "reference-client-meeting-worker");
                 thread.setDaemon(true);
                 return thread;
             });
-            scheduler.scheduleWithFixedDelay(() -> tick(cleanupWorker, abandonedSweeper),
+            scheduler.scheduleWithFixedDelay(() -> tick(cleanupWorker, pendingSweep,
+                            abandonedSweeper, frozenUsageSweeper),
                     0, TICK_SECONDS, TimeUnit.SECONDS);
             LOGGER.log(Level.INFO, "参考客户端直连后端已启动 httpPort={0} modelAdapter={1}",
                     new Object[]{http.address().getPort(), issuer.getClass().getSimpleName()});
@@ -166,8 +182,11 @@ public final class ReferenceClientMeetingProcess implements AutoCloseable {
         }
     }
 
-    /** 一次清理；两类任务各自兜异常，互不阻塞，失败只记录并等下个周期。 */
-    static void tick(ExpiredReservationCleanupWorker cleanup, JdbcAbandonedMeetingSweeper sweeper) {
+    /** 一次清理；各任务各自兜异常，互不阻塞，失败只记录并等下个周期。 */
+    static void tick(ExpiredReservationCleanupWorker cleanup,
+            JdbcClientFinalizationPendingSweep pendingSweep,
+            JdbcAbandonedMeetingSweeper sweeper,
+            JdbcFrozenUsageTimeoutSweeper frozenUsageSweeper) {
         if (cleanup != null) {
             try {
                 ExpiredReservationCleanupWorker.RunResult result = cleanup.runOnce();
@@ -178,6 +197,15 @@ public final class ReferenceClientMeetingProcess implements AutoCloseable {
             } catch (RuntimeException failure) {
                 LOGGER.log(Level.WARNING, "过期预占清理失败，下个周期继续", failure);
             }
+        }
+        try {
+            JdbcClientFinalizationPendingSweep.Result retried = pendingSweep.runOnce();
+            if (retried.finalizedMeetings() > 0 || retried.deferredMeetings() > 0) {
+                LOGGER.log(Level.INFO, "待收尾会议重试 finalized={0} deferred={1}",
+                        new Object[]{retried.finalizedMeetings(), retried.deferredMeetings()});
+            }
+        } catch (RuntimeException failure) {
+            LOGGER.log(Level.WARNING, "待收尾会议重试失败，下个周期继续", failure);
         }
         try {
             JdbcAbandonedMeetingSweeper.Result swept = sweeper.runOnce();
@@ -191,6 +219,16 @@ public final class ReferenceClientMeetingProcess implements AutoCloseable {
             }
         } catch (RuntimeException failure) {
             LOGGER.log(Level.WARNING, "弃场会议收口失败，下个周期继续", failure);
+        }
+        try {
+            JdbcFrozenUsageTimeoutSweeper.Result recovered = frozenUsageSweeper.runOnce();
+            if (recovered.finalizedMeetings() > 0 || recovered.deferredMeetings() > 0) {
+                LOGGER.log(Level.INFO, "冻结用量超时会议收口 finalized={0} deferred={1}",
+                        new Object[]{recovered.finalizedMeetings(),
+                                recovered.deferredMeetings()});
+            }
+        } catch (RuntimeException failure) {
+            LOGGER.log(Level.WARNING, "冻结用量超时会议收口失败，下个周期继续", failure);
         }
     }
 

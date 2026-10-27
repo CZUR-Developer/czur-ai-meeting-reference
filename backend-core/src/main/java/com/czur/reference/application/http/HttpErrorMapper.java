@@ -342,6 +342,9 @@ public final class HttpErrorMapper {
             case SUMMARY_NOT_GRANTED -> error(422, HttpErrorEnvelope.Domain.ENTITLEMENT,
                     "SUMMARY_NOT_GRANTED", false, HttpErrorEnvelope.UserAction.NONE,
                     "ai_meeting.entitlement.summary_not_granted");
+            case CONTENT_TOO_LARGE -> error(413, HttpErrorEnvelope.Domain.CONTRACT,
+                    "CONTENT_TOO_LARGE", false, HttpErrorEnvelope.UserAction.NONE,
+                    "ai_meeting.contract.content_too_large");
             case STORAGE_UNAVAILABLE -> error(503, HttpErrorEnvelope.Domain.STORAGE,
                     "CLIENT_INPUT_UNAVAILABLE", true, HttpErrorEnvelope.UserAction.RETRY,
                     "ai_meeting.storage.input_unavailable");
