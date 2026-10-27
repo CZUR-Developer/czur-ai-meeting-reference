@@ -13,6 +13,7 @@ class StoppedMeetingCheckpoint private constructor(
     private val stableStopKey: String,
     private val phase: Phase,
     private val genTime: Long?,
+    private val deliversResult: Boolean,
 ) {
     /** 顺序只表示已确认前缀，发布或 Stop 接受不等于实际 READY。 */
     enum class Phase { PUBLISH_PENDING, PUBLISHED, STOP_ACCEPTED, READY }
@@ -33,12 +34,17 @@ class StoppedMeetingCheckpoint private constructor(
     fun phase(): Phase = phase
     /** Stop 接受前为 null，之后固定为首次 ACK 的结果链接基准。 */
     fun genTime(): Long? = genTime
-    fun published(): StoppedMeetingCheckpoint = StoppedMeetingCheckpoint(context, stableStopKey, Phase.PUBLISHED, null)
+    /** 原场交付策略：false 表示 Stop 成功后只收口到 ENDED，不读取结果清单。 */
+    fun deliversResult(): Boolean = deliversResult
+    fun published(): StoppedMeetingCheckpoint =
+        StoppedMeetingCheckpoint(context, stableStopKey, Phase.PUBLISHED, null, deliversResult)
     fun stopAccepted(acceptedAtMs: Long): StoppedMeetingCheckpoint =
-        StoppedMeetingCheckpoint(context, stableStopKey, Phase.STOP_ACCEPTED, acceptedAtMs)
-    fun ready(): StoppedMeetingCheckpoint = StoppedMeetingCheckpoint(context, stableStopKey, Phase.READY, genTime)
+        StoppedMeetingCheckpoint(context, stableStopKey, Phase.STOP_ACCEPTED, acceptedAtMs, deliversResult)
+    fun ready(): StoppedMeetingCheckpoint =
+        StoppedMeetingCheckpoint(context, stableStopKey, Phase.READY, genTime, deliversResult)
     fun withAccessToken(accessToken: String): StoppedMeetingCheckpoint =
-        StoppedMeetingCheckpoint(context.withAccessToken(accessToken), stableStopKey, phase, genTime)
+        StoppedMeetingCheckpoint(context.withAccessToken(accessToken), stableStopKey, phase, genTime,
+            deliversResult)
 
     /**
      * 同场保存公共进度时核对原文件／格式／用量／服务归属／Stop 键，保留更先进阶段。
@@ -53,7 +59,8 @@ class StoppedMeetingCheckpoint private constructor(
             a.encodedBytes() != b.encodedBytes() || a.capturedPcmBytes() != b.capturedPcmBytes() ||
             context.frozenAudioDurationMs() != update.context.frozenAudioDurationMs() ||
             context.serverUrl() != update.context.serverUrl() || context.clientIdentity() != update.context.clientIdentity() ||
-            stableStopKey != update.stableStopKey || genTime != null && update.genTime != null && genTime != update.genTime)
+            stableStopKey != update.stableStopKey || deliversResult != update.deliversResult ||
+            genTime != null && update.genTime != null && genTime != update.genTime)
             throw IOException("同场停止记录的原事实不一致")
         val acknowledged = if (phase.ordinal >= update.phase.ordinal) this else update
         return if (acknowledged.context.accessToken() == update.context.accessToken()) acknowledged
@@ -61,16 +68,20 @@ class StoppedMeetingCheckpoint private constructor(
     }
     override fun toString(): String = "StoppedMeetingCheckpoint[phase=$phase, originalFacts=redacted]"
     companion object {
-        /** 仅尾部确认且 sealed 事实读取成功后生成一次停止键。 */
-        @JvmStatic fun pending(context: MeetingArtifactPublisher.Context): StoppedMeetingCheckpoint =
-            StoppedMeetingCheckpoint(context, UUID.randomUUID().toString(), Phase.PUBLISH_PENDING, null)
+        /** 仅尾部确认且 sealed 事实读取成功后生成一次停止键；默认按主动交付收口。 */
+        @JvmStatic fun pending(context: MeetingArtifactPublisher.Context,
+            deliversResult: Boolean = true): StoppedMeetingCheckpoint =
+            StoppedMeetingCheckpoint(context, UUID.randomUUID().toString(), Phase.PUBLISH_PENDING, null,
+                deliversResult)
         /**
          * 私有 Store 读回原事实，不重读当前账号／登录／音源。文件由 App 保持不变；
          * originalConfig 只提取原 URL／Bearer／ClientIdentity，不保留或调用 Provider。
+         * 旧记录没有交付策略字段时按主动交付续办。
          */
         @JvmStatic fun restore(audio: SealedAudioArtifact, frozenAudioDurationMs: Long,
-            originalConfig: MeetingClientConfig, stableStopKey: String, phase: Phase, genTime: Long?): StoppedMeetingCheckpoint =
+            originalConfig: MeetingClientConfig, stableStopKey: String, phase: Phase, genTime: Long?,
+            deliversResult: Boolean = true): StoppedMeetingCheckpoint =
             StoppedMeetingCheckpoint(MeetingArtifactPublisher.Context(audio.meetingId(), audio,
-                frozenAudioDurationMs, originalConfig), stableStopKey, phase, genTime)
+                frozenAudioDurationMs, originalConfig), stableStopKey, phase, genTime, deliversResult)
     }
 }

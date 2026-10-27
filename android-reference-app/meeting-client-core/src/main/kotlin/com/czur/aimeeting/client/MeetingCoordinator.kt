@@ -141,7 +141,8 @@ class MeetingCoordinator(
         enqueue { session.begin() }
         return session
     }
-    @Synchronized override fun resumeFinalization(checkpointId: String, callback: MeetingClient.Callback<MeetingResult>) {
+    @Synchronized override fun resumeFinalization(checkpointId: String,
+        callback: MeetingClient.Callback<FinalizationResult>) {
         requireOpen()
         val store = config.stoppedMeetingStore()
         if (store.isEmpty) { notifyClient { callback.onError(MeetingError(MeetingErrorCode.STOP_STORE_MISSING)) }; return }
@@ -151,7 +152,7 @@ class MeetingCoordinator(
         }
         resumingFinalization = true
         io.execute {
-            var result: MeetingResult? = null
+            var outcome: SavedFinalizationOutcome? = null
             var errorCode: MeetingErrorCode? = null
             try {
                 if (closed) return@execute
@@ -162,14 +163,14 @@ class MeetingCoordinator(
                 val frozenConfig = MeetingClientConfig(original.serverUrl(), original.accessToken(),
                     original.clientIdentity(), config.profile(), config.callbackExecutor())
                 val server = servers.apply(frozenConfig)
-                LOG.info("原场停止收尾续办开始 phase=${checkpoint.phase()}")
+                LOG.info("原场停止收尾续办开始 phase=${checkpoint.phase()} deliversResult=${checkpoint.deliversResult()}")
                 if (checkpoint.phase() == StoppedMeetingCheckpoint.Phase.PUBLISH_PENDING) {
                     // 恢复流程先写停止记录、后提交冻结用量；若在这之间被打断，续办时快照会
                     // 一直缺用量并 409。这里补交同场同值事实，正常停止已提交过时由服务端幂等处理。
                     LOG.info("原场停止收尾补交冻结采音用量 durationMs=${checkpoint.context().frozenAudioDurationMs()}")
                     server.submitUsage(checkpoint.checkpointId(), checkpoint.context().frozenAudioDurationMs())
                 }
-                result = finishSavedFinalization(checkpoint, store.get(), server, config.artifactPublisher(),
+                outcome = finishSavedFinalization(checkpoint, store.get(), server, config.artifactPublisher(),
                     BooleanSupplier { closed }, wallClockMs, Runnable {})
             } catch (failure: Exception) {
                 if (failure !is IOException && failure !is RuntimeException) throw failure
@@ -177,10 +178,16 @@ class MeetingCoordinator(
                 errorCode = MeetingErrorCode.FINALIZATION_FAILED
             } finally { synchronized(this) { resumingFinalization = false } }
             // 先释放互斥，再回调，允许宿主在回调中开始下一场。
-            val actual = result
-            val code = errorCode
-            if (actual != null) notifyClient { callback.onSuccess(actual) }
-            else if (code != null) notifyClient { callback.onError(MeetingError(code)) }
+            when (val actual = outcome) {
+                is SavedFinalizationOutcome.Delivered -> notifyClient {
+                    callback.onSuccess(FinalizationResult(checkpointId, actual.result))
+                }
+                SavedFinalizationOutcome.EndedWithoutDelivery -> notifyClient {
+                    // 明确完成回调，而不是静默成功；调用方据 delivered()==false 结束本地记录。
+                    callback.onSuccess(FinalizationResult(checkpointId, null))
+                }
+                null -> errorCode?.let { code -> notifyClient { callback.onError(MeetingError(code)) } }
+            }
         }
     }
     @Synchronized override fun recoverInterrupted(meetingId: String, callback: MeetingClient.Callback<RecoveryResult>) {
@@ -220,14 +227,19 @@ class MeetingCoordinator(
                 // 那条路径只补用量、不会再补纪要，失败一次就会永久缺纪要。
                 submitRecoveredSummary(record, server)
                 var checkpoint = stoppedStore.get().save(StoppedMeetingCheckpoint.pending(
-                    MeetingArtifactPublisher.Context(meetingId, audio, audio.durationMs(), sessionConfig)))
-                LOG.info("原场现场续办开始 phase=${checkpoint.phase()}")
-                val result = finishSavedFinalization(checkpoint, stoppedStore.get(), server,
+                    MeetingArtifactPublisher.Context(meetingId, audio, audio.durationMs(), sessionConfig),
+                    record.activeDelivery()))
+                LOG.info("原场现场续办开始 phase=${checkpoint.phase()} deliversResult=${checkpoint.deliversResult()}")
+                val finished = finishSavedFinalization(checkpoint, stoppedStore.get(), server,
                     sessionConfig.artifactPublisher(), BooleanSupplier { closed }, wallClockMs,
-                    Runnable {}, record.activeDelivery())
+                    Runnable {})
                 recoveryStore.get().delete(meetingId)
                 record.journalFile()?.let { journal -> if (journal.exists() && !journal.delete()) LOG.warning("原场字幕日志删除失败") }
-                outcome = RecoveryResult(meetingId, result)
+                outcome = when (finished) {
+                    is SavedFinalizationOutcome.Delivered -> RecoveryResult(meetingId, finished.result)
+                    SavedFinalizationOutcome.EndedWithoutDelivery -> RecoveryResult(meetingId, null)
+                    null -> null
+                }
             } catch (failure: Exception) {
                 if (failure !is IOException && failure !is RuntimeException) throw failure
                 logFailure("原场现场续办", failure)
@@ -272,9 +284,14 @@ class MeetingCoordinator(
         return refreshed
     }
     /** 已确认尾部共用唯一流程，真实 ACK 先保存；READY 也读实际清单，不由本地阶段伪造。 */
+    private sealed interface SavedFinalizationOutcome {
+        class Delivered(val result: MeetingResult) : SavedFinalizationOutcome
+        /** Stop 成功且原策略不交付；只推进本地阶段，不读取清单。 */
+        data object EndedWithoutDelivery : SavedFinalizationOutcome
+    }
     private fun finishSavedFinalization(initial: StoppedMeetingCheckpoint, store: StoppedMeetingStore,
         server: MeetingServerClient, publisher: MeetingArtifactPublisher, aborted: BooleanSupplier,
-        acceptedGenTime: LongSupplier, onStopAccepted: Runnable, deliverResult: Boolean = true): MeetingResult? {
+        acceptedGenTime: LongSupplier, onStopAccepted: Runnable): SavedFinalizationOutcome? {
         if (aborted.asBoolean) return null
         var checkpoint = store.save(initial)
         if (aborted.asBoolean) return null
@@ -295,16 +312,16 @@ class MeetingCoordinator(
         }
         if (aborted.asBoolean) return null
         onStopAccepted.run()
-        if (!deliverResult) {
+        if (!checkpoint.deliversResult()) {
             // NO_ACTIVE_DELIVERY 只收口到 ENDED，不读清单；本地阶段仍记录到 Stop 已受理。
             if (checkpoint.phase() != StoppedMeetingCheckpoint.Phase.READY) store.save(checkpoint.ready())
             LOG.info("原场已停止，未主动交付结果")
-            return null
+            return SavedFinalizationOutcome.EndedWithoutDelivery
         }
         LOG.info("读取原场实际 READY 清单开始")
         val result = server.readResult(checkpoint.checkpointId(), checkpoint.genTime()!!, false)
         if (checkpoint.phase() != StoppedMeetingCheckpoint.Phase.READY) store.save(checkpoint.ready())
-        return result
+        return SavedFinalizationOutcome.Delivered(result)
     }
     private fun requireOpen() { check(!closed) { "会议客户端已关闭" } }
     private fun enqueue(task: Runnable) {
@@ -884,12 +901,17 @@ class MeetingCoordinator(
                         sessionConfig = sessionConfig.forSession(IdentitySession(publicationContext!!.accessToken(), ""))
                         server = servers.apply(sessionConfig)
                     }
-                    val finalResult = finishSavedFinalization(stoppedCheckpoint!!, store.get(), server,
+                    val finished = finishSavedFinalization(stoppedCheckpoint!!, store.get(), server,
                         sessionConfig.artifactPublisher(), BooleanSupplier { cancelled || closed }, LongSupplier {
                             if (genTime == null) genTime = wallClockMs.asLong
                             genTime!!
                         }, Runnable { heartbeatAllowed = false; model!!.close() })
-                    if (finalResult != null) enqueue { ready(finalResult) }
+                    when (finished) {
+                        is SavedFinalizationOutcome.Delivered -> enqueue { ready(finished.result) }
+                        SavedFinalizationOutcome.EndedWithoutDelivery ->
+                            enqueue { endWithoutDelivery("会议已结束；无痕互译不主动交付结果") }
+                        null -> {}
+                    }
                     return
                 }
                 // 模型结束不等于音频封口；模型异常保留已采录音，输入错误／取消不正常发布。

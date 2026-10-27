@@ -18,9 +18,11 @@ interface MeetingClient : AutoCloseable {
     fun start(options: MeetingOptions, listener: MeetingListener): MeetingSession
     /**
      * 只续办已保存原场发布／同键 Stop／实际 READY，不建新场或重开音源／模型／总结。
-     * 使用原身份；部署可在身份扩展中批准同账号续签。默认在调用线程明确报告不支持。
+     * 使用原身份；部署可在身份扩展中批准同账号续签。NO_ACTIVE_DELIVERY 场次只推进到
+     * ENDED，不读取结果清单，仍通过成功回调返回 [FinalizationResult]（result 为 null）。
+     * 默认在调用线程明确报告不支持。
      */
-    fun resumeFinalization(checkpointId: String, callback: Callback<MeetingResult>) {
+    fun resumeFinalization(checkpointId: String, callback: Callback<FinalizationResult>) {
         callback.onError(MeetingError(MeetingErrorCode.STOP_STORE_MISSING))
     }
     /**

@@ -262,6 +262,9 @@ STARTING／CLOSED 枚举未作为独立状态通知。
 尾事件、用量、选定总结已确认且音频封口后保存 `StoppedMeetingCheckpoint`；
 宿主重建调用 `resumeFinalization(id, callback)` 只续原场发布、Stop 和 READY，
 不重新采音或总结。Store 由部署者管理，不由核心扫描或删除音频目录。
+`StoppedMeetingCheckpoint` 同时保存原场交付策略：`NO_ACTIVE_DELIVERY` 续办在 Stop
+成功后只推进到 ENDED，不读取结果清单，成功回调仍是 `FinalizationResult`，但
+`result()` 为 null、`delivered()` 为 false；旧停止记录没有策略字段时按主动交付处理。
 
 `IdentityProvider.identityForFinalization(meetingId, originalIdentity)` 可在原场再次收尾时
 提供同账号新会话，默认返回原身份。部署者须自行确认原账号归属，不能只比较显示名。

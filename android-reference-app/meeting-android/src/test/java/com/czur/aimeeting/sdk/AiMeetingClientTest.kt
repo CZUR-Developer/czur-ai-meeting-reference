@@ -1,6 +1,7 @@
 package com.czur.aimeeting.sdk
 
 import com.czur.aimeeting.client.ClientIdentity
+import com.czur.aimeeting.client.FinalizationResult
 import com.czur.aimeeting.client.MeetingArtifactPublisher
 import com.czur.aimeeting.client.MeetingCapabilityState
 import com.czur.aimeeting.client.MeetingClient
@@ -242,9 +243,11 @@ class AiMeetingClientTest {
                 }, SummaryRuntime { _, _, _ ->
                     summaries.incrementAndGet(); throw AssertionError("续办不能重跑总结")
                 }).use { client ->
-                    val ready = CompletableFuture<MeetingResult>()
+                    val ready = CompletableFuture<FinalizationResult>()
                     client.resumeFinalization(initial.checkpointId(), callback(ready, callbackThreads))
-                    val result = ready.get(10, TimeUnit.SECONDS)
+                    val outcome = ready.get(10, TimeUnit.SECONDS)
+                    assertTrue(outcome.delivered())
+                    val result = outcome.result()!!
                     assertEquals("mtg_facade", result.meetingId())
                     assertEquals(MeetingResult.Status.READY, result.status())
                     assertEquals(MeetingResult.DeliveryStatus.NOT_REQUESTED, result.deliveryStatus())

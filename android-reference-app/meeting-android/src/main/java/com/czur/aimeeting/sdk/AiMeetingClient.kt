@@ -8,6 +8,7 @@ import com.czur.aimeeting.client.MeetingCoordinator
 import com.czur.aimeeting.client.MeetingDiscovery
 import com.czur.aimeeting.client.MeetingListener
 import com.czur.aimeeting.client.MeetingOptions
+import com.czur.aimeeting.client.FinalizationResult
 import com.czur.aimeeting.client.MeetingResult
 import com.czur.aimeeting.client.AudioMixOptions
 import com.czur.aimeeting.client.MeetingRuntimePort
@@ -98,8 +99,8 @@ class AiMeetingClient : MeetingClient {
     override fun login(username: String, password: String,
         callback: MeetingClient.Callback<ReferenceLoginSession>) = delegate.login(username, password, callback)
     override fun start(options: MeetingOptions, listener: MeetingListener): MeetingSession = delegate.start(options, listener)
-    /** 续办既有发布/同键 Stop/真实 READY，不重开音源或模型。 */
-    override fun resumeFinalization(checkpointId: String, callback: MeetingClient.Callback<MeetingResult>) =
+    /** 续办既有发布/同键 Stop/真实 READY，不重开音源或模型；无痕场次 result 为 null。 */
+    override fun resumeFinalization(checkpointId: String, callback: MeetingClient.Callback<FinalizationResult>) =
         delegate.resumeFinalization(checkpointId, callback)
     /** 用本机原场现场重建封口事实并收口；不重开音源或模型。 */
     override fun recoverInterrupted(meetingId: String, callback: MeetingClient.Callback<RecoveryResult>) =

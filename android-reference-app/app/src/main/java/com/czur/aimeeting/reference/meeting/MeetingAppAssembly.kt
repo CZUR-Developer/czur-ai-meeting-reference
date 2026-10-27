@@ -3,6 +3,7 @@ package com.czur.aimeeting.reference.meeting
 import android.content.Context
 import android.util.Log
 import com.czur.aimeeting.client.ClientIdentity
+import com.czur.aimeeting.client.FinalizationResult
 import com.czur.aimeeting.client.MeetingClient
 import com.czur.aimeeting.client.identity.IdentityResult
 import com.czur.aimeeting.client.MeetingError
@@ -12,7 +13,6 @@ import com.czur.aimeeting.client.MeetingProfile
 import com.czur.aimeeting.client.MeetingDiscovery
 import com.czur.aimeeting.client.ModelAdapterRegistry
 import com.czur.aimeeting.client.RecoveryResult
-import com.czur.aimeeting.client.MeetingResult
 import com.czur.aimeeting.client.result.ResultActionRegistry
 import com.czur.aimeeting.client.result.ResultActionPlugin
 import com.czur.aimeeting.client.result.ResultOptions
@@ -269,10 +269,10 @@ object MeetingAppAssembly {
                 var resumed = false
                 Log.i(TAG, "原场停止收尾请求 meetingId=$meetingId")
                 try {
-                    client.resumeFinalization(meetingId, object : MeetingClient.Callback<MeetingResult> {
-                        override fun onSuccess(result: MeetingResult) {
+                    client.resumeFinalization(meetingId, object : MeetingClient.Callback<FinalizationResult> {
+                        override fun onSuccess(result: FinalizationResult) {
                             resumed = true
-                            Log.i(TAG, "原场停止收尾续办完成 meetingId=$meetingId")
+                            Log.i(TAG, "原场停止收尾续办完成 meetingId=$meetingId delivered=${result.delivered()}")
                             finished.countDown()
                         }
                         override fun onError(error: MeetingError) {

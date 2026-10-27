@@ -57,7 +57,9 @@ class ReferenceStoppedMeetingStore(context: Context) : StoppedMeetingStore {
             audioJson.getLong("frozenAudioDurationMs"), config,
             json.getString("stableStopKey"),
             StoppedMeetingCheckpoint.Phase.valueOf(json.getString("phase")),
-            if (json.isNull("genTime")) null else json.getLong("genTime")))
+            if (json.isNull("genTime")) null else json.getLong("genTime"),
+            // 旧记录没有该字段：沿用修复前的主动读取结果行为，不能悄悄改成不交付。
+            json.optBoolean("deliversResult", true)))
     }
 
     /** 尚未收口到 READY 的停止记录；交给 resumeFinalization 逐场推进。 */
@@ -94,6 +96,7 @@ class ReferenceStoppedMeetingStore(context: Context) : StoppedMeetingStore {
             .put("stableStopKey", checkpoint.stableStopKey())
             .put("phase", checkpoint.phase().name)
             .put("genTime", checkpoint.genTime() ?: JSONObject.NULL)
+            .put("deliversResult", checkpoint.deliversResult())
         if (!directory.isDirectory && !directory.mkdirs()) throw IOException("无法创建停止记录目录")
         val target = file(checkpoint.checkpointId())
         val temporary = File(directory, "${checkpoint.checkpointId()}.json.tmp")

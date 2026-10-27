@@ -932,6 +932,13 @@ class MeetingCoordinatorTest {
         assertEquals(555L, merged.genTime())
         assertEquals(accepted.stableStopKey(), merged.stableStopKey())
         assertSame(sealed, merged.context().audio())
+        // 交付策略是原场事实：旧记录默认主动交付，同一停止记录不能中途改策略。
+        assertTrue(pending.deliversResult())
+        val noDelivery = StoppedMeetingCheckpoint.restore(sealed, 1000, config, "original-key",
+            StoppedMeetingCheckpoint.Phase.PUBLISH_PENDING, null, false)
+        assertFalse(noDelivery.deliversResult())
+        assertFalse(noDelivery.published().deliversResult())
+        assertThrows(IOException::class.java, { accepted.merge(noDelivery) })
     }
 
     @Test fun pendingStopRenewsSameSceneAccessAndDoesNotOverwriteItOnAnotherRetry() {
@@ -1085,6 +1092,54 @@ class MeetingCoordinatorTest {
         }
     }
 
+    /**
+     * 评审场景：NO_ACTIVE_DELIVERY 现场首次 Stop 未受理，停止记录停在 PUBLISHED；
+     * 恢复续办必须沿用原策略，Stop 成功后直接收口，不读取清单，但仍完成回调。
+     */
+    @Test fun noActiveDeliveryRecoveryPersistsPolicyAndResumeFinishesWithoutManifest() {
+        val dir = File.createTempFile("recovery", "").apply { delete(); mkdirs() }
+        try {
+            val audioFile = File(dir, "mtg_test.pcm").apply { writeBytes(ByteArray(32000)) }
+            val record = CapturingMeeting("mtg_test", "http://127.0.0.1", ClientIdentity.reference(),
+                audioFile, null, 1L, "zh-CN", false, true, false)
+            val stopped = MemoryStore()
+            val recovery = MemoryRecoveryStore(record)
+            val publisher = Publisher()
+            val server = Server(ALL).also { publisher.server = it }
+            val runtime = Runtime(true)
+            val config = MeetingClientConfig("http://127.0.0.1",
+                ReferenceIdentityProvider("test-token"), ClientIdentity.reference(),
+                MeetingProfile.reference(), { it.run() })
+                .withArtifactPublisher(publisher).withStoppedMeetingStore(stopped)
+                .withMeetingRecoveryStore(recovery)
+            val client = MeetingCoordinator(config, ModelAdapterRegistry(), runtime,
+                java.util.function.Function { server },
+                { throw AssertionError("无痕续办不得重采") }, { 555L })
+            try {
+                server.pendingStop = true
+                val failed = CompletableFuture<RecoveryResult>()
+                client.recoverInterrupted("mtg_test", resultCallback(failed))
+                assertThrows(ExecutionException::class.java) { failed.get(3, TimeUnit.SECONDS) }
+                val suspended = stopped.read("mtg_test").orElseThrow()
+                assertEquals(StoppedMeetingCheckpoint.Phase.PUBLISHED, suspended.phase())
+                assertFalse("停止记录必须保存原交付策略", suspended.deliversResult())
+                assertFalse(server.steps.contains("manifest"))
+
+                server.pendingStop = false
+                val resumed = resumeOutcome(client).get(3, TimeUnit.SECONDS)
+                assertEquals("mtg_test", resumed.meetingId())
+                assertFalse("无痕续办不得伪装成已交付", resumed.delivered())
+                assertNull(resumed.result())
+                assertEquals(StoppedMeetingCheckpoint.Phase.READY,
+                    stopped.read("mtg_test").orElseThrow().phase())
+                assertTrue("无痕续办不得读取清单", !server.steps.contains("manifest"))
+                assertEquals(2, Collections.frequency(server.steps, "stop"))
+                assertNull(runtime.summaryInput)
+                assertFalse(server.steps.contains("summary"))
+            } finally { client.close() }
+        } finally { dir.deleteRecursively() }
+    }
+
     @Test fun resumeRequiresConfiguredRecordAndCannotRunAlongsideActiveMeeting() {
         Fixture(true, ALL).use { f ->
             assertThrows(ExecutionException::class.java, { resumeResult(f.client).get(2, TimeUnit.SECONDS) })
@@ -1229,10 +1284,18 @@ class MeetingCoordinatorTest {
         assertThrows(IllegalArgumentException::class.java) { AudioMixOptions(playbackGainPercent = -1) }
     }
 
+    private fun resumeOutcome(client: MeetingClient): CompletableFuture<FinalizationResult> {
+        val outcome = CompletableFuture<FinalizationResult>()
+        client.resumeFinalization("mtg_test", resultCallback(outcome))
+        return outcome
+    }
+
+    /** 大多数旧用例只关心主动交付结果；无痕续办使用 [resumeOutcome] 检查 delivered=false。 */
     private fun resumeResult(client: MeetingClient): CompletableFuture<MeetingResult> {
-        val result = CompletableFuture<MeetingResult>()
-        client.resumeFinalization("mtg_test", resultCallback(result))
-        return result
+        val outcome = resumeOutcome(client)
+        return outcome.thenApply {
+            requireNotNull(it.result()) { "fixture 期望主动交付结果" }
+        }
     }
 
     /** 重建客户端故意使用另一部署和当前身份；续办必须仍只用磁盘读回的原冻结事实。 */
@@ -2073,7 +2136,8 @@ class MeetingCoordinatorTest {
                 original.clientIdentity(), MeetingProfile.reference(), { it.run() })
             val copy = MemoryStore()
             copy.saved = StoppedMeetingCheckpoint.restore(original.audio(), original.frozenAudioDurationMs(),
-                originalConfig, checkpoint.stableStopKey(), checkpoint.phase(), checkpoint.genTime())
+                originalConfig, checkpoint.stableStopKey(), checkpoint.phase(), checkpoint.genTime(),
+                checkpoint.deliversResult())
             return copy
         }
     }
