@@ -140,22 +140,30 @@ Android 注册匹配的 `ModelAdapter`，再声明该实现确实支持的语言
 Adapter 或结果页。CZUR 的 `ContentProvider/UserHandler` 属于产品侧实现，不是
 参考工程的默认依赖。
 
-登录交互通过 App 的 `AppLoginEntry` 单独替换；默认入口未登录时打开参考表单，
-已登录时提供“切换账号／退出登录”。取消或登录失败保留原会话，新登录成功才替换，
-明确退出才清除。伙伴在
+登录交互通过 App 的 `AppLoginEntry` 单独替换：账号按钮未登录时调用 `open`，
+已登录时调用 `signOut`。默认入口未登录时打开参考表单，已登录时直接退出参考账号；
+取消或登录失败保留原会话，新登录成功才替换，明确退出才清除。伙伴在
 `MeetingAppAssembly.initialize(context)` 后、创建会议页面前装配自己的
 `IdentityProvider` 和 `registerLoginEntry(...)`：
 
 ```kotlin
 MeetingAppAssembly.registerIdentityProvider(partnerIdentityProvider)
-MeetingAppAssembly.registerLoginEntry(AppLoginEntry { activity, defaultEntry, onIdentityChanged ->
-    // 打开伙伴自己的登录界面；其成功回调更新 partnerIdentityProvider，再通知页面。
-    partnerLogin.open(activity) { onIdentityChanged() }
-    // 如使用参考账号密码流程，可改为 defaultEntry()。
+MeetingAppAssembly.registerLoginEntry(object : AppLoginEntry {
+    override fun open(activity: Activity, defaultEntry: () -> Unit, onIdentityChanged: () -> Unit) {
+        // 打开伙伴自己的登录界面；其成功回调更新 partnerIdentityProvider，再通知页面。
+        partnerLogin.open(activity) { onIdentityChanged() }
+        // 如使用参考账号密码流程，可改为 defaultEntry()。
+    }
+
+    override fun signOut(activity: Activity, defaultSignOut: () -> Unit, onIdentityChanged: () -> Unit) {
+        // 系统账号／SSO 的退出或切换由插件负责；也可调用 defaultSignOut 延续参考退出。
+        partnerLogin.signOut(activity) { onIdentityChanged() }
+    }
 })
 ```
 
-替换入口会完全接管账号切换，不会先执行默认退出。会话保存／恢复由伙伴 Provider
+只注册 `open` 的 lambda 仍可编译，已登录时走 `signOut` 的默认实现（清理参考会话）。
+替换入口会完全接管账号退出／切换，页面不会先执行默认退出。会话保存／恢复由伙伴 Provider
 负责，回调只触发重新读取身份和能力；SDK 不申请账号、不弹登录 UI，也不引用系统账号。
 默认插件将会话与构建后端配对：同一后端升级／重启恢复有效登录，更换后端的 APK 不复用
 原后端会话。伙伴自定义身份插件应保持这种归属；它不提供运行时切换部署地址的入口。

@@ -144,22 +144,25 @@ class MainActivity : Activity() {
         startButton = page.start; stopButton = page.stop; overlayButton = page.overlay
         swapColumnsButton = page.swapColumns; retryActionButton = page.retry; endResultButton = page.endResult
         loginButton.setOnClickListener {
-            // 已登录只有一个动作：退出登录；不再提供“切换账号”。
+            // 账号按钮的所有状态都先交给已装配的登录插件；伙伴替换入口后自行处理退出／切换。
+            val onIdentityChanged = {
+                runOnUiThread {
+                    if (!isFinishing && !isDestroyed) {
+                        // 伙伴可连同入口替换 Provider，重建会前客户端以读取新的装配。
+                        preMeetingClient?.close(); preMeetingClient = null
+                        refreshIdentity(true)
+                    }
+                }
+            }
+            val entry = MeetingAppAssembly.loginEntry()
             if (displayedIdentity != null) {
-                logout()
+                // 已登录默认只退出；伙伴可在 signOut 中接管系统账号／SSO 的退出流程。
+                entry.signOut(this, defaultSignOut = { logout() }, onIdentityChanged = onIdentityChanged)
                 return@setOnClickListener
             }
-            MeetingAppAssembly.loginEntry().open(this,
+            entry.open(this,
                 defaultEntry = { showDefaultAccountEntry() },
-                onIdentityChanged = {
-                    runOnUiThread {
-                        if (!isFinishing && !isDestroyed) {
-                            // 伙伴可连同入口替换 Provider，重建会前客户端以读取新的装配。
-                            preMeetingClient?.close(); preMeetingClient = null
-                            refreshIdentity(true)
-                        }
-                    }
-                })
+                onIdentityChanged = onIdentityChanged)
         }
         page.modes.setOnCheckedChangeListener { _, checkedId ->
             if (bindingSetupViews) return@setOnCheckedChangeListener
@@ -216,15 +219,14 @@ class MainActivity : Activity() {
     }
 
     /**
-     * 默认账号入口：首次登录直接打开表单，已有身份时明确区分切换与退出。
+     * 默认登录入口：未登录时打开参考账号表单。
      *
-     * 打开菜单或表单不改变 Provider；只有用户明确退出才清理本地会话。新账号登录
-     * 成功后，既有 MeetingClient.login 会更新同一个 Provider，无需在 App 备份令牌
-     * 或增加第二份账号状态。伙伴自定义 AppLoginEntry 不会经过本默认菜单。
+     * 打开表单不改变 Provider；新账号登录成功后，既有 MeetingClient.login 会更新
+     * 同一个 Provider，无需在 App 备份令牌或增加第二份账号状态。退出登录走
+     * AppLoginEntry.signOut 的默认实现，伙伴自定义入口不会经过本表单。
      */
     private fun showDefaultAccountEntry() {
         if (renderDeploymentIssue()) return
-        // 账号操作只有登录与退出登录；已登录时按钮直接退出，不提供“切换账号”。
         showLoginDialog()
     }
 
