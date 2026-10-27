@@ -13,12 +13,14 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -199,6 +201,81 @@ class JdbcMysqlWorkerIntegrationTest {
         }
     }
 
+    /**
+     * 单行领域事实损坏不能中断整批领取：损坏行被跳过且保持原样，同一批里
+     * 其它到期未绑定预占仍能正常领取。旧实现读到该行就抛
+     * “领取到期 Reservation 的持久事实损坏”，清理 Worker 每轮失败。
+     */
+    @Test
+    void corruptExpiredRowIsSkippedWhileValidExpiredRowsAreStillClaimed() throws Exception {
+        insertExpiredReservation("reservation-valid");
+        insertCorruptExpiredReservation("reservation-corrupt", NOW.minusSeconds(2));
+        JdbcExpiredReservationStore store = new JdbcExpiredReservationStore(
+                database.dataSource(), ids(), MYSQL);
+
+        ExpiredReservationStore.ClaimBatch batch = assertDoesNotThrow(() ->
+                store.claimExpired(new ExpiredReservationStore.ClaimRequest(
+                        DEPLOYMENT, "cleanup-corrupt", NOW, Duration.ofSeconds(30), 10)));
+
+        assertEquals(1, batch.claims().size());
+        assertEquals("reservation-valid",
+                batch.claims().getFirst().reservation().reservationId());
+        try (Connection connection = database.dataSource().getConnection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "SELECT status, version, actual_amount, lease_owner, lease_version"
+                             + " FROM ai_trans_usage_reservation WHERE reservation_id=?")) {
+            JdbcValues.setText(statement, 1, MYSQL, "reservation-corrupt");
+            try (ResultSet rows = statement.executeQuery()) {
+                assertTrue(rows.next());
+                assertEquals("RESERVED", JdbcValues.text(rows, "status"));
+                assertEquals(0L, rows.getLong("version"));
+                assertEquals(0, BigDecimal.valueOf(5).compareTo(
+                        rows.getBigDecimal("actual_amount")));
+                assertNull(JdbcValues.text(rows, "lease_owner"));
+                assertEquals(0L, rows.getLong("lease_version"));
+            }
+        }
+    }
+
+    /**
+     * 任何绑定证据（bound_meeting_id 或 bound_at）都说明预占可能已归属会议，
+     * 清理 Worker 不得领取。旧实现只过滤 bound_meeting_id，bound_at 脏行
+     * 会进入解码并让整批失败。
+     */
+    @Test
+    void expiredRowWithBoundAtOnlyIsNeverClaimed() throws Exception {
+        insertExpiredReservation("reservation-bound-at-only");
+        try (Connection connection = database.dataSource().getConnection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "UPDATE ai_trans_usage_reservation SET bound_at=?"
+                             + " WHERE reservation_id=?")) {
+            JdbcValues.setInstant(statement, 1, NOW.minusSeconds(600));
+            JdbcValues.setText(statement, 2, MYSQL, "reservation-bound-at-only");
+            assertEquals(1, statement.executeUpdate());
+        }
+        JdbcExpiredReservationStore store = new JdbcExpiredReservationStore(
+                database.dataSource(), ids(), MYSQL);
+
+        ExpiredReservationStore.ClaimBatch batch = assertDoesNotThrow(() ->
+                store.claimExpired(new ExpiredReservationStore.ClaimRequest(
+                        DEPLOYMENT, "cleanup-bound-at", NOW, Duration.ofSeconds(30), 10)));
+
+        assertTrue(batch.claims().isEmpty());
+        try (Connection connection = database.dataSource().getConnection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "SELECT status, version, lease_owner, lease_version"
+                             + " FROM ai_trans_usage_reservation WHERE reservation_id=?")) {
+            JdbcValues.setText(statement, 1, MYSQL, "reservation-bound-at-only");
+            try (ResultSet rows = statement.executeQuery()) {
+                assertTrue(rows.next());
+                assertEquals("RESERVED", JdbcValues.text(rows, "status"));
+                assertEquals(0L, rows.getLong("version"));
+                assertNull(JdbcValues.text(rows, "lease_owner"));
+                assertEquals(0L, rows.getLong("lease_version"));
+            }
+        }
+    }
+
     @Test
     void legacyMysqlSaveAndIdempotencyReleaseDoNotThrow() {
         JdbcMeetingRepository repository = new JdbcMeetingRepository(database);
@@ -239,6 +316,30 @@ class JdbcMysqlWorkerIntegrationTest {
                              + " updated_at, record_format, expires_at, status, version, lease_version)"
                              + " VALUES (?, ?, ?, 'grant-worker', ?, 'MEETING_DURATION_MS', 1000,"
                              + " ?, ?, 'V3', ?, 'RESERVED', 0, 0)")) {
+            JdbcValues.setText(statement, 1, MYSQL, reservationId);
+            JdbcValues.setText(statement, 2, MYSQL, DEPLOYMENT);
+            JdbcValues.setText(statement, 3, MYSQL, SUBJECT);
+            statement.setString(4, MEETING);
+            JdbcValues.setInstant(statement, 5, createdAt);
+            JdbcValues.setInstant(statement, 6, createdAt);
+            JdbcValues.setInstant(statement, 7, expiresAt);
+            assertEquals(1, statement.executeUpdate());
+        }
+    }
+
+    /** 落一条到期 RESERVED 行，但带 actual_amount，违反领域中间态约束。 */
+    private void insertCorruptExpiredReservation(String reservationId, Instant expiresAt)
+            throws Exception {
+        Instant createdAt = NOW.minusSeconds(3600);
+        try (Connection connection = database.dataSource().getConnection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "INSERT INTO ai_trans_usage_reservation ("
+                             + "reservation_id, deployment_scope, subject_scope, grant_id,"
+                             + " expected_meeting_id, usage_unit, reserved_amount, actual_amount,"
+                             + " created_at, updated_at, record_format, expires_at, status,"
+                             + " version, lease_version)"
+                             + " VALUES (?, ?, ?, 'grant-worker', ?, 'MEETING_DURATION_MS', 1000,"
+                             + " 5, ?, ?, 'V3', ?, 'RESERVED', 0, 0)")) {
             JdbcValues.setText(statement, 1, MYSQL, reservationId);
             JdbcValues.setText(statement, 2, MYSQL, DEPLOYMENT);
             JdbcValues.setText(statement, 3, MYSQL, SUBJECT);

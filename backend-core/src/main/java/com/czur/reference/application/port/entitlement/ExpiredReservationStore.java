@@ -16,10 +16,15 @@ import java.util.Set;
  * 补偿幂等键请求权益 Provider 取消。处理暂时失败时可以调用
  * {@link #release(LeaseToken, Instant)} 提前释放本次 lease。</p>
  *
- * <p>可领取记录必须同时满足：V3 Reservation、状态 RESERVED、尚未绑定会议、
- * {@code expiresAt <= now}，并且没有 lease 或旧 lease 已满足
- * {@code leaseUntil <= now}。数据库实现必须使用行锁加 SKIP LOCKED、条件更新或
- * 等价原子机制；不得先查询后无条件写入。</p>
+ * <p>可领取记录必须同时满足：V3 Reservation、状态 RESERVED、没有任何绑定证据
+ * （{@code boundMeetingId} 与 {@code boundAt} 都为空）、{@code expiresAt <= now}，
+ * 并且没有 lease 或旧 lease 已满足 {@code leaseUntil <= now}。已绑定但已过期的
+ * 预占属于会议结算路径，清理 Worker 不得领取或取消。数据库实现必须使用行锁加
+ * SKIP LOCKED、条件更新或等价原子机制；不得先查询后无条件写入。</p>
+ *
+ * <p>单行持久事实损坏（例如状态为 RESERVED 却带终态字段，或绑定字段不成对）
+ * 不应让整批领取失败：适配器跳过该行并继续处理其它可领取记录，损坏行保持原样
+ * 交给人工修复；连接或 SQL 级失败仍以脱敏异常上抛。</p>
  *
  * <p>每次成功领取都生成新的不透明 token 并递增 {@code leaseVersion}。释放时
  * 必须同时校验部署、主体、Reservation、owner、token、version、当前状态和

@@ -35,6 +35,11 @@ import java.util.logging.Logger;
  * {@code ai_trans_meeting_abandonment} 决定，而弃场扫描也跳过已有冻结用量的
  * 会议。决定事务先落持久待办，Finalizer 失败时由待办扫描下一轮重试，不会在
  * 同一轮用第二条链重复处理。</p>
+ *
+ * <p>等待窗口不是独立常量：它必须小于权益预占 TTL，否则扫描注定在预占到期后
+ * 才发生。装配层使用 {@link Config#derive(int, Duration)} 把窗口收敛到
+ * {@code TTL - 60 秒}；已绑定预占的结算本身允许过期，收敛窗口只是让正常路径
+ * 尽量在到期前完成，并避免配置矛盾被拖成后台永久失败。</p>
  */
 public final class JdbcFrozenUsageTimeoutSweeper {
     private static final Logger LOGGER = Logger.getLogger(
@@ -42,6 +47,18 @@ public final class JdbcFrozenUsageTimeoutSweeper {
 
     /** 冻结用量后等待 Stop 的默认下限；实际取 max(3 × 心跳间隔, 该值)。 */
     public static final Duration MIN_STOP_WAIT_WINDOW = Duration.ofMinutes(10);
+    /**
+     * 预占到期前必须留给收口事务的结算余量。
+     *
+     * <p>扫描周期是 30 秒，Finalizer 还要完成结算、结果发布和待办删除；窗口
+     * 即使等于 TTL 也会在上一次扫描与本次扫描之间越过到期时刻。固定留出
+     * 60 秒，既能容纳一轮调度抖动，也让正常路径尽量在预占到期前完成结算。
+     * 到期后才收口的会议仍由“已绑定预占允许过期结算”兜底，不依赖本余量。</p>
+     */
+    public static final Duration SETTLEMENT_MARGIN = Duration.ofSeconds(60);
+    /** 收敛后的窗口至少覆盖一个调度周期，否则配置没有可用的恢复点。 */
+    private static final Duration MIN_EFFECTIVE_WINDOW = Duration.ofSeconds(30);
+    public static final int DEFAULT_BATCH_LIMIT = 50;
     private static final long HEARTBEAT_MULTIPLIER = 3;
 
     private final JdbcDatabaseContext database;
@@ -223,6 +240,11 @@ public final class JdbcFrozenUsageTimeoutSweeper {
     /**
      * 扫描配置。等待窗口由部署心跳间隔推导，与弃场失联窗口一致取
      * {@code max(3 × 心跳间隔, 10 分钟)}；单轮最多处理 {@code batchLimit} 场。
+     *
+     * <p>窗口不能独立于预占寿命：预占 TTL 小于推导窗口时，扫描必然在预占
+     * 到期之后才发生。装配层必须使用
+     * {@link #derive(int, Duration)}，让窗口收敛到 {@code TTL - 结算余量}；
+     * 本记录不做隐式收敛，保持纯数据语义，便于测试和显式装配。</p>
      */
     public record Config(Duration stopWaitWindow, int batchLimit) {
         public Config {
@@ -236,14 +258,53 @@ public final class JdbcFrozenUsageTimeoutSweeper {
         }
 
         public static Config defaults(int heartbeatIntervalMs) {
+            return new Config(derivedStopWaitWindow(heartbeatIntervalMs), DEFAULT_BATCH_LIMIT);
+        }
+
+        /**
+         * 按心跳间隔和预占 TTL 推导扫描窗口。
+         *
+         * <p>取 {@code min(max(3 × 心跳间隔, 10 分钟), TTL - 60 秒)}。窗口被 TTL
+         * 压缩时记录 WARNING，保留原始推导值、实际 TTL 和余量，部署方可以据此
+         * 判断是否需要延长预占 TTL 而不是让后台在到期后永久失败。TTL 无法留出
+         * 一个调度周期时直接拒绝装配：这属于配置矛盾，不应等到运行时才暴露。</p>
+         *
+         * @param heartbeatIntervalMs 部署心跳间隔，必须为正
+         * @param reservationTtl 权益预占 TTL，必须能容纳结算余量和一个调度周期
+         * @return 不超过预占寿命的扫描配置
+         */
+        public static Config derive(int heartbeatIntervalMs, Duration reservationTtl) {
+            Objects.requireNonNull(reservationTtl, "reservationTtl");
+            Duration derived = derivedStopWaitWindow(heartbeatIntervalMs);
+            Duration maxWindow = reservationTtl.minus(SETTLEMENT_MARGIN);
+            if (maxWindow.compareTo(MIN_EFFECTIVE_WINDOW) < 0) {
+                throw new IllegalArgumentException(
+                        "reservationTtl must leave at least " + MIN_EFFECTIVE_WINDOW
+                                + " after the " + SETTLEMENT_MARGIN + " settlement margin: "
+                                + reservationTtl);
+            }
+            Duration window = derived.compareTo(maxWindow) > 0 ? maxWindow : derived;
+            if (window.equals(derived)) {
+                LOGGER.log(Level.INFO,
+                        "冻结用量超时窗口已按预占 TTL 校验 windowMs={0} reservationTtlMs={1}",
+                        new Object[]{window.toMillis(), reservationTtl.toMillis()});
+            } else {
+                LOGGER.log(Level.WARNING,
+                        "冻结用量超时窗口受预占 TTL 限制 derivedMs={0} effectiveMs={1}"
+                                + " reservationTtlMs={2} marginMs={3}",
+                        new Object[]{derived.toMillis(), window.toMillis(),
+                                reservationTtl.toMillis(), SETTLEMENT_MARGIN.toMillis()});
+            }
+            return new Config(window, DEFAULT_BATCH_LIMIT);
+        }
+
+        private static Duration derivedStopWaitWindow(int heartbeatIntervalMs) {
             if (heartbeatIntervalMs <= 0) {
                 throw new IllegalArgumentException("heartbeatIntervalMs must be positive");
             }
             Duration scaled = Duration.ofMillis(
                     Math.multiplyExact(HEARTBEAT_MULTIPLIER, (long) heartbeatIntervalMs));
-            Duration window = scaled.compareTo(MIN_STOP_WAIT_WINDOW) > 0
-                    ? scaled : MIN_STOP_WAIT_WINDOW;
-            return new Config(window, 50);
+            return scaled.compareTo(MIN_STOP_WAIT_WINDOW) > 0 ? scaled : MIN_STOP_WAIT_WINDOW;
         }
     }
 }

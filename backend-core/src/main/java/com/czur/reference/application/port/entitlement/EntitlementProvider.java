@@ -15,7 +15,14 @@ public interface EntitlementProvider {
     /** 为预期会议持久预占用量；并发相同请求只能形成一条 Reservation。 */
     EntitlementProviderResult<UsageOperationResult> reserveUsage(ReserveUsageRequest request);
 
-    /** 使用已持久化的最终累积用量事实提交已绑定 Reservation。 */
+    /**
+     * 使用已持久化的最终累积用量事实提交已绑定 Reservation。
+     *
+     * <p>请求携带 {@code meetingId} 时，实现必须锁定预占并校验它确实绑定到该
+     * 会议，再以锁定行的当前 version 提交；冻结时记录的 {@code expectedVersion}
+     * 缺失或陈旧不能让会议永久卡在待收口。预占已过期不构成拒绝理由：过期只阻止
+     * 新的 bind。未携带会议时按 {@code expectedVersion} 保持乐观并发语义。</p>
+     */
     EntitlementProviderResult<UsageOperationResult> commitUsage(CommitUsageRequest request);
 
     /**

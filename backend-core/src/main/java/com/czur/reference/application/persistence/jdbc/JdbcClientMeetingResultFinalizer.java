@@ -271,8 +271,10 @@ public final class JdbcClientMeetingResultFinalizer
                 Long duration = rows.getObject("audio_duration_ms", Long.class);
                 if (duration == null) return new Rejected(Reason.INVALID_STATE);
                 Long usageVersion = rows.getObject("usage_expected_version", Long.class);
+                // expectedVersion 可以是升级前/部分写入留下的空值；结算按预占归属
+                // 和当前版本恢复，快照读取不能把它当成存储不可用而挡住可恢复会议。
                 if (duration < 0 || JdbcValues.instant(rows, "usage_submitted_at") == null
-                        || usageVersion == null || usageVersion < 0) {
+                        || (usageVersion != null && usageVersion < 0)) {
                     return new Rejected(Reason.STORAGE_UNAVAILABLE);
                 }
                 // 复用既有 Create 解码／摘要／scope-key／响应一致性门，不重写正文 SQL。
@@ -859,9 +861,12 @@ public final class JdbcClientMeetingResultFinalizer
     /**
      * 只从已持久的客户端输入事实恢复Commit，不制造durable_input_fact。
      *
-     * <p>首次提交保存的expectedVersion不会随Reservation演进而变化。幂等键和摘要
-     * 只依赖同场稳定字段，Provider账本负责首次提交／重放。失败抛回原Stop编排，
-     * 维持已提交停止意图和待收口状态；本类不会在未结算时发布READY。</p>
+     * <p>首次提交保存的expectedVersion只是冻结时刻的观察值，不能作为结算的
+     * 唯一门槛：升级前或部分写入的记录可能缺失该列，Reservation 的当前版本也
+     * 可能因恢复路径变化。请求同时携带服务端会议标识，Provider 锁定预占后核对
+     * {@code bound_meeting_id} 归属并以当前版本提交；过期预占同样允许结算。幂等键
+     * 和摘要仍只依赖同场稳定字段，Provider 账本负责首次提交／重放。失败抛回原
+     * Stop 编排，维持已提交停止意图和待收口状态；本类不会在未结算时发布 READY。</p>
      */
     private Long commitClientUsage(String meetingId, boolean allowActiveState) {
         FrozenClientUsage usage = null;
@@ -879,11 +884,13 @@ public final class JdbcClientMeetingResultFinalizer
             JdbcValues.setText(statement, 1, engine, meetingId);
             try (ResultSet rows = statement.executeQuery()) {
                 if (rows.next() && rows.getObject("audio_duration_ms", Long.class) != null) {
+                    Long frozenVersion = rows.getObject("usage_expected_version", Long.class);
                     usage = new FrozenClientUsage(JdbcValues.text(rows, "deployment_scope"),
-                            JdbcValues.text(rows, "subject_scope"), JdbcValues.text(rows, "usage_reservation_id"),
+                            JdbcValues.text(rows, "subject_scope"),
+                            JdbcValues.text(rows, "usage_reservation_id"),
                             rows.getLong("audio_duration_ms"),
                             JdbcValues.instant(rows, "usage_submitted_at"),
-                            rows.getLong("usage_expected_version"));
+                            frozenVersion == null ? 0L : frozenVersion);
                 }
             }
         } catch (SQLException failure) {
@@ -902,7 +909,8 @@ public final class JdbcClientMeetingResultFinalizer
                 UsageOperationScopes.COMMIT,
                 "client-usage-" + sha256(meetingId.getBytes(StandardCharsets.UTF_8)),
                 identity, usage.reservationId(), usage.expectedVersion(),
-                new UsageActual(UsageUnit.MEETING_DURATION_MS, usage.audioDurationMs()));
+                new UsageActual(UsageUnit.MEETING_DURATION_MS, usage.audioDurationMs()),
+                meetingId);
         var result = entitlementProvider.commitUsage(request);
         if (!result.isSuccess()) {
             LOGGER.log(Level.WARNING, "客户端采音用量尚未结算，结果保持待收口");

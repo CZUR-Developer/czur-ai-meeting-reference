@@ -3,6 +3,7 @@ package com.czur.reference.application.persistence.jdbc;
 import com.czur.reference.application.artifact.filesystem.PersistentFileSystemMockArtifactStore;
 import com.czur.reference.application.command.MeetingCommandContext;
 import com.czur.reference.application.command.MeetingPermissions;
+import com.czur.reference.application.entitlement.ExpiredReservationCleanupWorker;
 import com.czur.reference.application.entitlement.FixedEntitlementPolicy;
 import com.czur.reference.application.entitlement.FixedEntitlementPolicyConfig;
 import com.czur.reference.application.port.ClientMeetingInputPort;
@@ -62,9 +63,12 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -223,6 +227,102 @@ class JdbcMysqlFinalizationRecoveryIntegrationTest {
         assertEquals(1, clientUsageOperationCount("mtg_usage"));
         assertEquals(1, clientResultCount("mtg_usage"));
         assertEquals(1, artifactCount("mtg_usage"));
+    }
+
+    /**
+     * 故障注入：预占已过期但仍绑定，且冻结用量记录缺少 expected_version。
+     *
+     * <p>这是线上卡住会议的最小复现：usage:submit 先写入用量和提交时间，
+     * 升级前或部分写入没有留下 usage_expected_version；等到冻结用量超时扫描
+     * 收口时，预占早已过期。结算必须按 bound_meeting_id 核对归属，并以锁定
+     * 预占的当前 version 提交，不能因为 expires_at 已过或缺少冻结版本而每
+     * 30 秒永久 deferred。同一批中的损坏记录和仍绑定预占也不能让清理 Worker
+     * 抛错或改动它们。</p>
+     */
+    @Test
+    void expiredBoundReservationIsSettledWhileCleanupWorkerLeavesItUntouched()
+            throws Exception {
+        String meetingId = "mtg_expired_bound";
+        seedClientMeeting(meetingId, "STARTING", 45_000L, T0.plus(Duration.ofMinutes(2)));
+        clearFrozenExpectedVersion(meetingId);
+        // bound_at 有值但 bound_meeting_id 为空：旧版本/人工修复留下的绑定证据
+        // 不一致行。清理 Worker 必须在 SQL 条件阶段就排除，不能解码后抛异常。
+        insertReservationRow("reservation_bound_at_only", "mtg_bound_at_only", null,
+                T0.plusSeconds(10), T0.plus(Duration.ofMinutes(5)), null, 0);
+        // RESERVED 却带 actual_amount：单行领域事实损坏。它没有绑定证据，会被
+        // 候选查询选中；适配器必须跳过该行，不能让整批读取失败。
+        insertReservationRow("reservation_terminal_amount", "mtg_terminal_amount", null,
+                null, T0.plus(Duration.ofMinutes(5)), 123L, 0);
+
+        JdbcEntitlementProvider provider = (JdbcEntitlementProvider) providerAt(NOW);
+        // 必须与收口使用同一测试时钟，否则 2030 年的夹具相对系统时钟尚未到期，
+        // 清理 Worker 根本不会进入候选集，故障注入就退化成空跑。
+        ExpiredReservationCleanupWorker cleanup =
+                JdbcClientModelWorkers.expiredReservationCleanupWorker(
+                        database, provider, cleanupIds(),
+                        new ExpiredReservationCleanupWorker.Config(
+                                DEPLOYMENT, "cleanup-expired-bound",
+                                Clock.fixed(NOW, ZoneOffset.UTC), Duration.ofSeconds(30), 20,
+                                null, null));
+
+        ExpiredReservationCleanupWorker.RunResult before = assertDoesNotThrow(cleanup::runOnce);
+        assertEquals(0, before.claimedCount());
+        assertBoundReservation(meetingId, "RESERVED", 1L, null);
+        assertCorruptReservationUntouched("reservation_bound_at_only");
+        assertCorruptReservationUntouched("reservation_terminal_amount");
+
+        JdbcClientMeetingResultFinalizer finalizer = finalizer(
+                NOW, new Persist(artifactRoot).store(), provider);
+        JdbcFrozenUsageTimeoutSweeper recovery = new JdbcFrozenUsageTimeoutSweeper(
+                database, DEPLOYMENT, Clock.fixed(NOW, ZoneOffset.UTC), finalizer,
+                new JdbcFrozenUsageTimeoutSweeper.Config(Duration.ofMinutes(10), 50));
+
+        JdbcFrozenUsageTimeoutSweeper.Result first = recovery.runOnce();
+
+        assertEquals(1, first.finalizedMeetings());
+        assertEquals(0, first.deferredMeetings());
+        assertEquals("READY", meetingState(meetingId));
+        assertEquals(0, pendingCount(meetingId));
+        assertSettled(meetingId, 45_000L);
+        assertEquals(1, clientUsageOperationCount(meetingId));
+        assertEquals(1, clientResultCount(meetingId));
+
+        ExpiredReservationCleanupWorker.RunResult after = assertDoesNotThrow(cleanup::runOnce);
+        assertEquals(0, after.claimedCount());
+        assertBoundReservation(meetingId, "COMMITTED", 2L, 45_000L);
+        assertCorruptReservationUntouched("reservation_bound_at_only");
+        assertCorruptReservationUntouched("reservation_terminal_amount");
+
+        // 重复扫描只重放既有结果，不再追加结算或结果事实。
+        JdbcFrozenUsageTimeoutSweeper.Result second = recovery.runOnce();
+        assertEquals(0, second.finalizedMeetings());
+        assertEquals(0, second.deferredMeetings());
+        assertEquals(1, clientUsageOperationCount(meetingId));
+        assertEquals(1, clientResultCount(meetingId));
+        assertSettled(meetingId, 45_000L);
+    }
+
+    /**
+     * 归属校验不是装饰：会议标识与会话标识不一致时必须拒绝结算并保留原预占，
+     * 不能把另一场会议的预占提交掉。缺失/陈旧版本只在归属匹配后才被忽略。
+     */
+    @Test
+    void commitUsageRejectsMeetingThatDoesNotOwnReservation() throws Exception {
+        String meetingId = "mtg_owner_check";
+        seedClientMeeting(meetingId, "STARTING", 10_000L, T0.plusSeconds(30));
+        JdbcEntitlementProvider provider = (JdbcEntitlementProvider) providerAt(NOW);
+        CommitUsageRequest request = new CommitUsageRequest(
+                DEPLOYMENT, SUBJECT, UsageOperationScopes.COMMIT,
+                "owner-check-key", "owner-check-digest", reservationId(meetingId), 1,
+                new UsageActual(UsageUnit.MEETING_DURATION_MS, 10_000), "mtg_other_owner");
+
+        var result = provider.commitUsage(request);
+
+        assertFalse(result.isSuccess());
+        assertEquals(EntitlementProviderError.Code.RESERVATION_STATE_CONFLICT,
+                result.errorOrThrow().code());
+        assertBoundReservation(meetingId, "RESERVED", 1L, null);
+        assertEquals(0, clientUsageOperationCount(meetingId));
     }
 
     /**
@@ -505,6 +605,124 @@ class JdbcMysqlFinalizationRecoveryIntegrationTest {
             try (ResultSet rows = statement.executeQuery()) {
                 assertTrue(rows.next());
                 return rows.getInt(1);
+            }
+        }
+    }
+
+    private void clearFrozenExpectedVersion(String meetingId) throws Exception {
+        try (Connection connection = connection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "UPDATE ai_trans_meeting_client_input"
+                             + " SET usage_expected_version=NULL WHERE meeting_id=?")) {
+            JdbcValues.setText(statement, 1, MYSQL, meetingId);
+            assertEquals(1, statement.executeUpdate());
+        }
+    }
+
+    /**
+     * 直接落一条到期 RESERVED 行，允许调用方构造绑定证据或终态字段损坏的夹具。
+     * 外键只约束 bound_meeting_id；expected_meeting_id 不要求真实会议存在。
+     */
+    private void insertReservationRow(String reservationId, String expectedMeetingId,
+            String boundMeetingId, Instant boundAt, Instant expiresAt,
+            Long actualAmount, long version) throws Exception {
+        try (Connection connection = connection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "INSERT INTO ai_trans_usage_reservation ("
+                             + "reservation_id, deployment_scope, subject_scope, grant_id,"
+                             + " expected_meeting_id, bound_meeting_id, bound_at, usage_unit,"
+                             + " reserved_amount, actual_amount, created_at, updated_at,"
+                             + " record_format, expires_at, status, version, lease_version)"
+                             + " VALUES (?, ?, ?, ?, ?, ?, ?, 'MEETING_DURATION_MS', 60000,"
+                             + " ?, ?, ?, 'V3', ?, 'RESERVED', ?, 0)")) {
+            JdbcValues.setText(statement, 1, MYSQL, reservationId);
+            JdbcValues.setText(statement, 2, MYSQL, DEPLOYMENT);
+            JdbcValues.setText(statement, 3, MYSQL, SUBJECT);
+            JdbcValues.setText(statement, 4, MYSQL, "grant-" + reservationId);
+            JdbcValues.setText(statement, 5, MYSQL, expectedMeetingId);
+            if (boundMeetingId == null) {
+                statement.setNull(6, java.sql.Types.VARBINARY);
+            } else {
+                JdbcValues.setText(statement, 6, MYSQL, boundMeetingId);
+            }
+            if (boundAt == null) {
+                statement.setNull(7, java.sql.Types.TIMESTAMP);
+            } else {
+                JdbcValues.setInstant(statement, 7, boundAt);
+            }
+            if (actualAmount == null) {
+                statement.setNull(8, java.sql.Types.DECIMAL);
+            } else {
+                statement.setBigDecimal(8, BigDecimal.valueOf(actualAmount));
+            }
+            JdbcValues.setInstant(statement, 9, T0);
+            JdbcValues.setInstant(statement, 10, T0);
+            JdbcValues.setInstant(statement, 11, expiresAt);
+            statement.setLong(12, version);
+            assertEquals(1, statement.executeUpdate());
+        }
+    }
+
+    private static EntitlementIdGenerator cleanupIds() {
+        return new EntitlementIdGenerator() {
+            @Override public String newGrantId() { return "cleanup-grant"; }
+            @Override public String newReservationId() { return "cleanup-reservation"; }
+            @Override public String newLeaseToken() { return "cleanup-lease-token"; }
+        };
+    }
+
+    private void assertBoundReservation(String meetingId, String status, long version,
+            Long actualAmount) throws Exception {
+        try (Connection connection = connection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "SELECT r.status, r.version, r.bound_meeting_id, r.lease_owner,"
+                             + " r.actual_amount FROM ai_trans_meeting m"
+                             + " JOIN ai_trans_usage_reservation r"
+                             + " ON r.reservation_id=m.usage_reservation_id"
+                             + " AND r.deployment_scope=m.deployment_scope"
+                             + " AND r.subject_scope=m.subject_scope"
+                             + " WHERE m.meeting_id=?")) {
+            JdbcValues.setText(statement, 1, MYSQL, meetingId);
+            try (ResultSet rows = statement.executeQuery()) {
+                assertTrue(rows.next());
+                assertEquals(status, JdbcValues.text(rows, "status"));
+                assertEquals(version, rows.getLong("version"));
+                assertEquals(meetingId, JdbcValues.text(rows, "bound_meeting_id"));
+                assertNull(JdbcValues.text(rows, "lease_owner"));
+                BigDecimal actual = rows.getBigDecimal("actual_amount");
+                if (actualAmount == null) {
+                    assertNull(actual);
+                } else {
+                    assertEquals(0, BigDecimal.valueOf(actualAmount).compareTo(actual));
+                }
+            }
+        }
+    }
+
+    /**
+     * 两条损坏夹具都必须保持原样：清理 Worker 既不领取、不写 lease，也不改动
+     * 触发解码失败的字段。status/version 不变同时证明没有误取消或误提交。
+     */
+    private void assertCorruptReservationUntouched(String reservationId) throws Exception {
+        try (Connection connection = connection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "SELECT status, version, bound_meeting_id, bound_at, actual_amount,"
+                             + " lease_owner, lease_until, lease_version"
+                             + " FROM ai_trans_usage_reservation WHERE reservation_id=?")) {
+            JdbcValues.setText(statement, 1, MYSQL, reservationId);
+            try (ResultSet rows = statement.executeQuery()) {
+                assertTrue(rows.next());
+                assertEquals("RESERVED", JdbcValues.text(rows, "status"));
+                assertEquals(0L, rows.getLong("version"));
+                assertNull(JdbcValues.text(rows, "bound_meeting_id"));
+                assertNull(JdbcValues.text(rows, "lease_owner"));
+                assertNull(JdbcValues.instant(rows, "lease_until"));
+                assertEquals(0L, rows.getLong("lease_version"));
+                if (reservationId.endsWith("bound_at_only")) {
+                    assertNotNull(JdbcValues.instant(rows, "bound_at"));
+                } else {
+                    assertNotNull(rows.getBigDecimal("actual_amount"));
+                }
             }
         }
     }

@@ -160,8 +160,12 @@ public final class ReferenceClientMeetingProcess implements AutoCloseable {
                     new JdbcFrozenUsageTimeoutSweeper(assembly.databaseContext(),
                             config.deploymentScope(), clock,
                             assembly.clientResultFinalizer(),
-                            JdbcFrozenUsageTimeoutSweeper.Config.defaults(
-                                    config.heartbeatIntervalMs()));
+                            // 等待窗口必须短于预占 TTL；否则扫描必然在预占到期后
+                            // 才发生，只能依赖过期结算兜底。窗口由 TTL 收敛，
+                            // 推导值被压缩时在配置日志中明确记录。
+                            JdbcFrozenUsageTimeoutSweeper.Config.derive(
+                                    config.heartbeatIntervalMs(),
+                                    config.entitlement().reservationTtl()));
             scheduler = Executors.newSingleThreadScheduledExecutor(task -> {
                 Thread thread = new Thread(task, "reference-client-meeting-worker");
                 thread.setDaemon(true);

@@ -166,7 +166,7 @@ public final class FinalizationCommitPlan {
         }
     }
 
-    /** 只依赖冻结字段恢复权益端口请求。 */
+    /** 只依赖冻结字段恢复权益端口请求；同时恢复服务端归属证明。 */
     public CommitUsageRequest commitUsageRequest() {
         return new CommitUsageRequest(
                 deploymentScope,
@@ -176,7 +176,8 @@ public final class FinalizationCommitPlan {
                 identity.requestDigest(),
                 reservationId,
                 expectedVersion,
-                actual);
+                actual,
+                meetingId);
     }
 
     /** 只依赖冻结 source provenance 恢复最终用量事实。 */

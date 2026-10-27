@@ -189,10 +189,32 @@ public class JdbcEntitlementProvider
                     return replay;
                 }
 
+                UsageReservation current = locked.get();
+                if (request.meetingId() != null) {
+                    // 归属证明来自会议持久事实：绑定到本场才允许结算。过期只阻止
+                    // 新的 bind，不阻止已绑定预占的最终提交，因此这里不比较
+                    // expires_at。以锁定行当前 version 提交，冻结时记录的版本只
+                    // 作为旧调用方的乐观并发输入；缺失或陈旧不能永久卡住会议。
+                    if (!request.meetingId().equals(current.expectedMeetingId())
+                            || !request.meetingId().equals(current.boundMeetingId())) {
+                        connection.rollback();
+                        return failure(EntitlementProviderError.Code.RESERVATION_STATE_CONFLICT,
+                                false, "COMMIT_MEETING_MISMATCH");
+                    }
+                    if (current.state() == UsageReservation.State.COMMITTED) {
+                        // 结算已提交但 operation 行缺失（崩溃窗口）：归属已核对，
+                        // 按稳定重放成功返回，不追加第二条结算事实。
+                        connection.rollback();
+                        return EntitlementProviderResult.success(identity.terminalResult(current));
+                    }
+                }
+
+                long expectedVersion = request.meetingId() != null
+                        ? current.version() : request.expectedVersion();
                 UsageReservation committed;
                 try {
-                    committed = locked.get().commit(
-                            request.actual(), clock.instant(), request.expectedVersion());
+                    committed = current.commit(
+                            request.actual(), clock.instant(), expectedVersion);
                 } catch (UsageReservationTransitionException transition) {
                     connection.rollback();
                     return transitionFailure(transition, "COMMIT");
@@ -201,7 +223,7 @@ public class JdbcEntitlementProvider
                     return failure(EntitlementProviderError.Code.INVALID_REQUEST, false,
                             "COMMIT_USAGE_INVALID");
                 }
-                if (!JdbcUsageReservationStore.commit(connection, engine, locked.get(), committed)) {
+                if (!JdbcUsageReservationStore.commit(connection, engine, current, committed)) {
                     connection.rollback();
                     return failure(EntitlementProviderError.Code.VERSION_CONFLICT, false,
                             "COMMIT_CAS_REJECTED");

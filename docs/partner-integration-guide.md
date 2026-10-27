@@ -91,7 +91,9 @@ client-model 的 MySQL 5.7 路径现在也支持 Outbox 和过期 Reservation �
   清理 Worker；`canceller` 必须传本装配的 lease-aware 权益端口，不能用普通 cancel 替代。
 
 两者都复用唯一的 `JdbcDatabaseContext` 连接池，`runOnce()` 不创建线程；宿主负责调度、
-lease owner、批次上限和在关闭上下文前停止调用。真实 MySQL 5.7 的门禁命令：
+lease owner、批次上限和在关闭上下文前停止调用。冻结用量超时扫描的等待窗口必须用
+`JdbcFrozenUsageTimeoutSweeper.Config.derive(heartbeatIntervalMs, reservationTtl)`
+推导，不能直接使用与预占 TTL 无关的常量。真实 MySQL 5.7 的门禁命令：
 
 ```bash
 REFERENCE_TEST_MYSQL_DATABASE_URL='jdbc:mysql://127.0.0.1:3306/ai_meeting_test' \
@@ -236,6 +238,20 @@ Android 端通过 `ModelAdapter` 接收 Provider 数据，将原文、译文、�
 `READY_WITH_WARNINGS`。这条链不按 0 结算，也不写 `meeting.abandoned` 弃场警告；
 它与弃场扫描互斥，同一会议只会由一条链收口。客户端恢复后不应再补发不同用量的
 `usage:submit`，同场只允许首次冻结值重放。
+
+等待窗口不能超过权益预占寿命：实际值取
+`min(max(3 × heartbeatIntervalMs, 10 分钟), AI_MEETING_ENTITLEMENT_RESERVATION_TTL_MS - 60 秒)`。
+TTL 不足以容纳推导窗口时，启动日志会输出 `derivedMs/effectiveMs/reservationTtlMs/marginMs`
+并按 TTL 压缩窗口；如果 TTL 连 60 秒余量加一个 30 秒调度周期都留不出，装配直接
+失败。示例配置把预占 TTL 设为 12 分钟、Grant TTL 设为 15 分钟，以保留完整的
+10 分钟等待；把 TTL 改短会同步缩短恢复等待，但不会让后台在到期后永久失败。
+
+已绑定预占的最终提交只以 `bound_meeting_id` 归属为门槛：`expires_at` 已过不阻止
+结算，冻结时记录的 `usage_expected_version` 缺失或陈旧也不阻止结算，Provider 会
+锁定预占并按当前版本提交。结算与弃场共用同一套幂等操作账本，重复扫描只重放首次
+扣减。过期预占清理 Worker 只处理同时没有 `bound_meeting_id` 和 `bound_at` 的记录：
+任何绑定证据、终态或单行持久事实损坏都不会被清理；损坏行会被跳过并计数，不会让
+整批扫描每轮抛错。
 
 ### 可选独立文本翻译
 
