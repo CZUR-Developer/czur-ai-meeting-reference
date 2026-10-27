@@ -401,6 +401,11 @@ class MeetingCoordinator(
         private var acceptingPresentation = false
         private var sequence = 0
         private var savedEvents = 0
+        /**
+         * 服务端已按部署正文预算拒绝标准事件（HTTP 413／CONTENT_TOO_LARGE）。
+         * 这是确定性拒绝，不再重试同场标准事件；提示保持到会议结束，避免静默丢数据。
+         */
+        @Volatile private var contentTooLarge = false
         private var deadline: ScheduledFuture<*>? = null
         /** IO 队列保留已分号原包，失败不跳队首；后续事件／停止重交，不增加磁盘或定时队列。 */
         private val pendingStandardEvents = ArrayDeque<PendingStandardEvent>()
@@ -434,13 +439,15 @@ class MeetingCoordinator(
 
         private fun notifyListener(task: Runnable) { notifyClient { if (!cancelled) task.run() } }
         private fun publish(notice: MeetingNotice? = null, errorCode: MeetingErrorCode? = null) {
+            // 413 后保持提示可见，直到本场结束；不因后续阶段发布而静默消失。
+            val effectiveNotice = notice ?: if (contentTooLarge) MeetingNotice.CONTENT_TOO_LARGE else null
             if (phase != lastLoggedPhase) {
-                LOG.info("会议状态 $phase" + (notice?.let { " notice=$it" } ?: "") +
+                LOG.info("会议状态 $phase" + (effectiveNotice?.let { " notice=$it" } ?: "") +
                     (errorCode?.let { " error=$it" } ?: ""))
                 lastLoggedPhase = phase
             }
             val snapshot = MeetingSessionState(phase, meetingId, available, savedEvents, active, canStop,
-                notice, errorCode)
+                effectiveNotice, errorCode)
             notifyListener { listener.onState(snapshot) }
         }
         private fun showDisplay() { val snapshot = display.snapshot(); notifyListener { listener.onDisplay(snapshot) } }
@@ -695,6 +702,11 @@ class MeetingCoordinator(
         /** 先接纳原包再确认队首，失败不跳过顺序。 */
         private fun saveStandardEvent(event: PendingStandardEvent) {
             if (closed || cancelled) return
+            // 413 之后服务端不会再接受标准事件；只保留本地显示／日志，不再制造重试。
+            if (contentTooLarge) {
+                LOG.fine("正文超过部署预算后不再上传标准事件 sequence=${event.sequence}")
+                return
+            }
             pendingStandardEvents.addLast(event)
             try { savePendingStandardEvents() }
             catch (failure: IOException) {
@@ -705,10 +717,19 @@ class MeetingCoordinator(
         /** IO 队列原序号重交，Server 返回后先出队再更新计数，Stop 也复用此确认屏障。 */
         private fun savePendingStandardEvents() {
             while (pendingStandardEvents.isNotEmpty()) {
-                if (closed || cancelled) return
+                if (closed || cancelled || contentTooLarge) return
                 val event = pendingStandardEvents.first
-                if (event.transcript != null) server.appendTranscript(id, event.sequence, event.transcript)
-                else server.appendTranslation(id, event.sequence, event.translation!!)
+                try {
+                    if (event.transcript != null) server.appendTranscript(id, event.sequence, event.transcript)
+                    else server.appendTranslation(id, event.sequence, event.translation!!)
+                } catch (failure: IOException) {
+                    // 413 是确定性拒绝；普通 5xx／网络失败仍是可重试的瞬时失败。
+                    if (failure is MeetingHttpStatusException && failure.isContentTooLarge) {
+                        rejectContentTooLarge()
+                        return
+                    }
+                    throw failure
+                }
                 pendingStandardEvents.removeFirst()
                 LOG.fine("标准事件保存已确认 sequence=${event.sequence}")
                 enqueue {
@@ -719,6 +740,25 @@ class MeetingCoordinator(
                         }
                         publish()
                     }
+                }
+            }
+        }
+        /**
+         * 服务端拒绝继续追加正文：清掉未确认尾部并停止上传，同场不再重试。
+         * 已接受内容仍在服务端，Stop／用量／纪要照常收口；宿主通过状态提示看到损失边界。
+         */
+        private fun rejectContentTooLarge() {
+            if (contentTooLarge) return
+            contentTooLarge = true
+            val dropped = pendingStandardEvents.size
+            pendingStandardEvents.clear()
+            LOG.warning("正文累计超过部署预算，停止上传标准事件 dropped=$dropped")
+            enqueue {
+                if (!done) {
+                    // 停止上传后不能再等一次永远不会来的 ACK；否则本地 Mock 的 canStop
+                    // 会一直为 false，用户点停止也收不了口。
+                    canStop = true
+                    publish(notice = MeetingNotice.CONTENT_TOO_LARGE)
                 }
             }
         }

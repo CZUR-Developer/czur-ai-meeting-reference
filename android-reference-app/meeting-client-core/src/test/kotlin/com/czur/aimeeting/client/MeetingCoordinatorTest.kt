@@ -518,6 +518,66 @@ class MeetingCoordinatorTest {
         }
     }
 
+    @Test fun contentTooLargeStopsRetryingSameEventAndAcceptedContentStillStops() {
+        Fixture(true, ALL).use { f ->
+            f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.WEB, false)
+            f.runtime.emit("s1", 1, "zh-CN", "已确认的正文", true)
+            f.probe.awaitSavedEvents(1)
+            f.server.appendHttpStatus = 413
+            f.server.appendHttpErrorCode = "CONTENT_TOO_LARGE"
+            f.runtime.emit("s2", 1, "zh-CN", "累计超过预算的正文", true)
+            val rejected = f.probe.awaitNotice(MeetingNotice.CONTENT_TOO_LARGE)
+            assertEquals("413 不能增加已确认事件", 1, rejected.savedEventCount())
+            // 后续事件不再上传，也不重试被拒的原事件；不能让同一事件无限打服务端。
+            f.runtime.emit("s3", 1, "zh-CN", "之后的正文", true)
+            Thread.sleep(150L)
+            assertEquals("被拒事件只尝试一次", 1, Collections.frequency(f.server.steps, "event2"))
+            assertEquals("超限后不再追加", 0, Collections.frequency(f.server.steps, "event3"))
+            assertEquals("已接受事件保持原样", 1, f.server.standardAccepted.size)
+            f.session.requestStop()
+            assertNotNull("已接受内容仍必须能正常 Stop", f.probe.result())
+            assertEquals(1, f.runtime.stopCalls)
+            assertTrue(f.server.steps.contains("stop"))
+            assertTrue(f.server.steps.contains("manifest"))
+            val ready = f.probe.awaitPhase(MeetingSessionState.Phase.READY)
+            assertEquals("413 后已接受内容不能被回滚", 1, ready.savedEventCount())
+            assertEquals("413 提示保持到就绪状态，不静默消失", MeetingNotice.CONTENT_TOO_LARGE, ready.notice())
+        }
+    }
+
+    @Test fun contentTooLargeOnLocalMockStillAllowsStopInsteadOfWaitingForAck() {
+        Fixture(false, ALL).use { f ->
+            f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.WEB, false)
+            f.server.appendHttpStatus = 413
+            f.server.appendHttpErrorCode = "CONTENT_TOO_LARGE"
+            f.runtime.emit("s1", 1, "zh-CN", "本地 Mock 首句就超预算", true)
+            f.probe.awaitNotice(MeetingNotice.CONTENT_TOO_LARGE)
+            f.session.requestStop()
+            assertNotNull("内容超限不能让本地会议卡死", f.probe.result())
+            assertTrue(f.server.steps.contains("stop"))
+            assertTrue(f.server.steps.contains("manifest"))
+        }
+    }
+
+    @Test fun server5xxStillRetriesOriginalEventBeforeMovingOn() {
+        Fixture(true, ALL).use { f ->
+            f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.WEB, false)
+            f.server.appendHttpStatus = 503
+            f.server.appendHttpErrorCode = "CLIENT_INPUT_UNAVAILABLE"
+            f.runtime.emit("s1", 1, "zh-CN", "第一次暂时失败", true)
+            f.probe.awaitNotice(MeetingNotice.TRANSCRIPT_UNCONFIRMED)
+            f.server.appendHttpStatus = null
+            f.server.appendHttpErrorCode = null
+            f.runtime.emit("s2", 1, "zh-CN", "后续正文", true)
+            f.probe.awaitSavedEvents(2)
+            assertEquals("5xx 仍按原策略重交队首", 2, Collections.frequency(f.server.steps, "event1"))
+            assertEquals(1, Collections.frequency(f.server.steps, "event2"))
+            f.session.requestStop()
+            assertNotNull(f.probe.result())
+            assertEquals(1, f.runtime.stopCalls)
+        }
+    }
+
     @Test fun laterEventConfirmsOriginalTranscriptBeforeQueuedTranslationAndRevision() {
         Fixture(true, ALL).use { f ->
             f.start(MeetingOptions.Mode.LIVE_TRANSLATION, MeetingOptions.ResultDelivery.WEB, false)
@@ -2415,6 +2475,9 @@ class MeetingCoordinatorTest {
         @Volatile var blockUsage = false
         @Volatile var blockModelGrant = false
         @Volatile var failAppend = false
+        /** 非空时 append 抛带稳定状态码的 HTTP 失败；用于验证 413 与普通 5xx 的不同重试策略。 */
+        @Volatile var appendHttpStatus: Int? = null
+        @Volatile var appendHttpErrorCode: String? = null
         var loseAppendAckOnce = false
         var pendingStop = false
         var failEmail = false
@@ -2526,6 +2589,7 @@ class MeetingCoordinatorTest {
             acceptStandardAppend(append)
         }
         private fun acceptStandardAppend(append: StandardAppend) {
+            appendHttpStatus?.let { throw MeetingHttpStatusException(it, appendHttpErrorCode) }
             if (failAppend) throw IOException("fixture-event-save-failed")
             val previous = standardAccepted.putIfAbsent(append.sequence(), append)
             if (previous != null) assertEquals("同号重交必须保持原场和原内容", previous, append)

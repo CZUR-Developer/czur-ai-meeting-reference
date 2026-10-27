@@ -12,6 +12,11 @@ enum class MeetingNotice {
     TRANSLATION_PENDING,
     /** 标准字幕或译文尚未全部确认。 */
     TRANSCRIPT_UNCONFIRMED,
+    /**
+     * 服务端按部署正文预算拒绝了标准事件（HTTP 413／CONTENT_TOO_LARGE）。
+     * SDK 已停止继续上传，未确认的尾部事件不会重试；已接受内容仍可正常停止。
+     */
+    CONTENT_TOO_LARGE,
     /** 停止模型输入失败，可再次确认停止。 */
     STOP_RETRY_REQUIRED,
     /** 没有最终字幕，纪要不会生成。 */

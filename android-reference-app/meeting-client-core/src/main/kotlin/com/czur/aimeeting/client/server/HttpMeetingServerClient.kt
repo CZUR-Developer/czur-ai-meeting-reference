@@ -347,7 +347,8 @@ class HttpMeetingServerClient(config: MeetingClientConfig) : MeetingServerClient
             connection.outputStream.use { it.write(bytes) }
             val status = connection.responseCode
             for (expected in accepted) if (status == expected) return connection.inputStream.use { Response(status, readUtf8(it)) }
-            throw MeetingHttpStatusException(status)
+            // 错误正文只取稳定 code；不把正文或 messageKey 带进异常和日志。
+            throw MeetingHttpStatusException(status, readErrorCode(connection.errorStream))
         } finally { connection.disconnect() }
     }
 
@@ -395,6 +396,8 @@ class HttpMeetingServerClient(config: MeetingClientConfig) : MeetingServerClient
     companion object {
         // 传输预算与服务端规范化保存正文一致，Base64／字段／schemaVersion 都计入。
         private const val MAX_PRESENTATION_REQUEST_BYTES = 1_048_576
+        /** 错误正文只需要读到稳定 code；固定上限避免异常响应拖住调用方或占用内存。 */
+        private const val MAX_ERROR_BODY_BYTES = 8 * 1024
         /** 只做同编码器的1MiB预检，不分配序号、持有图片或请求 HTTP。 */
         @JvmStatic @Throws(IOException::class)
         fun validatePresentationRequestSize(chunkSequence: Int, offsetMs: Long, jpeg: ByteArray) {
@@ -417,6 +420,26 @@ class HttpMeetingServerClient(config: MeetingClientConfig) : MeetingServerClient
             else (0 until values.length()).map(values::getString)
         private fun parseJson(body: String): JSONObject = try { JSONObject(body) }
             catch (invalid: JSONException) { throw IOException("本场结果 JSON 格式错误", invalid) }
+
+        /** 只读取 ErrorEnvelope 的稳定 code；缺字段、非 JSON 或读取失败一律视为无 code。 */
+        private fun readErrorCode(input: InputStream?): String? {
+            if (input == null) return null
+            return try {
+                val bytes = input.use { stream ->
+                    val output = ByteArrayOutputStream()
+                    val buffer = ByteArray(1024)
+                    while (output.size() < MAX_ERROR_BODY_BYTES) {
+                        val count = stream.read(buffer, 0,
+                            minOf(buffer.size, MAX_ERROR_BODY_BYTES - output.size()))
+                        if (count < 0) break
+                        output.write(buffer, 0, count)
+                    }
+                    output.toByteArray()
+                }
+                JSONObject(String(bytes, StandardCharsets.UTF_8))
+                    .optJSONObject("error")?.optString("code")?.takeIf { it.isNotBlank() }
+            } catch (unreadable: Exception) { null }
+        }
         private fun readUtf8(input: InputStream): String {
             val output = ByteArrayOutputStream()
             val buffer = ByteArray(4096)

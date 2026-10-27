@@ -375,6 +375,7 @@ class MeetingService : Service() {
                 MeetingNotice.MODEL_SESSION_ENDED -> "模型会话已结束"
                 MeetingNotice.TRANSLATION_PENDING -> "翻译尚未完成"
                 MeetingNotice.TRANSCRIPT_UNCONFIRMED -> "字幕尚未确认"
+                MeetingNotice.CONTENT_TOO_LARGE -> "正文超过部署预算，已停止上传；已保存内容仍可正常结束"
                 MeetingNotice.STOP_RETRY_REQUIRED -> "请再次确认停止"
                 MeetingNotice.NO_FINAL_TRANSCRIPT -> "没有最终字幕，纪要不会生成"
             }

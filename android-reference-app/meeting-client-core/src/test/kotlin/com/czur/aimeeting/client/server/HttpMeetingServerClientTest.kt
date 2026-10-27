@@ -16,6 +16,7 @@ import com.czur.aimeeting.client.MeetingResult
 import com.czur.aimeeting.client.PresentationFrame
 import com.czur.aimeeting.client.result.ResultOptions
 import com.czur.aimeeting.model.SealedAudioArtifact
+import com.czur.aimeeting.model.TranscriptEvent
 import com.sun.net.httpserver.HttpServer
 import java.io.IOException
 import java.net.InetSocketAddress
@@ -423,6 +424,41 @@ class HttpMeetingServerClientTest {
             } finally {
                 Files.deleteIfExists(file.toPath())
             }
+        }
+    }
+
+    @Test fun appendContentTooLargeExposesStableErrorCodeWithoutLosingStatus() {
+        Fixture().use { fixture ->
+            fixture.reply(413, "{\"specVersion\":\"0.1\",\"error\":{\"domain\":\"CONTRACT\","
+                    + "\"code\":\"CONTENT_TOO_LARGE\",\"severity\":\"FATAL\",\"retryable\":false,"
+                    + "\"retryAfterMs\":null,\"userAction\":\"NONE\","
+                    + "\"messageKey\":\"ai_meeting.contract.content_too_large\","
+                    + "\"diagnosticId\":\"diag-content-limit\"}}")
+            val failure = assertThrows(MeetingHttpStatusException::class.java) {
+                fixture.client().appendTranscript("mtg_test", 1,
+                    TranscriptEvent("s1", 1, 0, 100, "zh-CN", "超预算正文", true))
+            }
+            assertEquals(413, failure.status)
+            assertEquals("CONTENT_TOO_LARGE", failure.errorCode)
+            assertTrue(failure.isContentTooLarge)
+            assertEquals("/v1/meetings/mtg_test/events:append", fixture.request().path())
+        }
+    }
+
+    @Test fun appendOtherServerFailureStillExposesStatusForCallerRetryPolicy() {
+        Fixture().use { fixture ->
+            fixture.reply(503, "{\"specVersion\":\"0.1\",\"error\":{\"domain\":\"STORAGE\","
+                    + "\"code\":\"CLIENT_INPUT_UNAVAILABLE\",\"severity\":\"FATAL\",\"retryable\":true,"
+                    + "\"retryAfterMs\":1000,\"userAction\":\"RETRY\","
+                    + "\"messageKey\":\"ai_meeting.storage.input_unavailable\","
+                    + "\"diagnosticId\":\"diag-storage\"}}")
+            val failure = assertThrows(MeetingHttpStatusException::class.java) {
+                fixture.client().appendTranscript("mtg_test", 1,
+                    TranscriptEvent("s1", 1, 0, 100, "zh-CN", "暂不可用", true))
+            }
+            assertEquals(503, failure.status)
+            assertEquals("CLIENT_INPUT_UNAVAILABLE", failure.errorCode)
+            assertFalse(failure.isContentTooLarge)
         }
     }
 
