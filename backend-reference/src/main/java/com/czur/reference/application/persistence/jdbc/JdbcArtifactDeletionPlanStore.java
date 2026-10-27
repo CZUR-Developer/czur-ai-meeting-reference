@@ -31,7 +31,7 @@ import java.util.logging.Logger;
  * V012 删除计划和逐项审计的连接级 JDBC 参考实现。
  *
  * <p>本类只接受调用方已经取得且已关闭 auto-commit 的连接，不创建、提交、回滚或
- * 关闭连接。注册先锁定 Meeting 行以串行化同一会议的首次写入，再以 {@code NOWAIT}
+ * 关闭连接。注册先锁定 Meeting 行以串行化同一会议的首次写入，再以排它锁
  * 锁定已有计划行；因此正常并发注册会在 Meeting 锁上排队并得到 APPLIED/REPLAYED，
  * 外部持有计划行锁时则明确返回 {@link StoreErrorCode#LOCK_CONFLICT}。本切片不推进
  * Meeting、Workflow 或 Artifact Store。</p>
@@ -54,8 +54,8 @@ public final class JdbcArtifactDeletionPlanStore implements ArtifactDeletionPlan
               FROM meeting_deletion_plan
              WHERE meeting_id = ?
             """;
-    private static final String FIND_PLAN_FOR_UPDATE_NOWAIT_SQL = FIND_PLAN_SQL
-            + " FOR UPDATE NOWAIT";
+    private static final String FIND_PLAN_FOR_UPDATE_SQL = FIND_PLAN_SQL
+            + " FOR UPDATE";
     private static final String LOCK_MEETING_SQL = """
             SELECT meeting_id FROM meeting WHERE meeting_id = ? FOR UPDATE
             """;
@@ -144,7 +144,7 @@ public final class JdbcArtifactDeletionPlanStore implements ArtifactDeletionPlan
             if (inserted == 1) {
                 insertItems(candidate);
             }
-            // 读取计划行时 NOWAIT，能把外部仅持有删除计划行的竞争明确分类。
+            // 读取计划行时使用排它锁，等待超时按 MySQL 锁冲突处理。
             MeetingDeletionPlan winner = select(candidate.meetingId(), true)
                     .orElseThrow(JdbcArtifactDeletionPlanStore::corruptData);
             if (inserted == 1) {
@@ -199,14 +199,14 @@ public final class JdbcArtifactDeletionPlanStore implements ArtifactDeletionPlan
         }
     }
 
-    private Optional<MeetingDeletionPlan> select(String meetingId, boolean nowait)
+    private Optional<MeetingDeletionPlan> select(String meetingId, boolean lockPlan)
             throws SQLException {
-        return select(meetingId, nowait, false);
+        return select(meetingId, lockPlan, false);
     }
 
     private Optional<MeetingDeletionPlan> select(
-            String meetingId, boolean nowait, boolean forUpdate) throws SQLException {
-        String sql = nowait ? FIND_PLAN_FOR_UPDATE_NOWAIT_SQL
+            String meetingId, boolean lockPlan, boolean forUpdate) throws SQLException {
+        String sql = lockPlan ? FIND_PLAN_FOR_UPDATE_SQL
                 : (forUpdate ? FIND_PLAN_SQL + " FOR UPDATE" : FIND_PLAN_SQL);
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, meetingId);
@@ -221,7 +221,7 @@ public final class JdbcArtifactDeletionPlanStore implements ArtifactDeletionPlan
                 return Optional.of(result);
             }
         } catch (SQLException failure) {
-            if (nowait && isLockConflict(failure)) {
+            if (lockPlan && isLockConflict(failure)) {
                 throw new StoredFactException(StoreErrorCode.LOCK_CONFLICT);
             }
             throw failure;
@@ -438,7 +438,7 @@ public final class JdbcArtifactDeletionPlanStore implements ArtifactDeletionPlan
     }
 
     private static boolean isLockConflict(SQLException failure) {
-        return "55P03".equals(failure.getSQLState());
+        return failure.getErrorCode() == 1205 || failure.getErrorCode() == 1213;
     }
 
     private static StoredFactException corruptData() {

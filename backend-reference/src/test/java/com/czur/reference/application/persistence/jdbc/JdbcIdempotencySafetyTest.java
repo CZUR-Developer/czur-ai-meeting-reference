@@ -22,9 +22,9 @@ class JdbcIdempotencySafetyTest {
         String key = "external-secret-key";
         String encodedScope = IdempotencyScopeCodec.meetingCreate(deployment, subject);
 
-        IdempotencyConflictException conflict =
+        IdempotencyConflictException idempotencyConflict =
                 new IdempotencyConflictException(encodedScope, key);
-        assertRedacted(conflict, deployment, subject, key, encodedScope);
+        assertRedacted(idempotencyConflict, deployment, subject, key, encodedScope);
 
         DataSource failing = (DataSource) Proxy.newProxyInstance(
                 DataSource.class.getClassLoader(),
