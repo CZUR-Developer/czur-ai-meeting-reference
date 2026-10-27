@@ -8,7 +8,7 @@ The OpenAPI labels operations the reference implementation does not serve:
 `x-implementation-status: reserved` together with a "（预留，未实现）" summary means
 the reference HTTP dispatcher has no route and returns 404. Operations marked
 "（可选扩展）" require a partner implementation and are not part of the default
-process.
+process; the reference dispatcher has no route for them either and returns 404.
 
 ## Optional post-meeting speaker identity
 

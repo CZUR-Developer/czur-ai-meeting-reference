@@ -73,6 +73,8 @@ Android 部署参数在仓外本地文件 `android-reference-app/deployment.loca
 地址回退来源。
 构建与设备启动命令见 [工具说明](../tools/android-device/README.md)。
 
+### 数据库初始化
+
 数据库统一使用 MySQL 5.7，且只支持 `jdbc:mysql://` 地址（范围见
 [后端说明](../backend-reference/README.md#数据库范围)）。先由部署方创建隔离数据库，再用
 唯一入口 `bash deploy/migrate.sh` 执行仓库中当前的 `V001__initial_schema.sql`

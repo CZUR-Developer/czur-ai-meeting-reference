@@ -199,7 +199,9 @@ bash tools/migrate-reference-client.sh
 [`V001__initial_schema.sql`](../deploy/migrations/V001__initial_schema.sql)，创建
 `ai_trans_*` 专用表并登记 `V001__initial_schema`。它不创建数据库或账号，不迁移其他
 业务表。应用启动只检查登记结果，不自动建表；只手工执行 SQL 文件不会写登记，后端会
-拒绝启动，确需手工执行时按[数据库基线](../deploy/migrations/README.md)补写登记。
+拒绝启动。确需手工执行时，必须在整份 SQL 成功后补跑
+`INSERT INTO ai_trans_schema_migrations(version) VALUES ('V001__initial_schema')`，
+步骤与边界见[扩展开发手册的数据库初始化说明](partner-integration-guide.md#数据库初始化)。
 首次接入无需手工寻找其他版本脚本。
 
 ### 第 3 步：启动后端并确认健康

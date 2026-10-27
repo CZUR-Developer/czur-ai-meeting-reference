@@ -9,6 +9,8 @@
 
 脚本只向调用方已经创建的目标数据库新增会议专用 `ai_trans_*` 表，不创建数据库或账号，不读写其他业务表。应用启动只做只读 readiness 检查，不自动建表。
 
+确需绕过脚本、手工执行 V001 时，必须在整份 SQL 成功后补跑 `INSERT INTO ai_trans_schema_migrations(version) VALUES ('V001__initial_schema')`，否则应用会以迁移未登记（`MIGRATION_MISSING`）拒绝启动。
+
 MySQL 5.7 的 DDL（数据定义语句）会隐式提交，脚本只有在整份 V001 成功后才登记 `V001__initial_schema`；已完整登记的重复执行直接跳过。脚本不关闭外键检查，不删除或修复中途失败留下的结构。失败后请在仍然隔离的测试库中人工核对，再重新初始化。
 
 数据库使用 InnoDB、`utf8mb4`、二进制排序和 UTC `DATETIME(6)`。MySQL 5.7 不执行 PostgreSQL 的 CHECK 约束，领域校验和工作单元关系由公共持久层承担。JSON、规范化正文、音频和摘要按当前公共 core 的 MySQL 映射保存。表名固定为 `ai_trans_*`，不支持通过配置改前缀，避免误写现有业务表。

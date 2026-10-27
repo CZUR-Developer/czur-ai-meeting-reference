@@ -152,9 +152,16 @@ verifiedContext, meetingId)` 可在模型尾事件和采音用量保存后读取
 
 ## 数据库与非默认运行入口
 
-默认参考客户端使用 MySQL 5.7，先执行唯一
-[`V001__initial_schema.sql`](../deploy/migrations/V001__initial_schema.sql)。
-启动只检查已初始化的基线，不自动建表；不能把 readiness 当作业务全流程验收。
+默认参考客户端使用 MySQL 5.7。主路径执行唯一入口
+[`deploy/migrate.sh`](../deploy/migrate.sh)：它在整份
+[`V001__initial_schema.sql`](../deploy/migrations/V001__initial_schema.sql) 成功后登记
+`V001__initial_schema`。启动只检查已初始化的基线，不自动建表；不能把 readiness 当作
+业务全流程验收。
+
+确需手工执行 SQL 文件时，必须在整份 SQL 成功后补跑
+`INSERT INTO ai_trans_schema_migrations(version) VALUES ('V001__initial_schema')`，
+否则 readiness 会以迁移未登记（`MIGRATION_MISSING`）拒绝启动。细节见
+[数据库基线](../deploy/migrations/README.md)。
 
 持久层只支持 MySQL 5.7 兼容基线：`JdbcDatabaseEngine` 只有 `MYSQL`，
 `DATABASE_URL` 必须是 `jdbc:mysql://`，其他协议在启动期被拒绝。

@@ -159,8 +159,12 @@ systemd-run --user --unit=ai-meeting-reference-web \
   `--property=StandardOutput=append:/path/to/backend.log`
   `--property=StandardError=append:/path/to/backend.log`。
 - `tools/run-reference-client-backend.sh` 默认每次启动都跑一遍 Maven 构建；已构建过可加
-  `--setenv=SKIP_BUILD=1` 跳过，前提是 `backend-core` 已 install 到本机 `~/.m2`，
-  否则 `main` 会 `NoClassDefFoundError`。
+  `--setenv=SKIP_BUILD=1` 跳过，前提是匹配的后端 JAR
+  （`backend-reference/target/backend-reference-0.1.0-SNAPSHOT.jar`）和完整运行依赖目录
+  （`backend-reference/target/runtime-libs/`）已经构建好。仅执行过 `mvn install` 不够：
+  `runtime-libs/` 由单独的 `dependency:copy-dependencies -DincludeScope=runtime` 生成；
+  脚本用 `java -cp '<JAR>:backend-reference/target/runtime-libs/*'` 组装 classpath，
+  不从 `~/.m2` 读取，缺运行依赖时 `main` 会 `NoClassDefFoundError`。
 - 写 `bash -c '...'` 时不要在里面用 `${VAR}`：systemd 在 exec 前会替换 ExecStart
   参数里的 `${...}`，变量名对不上就被替换成空串。传值用 `--setenv`，命令里只留
   不带花括号的 `$VAR` 或相对路径。
