@@ -28,7 +28,7 @@ fun requiredDeployment(key: String): String =
             需要 backendUrl（设备可达的 HTTPS 后端根地址）与 resultWebUrl（结果页地址）。
             多环境可保留多个文件，用 REFERENCE_DEPLOYMENT_FILE=deployment.prod.properties 选择。
 
-            详见 docs/partner-getting-started.md 第 3.3 节「两个本地配置文件」。
+            详见 docs/partner-getting-started.zh-CN.md 第 3.3 节「两个本地配置文件」。
             """.trimIndent()
         )
 
@@ -45,7 +45,7 @@ fun rejectPlaceholder(key: String, value: String) {
             文件：${deploymentFile.absolutePath}
 
             请把它改成设备实际可达的地址后重新构建。
-            详见 docs/partner-getting-started.md 第 3.3 节「两个本地配置文件」。
+            详见 docs/partner-getting-started.zh-CN.md 第 3.3 节「两个本地配置文件」。
             """.trimIndent()
         )
     }

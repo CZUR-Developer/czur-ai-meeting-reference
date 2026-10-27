@@ -388,7 +388,7 @@ async function showResult() {
     const configResponse = await fetch('./config.json');
     if (!configResponse.ok) throw new Error(
       '结果页缺少后端配置（dist/config.json）：请确认静态站目录里有该文件；'
-      + '源码构建请先准备 web-reference/deployment.local.json，见 docs/partner-getting-started.md 第 3.3 节');
+      + '源码构建请先准备 web-reference/deployment.local.json，见 docs/partner-getting-started.zh-CN.md 第 3.3 节');
     const config = await configResponse.json();
     const base = (config.apiBaseUrl || '').replace(/\/+$/, '');
     const discoveryResponse = await fetch(`${base}/v1/capabilities`);

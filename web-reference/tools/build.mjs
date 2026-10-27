@@ -29,7 +29,7 @@ function fail(reason) {
   console.error('需要 apiBaseUrl（设备浏览器可达的后端根地址）。');
   console.error('多环境可保留多个文件，用 REFERENCE_WEB_DEPLOYMENT_FILE=deployment.prod.json 选择。');
   console.error('');
-  console.error('详见 docs/partner-getting-started.md 第 3.3 节「两个本地配置文件」。');
+  console.error('详见 docs/partner-getting-started.zh-CN.md 第 3.3 节「两个本地配置文件」。');
   process.exit(1);
 }
 
