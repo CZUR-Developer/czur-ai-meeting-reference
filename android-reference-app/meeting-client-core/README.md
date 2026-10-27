@@ -206,8 +206,8 @@ context.access().readContent(object : MeetingClient.Callback<MeetingResultConten
             // 在此生成本地 HTML／PDF，打开界面时切换到 context.uiExecutor()。
         }
     }
-    override fun onError(message: String) {
-        // 结束本次动作并提示可重试；会议本身仍保持 READY。
+    override fun onError(error: MeetingError) {
+        // 按 error.code 结束本次动作并提示可重试；会议本身仍保持 READY。
     }
 })
 ```
@@ -256,7 +256,9 @@ STARTING／CLOSED 枚举未作为独立状态通知。
 听悟已声明支持并保留收到 `SentenceEnd` 的原文。Android Runtime 的材料请求需独立
 工作线程，Stop 不等待迟到 HTTP；连接重建不提供进程级恢复保证。
 
-`withStoppedMeetingStore(store)` 是可选持久化接缝，默认参考 App 未装配。
+`withStoppedMeetingStore(store)` 是可选持久化接缝；参考 App 已在
+`MeetingAppAssembly.clientConfig` 中接入 `ReferenceStoppedMeetingStore`。
+伙伴可替换为自有实现，或按需不装配。
 尾事件、用量、选定总结已确认且音频封口后保存 `StoppedMeetingCheckpoint`；
 宿主重建调用 `resumeFinalization(id, callback)` 只续原场发布、Stop 和 READY，
 不重新采音或总结。Store 由部署者管理，不由核心扫描或删除音频目录。
