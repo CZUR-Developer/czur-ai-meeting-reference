@@ -1,5 +1,7 @@
 # 接入前准备清单
 
+[English](preparation-checklist.md) | **[简体中文](preparation-checklist.zh-CN.md)**
+
 > 接入前 · 第 0/4 篇 ｜ 下一篇 → [从零接入指南](partner-getting-started.zh-CN.md) ｜ 全部文档见 [文档导航](README.md)
 
 这篇回答一个问题：**动手之前，我到底要先准备什么。**

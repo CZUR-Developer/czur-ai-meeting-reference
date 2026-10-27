@@ -1,0 +1,171 @@
+# Preparation Checklist Before Integration
+
+[English](preparation-checklist.md) | [简体中文](preparation-checklist.zh-CN.md)
+
+> Before integration · Part 0/4 | Next → [Getting-started guide](partner-getting-started.md) | All documents: [docs index](README.md)
+
+This page answers one question: **what exactly do I have to prepare before starting.**
+
+Start with the minimum setup in section 2 — most people can get their first meeting running with it.
+If something is missing, look it up by group in section 3. Section 4 is the alternative path for
+"the model is not ready yet": wire the whole pipeline with the sample model first, then switch to
+your own model.
+
+Every item in this checklist states: required or optional, who provides it, what happens without it,
+and which configuration it maps to. This page is authoritative; the resource tables in other
+documents are excerpts of the same checklist at specific steps.
+
+## 1. First, separate the four kinds of dependencies
+
+| Category | What you prepare | Typical symptom when missing |
+| --- | --- | --- |
+| Accounts and credentials | Model service key, login account, session secret | It starts but meetings cannot be created, or a meeting produces no transcript |
+| Infrastructure | MySQL, a device-reachable host, TLS certificate, storage | The backend will not start, or the device cannot connect |
+| Development environment | JDK, Android SDK, Node, Python, etc. | The build fails right away |
+| Devices | A real Android 14 device, the device AAR matching the SDK | The App cannot be installed, or there is no real audio source |
+
+## 2. Minimum infrastructure set
+
+The five items below are the infrastructure pieces most often missed; only with all of them is the
+first meeting even possible. The login account, session secret, TLS entry point, writable result
+storage and results page address are required runtime configuration as well — see section 3. Do not
+assume that preparing only these five is enough to start a meeting:
+
+| # | Dependency | Notes | Where it maps |
+| --- | --- | --- | --- |
+| 1 | Source code | Full directory of this repository, including `meeting-android/libs/ai-meeting-device.aar` | — |
+| 2 | MySQL 5.7-compatible instance | A dedicated database and an account that can initialize, read and write | `DATABASE_URL` / `DATABASE_USER` / `DATABASE_PASSWORD` |
+| 3 | A device-reachable host | Runs the backend and the static Web; the device can reach its LAN address | `AI_MEETING_HTTP_BIND`, static site port |
+| 4 | A realtime speech model | Switching credentials to Tingwu is enough; switching to your own protocol means writing another Adapter (see [tutorial](custom-model-adapter.md)); with no model yet, verify the wiring with the sample model in section 4 | `AI_MEETING_MODEL_ADAPTER` and its companion keys |
+| 5 | Android 14 device | Microphone, network, ADB; version matching the device AAR | Backend address in `deployment.local.properties` |
+
+The following **can be left out for the first meeting**: summary (Bailian), cross-meeting voiceprint
+(iFlytek), object storage/OSS, e-mail and mini-program delivery, Docker delivery deployment. When the
+corresponding capability is missing, the UI hides it according to the actual capabilities and never
+fakes results.
+
+## 3. Full checklist
+
+### 3.1 Accounts and credentials
+
+| Dependency | Required? | Provided by | What happens without it | Configuration |
+| --- | --- | --- | --- | --- |
+| Realtime speech recognition (ASR) | **Required** (replaceable, but not optional) | You or a third party | No transcript during meetings; this is the core capability of the reference flow | `AI_MEETING_MODEL_ADAPTER`, Tingwu `AI_MEETING_TINGWU_APP_KEY` / `ACCESS_KEY_ID` / `ACCESS_KEY_SECRET` |
+| Realtime translation | Optional | Native in Tingwu, or your own translation service | The translation entry is unavailable and the transcript remains; no translated-text area on Web | `AI_MEETING_MODEL_CAPABILITIES` includes `translation.realtime` |
+| Session speaker diarization | Optional | The same Tingwu session | No per-speaker results are produced, and the transcript is not blocked | Same as above, includes `speaker.diarization.session` |
+| Structured summary | Optional | Bailian application ID + DashScope key | No summary switch and no summary area; the list title falls back to "未命名会议" (Untitled meeting) | `AI_MEETING_BAILIAN_APP_ID`, `DASHSCOPE_API_KEY`, `AI_MEETING_BAILIAN_SUMMARY_ENABLED` |
+| Cross-meeting voiceprint | Optional | iFlytek AppID/APIKey/APISecret | Only the session number and manual renaming; no "recognized automatically next time" | `AI_MEETING_XFYUN_VOICEPRINT_*`, `AI_MEETING_SPEAKER_IDENTITY_PROVIDER` |
+| Login identity | **Required** | The reference implementation ships preset accounts; a product integrates its own IdP | Cannot log in, cannot start a meeting | `REFERENCE_DEV_LOGIN_*`, `REFERENCE_DEV_IDENTITY_*` |
+| Session / page-token secret | **Required** | Generated by you | Backend startup validation fails | `REFERENCE_DEV_IDENTITY_BEARER_TOKEN`, `AI_MEETING_PAGE_TOKEN_SECRET` |
+| Entitlement and billing | Required at the product stage | Implement it yourself (the reference implementation uses a fixed policy) | The reference environment runs, but a product environment cannot bill | `AI_MEETING_ENTITLEMENT_*`, the `EntitlementProvider` extension point |
+
+### 3.2 Infrastructure
+
+| Dependency | Required? | Notes | Configuration |
+| --- | --- | --- | --- |
+| MySQL 5.7-compatible instance | **Required** | The reference solution ships only one V001 initialization; it does not create databases or accounts | `DATABASE_URL` etc. |
+| Device-reachable host | **Required** | Both the backend and the static Web must be reachable from the device; the device's own `127.0.0.1` points at the device itself | `AI_MEETING_HTTP_BIND` |
+| TLS certificate | **Required** | The App login entry must be HTTPS; self-signed is fine during development, see [local LAN HTTPS](local-lan-https.md) | The debug CA is always read from `app/src/debug/res/raw/reference_debug_ca.pem`; it is not a deployment configuration item |
+| Results page static site | **Required** | `web-reference` build output + a generated `config.json` | `resultWebUrl` in `deployment.local.properties` |
+| Storage (artifacts, recordings) | **Required** | Local file storage is enough; object storage is optional | `AI_MEETING_ARTIFACT_STORE`, `AI_MEETING_ARTIFACT_ROOT` |
+| Object storage (S3/OSS) | Optional | The reference implementation does not depend on a CZUR OSS account | Configuration of the storage implementation |
+| FFmpeg | Optional | Needed only when the reference voiceprint plugin is enabled; the delivery image already includes it | — |
+| Reverse proxy / domain | Required for production deployment | Use a self-signed TLS entry during development | — |
+
+### 3.3 Development environment
+
+| Tool | Minimum version | Used for |
+| --- | --- | --- |
+| JDK | 21 | Building and running the backend |
+| Maven | 3.9.x | Backend builds; Android uses its bundled Gradle Wrapper |
+| Android Studio, Android SDK | SDK Platform 35, ADB | Building the App, installing and debugging on devices; Android 14/API 34 minimum |
+| Node.js/npm | 18+ (22+ recommended) | Building the static results page output |
+| Python 3 | 3.x | Starting the local static Web, device scripts, optional sample model |
+| MySQL command-line client, curl | — | Running the V001 initialization, checking services |
+| OpenSSL | 1.1.1+ | Generating self-signed certificates during development; skip it if you already have a trusted certificate |
+| Docker | Optional | Only for the delivery deployment path; local development verification does not need it |
+
+### 3.4 Devices
+
+Prefer **CZUR StarryHub series devices** for product-level capabilities (Android 14/API 34).
+The system-level audio capture, cast screen capture and window exclusion in the device AAR depend on
+this firmware and its system interfaces. A regular Android 14 phone can still run the basic pipeline,
+but those system-level capabilities are not guaranteed.
+
+| Dependency | Notes |
+| --- | --- |
+| Test device | Prefer StarryHub series devices; a regular Android 14/API 34 device can verify only the basic transcript pipeline |
+| Device AAR | Already in the repository: `meeting-android/libs/ai-meeting-device.aar` (0.5.0), paired with the device firmware. Replace that file when changing versions; Gradle only reads that path |
+| System capabilities | Recording, floating window; demo capture additionally needs screen capture authorization. The system shared audio source (`CZUR_BROKER`) and system-level window exclusion are provided only on compatible StarryHub firmware; regular devices fall back to the standard microphone |
+| Device differences | The audio source is reflected by `AudioInputMode`: `MIC` (regular Android or older firmware), `CZUR_BROKER` (compatible CZUR shared audio), `DEBUG_WAV` (debug) |
+
+## 4. Model not ready yet: run the sample pipeline first
+
+If Tingwu is not activated yet and your own model is not connected either, you can use the protocol
+sample bundled with the repository to get the whole pipeline running.
+**It only returns fixed fake transcripts to verify the wiring; it says nothing about recognition quality.**
+
+```bash
+# 1) Install the sample service dependencies on the development machine and start it
+#    (the address must be reachable from the device)
+python3 -m pip install 'websockets>=13,<14'
+python3 tools/sample-json-ws-model.py --host 0.0.0.0 --port 19091
+
+# 2) Backend configuration: the template already defaults to this adapter path.
+#    Keep the configuration file outside the repository, e.g. ~/.config/ai-meeting/reference-client.env,
+#    and point REFERENCE_ENV_FILE at it; do not copy it into the repository as tools/reference-client.env.
+AI_MEETING_MODEL_ADAPTER=sample-json-ws
+AI_MEETING_SAMPLE_JSON_WS_ENDPOINT=ws://<开发机局域网 IP>:19091/model
+```
+
+Then follow steps 2–6 of the [getting-started guide](partner-getting-started.md) to create the
+database, start the backend, start HTTPS, install the APK and run a meeting. Seeing transcripts flow
+means the path "audio source → model → normalization → UI → results page" works; next, switch the
+Adapter and credentials to your own model. To write your own Adapter, see the
+[custom model Adapter tutorial](custom-model-adapter.md); for replacement boundaries see
+[section 5 of the model and capability guide](model-and-capability-guide.md#5-更换模型时修改边界是什么)
+and [section 4 of the integration guide](partner-integration-guide.md#4-model-and-capability-extensions).
+
+## 5. Environment self-check after preparation
+
+This section only checks whether the resources and configuration are in place. It does not require
+the backend to be running, the App to be installed or an account to be logged in; those belong to
+post-integration acceptance, see the next section. Go through it item by item and enter the
+integration steps only when everything is green:
+
+- [ ] `mysql -h <host> -u <user> -p <db>` connects, and `V001__initial_schema` has been registered
+      through `deploy/migrate.sh` (the local template uses `bash tools/migrate-reference-client.sh`);
+      running the SQL file by hand alone does not count as done.
+- [ ] The backend runtime configuration lives outside the repository (default
+      `~/.config/ai-meeting/reference-client.env`, or the path given by `REFERENCE_ENV_FILE`); there is
+      no `tools/reference-client.env` in the repository.
+      `python3 tools/check-public-boundary.py` outputs `PUBLIC_BOUNDARY_OK`.
+- [ ] `backendUrl` and `resultWebUrl` in `deployment.local.properties` are filled in, and the build no
+      longer reports "缺少部署配置" (missing deployment configuration).
+- [ ] `backendUrl` is a device-reachable HTTPS address; the self-signed development certificate has
+      been placed at the Debug CA path as described in [local LAN HTTPS](local-lan-https.md); in
+      production the deployer provides the certificate.
+- [ ] The model endpoint is reachable from the device (`ws://` or your provider's address); the
+      device's own `127.0.0.1` cannot be used.
+- [ ] `config.json` in the results page build output points at a browser-reachable backend
+      `apiBaseUrl`.
+
+## 6. Post-integration acceptance (not a preparation prerequisite)
+
+Once everything is ready, follow steps 2–6 of the [getting-started guide](partner-getting-started.md)
+to create the database, start up, install the APK and run the first meeting, then verify item by item
+against the [current support scope and acceptance checklist](validation-scope.md#目标环境的最小验收).
+The minimum entry checks are:
+
+- [ ] After the backend starts, `curl http://127.0.0.1:<端口>/v1/capabilities` returns the current
+      capabilities and languages, and the device browser can also open
+      `https://<主机>:8443/v1/capabilities` (a self-signed certificate must be trusted on the device first).
+- [ ] The reference APK installs successfully, and after login "开始" (Start) is available.
+- [ ] Run a real meeting and confirm the transcript, a normal stop and results page replay; check
+      optional capabilities item by item against what is actually declared.
+
+If an entry check fails, the corresponding documents are:
+[database and initialization](partner-getting-started.md#step-2-prepare-the-database-and-run-the-one-time-initialization-script),
+[starting the backend](partner-getting-started.md#step-3-start-the-backend-and-confirm-health),
+[HTTPS and Web](partner-getting-started.md#step-4-prepare-device-reachable-https-and-web),
+[build and install](partner-getting-started.md#step-5-build-and-install-the-real-sdk-build-of-the-app).

@@ -1,0 +1,48 @@
+# CZUR AI Meeting Reference
+
+[English](README.md) | [简体中文](README.zh-CN.md)
+
+An open-source reference implementation of AI meeting transcripts and minutes: three pieces of
+runnable code — the Android app, the backend and the results web page — plus public contracts and
+test tools. Partners provide and operate their own models, storage, accounts and billing.
+
+## Choose a path
+
+| What you want to do | Read this | Approx. |
+| --- | --- | --- |
+| See what to prepare before you start | [Preparation checklist](docs/preparation-checklist.md) | 10 minutes |
+| Get a real transcript running for the first time | [Getting-started guide](docs/partner-getting-started.md) | 30–60 minutes |
+| Connect your own model, languages or capability mix | [Model and capability guide](docs/model-and-capability-guide.md) | 20 minutes |
+| Replace login, store models, add result actions | [Integration guide](docs/partner-integration-guide.md) | 40 minutes |
+| Deliver to your own servers | [Deployment guide](deploy/README.md) | 30 minutes |
+| Embed only the meeting results page | [Web results page](web-reference/README.md) | 15 minutes |
+| See what has been verified and what has not | [Support scope and acceptance checklist](docs/validation-scope.md) | 10 minutes |
+
+For a first integration there is only one path: go through the preparation checklist, then steps 1–6 of
+the getting-started guide; the commands can be pasted as-is. The device AAR ships with the repository;
+once both the Android and the Web local deployment configurations exist, everything can be rebuilt from a
+clean checkout. All other documents (module READMEs, tools, public contracts) are listed in the
+**[docs index](docs/README.md)**.
+
+## What is in the repository
+
+| Directory | Contents |
+| --- | --- |
+| `backend-core/`, `backend-reference/` | Meeting core and reference backend (Java 21) |
+| `android-reference-app/` | Reference app, client core, business AAR (including the device AAR) |
+| `web-reference/` | Static source of the results page |
+| `contracts/`, `system-audio-contract/` | Public contracts and the audio source interface |
+| `deploy/` | Backend Docker Compose example (connecting to an external MySQL) |
+| `tools/` | Local verification, contract validation, device-side tools |
+
+## A few rules
+
+- Do not commit production addresses, keys, certificates, user data or device signing material; keep
+  local configuration outside the repository or in untracked files.
+- Before releasing, go through the [acceptance checklist](docs/validation-scope.md#目标环境的最小验收)
+  yourself, with your own signing and your own deployment environment.
+- The device AAR binary ships with this reference repository; its closed-source SDK source is not
+  published with this repository and is used under the delivery license.
+
+Development environment, verification commands, contribution workflow and release boundaries are in
+[CONTRIBUTING.md](CONTRIBUTING.md) and [local development verification](tools/README.md).

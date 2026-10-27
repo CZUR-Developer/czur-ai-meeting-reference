@@ -1,5 +1,7 @@
 # 合作伙伴扩展开发手册
 
+[English](partner-integration-guide.md) | **[简体中文](partner-integration-guide.zh-CN.md)**
+
 > 扩展开发主线 ｜ 模块级说明见 [文档导航](README.md) ｜ 接入顺序见 [从零接入指南](partner-getting-started.zh-CN.md)
 
 本文面向需要二次开发的合作伙伴。它说明如何从本仓库启动一套可替换的

@@ -1,5 +1,7 @@
 # CZUR AI Meeting Reference
 
+[English](README.md) | **[简体中文](README.zh-CN.md)**
+
 AI 字幕纪要的开源参考实现：Android 应用、后端、结果网页三块可运行代码，加上公共协议和
 测试工具。模型、存储、账号和计费由合作伙伴自己提供和运营。
 

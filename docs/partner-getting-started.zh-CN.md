@@ -1,5 +1,7 @@
 # 合作伙伴从零接入指南
 
+[English](partner-getting-started.md) | **[简体中文](partner-getting-started.zh-CN.md)**
+
 > 第一次接入 · 第 1/4 篇 ｜ 上一篇 ← [接入前准备清单](preparation-checklist.zh-CN.md) ｜ 下一篇 → [模型与能力配置指南](model-and-capability-guide.md)
 
 本文面向首次接触本项目的 Android／后端开发者。读完后，您可以准备所需资源，
