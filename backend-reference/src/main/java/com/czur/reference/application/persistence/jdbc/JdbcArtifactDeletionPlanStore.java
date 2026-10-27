@@ -44,9 +44,6 @@ import java.util.logging.Logger;
 public final class JdbcArtifactDeletionPlanStore implements ArtifactDeletionPlanStore {
     private static final Logger LOGGER = Logger.getLogger(
             JdbcArtifactDeletionPlanStore.class.getName());
-    private static final String PIN_SEARCH_PATH_SQL = """
-            SELECT set_config('search_path', format('%I, pg_temp', current_schema()), TRUE)
-            """;
     private static final String FIND_PLAN_SQL = """
             SELECT meeting_id, accepted_at, source_manifest_revision,
                    source_workflow_step_type, source_workflow_step_key,
@@ -89,7 +86,6 @@ public final class JdbcArtifactDeletionPlanStore implements ArtifactDeletionPlan
         requireMeetingId(meetingId);
         requireExplicitTransaction();
         try {
-            pinSearchPath();
             MeetingDeletionPlan result = select(meetingId, false).orElse(null);
             logResult("FIND", result == null ? "EMPTY" : "PRESENT");
             return Optional.ofNullable(result);
@@ -108,7 +104,6 @@ public final class JdbcArtifactDeletionPlanStore implements ArtifactDeletionPlan
         requireMeetingId(meetingId);
         requireExplicitTransaction();
         try {
-            pinSearchPath();
             return select(meetingId, false, true);
         } catch (StoredFactException failure) {
             logFailure("FIND_FOR_UPDATE", failure.code(), "N/A");
@@ -127,7 +122,6 @@ public final class JdbcArtifactDeletionPlanStore implements ArtifactDeletionPlan
         final String canonical = ArtifactDeletionPlanJson.encode(candidate);
         final byte[] digest = sha256(canonical);
         try {
-            pinSearchPath();
             // Meeting 是 V012 所有删除事实的上游锁；同一会议的正常并发在此排队。
             lockMeeting(candidate.meetingId());
             int inserted;
@@ -379,23 +373,6 @@ public final class JdbcArtifactDeletionPlanStore implements ArtifactDeletionPlan
         statement.setString(9, canonical);
         statement.setString(10, canonical);
         statement.setBytes(11, digest);
-    }
-
-    private void pinSearchPath() throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement("SELECT current_schema()")) {
-            try (ResultSet rows = statement.executeQuery()) {
-                if (!rows.next()) {
-                    throw new SQLException("schema unavailable");
-                }
-                String schema = rows.getString(1);
-                if (schema == null || schema.startsWith("pg_temp")) {
-                    throw new SQLException("temporary schema is not deployment schema");
-                }
-            }
-        }
-        try (PreparedStatement statement = connection.prepareStatement(PIN_SEARCH_PATH_SQL)) {
-            statement.execute();
-        }
     }
 
     private void requireExplicitTransaction() {

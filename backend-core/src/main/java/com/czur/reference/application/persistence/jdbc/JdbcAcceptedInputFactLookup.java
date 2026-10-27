@@ -6,8 +6,6 @@ import com.czur.reference.domain.meeting.MeetingIdPolicy;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.Objects;
 import java.util.logging.Level;
@@ -38,7 +36,6 @@ public final class JdbcAcceptedInputFactLookup implements AcceptedInputFactLooku
             connection.setReadOnly(true);
             connection.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
             connection.setAutoCommit(false);
-            pinSchema(connection);
             FinalizationInputFact fact;
             try {
                 fact = JdbcDurableInputFactStore.find(connection, meetingId).orElse(null);
@@ -65,21 +62,6 @@ public final class JdbcAcceptedInputFactLookup implements AcceptedInputFactLooku
             // 未知连接池/驱动异常可能包含动态正文，只记录固定类别。
             LOGGER.log(Level.WARNING, "已接管输入读取不可用 module=accepted-input-lookup");
             return new Unavailable();
-        }
-    }
-
-    private static void pinSchema(Connection connection) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement("SELECT current_schema()");
-             ResultSet rows = statement.executeQuery()) {
-            if (!rows.next() || rows.getString(1) == null
-                    || rows.getString(1).startsWith("pg_temp")) {
-                throw new SQLException("deployment schema unavailable");
-            }
-        }
-        try (PreparedStatement statement = connection.prepareStatement("""
-                SELECT set_config('search_path', format('%I, pg_temp', current_schema()), TRUE)
-                """)) {
-            statement.execute();
         }
     }
 

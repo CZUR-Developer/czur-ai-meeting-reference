@@ -62,7 +62,6 @@ public final class JdbcRealtimeStartFactsLookup implements RealtimeStartFactsLoo
             connection.setReadOnly(true);
             connection.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
             connection.setAutoCommit(false);
-            pinSchema(connection);
             MeetingRow meeting = readMeeting(connection, meetingId);
             if (meeting == null) {
                 return reject(Reason.MISSING);
@@ -149,22 +148,6 @@ public final class JdbcRealtimeStartFactsLookup implements RealtimeStartFactsLoo
                 && response.acceptedProfile().revision() == meeting.profileRevision()
                 && response.acceptedAudioProfile().equals(request.audioProfile())
                 && first.createdAt().equals(meeting.createdAt());
-    }
-
-    private void pinSchema(Connection connection) throws SQLException {
-        if (engine == JdbcDatabaseEngine.MYSQL) return;
-        try (PreparedStatement statement = connection.prepareStatement("SELECT current_schema()");
-             ResultSet rows = statement.executeQuery()) {
-            if (!rows.next() || rows.getString(1) == null
-                    || rows.getString(1).startsWith("pg_temp")) {
-                throw new SQLException("deployment schema unavailable");
-            }
-        }
-        try (PreparedStatement statement = connection.prepareStatement("""
-                SELECT set_config('search_path', format('%I, pg_temp', current_schema()), TRUE)
-                """)) {
-            statement.execute();
-        }
     }
 
     private static Rejected reject(Reason reason) {

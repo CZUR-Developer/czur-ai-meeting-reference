@@ -108,7 +108,7 @@ public final class JdbcWorkflowStepStore implements WorkflowStepStore {
                SET status = CASE WHEN attempt_count + 1 >= ? THEN 'DEAD' ELSE 'PENDING' END,
                    attempt_count = attempt_count + 1,
                    next_attempt_at = CASE WHEN attempt_count + 1 >= ?
-                                          THEN NULL ELSE ?::timestamptz END,
+                                          THEN NULL ELSE ? END,
                    lease_owner = NULL, lease_until = NULL, lease_token = NULL,
                    error_code = ?, error_message = ?, updated_at = ?
              WHERE meeting_id = ? AND step_type = ? AND step_key = ?

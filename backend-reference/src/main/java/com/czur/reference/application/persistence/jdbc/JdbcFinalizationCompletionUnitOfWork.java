@@ -52,10 +52,6 @@ public final class JdbcFinalizationCompletionUnitOfWork
         implements FinalizationCompletionUnitOfWork {
     private static final Logger LOGGER = Logger.getLogger(
             JdbcFinalizationCompletionUnitOfWork.class.getName());
-    private static final String PIN_SEARCH_PATH_SQL = """
-            SELECT set_config(
-                'search_path', format('%I, pg_temp', current_schema()), TRUE)
-            """;
 
     private final DataSource dataSource;
     private final FailureProbe failureProbe;
@@ -145,8 +141,6 @@ public final class JdbcFinalizationCompletionUnitOfWork
             connection.setAutoCommit(false);
             transactionStarted = true;
 
-            phase = Phase.SCHEMA_PIN;
-            pinDeploymentSchema(connection);
             phase = Phase.MEETING_LOCK;
             Optional<JdbcMeetingRepository.PublicationMeeting> meetingOptional =
                     JdbcMeetingRepository.findManifestPublicationForUpdate(
@@ -406,8 +400,6 @@ public final class JdbcFinalizationCompletionUnitOfWork
             connection.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
             transactionStarted = true;
 
-            phase = Phase.SCHEMA_PIN;
-            pinDeploymentSchema(connection);
             Optional<JdbcMeetingRepository.PublicationMeeting> meetingOptional =
                     JdbcMeetingRepository.findManifestPublication(
                             connection, operation.checkpoint().meetingId());
@@ -955,25 +947,6 @@ public final class JdbcFinalizationCompletionUnitOfWork
         return new Failure(code);
     }
 
-    private static void pinDeploymentSchema(Connection connection) throws SQLException {
-        try (java.sql.PreparedStatement statement = connection.prepareStatement(
-                "SELECT current_schema()")) {
-            try (java.sql.ResultSet rows = statement.executeQuery()) {
-                if (!rows.next()) {
-                    throw new SQLException("schema is unavailable");
-                }
-                String schema = rows.getString(1);
-                if (schema == null || schema.startsWith("pg_temp")) {
-                    throw new SQLException("temporary schema is not a deployment schema");
-                }
-            }
-        }
-        try (java.sql.PreparedStatement statement = connection.prepareStatement(
-                PIN_SEARCH_PATH_SQL)) {
-            statement.execute();
-        }
-    }
-
     private static void restoreAutoCommitQuietly(
             Connection connection,
             boolean previousAutoCommit) {
@@ -1093,7 +1066,6 @@ public final class JdbcFinalizationCompletionUnitOfWork
 
     private enum Phase {
         OPEN_CONNECTION,
-        SCHEMA_PIN,
         MEETING_LOCK,
         FACT_READ,
         STATE_CHECK,

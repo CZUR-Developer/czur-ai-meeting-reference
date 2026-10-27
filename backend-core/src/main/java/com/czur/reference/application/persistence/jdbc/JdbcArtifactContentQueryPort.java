@@ -43,10 +43,6 @@ public class JdbcArtifactContentQueryPort
             JdbcArtifactContentQueryPort.class.getName());
     private static final String OWNER_SQL =
             "SELECT meeting_id FROM %s WHERE artifact_id = ?";
-    private static final String PIN_SEARCH_PATH_SQL = """
-            SELECT set_config(
-                'search_path', format('%I, pg_temp', current_schema()), TRUE)
-            """;
     private static final int MAX_LEGACY_CONTENT_BYTES = 4096;
 
     private final DataSource dataSource;

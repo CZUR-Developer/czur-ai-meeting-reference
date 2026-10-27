@@ -26,14 +26,15 @@ class JdbcFinalizationExecutionFactStoreContractTest {
     @Test
     void storeUsesAtomicConflictRetryAndChecksAllPhysicalMirrors() throws Exception {
         String source = readSource("JdbcFinalizationExecutionFactStore.java");
-        assertTrue(source.contains("ON CONFLICT (meeting_id) DO NOTHING"));
+        assertTrue(source.contains("JdbcSqlErrors.isDuplicate(engine, duplicate)"));
         assertTrue(source.contains("FinalizationExecutionFactJson.decode(canonical)"));
         assertTrue(source.contains("FinalizationExecutionFactJson.decode(mirror)"));
         assertTrue(source.contains("MessageDigest.isEqual(storedDigest, sha256(canonical))"));
         assertTrue(source.contains("canonical.equals(FinalizationExecutionFactJson.encode(fact))"));
-        assertTrue(source.contains("format('%I, pg_temp', current_schema())"));
-        assertTrue(source.contains("current_schema()"));
-        assertTrue(source.contains("startsWith(\"pg_temp\")"));
+        // MySQL 直接用当前数据库内的物理表，不固定 schema 解析顺序。
+        assertFalse(source.contains("set_config"));
+
+        assertFalse(source.contains("current_schema()"));
     }
 
     @Test

@@ -60,7 +60,6 @@ public final class JdbcModelSessionLanguageLookup implements ModelSessionLanguag
             connection.setReadOnly(true);
             connection.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
             connection.setAutoCommit(false);
-            pinSchema(connection);
             try (PreparedStatement statement = connection.prepareStatement("""
                     SELECT deployment_scope, subject_scope, client_session_id, created_at
                       FROM %s WHERE meeting_id=?
@@ -110,15 +109,6 @@ public final class JdbcModelSessionLanguageLookup implements ModelSessionLanguag
             }
         } catch (SQLException | RuntimeException failure) {
             throw unavailable();
-        }
-    }
-
-    private void pinSchema(Connection connection) throws SQLException {
-        if (engine == JdbcDatabaseEngine.MYSQL) return;
-        try (PreparedStatement statement = connection.prepareStatement("""
-                SELECT set_config('search_path', format('%I, pg_temp', current_schema()), TRUE)
-                """)) {
-            statement.executeQuery().close();
         }
     }
 

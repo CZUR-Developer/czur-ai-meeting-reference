@@ -27,7 +27,7 @@ class JdbcArtifactReadyMetadataStoreContractTest {
     @Test
     void storeUsesAllFourIdentityAxesAndRejectsUnexplainedEmptyConflictRead() throws Exception {
         String source = readSource();
-        assertTrue(source.contains("ON CONFLICT DO NOTHING"));
+        assertTrue(source.contains("JdbcSqlErrors.isDuplicate(engine, duplicate)"));
         assertTrue(source.contains("artifact_id = ?"));
         assertTrue(source.contains("meeting_id = ? AND artifact_type = ? AND revision = ?"));
         assertTrue(source.contains("intent_id = ?"));
@@ -38,10 +38,12 @@ class JdbcArtifactReadyMetadataStoreContractTest {
     }
 
     @Test
-    void storePinsSearchPathAndRejectsTemporaryCurrentSchema() throws Exception {
+    void storeUsesCurrentDatabaseWithoutSchemaPinAndValidatesEncoding() throws Exception {
         String source = readSource();
-        assertTrue(source.contains("format('%I, pg_temp', current_schema())"));
-        assertTrue(source.contains("startsWith(\"pg_temp\")"));
+        // MySQL 直接用当前数据库内的物理表，不固定 schema 解析顺序。
+        assertFalse(source.contains("set_config"));
+
+        assertFalse(source.contains("current_schema()"));
         assertTrue(source.contains("CodingErrorAction.REPORT"));
         assertTrue(source.contains("encoded.remaining() > 4096"));
     }

@@ -26,8 +26,6 @@ import com.czur.reference.domain.meeting.MeetingState;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.EnumSet;
 import java.util.Objects;
@@ -60,10 +58,6 @@ public final class JdbcMeetingStartExecutionUnitOfWork
         implements MeetingStartExecutionUnitOfWork {
     private static final Logger LOGGER = Logger.getLogger(
             JdbcMeetingStartExecutionUnitOfWork.class.getName());
-    private static final String PIN_SEARCH_PATH_SQL = """
-            SELECT set_config(
-                'search_path', format('%I, pg_temp', current_schema()), TRUE)
-            """;
     private static final EnumSet<MeetingState> REPLAYABLE_STARTED_STATES = EnumSet.of(
             MeetingState.STARTING,
             MeetingState.RUNNING,
@@ -137,12 +131,6 @@ public final class JdbcMeetingStartExecutionUnitOfWork
             previousAutoCommit = connection.getAutoCommit();
             connection.setAutoCommit(false);
             transactionStarted = true;
-
-            // 数据库会把 pg_temp 隐式放在普通 search_path 之前。必须在第一次
-            // Meeting 锁读前固定部署 schema；若等到 execution fact Store 才固定，
-            // 同名 TEMP meeting 已经可以伪造 owner/Profile 并污染重放结果。
-            phase = Phase.SCHEMA_PIN;
-            pinDeploymentSchema(connection, engine);
 
             phase = Phase.MEETING_LOCK;
             Optional<JdbcMeetingRepository.VersionedMeeting> lockedOptional =
@@ -546,34 +534,6 @@ public final class JdbcMeetingStartExecutionUnitOfWork
                         .equals(authorization.reserveRequestDigest());
     }
 
-    /**
-     * 在任何业务表访问前把当前事务的名字解析固定为真实部署 schema。
-     *
-     * <p>先拒绝 {@code pg_temp*} 当前 schema，再以事务局部
-     * {@code set_config(..., true)} 把部署 schema 放在临时 schema 前面。设置随
-     * commit/rollback 自动回收，不会污染连接池中的后续借用者。</p>
-     */
-    private static void pinDeploymentSchema(Connection connection, JdbcDatabaseEngine engine)
-            throws SQLException {
-        if (engine == JdbcDatabaseEngine.MYSQL) return;
-        try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT current_schema()")) {
-            try (ResultSet rows = statement.executeQuery()) {
-                if (!rows.next()) {
-                    throw new SQLException("schema is unavailable");
-                }
-                String schema = rows.getString(1);
-                if (schema == null || schema.startsWith("pg_temp")) {
-                    throw new SQLException("temporary schema is not a deployment schema");
-                }
-            }
-        }
-        try (PreparedStatement statement = connection.prepareStatement(
-                PIN_SEARCH_PATH_SQL)) {
-            statement.execute();
-        }
-    }
-
     private static boolean sameOwner(
             StartRequest request,
             MeetingAggregate.MeetingSnapshot meeting) {
@@ -711,7 +671,6 @@ public final class JdbcMeetingStartExecutionUnitOfWork
 
     private enum Phase {
         OPEN_CONNECTION,
-        SCHEMA_PIN,
         MEETING_LOCK,
         ACCESS_CHECK,
         EXECUTION_FACT_READ,

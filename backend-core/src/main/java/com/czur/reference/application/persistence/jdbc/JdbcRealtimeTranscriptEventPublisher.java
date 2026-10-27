@@ -12,7 +12,6 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.sql.Connection;
-import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.time.Clock;
 import java.util.HexFormat;
@@ -50,7 +49,6 @@ public final class JdbcRealtimeTranscriptEventPublisher
             transactionStarted = true;
             previousAutoCommit = connection.getAutoCommit();
             connection.setAutoCommit(false);
-            pinSchema(connection);
             if (!JdbcMeetingEventLogStore.lockMeeting(connection, meetingId)) {
                 throw new IllegalStateException("mock transcript meeting unavailable");
             }
@@ -119,14 +117,6 @@ public final class JdbcRealtimeTranscriptEventPublisher
             connection.close();
         } catch (SQLException | RuntimeException ignored) {
             // 发布结果已确定或已按提交未知失败；不得改写返回语义。
-        }
-    }
-
-    private static void pinSchema(Connection connection) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement("""
-                SELECT set_config('search_path', format('%I, pg_temp', current_schema()), TRUE)
-                """)) {
-            statement.executeQuery().close();
         }
     }
 

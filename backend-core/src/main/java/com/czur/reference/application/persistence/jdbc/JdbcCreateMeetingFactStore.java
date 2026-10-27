@@ -24,12 +24,12 @@ import java.util.logging.Logger;
  * V013 完整 Create 事实的连接级 JDBC 原语。
  *
  * <p>实例只绑定调用方已经取得的 JDBC 连接；不会创建、提交、回滚、恢复、关闭
- * 连接或改变 auto-commit。每次操作都要求显式事务，并把 search_path 固定到当前
- * 部署 schema 后接 {@code pg_temp}，防止同名临时表遮蔽物理事实表。调用方负责把
+ * 连接或改变 auto-commit。每次操作都要求显式事务；MySQL 直接使用当前数据库内的
+ * 物理事实表，不需要额外的 schema 固定。调用方负责把
  * 本 Store 与会议行、权益 Reservation 及 Outbox 放入更大的原子事务。</p>
  *
  * <p>写入保存新 codec 产生的规范请求/响应 JSON、请求事实摘要和响应 UTF-8
- * SHA-256；使用 {@code ON CONFLICT DO NOTHING} 后必定重读赢家，再按完整规范正文、
+ * SHA-256；插入命中唯一键时必定重读赢家，再按完整规范正文、
  * 摘要、会议标识和创建时间分类 APPLIED、REPLAYED 或 CONFLICT。读取逐列核对并
  * 严格解码，任一正文、哈希、schema、scope/key 或响应会议标识损坏都会 fail closed。
  * 日志只包含阶段、结果类别、故障类别和 SQLState，不输出正文、Token、scope、key 或
@@ -38,42 +38,6 @@ import java.util.logging.Logger;
 final class JdbcCreateMeetingFactStore implements CreateMeetingFactStore {
     private static final Logger LOGGER = Logger.getLogger(
             JdbcCreateMeetingFactStore.class.getName());
-
-    private static final String PIN_SEARCH_PATH_SQL = """
-            SELECT set_config(
-                'search_path', format('%I, pg_temp', current_schema()), TRUE)
-            """;
-    private static final String FIND_SQL = """
-            SELECT scope, idempotency_key,
-                   request_schema_version, request_digest, request_json,
-                   response_schema_version, response_status, response_type,
-                   response_json, response_sha256, meeting_id, created_at
-              FROM meeting_create_fact
-             WHERE scope = ? AND idempotency_key = ?
-            """;
-    private static final String FIND_BY_MEETING_BASE_SQL = """
-            SELECT scope, idempotency_key,
-                   request_schema_version, request_digest, request_json,
-                   response_schema_version, response_status, response_type,
-                   response_json, response_sha256, meeting_id, created_at
-              FROM meeting_create_fact
-             WHERE meeting_id = ?
-            """;
-    private static final String FIND_BY_MEETING_SQL = FIND_BY_MEETING_BASE_SQL + " FOR SHARE";
-    private static final String PROBE_DIGEST_SQL = """
-            SELECT request_schema_version, request_digest, request_json
-              FROM meeting_create_fact
-             WHERE scope = ? AND idempotency_key = ?
-            """;
-    private static final String INSERT_SQL = """
-            INSERT INTO meeting_create_fact (
-                scope, idempotency_key,
-                request_schema_version, request_digest, request_json,
-                response_schema_version, response_status, response_type,
-                response_json, response_sha256, meeting_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (scope, idempotency_key) DO NOTHING
-            """;
 
     private final Connection connection;
     private final JdbcDatabaseEngine engine;
@@ -101,7 +65,6 @@ final class JdbcCreateMeetingFactStore implements CreateMeetingFactStore {
         requireLookup(scope, key);
         requireExplicitTransaction();
         try {
-            pinSearchPath();
             String sql = "SELECT request_schema_version, request_digest, request_json FROM "
                     + JdbcDatabaseTable.MEETING_CREATE_FACT.physicalName(engine)
                     + " WHERE scope = ? AND idempotency_key = ?" + mysqlWriteReadLock();
@@ -137,7 +100,6 @@ final class JdbcCreateMeetingFactStore implements CreateMeetingFactStore {
         requireLookup(scope, key);
         requireExplicitTransaction();
         try {
-            pinSearchPath();
             try (PreparedStatement statement = connection.prepareStatement(scopeKeySql())) {
                 JdbcValues.setText(statement, 1, engine, scope);
                 JdbcValues.setText(statement, 2, engine, key);
@@ -203,7 +165,6 @@ final class JdbcCreateMeetingFactStore implements CreateMeetingFactStore {
         requireText("meetingId", meetingId);
         requireExplicitTransaction();
         try {
-            pinSearchPath();
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
                 JdbcValues.setText(statement, 1, engine, meetingId);
                 try (ResultSet rows = statement.executeQuery()) {
@@ -246,7 +207,6 @@ final class JdbcCreateMeetingFactStore implements CreateMeetingFactStore {
         String responseJson = CreateMeetingResponseFactJson.encode(candidate.response());
         byte[] responseSha256 = sha256(responseJson);
         try {
-            pinSearchPath();
             int inserted;
             String sql = "INSERT INTO "
                     + JdbcDatabaseTable.MEETING_CREATE_FACT.physicalName(engine)
@@ -398,27 +358,6 @@ final class JdbcCreateMeetingFactStore implements CreateMeetingFactStore {
             throw failure;
         } catch (RuntimeException failure) {
             throw corruptData();
-        }
-    }
-
-    private void pinSearchPath() throws SQLException {
-        if (engine == JdbcDatabaseEngine.MYSQL) {
-            return; // MySQL 固定当前数据库 ai_trans_* 表，不需要额外固定 search_path。
-        }
-        try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT current_schema()")) {
-            try (ResultSet rows = statement.executeQuery()) {
-                if (!rows.next()) {
-                    throw new SQLException("schema is unavailable");
-                }
-                String schema = rows.getString(1);
-                if (schema == null || schema.startsWith("pg_temp")) {
-                    throw new SQLException("temporary schema is not a deployment schema");
-                }
-            }
-        }
-        try (PreparedStatement statement = connection.prepareStatement(PIN_SEARCH_PATH_SQL)) {
-            statement.execute();
         }
     }
 

@@ -8,7 +8,6 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -350,35 +349,12 @@ public final class JdbcExpiredReservationStore implements ExpiredReservationStor
     }
 
     private Instant normalizedTimestamp(Instant value) {
-        return engine == JdbcDatabaseEngine.MYSQL
-                ? value.truncatedTo(java.time.temporal.ChronoUnit.MICROS)
-                : roundedMicrosecondTimestamp(value);
+        return value.truncatedTo(java.time.temporal.ChronoUnit.MICROS);
     }
 
     private void bindInstant(PreparedStatement statement, int index, Instant value)
             throws SQLException {
-        if (engine == JdbcDatabaseEngine.MYSQL) {
-            JdbcValues.setInstant(statement, index, value);
-        } else {
-            statement.setTimestamp(index, Timestamp.from(value));
-        }
-    }
-
-    /**
-     * 使用驱动对时间戳的微秒四舍五入规则规范化时间。
-     *
-     * <p>不能使用 {@link Instant#truncatedTo(java.time.temporal.TemporalUnit)}：
-     * 那会向下截断，并在纳秒部分达到 999999500 时与驱动的跨秒进位结果
-     * 不一致。LeaseToken 的 expiresAt 是后续 release 与 lease-aware cancel 的
-     * 栅栏字段，必须和实际写入数据库的 {@code lease_until} 精确相等。</p>
-     */
-    private static Instant roundedMicrosecondTimestamp(Instant value) {
-        int nanos = value.getNano();
-        int roundedMicros = (nanos + 500) / 1_000;
-        if (roundedMicros == 1_000_000) {
-            return Instant.ofEpochSecond(Math.addExact(value.getEpochSecond(), 1L));
-        }
-        return Instant.ofEpochSecond(value.getEpochSecond(), roundedMicros * 1_000L);
+        JdbcValues.setInstant(statement, index, value);
     }
 
     private static IllegalStateException sanitized(String message) {

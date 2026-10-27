@@ -41,10 +41,6 @@ final class JdbcArtifactReadyMetadataStore implements ArtifactReadyMetadataStore
     private static final Logger LOGGER = Logger.getLogger(
             JdbcArtifactReadyMetadataStore.class.getName());
 
-    private static final String PIN_SEARCH_PATH_SQL = """
-            SELECT set_config(
-                'search_path', format('%I, pg_temp', current_schema()), TRUE)
-            """;
     private static final String FIND_BY_ARTIFACT_ID_SQL = """
             SELECT artifact_id, meeting_id, artifact_type, media_type, language,
                    revision, intent_id, storage_binding, content_size, content_checksum,
@@ -75,7 +71,6 @@ final class JdbcArtifactReadyMetadataStore implements ArtifactReadyMetadataStore
                 artifact_id, meeting_id, artifact_type, media_type, language,
                 revision, intent_id, storage_binding, content_size, content_checksum)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            %s
             """;
 
     private final Connection connection;
@@ -98,7 +93,6 @@ final class JdbcArtifactReadyMetadataStore implements ArtifactReadyMetadataStore
         requireText("artifactId", artifactId);
         requireExplicitTransaction();
         try {
-            pinSearchPath();
             try (PreparedStatement statement = connection.prepareStatement(
                     FIND_BY_ARTIFACT_ID_SQL.formatted(table()))) {
                 JdbcValues.setText(statement, 1, engine, artifactId);
@@ -131,7 +125,6 @@ final class JdbcArtifactReadyMetadataStore implements ArtifactReadyMetadataStore
         requireText("meetingId", meetingId);
         requireExplicitTransaction();
         try {
-            pinSearchPath();
             try (PreparedStatement statement = connection.prepareStatement(
                     FIND_BY_MEETING_ID_SQL.formatted(table()))) {
                 JdbcValues.setText(statement, 1, engine, meetingId);
@@ -173,10 +166,8 @@ final class JdbcArtifactReadyMetadataStore implements ArtifactReadyMetadataStore
         validateCandidate(candidate);
         requireExplicitTransaction();
         try {
-            pinSearchPath();
             int inserted;
-            try (PreparedStatement statement = connection.prepareStatement(INSERT_SQL.formatted(
-                    table(), engine == JdbcDatabaseEngine.MYSQL ? "" : "ON CONFLICT DO NOTHING"))) {
+            try (PreparedStatement statement = connection.prepareStatement(INSERT_SQL.formatted(table()))) {
                 WriteIntentSpec spec = candidate.intent().spec();
                 JdbcValues.setText(statement, 1, engine, spec.artifactId());
                 JdbcValues.setText(statement, 2, engine, spec.meetingId());
@@ -239,8 +230,7 @@ final class JdbcArtifactReadyMetadataStore implements ArtifactReadyMetadataStore
         WriteIntentSpec spec = candidate.intent().spec();
         // 写入/重复键之后必须读取当前唯一赢家，不复用外层较早建立的 RR 快照。
         try (PreparedStatement statement = connection.prepareStatement(
-                FIND_MATCHING_AXES_SQL.formatted(table())
-                        + (engine == JdbcDatabaseEngine.MYSQL ? " FOR UPDATE" : ""))) {
+                FIND_MATCHING_AXES_SQL.formatted(table()) + " FOR UPDATE")) {
             JdbcValues.setText(statement, 1, engine, spec.artifactId());
             JdbcValues.setText(statement, 2, engine, spec.meetingId());
             JdbcValues.setText(statement, 3, engine, spec.artifactType());
@@ -313,25 +303,6 @@ final class JdbcArtifactReadyMetadataStore implements ArtifactReadyMetadataStore
         requireText("intentId", candidate.intent().intentId());
         requireText("storageBinding", candidate.intent().binding().value());
         requireText("contentChecksum", candidate.content().checksum());
-    }
-
-    private void pinSearchPath() throws SQLException {
-        if (engine == JdbcDatabaseEngine.MYSQL) return;
-        try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT current_schema()")) {
-            try (ResultSet rows = statement.executeQuery()) {
-                if (!rows.next()) {
-                    throw new SQLException("schema is unavailable");
-                }
-                String schema = rows.getString(1);
-                if (schema == null || schema.startsWith("pg_temp")) {
-                    throw new SQLException("temporary schema is not a deployment schema");
-                }
-            }
-        }
-        try (PreparedStatement statement = connection.prepareStatement(PIN_SEARCH_PATH_SQL)) {
-            statement.execute();
-        }
     }
 
     private void requireExplicitTransaction() {

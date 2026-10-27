@@ -39,7 +39,6 @@ import java.util.logging.Logger;
  */
 public final class JdbcDurableAudioInputPort implements DurableAudioInputPort {
     private static final Logger LOGGER = Logger.getLogger(JdbcDurableAudioInputPort.class.getName());
-    private static final String PIN = "SELECT set_config('search_path', format('%I, pg_temp', current_schema()), TRUE)";
     private static final String MEETING = """
             SELECT deployment_scope, subject_scope, client_session_id, profile_id,
                    profile_revision, created_at, state, input_state
@@ -311,15 +310,6 @@ public final class JdbcDurableAudioInputPort implements DurableAudioInputPort {
         try {
             connection.setReadOnly(false);
             connection.setAutoCommit(false);
-            try (PreparedStatement statement = connection.prepareStatement("SELECT current_schema()");
-                 ResultSet rows = statement.executeQuery()) {
-                if (!rows.next()) throw new BadFact();
-                String schema = rows.getString(1);
-                if (schema == null || schema.startsWith("pg_temp")) throw new BadFact();
-            }
-            try (PreparedStatement statement = connection.prepareStatement(PIN)) {
-                statement.executeQuery().close();
-            }
             ready = true;
             return connection;
         } finally {

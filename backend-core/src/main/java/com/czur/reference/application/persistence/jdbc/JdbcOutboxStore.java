@@ -661,9 +661,7 @@ public final class JdbcOutboxStore implements OutboxStore {
     }
 
     private Instant canonicalTimestamp(Instant value) {
-        return engine == JdbcDatabaseEngine.MYSQL
-                ? value.truncatedTo(java.time.temporal.ChronoUnit.MICROS)
-                : roundedMicrosecondTimestamp(value);
+        return value.truncatedTo(java.time.temporal.ChronoUnit.MICROS);
     }
 
     static OutboxEvent withLease(OutboxEvent event, String owner, java.time.Instant until) {

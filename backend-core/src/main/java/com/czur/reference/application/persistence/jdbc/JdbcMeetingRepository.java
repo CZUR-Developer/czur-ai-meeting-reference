@@ -52,52 +52,6 @@ public final class JdbcMeetingRepository implements MeetingRepository {
             ManifestStatus.READY,
             ManifestStatus.READY_WITH_WARNINGS,
             ManifestStatus.FAILED);
-    private static final String FIND_SQL = """
-            SELECT stored.meeting_id, stored.deployment_scope, stored.client_session_id,
-                   stored.subject_scope, stored.profile_id, stored.profile_revision,
-                   stored.state, stored.created_at, stored.updated_at,
-                   jsonb_exists(to_jsonb(stored), 'grant_id') AS ownership_columns_present,
-                   to_jsonb(stored) ->> 'grant_id' AS grant_id,
-                   (to_jsonb(stored) ->> 'grant_expires_at')::timestamptz AS grant_expires_at,
-                   to_jsonb(stored) ->> 'usage_reservation_id' AS usage_reservation_id
-              FROM meeting AS stored
-             WHERE stored.meeting_id = ?
-            """;
-
-    private static final String FIND_FOR_UPDATE_SQL = FIND_SQL + " FOR UPDATE";
-
-    /**
-     * owned 命令除领域快照外还需要数据库聚合版本参与 CAS。该版本是 JDBC
-     * 并发控制细节，不上浮到公共 {@code MeetingSnapshot}，避免把关系数据库
-     * 实现字段扩散到领域和公开协议。
-     */
-    private static final String FIND_VERSIONED_FOR_UPDATE_SQL = """
-            SELECT stored.meeting_id, stored.deployment_scope, stored.client_session_id,
-                   stored.subject_scope, stored.profile_id, stored.profile_revision,
-                   stored.state, stored.aggregate_version, stored.created_at, stored.updated_at,
-                   jsonb_exists(to_jsonb(stored), 'grant_id') AS ownership_columns_present,
-                   to_jsonb(stored) ->> 'grant_id' AS grant_id,
-                   (to_jsonb(stored) ->> 'grant_expires_at')::timestamptz AS grant_expires_at,
-                   to_jsonb(stored) ->> 'usage_reservation_id' AS usage_reservation_id
-              FROM meeting AS stored
-             WHERE stored.meeting_id = ?
-             FOR UPDATE
-            """;
-
-    private static final String FIND_BY_SCOPE_SQL = """
-            SELECT stored.meeting_id, stored.deployment_scope, stored.client_session_id,
-                   stored.subject_scope, stored.profile_id, stored.profile_revision,
-                   stored.state, stored.created_at, stored.updated_at,
-                   jsonb_exists(to_jsonb(stored), 'grant_id') AS ownership_columns_present,
-                   to_jsonb(stored) ->> 'grant_id' AS grant_id,
-                   (to_jsonb(stored) ->> 'grant_expires_at')::timestamptz AS grant_expires_at,
-                   to_jsonb(stored) ->> 'usage_reservation_id' AS usage_reservation_id
-              FROM meeting AS stored
-             WHERE stored.deployment_scope = ? AND stored.client_session_id = ?
-             ORDER BY stored.created_at, stored.meeting_id
-             LIMIT 1
-            """;
-
     /**
      * V001/V002/V003 都可执行的兼容写入。冲突更新只有在数据库行仍是 legacy
      * 形态时才允许；因此旧命令不能用相同 meetingId 覆盖真实主体会议。
@@ -362,7 +316,7 @@ public final class JdbcMeetingRepository implements MeetingRepository {
      */
     static Optional<MeetingAggregate.MeetingSnapshot> find(Connection connection, String meetingId)
             throws SQLException {
-        return find(connection, FIND_SQL, meetingId);
+        return find(connection, findSql(JdbcDatabaseEngine.MYSQL, false), meetingId);
     }
 
     /**
@@ -374,7 +328,8 @@ public final class JdbcMeetingRepository implements MeetingRepository {
      */
     static Optional<MeetingAggregate.MeetingSnapshot> findForUpdate(
             Connection connection, String meetingId) throws SQLException {
-        return find(connection, FIND_FOR_UPDATE_SQL, meetingId);
+        return find(connection, findSql(JdbcDatabaseEngine.MYSQL, false) + " FOR UPDATE",
+                meetingId);
     }
 
     /**
@@ -421,7 +376,9 @@ public final class JdbcMeetingRepository implements MeetingRepository {
             Connection connection, String deploymentScope, String clientSessionId) throws SQLException {
         requireText("deploymentScope", deploymentScope);
         requireText("clientSessionId", clientSessionId);
-        try (PreparedStatement statement = connection.prepareStatement(FIND_BY_SCOPE_SQL)) {
+        try (PreparedStatement statement = connection.prepareStatement(mysqlColumns(false)
+                + " WHERE m.deployment_scope = ? AND m.client_session_id = ?"
+                + " ORDER BY m.created_at, m.meeting_id LIMIT 1")) {
             statement.setString(1, deploymentScope);
             statement.setString(2, clientSessionId);
             try (ResultSet resultSet = statement.executeQuery()) {

@@ -49,9 +49,6 @@ public final class JdbcRenewRealtimeTokenUnitOfWork
             JdbcRenewRealtimeTokenUnitOfWork.class.getName());
     private static final Base64.Encoder TOKEN_ENCODER =
             Base64.getUrlEncoder().withoutPadding();
-    private static final String PIN_SQL = """
-            SELECT set_config('search_path', format('%I, pg_temp', current_schema()), TRUE)
-            """;
     private static final String MEETING_BASE_SQL = """
             SELECT deployment_scope, subject_scope, client_session_id,
                    profile_id, profile_revision, created_at, state, input_state
@@ -106,7 +103,6 @@ public final class JdbcRenewRealtimeTokenUnitOfWork
             connection = dataSource.getConnection();
             connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
             connection.setAutoCommit(false);
-            pinSearchPath(connection);
 
             phase = Phase.MEETING_LOCK;
             Optional<MeetingRow> optional = readMeeting(connection, request, true);
@@ -253,7 +249,6 @@ public final class JdbcRenewRealtimeTokenUnitOfWork
             recovery.setReadOnly(true);
             recovery.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
             recovery.setAutoCommit(false);
-            pinSearchPath(recovery);
             Optional<MeetingRow> optional = readMeeting(recovery, request, false);
             if (optional.isEmpty()) return failure(ErrorCode.OUTCOME_UNKNOWN, Phase.RECOVERY);
             MeetingRow meeting = optional.orElseThrow();
@@ -356,19 +351,6 @@ public final class JdbcRenewRealtimeTokenUnitOfWork
             statement.setTimestamp(6, Timestamp.from(issuedAt));
             statement.setTimestamp(7, Timestamp.from(expiresAt));
             return statement.executeUpdate();
-        }
-    }
-
-    private static void pinSearchPath(Connection connection) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement("SELECT current_schema()");
-             ResultSet rows = statement.executeQuery()) {
-            if (!rows.next() || rows.getString(1) == null
-                    || rows.getString(1).startsWith("pg_temp")) {
-                throw new SQLException("deployment schema is unavailable");
-            }
-        }
-        try (PreparedStatement statement = connection.prepareStatement(PIN_SQL)) {
-            statement.execute();
         }
     }
 

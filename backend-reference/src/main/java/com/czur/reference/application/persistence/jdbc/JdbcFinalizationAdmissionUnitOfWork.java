@@ -35,7 +35,7 @@ import java.util.logging.Logger;
 /**
  * 单连接实现的最终收口 Admission 工作单元。
  *
- * <p>首次路径只取得一条连接并按固定顺序完成：固定部署 schema、锁定 Meeting、
+ * <p>首次路径只取得一条连接并按固定顺序完成：锁定 Meeting、
  * 核对 owner/Profile/execution fact、锁定主 Reservation、保存 V008、从 V008 保存
  * V009、生成并保存 receipt、从冻结事实形成 checkpoint、注册 Workflow，最后把
  * Manifest 状态推进到 GENERATING。所有步骤共享同一事务；本类不读取 Clock，
@@ -54,10 +54,6 @@ public final class JdbcFinalizationAdmissionUnitOfWork
         implements FinalizationAdmissionUnitOfWork {
     private static final Logger LOGGER = Logger.getLogger(
             JdbcFinalizationAdmissionUnitOfWork.class.getName());
-    private static final String PIN_SEARCH_PATH_SQL = """
-            SELECT set_config(
-                'search_path', format('%I, pg_temp', current_schema()), TRUE)
-            """;
 
     private final DataSource dataSource;
     private final FinalizationReceiptGenerator receiptGenerator;
@@ -126,8 +122,6 @@ public final class JdbcFinalizationAdmissionUnitOfWork
             connection.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
             transactionStarted = true;
 
-            phase = Phase.SCHEMA_PIN;
-            pinDeploymentSchema(connection);
             phase = Phase.RECOVERY_MEETING_READ;
             Optional<JdbcMeetingRepository.PublicationMeeting> meetingOptional =
                     JdbcMeetingRepository.findManifestPublication(
@@ -291,9 +285,6 @@ public final class JdbcFinalizationAdmissionUnitOfWork
             previousAutoCommit = connection.getAutoCommit();
             connection.setAutoCommit(false);
             transactionStarted = true;
-
-            phase = Phase.SCHEMA_PIN;
-            pinDeploymentSchema(connection);
 
             phase = Phase.MEETING_LOCK;
             Optional<JdbcMeetingRepository.PublicationMeeting> lockedOptional =
@@ -949,26 +940,6 @@ public final class JdbcFinalizationAdmissionUnitOfWork
         return new Failure(code);
     }
 
-    private static void pinDeploymentSchema(Connection connection) throws SQLException {
-        try (java.sql.PreparedStatement statement = connection.prepareStatement(
-                "SELECT current_schema()")) {
-            try (java.sql.ResultSet rows = statement.executeQuery()) {
-                if (!rows.next()) {
-                    throw new SQLException("schema is unavailable");
-                }
-                String schema = rows.getString(1);
-                if (schema == null || schema.startsWith("pg_temp")) {
-                    throw new SQLException(
-                            "temporary schema is not a deployment schema");
-                }
-            }
-        }
-        try (java.sql.PreparedStatement statement = connection.prepareStatement(
-                PIN_SEARCH_PATH_SQL)) {
-            statement.execute();
-        }
-    }
-
     private static void restoreAutoCommitQuietly(
             Connection connection,
             boolean previousAutoCommit) {
@@ -1033,7 +1004,6 @@ public final class JdbcFinalizationAdmissionUnitOfWork
 
     private enum Phase {
         OPEN_CONNECTION,
-        SCHEMA_PIN,
         RECOVERY_MEETING_READ,
         MEETING_LOCK,
         ACCESS_CHECK,

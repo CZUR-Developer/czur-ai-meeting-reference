@@ -44,7 +44,6 @@ public final class JdbcRealtimeMockSessionSpecLookup
             connection.setReadOnly(true);
             connection.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
             connection.setAutoCommit(false);
-            pinSchema(connection);
             MeetingRow meeting = meeting(connection, meetingId);
             if (meeting == null || !deploymentScope.equals(meeting.deploymentScope())
                     || meeting.subjectScope() == null || meeting.subjectScope().isBlank()
@@ -110,14 +109,6 @@ public final class JdbcRealtimeMockSessionSpecLookup
                 if (rows.next()) throw invalid();
                 return fact;
             }
-        }
-    }
-
-    private static void pinSchema(Connection connection) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement("""
-                SELECT set_config('search_path', format('%I, pg_temp', current_schema()), TRUE)
-                """)) {
-            statement.executeQuery().close();
         }
     }
 

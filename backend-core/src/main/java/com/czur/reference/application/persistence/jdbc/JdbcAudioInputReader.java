@@ -34,9 +34,6 @@ import java.util.logging.Logger;
  */
 final class JdbcAudioInputReader {
     private static final Logger LOGGER = Logger.getLogger(JdbcAudioInputReader.class.getName());
-    private static final String PIN_SEARCH_PATH = """
-            SELECT set_config('search_path', format('%I, pg_temp', current_schema()), TRUE)
-            """;
     private static final String CURSOR_SQL = """
             SELECT accepted_stream_sequence, accepted_audio_position_ms,
                    complete_last_stream_sequence, complete_last_audio_position_ms,
@@ -131,9 +128,6 @@ final class JdbcAudioInputReader {
             connection.setReadOnly(true);
             connection.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
             connection.setAutoCommit(false);
-            try (PreparedStatement statement = connection.prepareStatement(PIN_SEARCH_PATH)) {
-                statement.executeQuery().close();
-            }
             ready = true;
             return connection;
         } finally {

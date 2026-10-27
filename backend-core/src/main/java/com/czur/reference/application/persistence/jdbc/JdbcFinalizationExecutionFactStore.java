@@ -22,23 +22,17 @@ import java.util.logging.Logger;
  *
  * <p>本类只使用调用方传入的 JDBC 连接，不创建连接、不提交或回滚事务，也不关闭
  * 连接。调用方必须先进入显式事务；这样执行事实可以和同一会议的其它收口事实共用
- * 一个数据库事务。写入采用 {@code ON CONFLICT DO NOTHING}，写入后无论是否为本次
- * 首次插入都重新读回完整行，再用 canonical JSON、JSONB 镜像、SHA-256 和领域对象
- * 四重校验裁决 APPLIED、REPLAYED 或 CONFLICT。</p>
+ * 一个数据库事务。写入命中唯一键时无论是否为本次首次插入都重新读回完整行，
+ * 再用 canonical JSON、JSON 镜像、SHA-256 和领域对象四重校验裁决 APPLIED、
+ * REPLAYED 或 CONFLICT。</p>
  *
- * <p>每次操作先把当前事务的 search_path 固定为部署 schema 后接 pg_temp。这样连接
- * 中存在同名临时表时，未限定的业务表名仍不会被临时对象遮蔽；该设置由本事务自动
- * 回收，不改变调用方事务的提交/回滚责任。</p>
+ * <p>本类只按当前数据库内的物理表名访问事实表，不改变调用方事务的提交/回滚责任。</p>
  */
 final class JdbcFinalizationExecutionFactStore
         implements FinalizationExecutionFactStore {
     private static final Logger LOGGER = Logger.getLogger(
             JdbcFinalizationExecutionFactStore.class.getName());
 
-    private static final String PIN_SEARCH_PATH_SQL = """
-            SELECT set_config(
-                'search_path', format('%I, pg_temp', current_schema()), TRUE)
-            """;
     private static final String FIND_SQL = """
             SELECT meeting_id, canonical_json, %s AS jsonb_text,
                    content_sha256
@@ -49,7 +43,6 @@ final class JdbcFinalizationExecutionFactStore
             INSERT INTO %s (
                 meeting_id, canonical_json, execution_fact_json, content_sha256)
             VALUES (?, ?, %s, ?)
-            %s
             """;
 
     private final Connection connection;
@@ -71,7 +64,6 @@ final class JdbcFinalizationExecutionFactStore
         requireMeetingId(meetingId);
         requireExplicitTransaction();
         try {
-            pinSearchPath();
             try (PreparedStatement statement = connection.prepareStatement(findSql(false))) {
                 JdbcValues.setText(statement, 1, engine, meetingId);
                 try (ResultSet rows = statement.executeQuery()) {
@@ -105,12 +97,10 @@ final class JdbcFinalizationExecutionFactStore
         String canonical = FinalizationExecutionFactJson.encode(candidate);
         byte[] digest = sha256(canonical);
         try {
-            pinSearchPath();
             int inserted;
             try (PreparedStatement statement = connection.prepareStatement(INSERT_SQL.formatted(
                     JdbcDatabaseTable.FINALIZATION_EXECUTION_FACT.physicalName(engine),
-                    JdbcValues.jsonParameter(engine), engine == JdbcDatabaseEngine.MYSQL
-                            ? "" : "ON CONFLICT (meeting_id) DO NOTHING"))) {
+                    JdbcValues.jsonParameter(engine)))) {
                 JdbcValues.setText(statement, 1, engine, candidate.meetingId());
                 statement.setString(2, canonical);
                 statement.setString(3, canonical);
@@ -193,25 +183,6 @@ final class JdbcFinalizationExecutionFactStore
         }
     }
 
-    private void pinSearchPath() throws SQLException {
-        if (engine == JdbcDatabaseEngine.MYSQL) return;
-        try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT current_schema()")) {
-            try (ResultSet rows = statement.executeQuery()) {
-                if (!rows.next()) {
-                    throw new SQLException("schema is unavailable");
-                }
-                String schema = rows.getString(1);
-                if (schema == null || schema.startsWith("pg_temp")) {
-                    throw new SQLException("temporary schema is not a deployment schema");
-                }
-            }
-        }
-        try (PreparedStatement statement = connection.prepareStatement(PIN_SEARCH_PATH_SQL)) {
-            statement.execute();
-        }
-    }
-
     private void requireExplicitTransaction() {
         try {
             if (connection.getAutoCommit()) {
@@ -250,7 +221,7 @@ final class JdbcFinalizationExecutionFactStore
     private String findSql(boolean currentRead) {
         return FIND_SQL.formatted(JdbcValues.jsonText(engine, "execution_fact_json"),
                 JdbcDatabaseTable.FINALIZATION_EXECUTION_FACT.physicalName(engine))
-                + (currentRead && engine == JdbcDatabaseEngine.MYSQL ? " FOR UPDATE" : "");
+                + (currentRead ? " FOR UPDATE" : "");
     }
 
     private static void requireStored(boolean condition) {

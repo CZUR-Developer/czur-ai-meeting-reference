@@ -42,9 +42,6 @@ import java.util.logging.Logger;
 public final class JdbcRealtimeCredentialVerifier implements RealtimeCredentialVerifier {
     private static final Logger LOGGER = Logger.getLogger(
             JdbcRealtimeCredentialVerifier.class.getName());
-    private static final String PIN_SEARCH_PATH_SQL = """
-            SELECT set_config('search_path', format('%I, pg_temp', current_schema()), TRUE)
-            """;
     private static final String MEETING_SQL = """
             SELECT deployment_scope, subject_scope, client_session_id, profile_id,
                    profile_revision, created_at,
@@ -112,7 +109,6 @@ public final class JdbcRealtimeCredentialVerifier implements RealtimeCredentialV
     }
 
     private Result inspect(Connection connection, Request request) throws SQLException {
-        pinSearchPath(connection);
         Optional<MeetingFact> rawMeeting = readMeeting(connection, request.meetingId());
         if (rawMeeting.isEmpty()) {
             return new Denied();
@@ -266,20 +262,6 @@ public final class JdbcRealtimeCredentialVerifier implements RealtimeCredentialV
             return InputState.valueOf(value);
         } catch (RuntimeException malformed) {
             throw new InvalidFact();
-        }
-    }
-
-    private static void pinSearchPath(Connection connection) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement("SELECT current_schema()");
-             ResultSet rows = statement.executeQuery()) {
-            if (!rows.next()) throw new SQLException("deployment schema is unavailable");
-            String schema = rows.getString(1);
-            if (schema == null || schema.startsWith("pg_temp")) {
-                throw new SQLException("deployment schema is unavailable");
-            }
-        }
-        try (PreparedStatement statement = connection.prepareStatement(PIN_SEARCH_PATH_SQL)) {
-            statement.execute();
         }
     }
 

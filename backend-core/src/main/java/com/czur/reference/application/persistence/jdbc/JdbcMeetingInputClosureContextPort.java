@@ -58,7 +58,6 @@ public final class JdbcMeetingInputClosureContextPort
             connection.setReadOnly(true);
             connection.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
             connection.setAutoCommit(false);
-            pinSchema(connection);
 
             // 先只读原始部署范围，再解析完整会议快照。即使另一部署的会议行
             // 本身损坏，也不能向本部署泄漏“存在但不一致”的分类。
@@ -203,21 +202,6 @@ public final class JdbcMeetingInputClosureContextPort
             case DELETED -> manifest == ManifestStatus.DELETED;
             default -> false;
         };
-    }
-
-    private static void pinSchema(Connection connection) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement("SELECT current_schema()");
-             ResultSet rows = statement.executeQuery()) {
-            if (!rows.next() || rows.getString(1) == null
-                    || rows.getString(1).startsWith("pg_temp")) {
-                throw new SQLException("deployment schema unavailable");
-            }
-        }
-        try (PreparedStatement statement = connection.prepareStatement("""
-                SELECT set_config('search_path', format('%I, pg_temp', current_schema()), TRUE)
-                """)) {
-            statement.execute();
-        }
     }
 
     private static Inconsistent inconsistent() {

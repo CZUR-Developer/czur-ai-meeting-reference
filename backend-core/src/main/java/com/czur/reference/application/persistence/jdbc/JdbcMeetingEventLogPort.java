@@ -20,8 +20,7 @@ import java.util.logging.Logger;
 /**
  * 基于同一会议事实源的认证事件补拉适配器。
  *
- * <p>非 MySQL 分支一次调用只执行一条 SELECT；MySQL5.7 在一个只读 REPEATABLE READ 事务内
- * 读取会议和事件。会议存在性、原始归属、会议与 Manifest 删除状态、整场事件完整性、
+ * <p>MySQL5.7 在一个只读 REPEATABLE READ 事务内读取会议和事件。会议存在性、原始归属、会议与 Manifest 删除状态、整场事件完整性、
  * 最高已提交事件序号和 {@code afterSequence} 之后的事件页都来自同一快照，
  * 不会出现先鉴权、后查询时读到两份数据库状态的竞态。结果行到达后
  * 必须先用 {@link MeetingAccessGuard} 判断原始归属；跨部署、跨主体和历史
@@ -44,114 +43,6 @@ import java.util.logging.Logger;
  */
 public final class JdbcMeetingEventLogPort implements MeetingEventLogPort, RealtimeEventLogPort {
     private static final Logger LOGGER = Logger.getLogger(JdbcMeetingEventLogPort.class.getName());
-
-    /**
-     * MATERIALIZED 单行 CTE 强制整场异常扫描每次请求只执行一次；随后
-     * LEFT JOIN LATERAL 让“存在但无新事件”的会议仍返回一行。归属、两处删除状态、整场异常
-     * 标记和分页事件仍由同一个 statement snapshot 解释。
-     *
-     * <p>数据库的 POSIX {@code [:space:]} 与 Java 21
-     * {@link String#isBlank()} 基本一致，但缺少 U+001C～U+001F 四个信息分隔符。
-     * 每个必填文本先用 {@code translate} 删除这四个字符，再检查剩余字符是否
-     * 全属于 POSIX whitespace，等价覆盖二者并集；这种写法也能正确处理 TAB 与
-     * U+001C 混合的字符串。</p>
-     */
-    private static final String READ_SQL = """
-            WITH meeting_snapshot AS MATERIALIZED (
-                SELECT m.meeting_id,
-                       m.deployment_scope,
-                       m.subject_scope,
-                       m.state,
-                       m.manifest_state,
-                       COALESCE((
-                           SELECT MAX(committed.event_sequence)
-                             FROM meeting_event committed
-                            WHERE committed.meeting_id = m.meeting_id
-                       ), 0) AS max_event_sequence,
-                       EXISTS (
-                           SELECT 1
-                             FROM meeting_event historical
-                            WHERE historical.meeting_id = m.meeting_id
-                              AND (
-                                  historical.meeting_id IS NULL
-                                  OR translate(
-                                         historical.meeting_id,
-                                         chr(28) || chr(29) || chr(30) || chr(31), '')
-                                     !~ '[^[:space:]]'
-                                  OR historical.event_sequence IS NULL
-                                  OR historical.event_sequence <= 0
-                                  OR historical.event_id IS NULL
-                                  OR translate(
-                                         historical.event_id,
-                                         chr(28) || chr(29) || chr(30) || chr(31), '')
-                                     !~ '[^[:space:]]'
-                                  OR historical.event_type IS NULL
-                                  OR translate(
-                                         historical.event_type,
-                                         chr(28) || chr(29) || chr(30) || chr(31), '')
-                                     !~ '[^[:space:]]'
-                                  OR historical.occurred_at IS NULL
-                                  OR historical.spec_version IS NULL
-                                  OR translate(
-                                         historical.spec_version,
-                                         chr(28) || chr(29) || chr(30) || chr(31), '')
-                                     !~ '[^[:space:]]'
-                                  OR historical.stream_id IS NULL
-                                  OR translate(
-                                         historical.stream_id,
-                                         chr(28) || chr(29) || chr(30) || chr(31), '')
-                                     !~ '[^[:space:]]'
-                                  OR CASE
-                                      WHEN historical.canonical_payload IS NULL
-                                           OR translate(
-                                                  historical.canonical_payload,
-                                                  chr(28) || chr(29) || chr(30) || chr(31), '')
-                                              !~ '[^[:space:]]'
-                                          THEN TRUE
-                                      WHEN NOT pg_input_is_valid(
-                                              historical.canonical_payload, 'jsonb')
-                                          THEN TRUE
-                                      ELSE historical.canonical_payload::jsonb
-                                           IS DISTINCT FROM historical.payload
-                                  END
-                              )
-                       ) AS has_invalid_event
-                  FROM meeting m
-                 WHERE m.meeting_id = ?
-            )
-            SELECT m.deployment_scope,
-                   m.subject_scope,
-                   m.state,
-                   m.manifest_state,
-                   m.has_invalid_event,
-                   m.max_event_sequence,
-                   event_page.meeting_id,
-                   event_page.event_sequence,
-                   event_page.event_id,
-                   event_page.event_type,
-                   event_page.canonical_payload,
-                   event_page.occurred_at,
-                   event_page.spec_version,
-                   event_page.stream_id,
-                   event_page.event_sequence IS NOT NULL AS event_present
-              FROM meeting_snapshot m
-              LEFT JOIN LATERAL (
-                  SELECT event.meeting_id,
-                         event.event_sequence,
-                         event.event_id,
-                         event.event_type,
-                         event.canonical_payload,
-                         event.occurred_at,
-                         event.spec_version,
-                         event.stream_id
-                    FROM meeting_event event
-                   WHERE event.meeting_id = m.meeting_id
-                     AND event.event_sequence > ?
-                   ORDER BY event.event_sequence ASC
-                   LIMIT ?
-              ) event_page ON TRUE
-             ORDER BY event_page.event_sequence ASC
-            """;
 
     private final DataSource dataSource;
     private final JdbcDatabaseEngine engine;
@@ -203,17 +94,13 @@ public final class JdbcMeetingEventLogPort implements MeetingEventLogPort, Realt
         Connection connection = null;
         try {
             connection = dataSource.getConnection();
-            if (engine == JdbcDatabaseEngine.MYSQL) {
-                connection.setReadOnly(true);
-                connection.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
-                connection.setAutoCommit(false);
-                Result result = readMysqlSnapshot(connection, meetingId, afterSequence, limit,
-                        deploymentScope, subjectScope);
-                connection.rollback();
-                return logged(result, afterSequence);
-            }
-            return logged(readSnapshot(connection, meetingId, afterSequence, limit,
-                    deploymentScope, subjectScope), afterSequence);
+            connection.setReadOnly(true);
+            connection.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+            connection.setAutoCommit(false);
+            Result result = readMysqlSnapshot(connection, meetingId, afterSequence, limit,
+                    deploymentScope, subjectScope);
+            connection.rollback();
+            return logged(result, afterSequence);
         } catch (JdbcMeetingEventLogStore.InvalidStoredEvent
                  | CorruptEventPage failure) {
             return logged(new Unavailable(UnavailableReason.STORAGE_FAILURE, false),
@@ -231,7 +118,7 @@ public final class JdbcMeetingEventLogPort implements MeetingEventLogPort, Realt
     }
 
     /**
-     * 5.7 读取与非 MySQL 分支使用同一守卫、EventLog 解码及页值对象。
+     * 5.7 读取使用与共享解码器相同的访问守卫、EventLog 解码及页值对象。
      * 先读归属／删除状态，后在同一 RR 快照扫描整场完整性；只保留本页 limit+1 条。
      * 不使用锁定读，不把历史坏事件隐藏在游标之前，也不另建事件事实源。
      */
@@ -281,74 +168,6 @@ public final class JdbcMeetingEventLogPort implements MeetingEventLogPort, Realt
         List<EventLog> page = hasMore ? events.subList(0, limit) : events;
         return new Page(page.isEmpty() ? MeetingEventPage.empty(afterSequence)
                 : new MeetingEventPage(page, page.getLast().eventSequence(), hasMore));
-    }
-
-    /**
-     * 执行唯一的数据库语句并按安全顺序解释 ResultSet。
-     *
-     * <p>即使 SQL 已经返回事件列，也必须先读取两个原始 scope 并调用访问守卫；
-     * 守卫放行后先判断删除撤权，再解释坏事实、游标和事件正文。</p>
-     */
-    private static Result readSnapshot(Connection connection, String meetingId,
-            long afterSequence, int limit, String deploymentScope, String subjectScope)
-            throws SQLException {
-        int queryLimit = Math.addExact(limit, 1);
-        try (PreparedStatement statement = connection.prepareStatement(READ_SQL)) {
-            statement.setString(1, meetingId);
-            statement.setLong(2, afterSequence);
-            statement.setInt(3, queryLimit);
-            try (ResultSet rows = statement.executeQuery()) {
-                if (!rows.next()) {
-                    return new NotFound();
-                }
-
-                String storedDeploymentScope = rows.getString("deployment_scope");
-                String storedSubjectScope = rows.getString("subject_scope");
-                if (MeetingAccessGuard.evaluate(deploymentScope, subjectScope,
-                        storedDeploymentScope, storedSubjectScope)
-                        != MeetingAccessGuard.Decision.ALLOWED) {
-                    return new AccessDenied();
-                }
-                String state = rows.getString("state");
-                String manifestState = rows.getString("manifest_state");
-                if ("DELETION_PENDING".equals(state) || "DELETED".equals(state)
-                        || "DELETION_PENDING".equals(manifestState)
-                        || "DELETED".equals(manifestState)) {
-                    return new AccessDenied();
-                }
-
-                if (rows.getBoolean("has_invalid_event")) {
-                    return new Unavailable(UnavailableReason.STORAGE_FAILURE, false);
-                }
-                if (afterSequence > rows.getLong("max_event_sequence")) {
-                    return new Conflict(ConflictReason.INVALID_CURSOR);
-                }
-
-                List<EventLog> events = new ArrayList<>(queryLimit);
-                do {
-                    if (rows.getBoolean("event_present")) {
-                        events.add(JdbcMeetingEventLogStore.readEvent(rows));
-                    }
-                } while (rows.next());
-
-                boolean hasMore = events.size() > limit;
-                int returnedCount = hasMore ? limit : events.size();
-                List<EventLog> returnedEvents = new ArrayList<>(
-                        events.subList(0, returnedCount));
-                MeetingEventPage page;
-                try {
-                    page = returnedEvents.isEmpty()
-                            ? MeetingEventPage.empty(afterSequence)
-                            : new MeetingEventPage(
-                                    returnedEvents,
-                                    returnedEvents.getLast().eventSequence(),
-                                    hasMore);
-                } catch (IllegalArgumentException | NullPointerException failure) {
-                    throw new CorruptEventPage();
-                }
-                return new Page(page);
-            }
-        }
     }
 
     private static Result fromSqlFailure(SQLException failure, long afterSequence) {
