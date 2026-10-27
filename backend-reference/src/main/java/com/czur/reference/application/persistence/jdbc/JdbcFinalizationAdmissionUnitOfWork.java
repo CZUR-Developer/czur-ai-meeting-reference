@@ -33,7 +33,10 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * 单连接实现的最终收口 Admission 工作单元。
+ * 不可达，勿在 MySQL 5.7 装配；保留原因：仅被 backend-reference 的 legacy 全量音频装配引用，
+ * 客户端直连模型装配不会构造本类。
+ *
+ * <p>单连接实现的最终收口 Admission 工作单元。
  *
  * <p>首次路径只取得一条连接并按固定顺序完成：锁定 Meeting、
  * 核对 owner/Profile/execution fact、锁定主 Reservation、保存 V008、从 V008 保存

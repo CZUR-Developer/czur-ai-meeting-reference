@@ -36,7 +36,10 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * 单连接实现的最终收口 Completion 工作单元。
+ * 不可达，勿在 MySQL 5.7 装配；保留原因：仅被 backend-reference 的 legacy 全量进程引用，
+ * 客户端直连模型装配不会构造本类。
+ *
+ * <p>单连接实现的最终收口 Completion 工作单元。
  *
  * <p>写路径固定使用 Meeting -> Workflow -> 排序 Artifact metadata -> Manifest ->
  * Meeting CAS -> Workflow terminal 的锁序。成功和死信路径都只执行一次数据库提交；

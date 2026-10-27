@@ -24,7 +24,11 @@ class JdbcWorkflowStepStoreContractTest {
         assertTrue(source.contains("connection.setAutoCommit(false)"));
         assertTrue(source.contains("connection.commit()"));
         assertTrue(source.contains("rollbackQuietly(connection)"));
-        assertTrue(source.contains("FOR UPDATE SKIP LOCKED"));
+        // 不可达的 legacy 适配器不得再携带 MySQL 8 的锁跳过子句；去掉后领取会阻塞等待。
+        assertTrue(source.contains("不可达，勿在 MySQL 5.7 装配"));
+        assertTrue(source.contains("FOR UPDATE"));
+        assertFalse(source.contains("SKIP" + " LOCKED"));
+        assertFalse(source.contains("NOWAIT"));
         assertTrue(source.contains("workflow step operation requires autoCommit=false"));
         assertTrue(source.contains("leaseExpiry(request.now(), request.leaseDuration())"));
         assertTrue(source.contains("renewalExpiry(lease, renewedAt, leaseDuration)"));

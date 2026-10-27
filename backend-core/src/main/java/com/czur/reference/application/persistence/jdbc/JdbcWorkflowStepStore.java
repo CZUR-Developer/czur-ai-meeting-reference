@@ -20,7 +20,12 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * {@link WorkflowStepStore} 参考实现。
+ * 不可达，勿在 MySQL 5.7 装配；保留原因：旧全量收尾链路和源码契约测试仍引用，
+ * 删除会连带拆掉该 legacy 链路的收尾工作单元，超出当前客户端直连模型装配的清理范围。
+ *
+ * <p>{@link WorkflowStepStore} 参考实现。当前交付只支持
+ * {@code ReferenceClientMeetingProcess -> MeetingHttpAssembly.startClientModel}，
+ * 该装配不构造本类；本类的方法只被 legacy 收尾工作单元与 Mock Worker 调用。</p>
  *
  * <p>公共方法自行取得连接并管理短事务；包可见的 connection-scoped 原语要求
  * 调用方已经关闭 auto-commit，并且绝不提交、回滚、关闭连接或另取第二个连接。
@@ -54,6 +59,11 @@ public final class JdbcWorkflowStepStore implements WorkflowStepStore {
                 next_attempt_at, lease_version, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, ?, 0, ?)
             """;
+    /**
+     * 不可达的 MySQL 5.7 兼容回退：去掉 MySQL 8 的锁跳过子句后，领取语句会阻塞
+     * 等待已锁行释放，而不是跳过它们。本类不在客户端装配路径，claim 也没有外部
+     * 调用者，因此只影响死代码；不要把这个实现接到 MySQL 5.7 的并发 Worker 上。
+     */
     private static final String CLAIM_SELECT_SQL = """
             SELECT meeting_id, step_type, step_key, checkpoint_type, canonical_payload,
                    content_digest, initial_available_at, status, attempt_count,
@@ -65,7 +75,7 @@ public final class JdbcWorkflowStepStore implements WorkflowStepStore {
                     OR (status = 'LEASED' AND lease_until <= ?))
              ORDER BY CASE WHEN status = 'PENDING' THEN next_attempt_at ELSE lease_until END,
                       meeting_id, step_type, step_key
-             FOR UPDATE SKIP LOCKED
+             FOR UPDATE
              LIMIT ?
             """;
     private static final String CLAIM_UPDATE_SQL = """

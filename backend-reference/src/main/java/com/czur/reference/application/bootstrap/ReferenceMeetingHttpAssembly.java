@@ -16,7 +16,6 @@ import com.czur.reference.application.persistence.jdbc.JdbcCompletedAudioReadine
 import com.czur.reference.application.persistence.jdbc.JdbcDurableAudioInputPort;
 import com.czur.reference.application.persistence.jdbc.JdbcFinalizationAdmissionUnitOfWork;
 import com.czur.reference.application.persistence.jdbc.JdbcMeetingArtifactContentQueryPort;
-import com.czur.reference.application.persistence.jdbc.JdbcMeetingDeletionAdmissionUnitOfWork;
 import com.czur.reference.application.persistence.jdbc.JdbcMeetingInputClosureContextPort;
 import com.czur.reference.application.persistence.jdbc.JdbcRealtimeMockSessionSpecLookup;
 import com.czur.reference.application.persistence.jdbc.JdbcRealtimeTranscriptEventPublisher;
@@ -194,7 +193,9 @@ public final class ReferenceMeetingHttpAssembly extends MeetingHttpAssembly {
         var transcripts = new RealtimeMockTranscriptRuntime(
                 new JdbcRealtimeMockSessionSpecLookup(source, config.deploymentScope()), audio,
                 new JdbcRealtimeTranscriptEventPublisher(source, clock), config.mockCapabilities(), clock);
-        return new LegacyAudioComponents(new JdbcMeetingDeletionAdmissionUnitOfWork(source, clock),
+        // 删除受理适配器已随不可达的 legacy 装配删除；此处保持端口为空，客户端装配同样
+        // 不为该路由提供实现，DELETE 仍按既有 501 语义处理。
+        return new LegacyAudioComponents(null,
                 reconciler, new RealtimeAudioIngress(starts, audio), transcripts,
                 JdbcMeetingArtifactContentQueryPort::matchesLegacy);
     }
