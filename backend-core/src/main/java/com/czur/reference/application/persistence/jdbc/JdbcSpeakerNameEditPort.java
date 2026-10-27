@@ -1,5 +1,6 @@
 package com.czur.reference.application.persistence.jdbc;
 
+import com.czur.reference.application.artifact.MeetingBodyArtifactBudget;
 import com.czur.reference.application.command.MeetingCommandContext;
 import com.czur.reference.application.port.MeetingManifest;
 import com.czur.reference.application.port.artifact.ArtifactStore;
@@ -27,8 +28,14 @@ public final class JdbcSpeakerNameEditPort implements SpeakerNameEditPort {
 
     public JdbcSpeakerNameEditPort(JdbcDatabaseContext database, ArtifactStore store,
             SpeakerIdentityEnrollmentPort enrollment) {
+        this(database, store, enrollment, MeetingBodyArtifactBudget.LEGACY_MAX_BYTES);
+    }
+
+    /** 名称编辑会重发同一正文产物，必须沿用部署的发布／读取预算。 */
+    public JdbcSpeakerNameEditPort(JdbcDatabaseContext database, ArtifactStore store,
+            SpeakerIdentityEnrollmentPort enrollment, long maxClientArtifactBytes) {
         this.database = database;
-        this.artifacts = new JdbcClientResultArtifacts(store, database.engine());
+        this.artifacts = new JdbcClientResultArtifacts(store, database.engine(), maxClientArtifactBytes);
         this.enrollment = enrollment;
     }
 

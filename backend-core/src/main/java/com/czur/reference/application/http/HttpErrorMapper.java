@@ -54,14 +54,34 @@ public final class HttpErrorMapper {
     private static final ObjectMapper EVENT_JSON = new ObjectMapper();
 
     private final Supplier<String> diagnosticIds;
+    private final int maxArtifactBodyBytes;
 
     public HttpErrorMapper() {
         this(() -> UUID.randomUUID().toString());
     }
 
-    /** 测试可注入固定 opaque ID；生产生成器不得拼接业务标识。 */
+    /**
+     * 测试可注入固定 opaque ID；生产生成器不得拼接业务标识。
+     *
+     * <p>正文产物下载仍使用普通 1 MiB 响应上限；部署装配应改用带预算的
+     * 构造器，避免读取端口已允许的正文在响应编码处再次被截断。</p>
+     */
     public HttpErrorMapper(Supplier<String> diagnosticIds) {
+        this(diagnosticIds, HttpResponse.MAX_BODY_BYTES);
+    }
+
+    /** 仅放宽会议正文产物下载的单条响应上限，其他错误与查询响应保持原限制。 */
+    public HttpErrorMapper(int maxArtifactBodyBytes) {
+        this(() -> UUID.randomUUID().toString(), maxArtifactBodyBytes);
+    }
+
+    /** 同一错误映射器同时携带 opaque ID 生成器与正文产物响应上限。 */
+    public HttpErrorMapper(Supplier<String> diagnosticIds, int maxArtifactBodyBytes) {
         this.diagnosticIds = Objects.requireNonNull(diagnosticIds, "diagnosticIds");
+        if (maxArtifactBodyBytes <= 0) {
+            throw new IllegalArgumentException("artifact body limit must be positive");
+        }
+        this.maxArtifactBodyBytes = maxArtifactBodyBytes;
     }
 
     public HttpResponse query(MeetingQueryPort.Result result) {
@@ -363,7 +383,9 @@ public final class HttpErrorMapper {
         Objects.requireNonNull(result, "result");
         return switch (result) {
             case MeetingArtifactContentPort.Found found ->
-                    HttpResponse.json(200, new String(found.content(), StandardCharsets.UTF_8));
+                    HttpResponse.json(200,
+                            new String(found.content(), StandardCharsets.UTF_8),
+                            maxArtifactBodyBytes);
             case MeetingArtifactContentPort.Pending pending ->
                     success(202, meetingStatus(pending.meetingStatus()));
             case MeetingArtifactContentPort.NotFound ignored -> error(404,

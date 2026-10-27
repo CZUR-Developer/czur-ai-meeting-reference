@@ -90,6 +90,21 @@ class HttpTransportContractTest {
     }
 
     @Test
+    void explicitEndpointBudgetDoesNotOpenTheGlobalResponseLimit() {
+        String large = "会".repeat(400_000); // 约 1.2 MB UTF-8
+        assertThrows(IllegalArgumentException.class,
+                () -> new HttpResponse(200, Map.of(), large));
+
+        HttpResponse response = new HttpResponse(200, Map.of(), large, 2 * 1024 * 1024);
+        assertEquals(2 * 1024 * 1024, response.maxBodyBytes());
+        assertEquals(large, response.body());
+        assertThrows(IllegalArgumentException.class,
+                () -> new HttpResponse(200, Map.of(), large, 1024 * 1024));
+        assertThrows(IllegalArgumentException.class,
+                () -> new HttpResponse(200, Map.of(), "", 0));
+    }
+
+    @Test
     void errorEnvelopeContainsExactlyOpenApiErrorFields() throws Exception {
         HttpErrorEnvelope envelope = new HttpErrorEnvelope(
                 HttpErrorMapper.SPEC_VERSION,

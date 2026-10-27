@@ -1,5 +1,6 @@
 package com.czur.reference.application.persistence.jdbc;
 
+import com.czur.reference.application.artifact.MeetingBodyArtifactBudget;
 import com.czur.reference.application.port.MeetingArtifactContentPort;
 import com.czur.reference.application.port.MeetingArtifactMediaPort;
 import com.czur.reference.application.port.MeetingManifest;
@@ -31,9 +32,10 @@ import java.util.logging.Logger;
  * 在任何内容读取前，先由既有 {@link MeetingManifestPort} 对该会议执行 genTime、
  * 删除撤权和最新 Manifest 完整性判断，再要求公开 ArtifactRef 与 READY descriptor
  * 完全相符。Store 仅接收数据库持有的不透明 binding；旧格式 正文维持 4096 字节
- * 上限，客户端字幕正文上限为 1 MiB。实际字节还要通过 size、SHA-256 校验；
- * 旧格式 结果沿用 canonical JSON 校验。本端口不拥有 DataSource 或 ArtifactStore
- * 生命周期，也不把正文或底层异常写入日志。</p>
+ * 上限，客户端字幕正文上限与发布、HTTP 响应共用
+ * {@link MeetingBodyArtifactBudget} 推导的部署预算。实际字节还要通过 size、
+ * SHA-256 校验；旧格式 结果沿用 canonical JSON 校验。本端口不拥有 DataSource
+ * 或 ArtifactStore 生命周期，也不把正文或底层异常写入日志。</p>
  */
 public class JdbcArtifactContentQueryPort
         implements MeetingArtifactContentPort, MeetingArtifactMediaPort {
@@ -46,13 +48,13 @@ public class JdbcArtifactContentQueryPort
                 'search_path', format('%I, pg_temp', current_schema()), TRUE)
             """;
     private static final int MAX_LEGACY_CONTENT_BYTES = 4096;
-    private static final int MAX_CLIENT_CONTENT_BYTES = 1024 * 1024;
 
     private final DataSource dataSource;
     private final JdbcDatabaseEngine engine;
     private final MeetingManifestPort manifestPort;
     private final ArtifactStore artifactStore;
     private final LegacyArtifactValidator legacyValidator;
+    private final int maxClientContentBytes;
 
     /**
      * 可选旧产物格式校验；共享读取器不认识参考 Mock 的数据格式。
@@ -68,30 +70,63 @@ public class JdbcArtifactContentQueryPort
             DataSource dataSource,
             MeetingManifestPort manifestPort,
             ArtifactStore artifactStore) {
-        this(dataSource, JdbcDatabaseEngine.MYSQL, manifestPort, artifactStore, null);
+        this(dataSource, JdbcDatabaseEngine.MYSQL, manifestPort, artifactStore, null,
+                MeetingBodyArtifactBudget.LEGACY_MAX_BYTES);
     }
 
     /** 同一 Context／Manifest／Store 读取原产物字节；不另建池或产物状态机。 */
     public JdbcArtifactContentQueryPort(JdbcDatabaseContext database,
             MeetingManifestPort manifestPort, ArtifactStore artifactStore) {
-        this(database.dataSource(), database.engine(), manifestPort, artifactStore, null);
+        this(database.dataSource(), database.engine(), manifestPort, artifactStore, null,
+                MeetingBodyArtifactBudget.LEGACY_MAX_BYTES);
     }
 
     /** 显式注入参考／部署方旧格式解析器；不改变存储资源所有权。 */
     public JdbcArtifactContentQueryPort(JdbcDatabaseContext database,
             MeetingManifestPort manifestPort, ArtifactStore artifactStore,
             LegacyArtifactValidator legacyValidator) {
-        this(database.dataSource(), database.engine(), manifestPort, artifactStore, legacyValidator);
+        this(database.dataSource(), database.engine(), manifestPort, artifactStore,
+                legacyValidator, MeetingBodyArtifactBudget.LEGACY_MAX_BYTES);
+    }
+
+    /**
+     * 显式注入与发布、HTTP 响应相同的会议正文预算；旧格式仍只读 4096 字节。
+     */
+    public JdbcArtifactContentQueryPort(JdbcDatabaseContext database,
+            MeetingManifestPort manifestPort, ArtifactStore artifactStore,
+            LegacyArtifactValidator legacyValidator, long maxClientContentBytes) {
+        this(database.dataSource(), database.engine(), manifestPort, artifactStore,
+                legacyValidator, maxClientContentBytes);
+    }
+
+    /** 显式预算入口；调用方必须与发布和响应使用同一部署预算。 */
+    public JdbcArtifactContentQueryPort(JdbcDatabaseContext database,
+            MeetingManifestPort manifestPort, ArtifactStore artifactStore,
+            long maxClientContentBytes) {
+        this(database.dataSource(), database.engine(), manifestPort, artifactStore, null,
+                maxClientContentBytes);
     }
 
     protected JdbcArtifactContentQueryPort(DataSource dataSource, JdbcDatabaseEngine engine,
             MeetingManifestPort manifestPort, ArtifactStore artifactStore,
             LegacyArtifactValidator legacyValidator) {
+        this(dataSource, engine, manifestPort, artifactStore, legacyValidator,
+                MeetingBodyArtifactBudget.LEGACY_MAX_BYTES);
+    }
+
+    protected JdbcArtifactContentQueryPort(DataSource dataSource, JdbcDatabaseEngine engine,
+            MeetingManifestPort manifestPort, ArtifactStore artifactStore,
+            LegacyArtifactValidator legacyValidator, long maxClientContentBytes) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
         this.engine = Objects.requireNonNull(engine, "engine");
         this.manifestPort = Objects.requireNonNull(manifestPort, "manifestPort");
         this.artifactStore = artifactStore;
         this.legacyValidator = legacyValidator;
+        if (maxClientContentBytes <= MAX_LEGACY_CONTENT_BYTES
+                || maxClientContentBytes >= Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("client content budget is invalid");
+        }
+        this.maxClientContentBytes = (int) maxClientContentBytes;
     }
 
     @Override
@@ -148,9 +183,10 @@ public class JdbcArtifactContentQueryPort
                     return new MeetingArtifactContentPort.Conflict();
                 }
                 int limit = request.artifactId().startsWith("art_client_")
-                        ? MAX_CLIENT_CONTENT_BYTES : MAX_LEGACY_CONTENT_BYTES;
+                        ? maxClientContentBytes : MAX_LEGACY_CONTENT_BYTES;
                 byte[] bytes = read.content().readNBytes(limit + 1);
-                if (bytes.length != expected.content().size()
+                // 多读 1 字节用于识别超限；上限本身包含 limit 字节，不能接受 limit+1。
+                if (bytes.length > limit || bytes.length != expected.content().size()
                         || !expected.content().checksum().equals(checksum(bytes))) {
                     return new MeetingArtifactContentPort.Conflict();
                 }

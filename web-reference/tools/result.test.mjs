@@ -541,3 +541,25 @@ test('READY_WITH_WARNINGS 清单展示告警但隐藏姓名编辑，READY 清单
   assert.equal(readyPage.nodes['#result-warnings'].hidden, true);
   assert.equal(readyPage.nodes['#result-status'].hidden, true);
 });
+
+test('超过旧1MiB的最终正文仍能读取并渲染，不整页中断', async () => {
+  // 旧后端在 1 MiB 处 409；这里验证页面自身没有第二套大小限制，读到即可渲染。
+  const text = '会'.repeat(400_000); // 约 1.2 MB UTF-8
+  const transcript = { schemaVersion: 'client-transcript/v1', artifactType: 'transcript.final',
+    text, segments: [{ segmentId: 'long-1', startMs: 0, text }] };
+  const manifest = { title: '长会议', artifacts: [
+    { type: 'transcript.final', status: 'READY', artifactId: 'art_long' }
+  ] };
+  const fetcher = async url => ({ ok: true, status: 200,
+    json: async () => url.includes('/manifest') ? manifest : transcript });
+  const result = await readFinalTranscript('http://api.test', 'mtg_long', '123', fetcher);
+  assert.equal(result.text.length, text.length);
+
+  const page = identityTestPage();
+  renderFinalResult(result, page);
+  assert.equal(page.nodes['#result'].hidden, false);
+  assert.equal(page.nodes['#transcript-segments'].hidden, false);
+  const rendered = page.nodes['#transcript-segments'].children[0];
+  assert.equal(rendered.children[1].textContent.length, text.length);
+  assert.equal(page.nodes['#status'].textContent, '结果已生成');
+});

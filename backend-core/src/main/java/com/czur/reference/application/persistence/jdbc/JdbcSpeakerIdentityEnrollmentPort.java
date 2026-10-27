@@ -1,5 +1,6 @@
 package com.czur.reference.application.persistence.jdbc;
 
+import com.czur.reference.application.artifact.MeetingBodyArtifactBudget;
 import com.czur.reference.application.command.MeetingCommandContext;
 import com.czur.reference.application.port.MeetingManifest;
 import com.czur.reference.application.port.artifact.ArtifactStore;
@@ -32,10 +33,16 @@ public final class JdbcSpeakerIdentityEnrollmentPort implements SpeakerIdentityE
 
     public JdbcSpeakerIdentityEnrollmentPort(JdbcDatabaseContext database, ArtifactStore store,
             SpeakerIdentityProvider provider) {
+        this(database, store, provider, MeetingBodyArtifactBudget.LEGACY_MAX_BYTES);
+    }
+
+    /** 身份产物沿用与正文相同的发布预算，避免第二条发布路径绕过上限。 */
+    public JdbcSpeakerIdentityEnrollmentPort(JdbcDatabaseContext database, ArtifactStore store,
+            SpeakerIdentityProvider provider, long maxClientArtifactBytes) {
         this.database = Objects.requireNonNull(database, "database");
         this.provider = Objects.requireNonNull(provider, "provider");
         this.artifacts = new JdbcClientResultArtifacts(Objects.requireNonNull(store, "store"),
-                database.engine());
+                database.engine(), maxClientArtifactBytes);
     }
 
     @Override

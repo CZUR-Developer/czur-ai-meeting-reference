@@ -2,6 +2,7 @@ package com.czur.reference.application.persistence.jdbc;
 
 import com.czur.aimeeting.contract.realtime.v1.TranscriptUpsert;
 import com.czur.aimeeting.contract.realtime.v1.TranslationUpsert;
+import com.czur.reference.application.artifact.MeetingBodyArtifactBudget;
 import com.czur.reference.application.command.MeetingAccessGuard;
 import com.czur.reference.application.command.MeetingCommandContext;
 import com.czur.reference.application.port.AbandonedMeetingFinalizer;
@@ -88,6 +89,7 @@ public final class JdbcClientMeetingResultFinalizer
     private final ArtifactStore artifactStore;
     private final EntitlementProvider entitlementProvider;
     private final SpeakerIdentityProvider speakerIdentity;
+    private final long maxClientArtifactBytes;
 
     public JdbcClientMeetingResultFinalizer(DataSource dataSource,
             FinalizationReceiptGenerator receipts, Clock clock, ArtifactStore artifactStore) {
@@ -117,7 +119,7 @@ public final class JdbcClientMeetingResultFinalizer
             FinalizationReceiptGenerator receipts, Clock clock, ArtifactStore artifactStore,
             EntitlementProvider entitlementProvider) {
         this(database.dataSource(), database.engine(), receipts, clock, artifactStore,
-                entitlementProvider, null);
+                entitlementProvider, null, MeetingBodyArtifactBudget.LEGACY_MAX_BYTES);
     }
 
     /**
@@ -128,18 +130,32 @@ public final class JdbcClientMeetingResultFinalizer
             FinalizationReceiptGenerator receipts, Clock clock, ArtifactStore artifactStore,
             EntitlementProvider entitlementProvider, SpeakerIdentityProvider speakerIdentity) {
         this(database.dataSource(), database.engine(), receipts, clock, artifactStore,
-                entitlementProvider, speakerIdentity);
+                entitlementProvider, speakerIdentity,
+                MeetingBodyArtifactBudget.LEGACY_MAX_BYTES);
+    }
+
+    /**
+     * 显式注入与读取端口、HTTP 响应相同的会议正文预算；旧构造器沿用兼容下限。
+     */
+    public JdbcClientMeetingResultFinalizer(JdbcDatabaseContext database,
+            FinalizationReceiptGenerator receipts, Clock clock, ArtifactStore artifactStore,
+            EntitlementProvider entitlementProvider, SpeakerIdentityProvider speakerIdentity,
+            long maxClientArtifactBytes) {
+        this(database.dataSource(), database.engine(), receipts, clock, artifactStore,
+                entitlementProvider, speakerIdentity, maxClientArtifactBytes);
     }
 
     private JdbcClientMeetingResultFinalizer(DataSource dataSource, JdbcDatabaseEngine engine,
             FinalizationReceiptGenerator receipts, Clock clock, ArtifactStore artifactStore,
             EntitlementProvider entitlementProvider) {
-        this(dataSource, engine, receipts, clock, artifactStore, entitlementProvider, null);
+        this(dataSource, engine, receipts, clock, artifactStore, entitlementProvider, null,
+                MeetingBodyArtifactBudget.LEGACY_MAX_BYTES);
     }
 
     private JdbcClientMeetingResultFinalizer(DataSource dataSource, JdbcDatabaseEngine engine,
             FinalizationReceiptGenerator receipts, Clock clock, ArtifactStore artifactStore,
-            EntitlementProvider entitlementProvider, SpeakerIdentityProvider speakerIdentity) {
+            EntitlementProvider entitlementProvider, SpeakerIdentityProvider speakerIdentity,
+            long maxClientArtifactBytes) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
         this.engine = Objects.requireNonNull(engine, "engine");
         this.receipts = Objects.requireNonNull(receipts, "receipts");
@@ -148,6 +164,10 @@ public final class JdbcClientMeetingResultFinalizer
         this.artifactStore = artifactStore;
         this.entitlementProvider = entitlementProvider;
         this.speakerIdentity = speakerIdentity;
+        if (maxClientArtifactBytes <= 0) {
+            throw new IllegalArgumentException("client result budget must be positive");
+        }
+        this.maxClientArtifactBytes = maxClientArtifactBytes;
     }
 
     /**
@@ -753,8 +773,8 @@ public final class JdbcClientMeetingResultFinalizer
     private MeetingManifest.ArtifactRef publishReady(Connection connection, String artifactId,
             String meetingId, String type, String language, ObjectNode body)
             throws ArtifactStoreException, SQLException {
-        return new JdbcClientResultArtifacts(artifactStore, engine).publishReady(connection,
-                artifactId, meetingId, type, language, 1, body);
+        return new JdbcClientResultArtifacts(artifactStore, engine, maxClientArtifactBytes)
+                .publishReady(connection, artifactId, meetingId, type, language, 1, body);
     }
 
     /** 本场输入已在 Stop 冻结；读取完释放连接后再执行可选后处理。 */

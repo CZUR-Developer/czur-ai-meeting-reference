@@ -1,5 +1,6 @@
 package com.czur.reference.application.persistence.jdbc;
 
+import com.czur.reference.application.artifact.MeetingBodyArtifactBudget;
 import com.czur.reference.application.artifact.filesystem.PersistentFileSystemMockArtifactStore;
 import com.czur.reference.application.bootstrap.ReferenceMeetingDeploymentConfig;
 import com.czur.reference.application.bootstrap.ReferenceMeetingHttpAssembly;
@@ -7,6 +8,9 @@ import com.czur.reference.application.command.MeetingCommandContext;
 import com.czur.reference.application.command.MeetingPermissions;
 import com.czur.reference.application.entitlement.referencedev.ReferenceDevEntitlementPolicy;
 import com.czur.reference.application.http.MeetingJdkHttpServer;
+import com.czur.reference.application.manifest.ManifestResultAccessPolicy;
+import com.czur.reference.application.port.MeetingArtifactContentPort;
+import com.czur.reference.application.port.artifact.ArtifactStoreException;
 import com.czur.reference.application.port.entitlement.AuthorizeStartRequest;
 import com.czur.reference.application.port.entitlement.CancelReservationRequest;
 import com.czur.reference.application.port.entitlement.CommitUsageRequest;
@@ -29,12 +33,14 @@ import com.czur.reference.domain.capability.CapabilityDescriptor;
 import com.czur.reference.protocol.json.MeetingManifestJson;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.RandomAccessFile;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -52,6 +58,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -496,6 +503,149 @@ class ReferenceMeetingMysqlClientHttpAssemblyIntegrationTest {
                     .path("segments").get(0).path("speakerDisplayName").asText());
             assertSentinelUnchanged();
         }
+    }
+
+    /**
+     * 复现长会议正文超过旧 1 MiB 读取/响应上限的场景：同一部署预算允许发布、
+     * 读取端口和真实 HTTP 响应完整取回，同时保留 size/SHA-256 拒绝能力。
+     */
+    @Test
+    void longTranscriptBeyondLegacyMegabyteIsReadableThroughPortAndHttp() throws Exception {
+        var config = config();
+        long bodyBudget = MeetingBodyArtifactBudget
+                .forMaxDurationMs(config.runtimeLimits().maxMeetingDurationMs());
+        assertTrue(bodyBudget > 1024L * 1024, "门禁要求部署预算高于旧 1 MiB 上限");
+        var store = new PersistentFileSystemMockArtifactStore(artifactRoot, bodyBudget);
+        IdentityProvider identity = request -> {
+            assertEquals("m2-c-audience", request.audience());
+            assertEquals("m2-c-client", request.clientId());
+            return IdentityProviderResult.success(verifiedIdentity());
+        };
+        var policy = new ReferenceDevEntitlementPolicy(config.entitlement(), CLOCK,
+                new EntitlementIdGenerator() {
+                    @Override public String newGrantId() { return "grant_" + UUID.randomUUID(); }
+                    @Override public String newReservationId() { return "reservation_" + UUID.randomUUID(); }
+                    @Override public String newLeaseToken() { return "lease_" + UUID.randomUUID(); }
+                });
+        ModelSessionIssuer issuer = request -> new ModelSessionIssuer.Session(
+                "sample-json-ws", "ws://model.example.invalid/long-body",
+                NOW.plusSeconds(300), Map.of("taskId", "long-body-task"));
+        try (var assembly = ReferenceMeetingHttpAssembly.startClientModel(config, CLOCK,
+                store, identity, policy, issuer, java.util.function.UnaryOperator.identity());
+             var network = assembly.newJdkHttpServer(new InetSocketAddress("127.0.0.1", 0));
+             var client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2))
+                     .version(HttpClient.Version.HTTP_1_1).build()) {
+            network.start();
+            int port = network.address().getPort();
+            var created = exchange(client, port, "POST", "/v1/meetings", createBody(),
+                    "long-body-create-key-123456789", true);
+            assertEquals(201, created.statusCode());
+            String meetingId = json(created).path("meetingId").asText();
+            String meetingPath = "/v1/meetings/" + meetingId;
+            assertEquals(200, exchange(client, port, "POST", meetingPath + ":modelSession",
+                    "", null, true).statusCode());
+            assertEquals(200, exchange(client, port, "POST", meetingPath + ":startClient",
+                    "", null, true).statusCode());
+
+            // 每段 60k 个三字节中文；最终转写同时保存顶层 text 和 segments[].text，
+            // 约 1.8 MB，既超过旧 1 MiB，又低于本部署 2 MiB 预算。
+            StringBuilder expectedText = new StringBuilder();
+            for (int index = 0; index < 5; index++) {
+                String text = String.format("%05d", index) + "会".repeat(60_000);
+                append(client, port, meetingPath + "/events:append",
+                        transcript("long-" + index, index + 1L, "long-" + index, 1, text, true));
+                if (index > 0) expectedText.append('\n');
+                expectedText.append(text);
+            }
+            assertEquals(201, exchange(client, port, "POST", meetingPath + "/usage:submit",
+                    "{\"audioDurationMs\":1000}", null, true).statusCode());
+            String stopKey = "long-body-stop-key-123456789";
+            var stopped = exchange(client, port, "POST", meetingPath + ":stop",
+                    "", stopKey, true);
+            assertEquals(200, stopped.statusCode());
+            assertEquals("READY", json(stopped).path("state").asText());
+
+            String generation = "?genTime=" + NOW.toEpochMilli();
+            var manifest = MeetingManifestJson.decode(exchange(client, port, "GET",
+                    meetingPath + "/manifest" + generation, "", null, false).body());
+            var reference = manifest.artifacts().stream()
+                    .filter(item -> "transcript.final".equals(item.type()))
+                    .findFirst().orElseThrow();
+
+            // 读取端口直取：完整字节、Manifest size/checksum 仍一致。
+            var manifestPolicy = new ManifestResultAccessPolicy(CLOCK,
+                    config.resultLinkTtl().orElseThrow());
+            var manifestPort = new JdbcMeetingManifestQueryPort(
+                    assembly.databaseContext(), manifestPolicy);
+            var contentPort = new JdbcArtifactContentQueryPort(
+                    assembly.databaseContext(), manifestPort, store, bodyBudget);
+            var found = assertInstanceOf(MeetingArtifactContentPort.Found.class,
+                    contentPort.get(new MeetingArtifactContentPort.Request(
+                            reference.artifactId(), NOW.toEpochMilli())));
+            byte[] published = found.content();
+            assertTrue(published.length > 1024 * 1024, "正文必须真正超过旧 1 MiB 上限");
+            assertEquals(reference.size(), published.length);
+            assertEquals(reference.checksum(), checksum(published));
+            JsonNode publishedJson = JSON.readTree(published);
+            assertEquals(expectedText.toString(), publishedJson.path("text").asText());
+            assertEquals(5, publishedJson.path("segments").size());
+
+            // 真实 HTTP 响应：同样完整取回，不再在 1 MiB 处 500/截断。
+            var download = exchange(client, port, "GET", "/v1/artifacts/"
+                    + reference.artifactId() + generation, "", null, false);
+            assertEquals(200, download.statusCode());
+            assertArrayEquals(published,
+                    download.body().getBytes(StandardCharsets.UTF_8));
+            assertEquals(expectedText.toString(),
+                    json(download).path("text").asText());
+
+            // 比实际正文少 1 字节仍拒绝读取，不能为了长正文去掉长度/摘要一致性校验。
+            var strictPort = new JdbcArtifactContentQueryPort(
+                    assembly.databaseContext(), manifestPort, store, published.length - 1L);
+            assertInstanceOf(MeetingArtifactContentPort.Conflict.class,
+                    strictPort.get(new MeetingArtifactContentPort.Request(
+                            reference.artifactId(), NOW.toEpochMilli())));
+
+            // 发布端同样在写 Store intent 前拒绝超过部署预算的正文。
+            try (Connection connection = assembly.databaseContext()
+                    .dataSource().getConnection()) {
+                var strictArtifacts = new JdbcClientResultArtifacts(
+                        store, JdbcDatabaseEngine.MYSQL, bodyBudget);
+                ObjectNode oversized = JSON.createObjectNode()
+                        .put("schemaVersion", "client-transcript/v1")
+                        .put("artifactType", "transcript.final")
+                        .put("text", "x".repeat((int) bodyBudget));
+                var failure = assertThrows(ArtifactStoreException.class,
+                        () -> strictArtifacts.publishReady(connection, "art_client_oversized",
+                                meetingId, "transcript.final", "zh-CN", 1, oversized));
+                assertEquals(ArtifactStoreException.Code.CONTENT_TOO_LARGE, failure.code());
+                assertFalse(failure.retryable());
+            }
+
+            // 物理字节被篡改后仍必须 409，而不是返回与 Manifest 不一致的正文。
+            Path object = null;
+            try (var paths = Files.walk(artifactRoot.resolve("objects"))) {
+                object = paths.filter(Files::isRegularFile)
+                        .filter(path -> path.getFileName().toString().endsWith(".blob"))
+                        .filter(path -> {
+                            try { return Files.size(path) == published.length; }
+                            catch (java.io.IOException failure) { return false; }
+                        }).findFirst().orElseThrow();
+            }
+            try (var file = new RandomAccessFile(object.toFile(), "rw")) {
+                file.seek(0);
+                int first = file.read();
+                file.seek(0);
+                file.write(first ^ 0xFF);
+            }
+            assertEquals(409, exchange(client, port, "GET", "/v1/artifacts/"
+                    + reference.artifactId() + generation, "", null, false).statusCode());
+        }
+    }
+
+    private static String checksum(byte[] content) throws Exception {
+        return "sha256:" + HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(content));
     }
 
     private String completeSpeakerMeeting(HttpClient client, int port, String suffix) throws Exception {

@@ -60,6 +60,7 @@ import com.czur.reference.application.port.MeetingArtifactContentPort;
 import com.czur.reference.application.port.MeetingArtifactMediaPort;
 import com.czur.reference.application.port.artifact.ArtifactStore;
 import com.czur.reference.application.artifact.AudioArtifactBudget;
+import com.czur.reference.application.artifact.MeetingBodyArtifactBudget;
 import com.czur.reference.application.port.ProductProfileCatalog;
 import com.czur.reference.application.realtime.RealtimeAudioIngress;
 import com.czur.reference.application.realtime.RealtimeTranscriptSessions;
@@ -124,6 +125,7 @@ public class MeetingHttpAssembly implements AutoCloseable {
     private final EntitlementProvider entitlementProvider;
     private final AbandonedMeetingFinalizer abandonedMeetingFinalizer;
     private final long audioArtifactMaxBytes;
+    private final long bodyArtifactMaxBytes;
     private final AtomicBoolean closed;
 
     private MeetingHttpAssembly(
@@ -142,7 +144,7 @@ public class MeetingHttpAssembly implements AutoCloseable {
             MeetingArtifactHttpEndpoint artifactEndpoint,
             SpeakerIdentityEnrollmentEndpoint speakerEnrollment, SpeakerNameEditEndpoint speakerEditing,
             MeetingHeartbeatEndpoint heartbeat,
-            long audioArtifactMaxBytes) {
+            long audioArtifactMaxBytes, long bodyArtifactMaxBytes) {
         this.closed = new AtomicBoolean();
         this.database = database;
         this.databaseContext = Objects.requireNonNull(databaseContext, "databaseContext");
@@ -164,6 +166,7 @@ public class MeetingHttpAssembly implements AutoCloseable {
         this.abandonedMeetingFinalizer = Objects.requireNonNull(
                 abandonedMeetingFinalizer, "abandonedMeetingFinalizer");
         this.audioArtifactMaxBytes = audioArtifactMaxBytes;
+        this.bodyArtifactMaxBytes = bodyArtifactMaxBytes;
     }
 
     /** 薄兼容facade共享同一组资源和关闭标记，不创建第二份运行时或数据库池。 */
@@ -186,6 +189,7 @@ public class MeetingHttpAssembly implements AutoCloseable {
         this.entitlementProvider = source.entitlementProvider;
         this.abandonedMeetingFinalizer = source.abandonedMeetingFinalizer;
         this.audioArtifactMaxBytes = source.audioArtifactMaxBytes;
+        this.bodyArtifactMaxBytes = source.bodyArtifactMaxBytes;
         this.closed = source.closed;
     }
 
@@ -402,6 +406,9 @@ public class MeetingHttpAssembly implements AutoCloseable {
         JdbcDatabaseContext databaseContext = clientModel ? JdbcDatabaseContext.start(config.database())
                 : database.databaseContext();
         boolean realtimeRenewEnabled = !clientModel && config.realtimeRenewEnabled();
+        // 发布、读取、HTTP 响应共用同一部署预算；按最长会议时长推导，不授权无界正文。
+        long bodyArtifactMaxBytes = MeetingBodyArtifactBudget
+                .forMaxDurationMs(config.runtimeLimits().maxMeetingDurationMs());
         MeetingHttpRuntime runtime = null;
         try {
             if (realtimeRenewEnabled) {
@@ -443,7 +450,7 @@ public class MeetingHttpAssembly implements AutoCloseable {
             EntitlementProvider entitlement = Objects.requireNonNull(
                     entitlementProviderDecorator.apply(jdbcEntitlement),
                     "entitlementProviderDecorator result");
-            var errors = new HttpErrorMapper();
+            var errors = new HttpErrorMapper(Math.toIntExact(bodyArtifactMaxBytes));
             var referenceLogin = login;
             var decoder = new ReferenceMeetingHttpRequestDecoder(
                     config.audience(), config.clientId());
@@ -473,7 +480,7 @@ public class MeetingHttpAssembly implements AutoCloseable {
             // 用量结算边界只有一份实现；宿主不得另造并行状态机。
             var clientResultFinalizer = new JdbcClientMeetingResultFinalizer(
                     databaseContext, ids::newReceipt, clock, artifactStore, entitlement,
-                    speakerIdentity);
+                    speakerIdentity, bodyArtifactMaxBytes);
             var stopService = new AuthenticatedMeetingStopApplicationService(
                     config.deploymentScope(), identity, stop, query, inputReconciler,
                     clientResultFinalizer);
@@ -495,7 +502,8 @@ public class MeetingHttpAssembly implements AutoCloseable {
             JdbcArtifactContentQueryPort artifactQuery = manifest != null
                     ? new JdbcArtifactContentQueryPort(
                             databaseContext, manifest, artifactStore,
-                            legacy == null ? null : legacy.artifactValidator()) : null;
+                            legacy == null ? null : legacy.artifactValidator(),
+                            bodyArtifactMaxBytes) : null;
             MeetingArtifactContentPort artifact = artifactQuery;
             MeetingArtifactMediaPort artifactMedia = artifactQuery;
             // REST 补拉和后续 WSS 恢复共用 meeting_event；不建立第二套事件事实源。
@@ -552,7 +560,8 @@ public class MeetingHttpAssembly implements AutoCloseable {
                             login == null ? "EXTERNAL" : "DEPLOYMENT_LOGIN",
                             modelSessionIssuer == null ? "DEFAULT" : "EXTERNAL", clientModel});
             var enrollment = speakerAvailable
-                    ? new JdbcSpeakerIdentityEnrollmentPort(databaseContext, artifactStore, speakerIdentity) : null;
+                    ? new JdbcSpeakerIdentityEnrollmentPort(databaseContext, artifactStore,
+                            speakerIdentity, bodyArtifactMaxBytes) : null;
             return new MeetingHttpAssembly(database, databaseContext, config.deploymentScope(),
                     runtime, resolver, errors,
                     realtimeRenewEnabled, realtimeVerifier, realtimeIngress,
@@ -564,14 +573,16 @@ public class MeetingHttpAssembly implements AutoCloseable {
                             : new MeetingArtifactHttpEndpoint(clientInput, artifactMedia, errors),
                     enrollment == null ? null : new SpeakerIdentityEnrollmentEndpoint(enrollment, errors),
                     speakerEditingEnabled ? new SpeakerNameEditEndpoint(
-                            new JdbcSpeakerNameEditPort(databaseContext, artifactStore, enrollment), errors,
+                            new JdbcSpeakerNameEditPort(databaseContext, artifactStore, enrollment,
+                                    bodyArtifactMaxBytes), errors,
                             speakerAccess) : null,
                     // 心跳与查询共用同一连接池和服务端时钟；未开启 Create 也不关闭，
                     // 以便先前创建、仍处于会中的会议继续记录开始与活跃事实。
                     new MeetingHeartbeatEndpoint(query,
                             new JdbcMeetingHeartbeatStore(databaseContext), clock,
                             config.heartbeatIntervalMs(), errors),
-                    AudioArtifactBudget.forMaxDurationMs(config.runtimeLimits().maxMeetingDurationMs()));
+                    AudioArtifactBudget.forMaxDurationMs(config.runtimeLimits().maxMeetingDurationMs()),
+                    bodyArtifactMaxBytes);
         } catch (RuntimeException | Error failure) {
             try {
                 if (runtime != null) {
