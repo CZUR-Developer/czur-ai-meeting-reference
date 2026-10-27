@@ -65,15 +65,23 @@ class ReferenceStoppedMeetingStore(context: Context) : StoppedMeetingStore {
     /** 尚未收口到 READY 的停止记录；交给 resumeFinalization 逐场推进。 */
     @Synchronized
     @Throws(IOException::class)
-    fun pendingIds(): List<String> = directory.listFiles { file -> file.isFile && file.extension == "json" }
-        ?.filter { file ->
-            val saved = read(file.nameWithoutExtension)
-            saved.isPresent && saved.get().phase() != StoppedMeetingCheckpoint.Phase.READY
-        }?.map { it.nameWithoutExtension }?.sorted().orEmpty()
+    fun pendingIds(): List<String> = storedIds().filter { checkpointId ->
+        val saved = read(checkpointId)
+        saved.isPresent && saved.get().phase() != StoppedMeetingCheckpoint.Phase.READY
+    }
 
-    /** READY 后删除停止记录；失败保留，下次启动继续。 */
+    /** 启动扫描用：全部停止记录编号，包含已 READY、等待本地清理的场次；坏文件留给单场报告。 */
     @Synchronized
-    fun delete(checkpointId: String) { file(checkpointId).delete() }
+    fun storedIds(): List<String> = directory.listFiles { file -> file.isFile && file.extension == "json" }
+        ?.map { it.nameWithoutExtension }?.sorted().orEmpty()
+
+    /** 收口后删除停止记录；失败抛错保留文件，下次扫描继续。 */
+    @Synchronized
+    @Throws(IOException::class)
+    fun delete(checkpointId: String) {
+        val target = file(checkpointId)
+        if (target.exists() && !target.delete()) throw IOException("停止记录删除失败")
+    }
 
     private fun persist(checkpoint: StoppedMeetingCheckpoint) {
         val context = checkpoint.context()

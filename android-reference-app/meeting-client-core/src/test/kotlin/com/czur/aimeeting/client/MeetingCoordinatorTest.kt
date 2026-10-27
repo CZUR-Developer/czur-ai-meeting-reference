@@ -1264,6 +1264,53 @@ class MeetingCoordinatorTest {
         } finally { dir.deleteRecursively() }
     }
 
+    @Test fun recoveryCompletesWithoutRestoppingWhenStopCheckpointIsAlreadyReady() {
+        val dir = File.createTempFile("recovery", "").apply { delete(); mkdirs() }
+        try {
+            val audioFile = File(dir, "mtg_test.pcm").apply { writeBytes(ByteArray(32000)) }
+            val journal = File(dir, "mtg_test.jsonl").apply {
+                writeText("{\"segmentId\":\"a\",\"revision\":1,\"startMs\":0,\"language\":\"zh\",\"text\":\"第一段\"}\n")
+            }
+            val record = CapturingMeeting("mtg_test", "http://127.0.0.1", ClientIdentity.reference(),
+                audioFile, journal, 1L, "zh-CN", true, true, true)
+            val stopped = MemoryStore()
+            val context = MeetingArtifactPublisher.Context("mtg_test", audio("mtg_test", 0), 0L,
+                MeetingClientConfig("http://127.0.0.1", "fixture-token", ClientIdentity.reference(),
+                    MeetingProfile.reference(), java.util.concurrent.Executor { it.run() }))
+            stopped.save(StoppedMeetingCheckpoint.pending(context).stopAccepted(555L).ready())
+            val recovery = MemoryRecoveryStore(record)
+            val server = Server(ALL)
+            val runtime = Runtime(true)
+            val config = MeetingClientConfig("http://127.0.0.1", ReferenceIdentityProvider("test-token"),
+                ClientIdentity.reference(), MeetingProfile.reference(), java.util.concurrent.Executor { it.run() })
+                .withArtifactPublisher(MeetingArtifactPublisher.none()).withStoppedMeetingStore(stopped)
+                .withMeetingRecoveryStore(recovery)
+            val client = MeetingCoordinator(config, ModelAdapterRegistry(), runtime,
+                java.util.function.Function { server }, { 0L }, { 555L })
+            try {
+                val future = CompletableFuture<RecoveryResult>()
+                client.recoverInterrupted("mtg_test", resultCallback(future))
+                val result = future.get(3, TimeUnit.SECONDS)
+                assertEquals("mtg_test", result.meetingId())
+                assertFalse("已 READY 场次不伪装成新交付", result.delivered())
+                assertNull(result.result())
+                // READY 说明服务端已收口：不能再提交用量／纪要、发布、Stop 或读清单。
+                assertTrue("已 READY 场次不重复收口", server.steps.isEmpty())
+                assertEquals(0, runtime.openCalls)
+                assertNull(runtime.summaryInput)
+                assertTrue("残留现场已清理", recovery.deleted)
+                assertFalse("字幕日志已清理", journal.exists())
+                assertEquals("停止记录由宿主删除，核心只读不删",
+                    StoppedMeetingCheckpoint.Phase.READY, stopped.read("mtg_test").orElseThrow().phase())
+                // 现场已被清掉后再次调用同样是“已完成”，不因为缺现场报错。
+                val again = CompletableFuture<RecoveryResult>()
+                client.recoverInterrupted("mtg_test", resultCallback(again))
+                assertEquals("mtg_test", again.get(3, TimeUnit.SECONDS).meetingId())
+                assertTrue(server.steps.isEmpty())
+            } finally { client.close() }
+        } finally { dir.deleteRecursively() }
+    }
+
     @Test fun meetingOptionsCarryAudioMixToRuntime() {
         Fixture(true, ALL, ReferenceIdentityProvider("test-token"), Publisher()).use { f ->
             val options = MeetingOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT, "zh-CN", "en-US", false,

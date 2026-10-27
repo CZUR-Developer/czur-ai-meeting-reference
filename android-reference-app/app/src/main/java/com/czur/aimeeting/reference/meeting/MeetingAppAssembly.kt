@@ -3,16 +3,12 @@ package com.czur.aimeeting.reference.meeting
 import android.content.Context
 import android.util.Log
 import com.czur.aimeeting.client.ClientIdentity
-import com.czur.aimeeting.client.FinalizationResult
-import com.czur.aimeeting.client.MeetingClient
 import com.czur.aimeeting.client.identity.IdentityResult
-import com.czur.aimeeting.client.MeetingError
 import com.czur.aimeeting.client.MeetingClientConfig
 import com.czur.aimeeting.client.HttpMeetingArtifactPublisher
 import com.czur.aimeeting.client.MeetingProfile
 import com.czur.aimeeting.client.MeetingDiscovery
 import com.czur.aimeeting.client.ModelAdapterRegistry
-import com.czur.aimeeting.client.RecoveryResult
 import com.czur.aimeeting.client.result.ResultActionRegistry
 import com.czur.aimeeting.client.result.ResultActionPlugin
 import com.czur.aimeeting.client.result.ResultOptions
@@ -28,7 +24,6 @@ import com.czur.aimeeting.reference.identity.PersistentReferenceIdentityProvider
 import com.czur.aimeeting.reference.identity.AppLoginEntry
 import com.czur.aimeeting.reference.identity.DefaultAppLoginEntry
 import java.util.ArrayDeque
-import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 
 /**
@@ -57,7 +52,10 @@ object MeetingAppAssembly {
     private var pageFactory: MeetingPageViews.Factory = MeetingPageViews.DefaultFactory()
     private var applicationContext: Context? = null
     private var recoveryStore: ReferenceMeetingRecoveryStore? = null
-    /** 当前进程里正在进行的会议；页面重进触发扫描时不得当成异常原场续办。 */
+    /**
+     * 当前进程里正在进行的会议；从开始保留到 READY／终态销毁，收尾中也算本进程所有。
+     * 页面重进触发扫描时据此跳过同一场，不得另起一条续办链。
+     */
     @Volatile private var activeMeetingId: String? = null
     private val recoveryScanning = java.util.concurrent.atomic.AtomicBoolean(false)
     private var stoppedStore: ReferenceStoppedMeetingStore? = null
@@ -219,8 +217,11 @@ object MeetingAppAssembly {
     }
 
     /**
-     * 启动时对未确认停止的原场逐场续办：SDK 用本机录音和字幕日志补交用量／纪要后
-     * 发布、Stop、读 READY；成功后删除现场，失败保留等下次启动。
+     * 启动时对未确认停止的原场逐场续办：按停止记录先区分待收尾与已 READY，
+     * 待收尾场次续办发布／Stop／READY，已 READY 场次只清本地残留，只有恢复现场
+     * 的场次交给 recoverInterrupted；成功后删除现场，失败保留等下次启动。
+     *
+     * <p>本进程 Service 仍在进行或收尾的同一场整场跳过，避免两条链同时生成 genTime。</p>
      *
      * <p>调用方负责放在后台线程；未登录时 SDK 拒绝并保留现场，登录后再次调用即可。
      * 参考实现只在页面启动触发一次，伙伴可以改到开机广播或工作队列。</p>
@@ -237,87 +238,27 @@ object MeetingAppAssembly {
         }
     }
 
-    /** 由会议 Service 在开始／结束会议时调用；新进程里为空，异常现场才允许续办。 */
+    /**
+     * 由会议 Service 在开始／结束会议时调用；新进程里为空，异常现场才允许续办。
+     * 从会议开始一直保留到 READY／终态销毁，扫描据此跳过仍在收尾的同一场。
+     */
     @JvmStatic fun markActiveMeeting(meetingId: String?) { activeMeetingId = meetingId }
+
+    /** 本进程 Service 持有的场次；会议进行中和收尾中都算所有权，扫描不得另起续办。 */
+    private fun ownedMeetingIds(): Set<String> = activeMeetingId?.let { setOf(it) } ?: emptySet()
 
     private fun resumeInterruptedMeetingsOnce(onFailure: (String) -> Unit) {
         val store: ReferenceMeetingRecoveryStore
+        val stopped: ReferenceStoppedMeetingStore
         val context: Context
         synchronized(MeetingAppAssembly::class.java) {
             store = recoveryStore ?: return
+            stopped = stoppedStore ?: return
             context = applicationContext ?: return
         }
-        val stopped: ReferenceStoppedMeetingStore
-        synchronized(MeetingAppAssembly::class.java) { stopped = stoppedStore ?: return }
-        val pendingStopIds = try { stopped.pendingIds() } catch (_: Exception) { emptyList() }
-        val pendingIds = try { store.pendingIds() } catch (_: Exception) { return }
-            .filter { it !in pendingStopIds }
-        val active = activeMeetingId
-        Log.i(TAG, "原场续办扫描 pending=${pendingIds.size} active=$active")
-        val pending = pendingIds.filter { meetingId ->
-            if (meetingId == active) {
-                Log.i(TAG, "跳过正在进行的会议，不按异常原场续办 meetingId=$meetingId")
-                false
-            } else true
-        }
-        Log.i(TAG, "原场停止记录待续办 pending=$pendingStopIds")
-        if (pending.isEmpty() && pendingStopIds.isEmpty()) return
-        val client = MeetingRuntimeFactory.create(context, clientConfig { it.run() })
-        try {
-            for (meetingId in pendingStopIds) {
-                val finished = CountDownLatch(1)
-                var resumed = false
-                Log.i(TAG, "原场停止收尾请求 meetingId=$meetingId")
-                try {
-                    client.resumeFinalization(meetingId, object : MeetingClient.Callback<FinalizationResult> {
-                        override fun onSuccess(result: FinalizationResult) {
-                            resumed = true
-                            Log.i(TAG, "原场停止收尾续办完成 meetingId=$meetingId delivered=${result.delivered()}")
-                            finished.countDown()
-                        }
-                        override fun onError(error: MeetingError) {
-                            Log.w(TAG, "原场停止收尾续办未完成 meetingId=$meetingId code=${error.code}")
-                            finished.countDown()
-                        }
-                    })
-                    finished.await()
-                } catch (_: InterruptedException) {
-                    Thread.currentThread().interrupt()
-                    return
-                } catch (failure: RuntimeException) {
-                    Log.w(TAG, "原场停止收尾请求异常 meetingId=$meetingId class=${failure.javaClass.simpleName}")
-                }
-                if (resumed) {
-                    stopped.delete(meetingId)
-                    store.delete(meetingId)
-                } else onFailure(meetingId)
-            }
-            for (meetingId in pending) {
-                val finished = CountDownLatch(1)
-                var recovered = false
-                try {
-                    client.recoverInterrupted(meetingId, object : MeetingClient.Callback<RecoveryResult> {
-                        override fun onSuccess(result: RecoveryResult) {
-                            recovered = true
-                            finished.countDown()
-                        }
-                        override fun onError(error: MeetingError) {
-                            Log.w(TAG, "原场现场续办未完成 meetingId=$meetingId code=${error.code}")
-                            finished.countDown()
-                        }
-                    })
-                    finished.await()
-                } catch (_: InterruptedException) {
-                    Thread.currentThread().interrupt()
-                    return
-                } catch (_: RuntimeException) {
-                    // 单场失败不阻断其余现场，下一次启动继续尝试。
-                }
-                if (!recovered) onFailure(meetingId)
-            }
-        } finally {
-            client.close()
-        }
+        val config = clientConfig { it.run() }
+        MeetingRecoveryScan(store, stopped, ::ownedMeetingIds,
+            { MeetingRuntimeFactory.create(context, config) }, onFailure).run()
     }
 
     @JvmStatic @Synchronized fun clearReferenceSession() { (identityProvider as? LoginIdentityProvider)?.clearSession() }

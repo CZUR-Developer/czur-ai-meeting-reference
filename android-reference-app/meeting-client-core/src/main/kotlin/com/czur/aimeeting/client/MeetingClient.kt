@@ -29,6 +29,9 @@ interface MeetingClient : AutoCloseable {
      * 续办进程异常退出留下的原场：用本机现场重建封口录音事实，补交缺失的标准纪要，
      * 再按与停止记录相同的发布／Stop／READY 顺序收口。不新建场次、不重开音源或模型，
      * 未确认现场保留。默认在调用线程明确报告不支持。
+     *
+     * 原场停止记录已经保存为 READY 时，说明服务端此前已收口：本次只清理残留现场并以
+     * 成功回调表示“已完成”，不重复提交用量、纪要、Stop 或读取清单；停止记录由宿主删除。
      */
     fun recoverInterrupted(meetingId: String, callback: Callback<RecoveryResult>) {
         callback.onError(MeetingError(MeetingErrorCode.RECOVERY_STORE_MISSING))

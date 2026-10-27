@@ -208,37 +208,53 @@ class MeetingCoordinator(
             var errorCode: MeetingErrorCode? = null
             try {
                 if (closed) return@execute
-                val record = recoveryStore.get().read(meetingId)
-                    .orElseThrow { IOException("原场现场不存在或原账号已改变") }
-                if (stoppedStore.get().read(meetingId).isPresent)
-                    throw IOException("原场已有停止记录，应由停止续办收口")
-                val identity = config.identityProvider().currentIdentity()
-                if (identity.status() != IdentityResult.Status.LOGGED_IN) throw IOException("原场账号身份尚未就绪")
-                val sessionConfig = config.forSession(identity.session()!!)
-                if (record.serverUrl() != sessionConfig.serverUrl()) throw IOException("原场服务地址已改变")
-                val server = servers.apply(sessionConfig)
-                // 录音只为续办读取文件持久前缀；估算时长不冒充正常停止的计数门原值。
-                val audio = RecoveredAudioFacts.sealedArtifact(meetingId, record.audioFile())
-                // 发布快照要求本场冻结用量已提交；正常停止在发布前提交，续办必须补同一事实。
-                LOG.info("原场冻结用量提交开始 durationMs=${audio.durationMs()}")
-                server.submitUsage(meetingId, audio.durationMs())
-                LOG.info("原场冻结用量已确认")
-                // 纪要必须在写停止记录之前补交：一旦停止记录落盘，下次会走 resumeFinalization，
-                // 那条路径只补用量、不会再补纪要，失败一次就会永久缺纪要。
-                submitRecoveredSummary(record, server)
-                var checkpoint = stoppedStore.get().save(StoppedMeetingCheckpoint.pending(
-                    MeetingArtifactPublisher.Context(meetingId, audio, audio.durationMs(), sessionConfig),
-                    record.activeDelivery()))
-                LOG.info("原场现场续办开始 phase=${checkpoint.phase()} deliversResult=${checkpoint.deliversResult()}")
-                val finished = finishSavedFinalization(checkpoint, stoppedStore.get(), server,
-                    sessionConfig.artifactPublisher(), BooleanSupplier { closed }, wallClockMs,
-                    Runnable {})
-                recoveryStore.get().delete(meetingId)
-                record.journalFile()?.let { journal -> if (journal.exists() && !journal.delete()) LOG.warning("原场字幕日志删除失败") }
-                outcome = when (finished) {
-                    is SavedFinalizationOutcome.Delivered -> RecoveryResult(meetingId, finished.result)
-                    SavedFinalizationOutcome.EndedWithoutDelivery -> RecoveryResult(meetingId, null)
-                    null -> null
+                val existingStop = stoppedStore.get().read(meetingId).orElse(null)
+                if (existingStop != null && existingStop.phase() != StoppedMeetingCheckpoint.Phase.READY)
+                    throw IOException("原场已有未完成停止记录，应由停止续办收口")
+                if (existingStop != null) {
+                    // 停止记录已 READY：服务端早已收口，本次只清可能残留的现场，不重复提交
+                    // 用量／纪要，也不再发布、Stop 或读取清单；现场缺失或读不出来同样按已完成返回。
+                    LOG.info("原场停止记录已 READY，只清理残留现场")
+                    try {
+                        recoveryStore.get().read(meetingId).orElse(null)
+                            ?.let { record -> discardRecoveredScene(meetingId, record) }
+                    } catch (failure: Exception) {
+                        if (failure !is IOException && failure !is RuntimeException) throw failure
+                        LOG.warning("已READY原场现场读取失败 class=${failure.javaClass.simpleName}")
+                    }
+                    outcome = RecoveryResult(meetingId, null)
+                } else {
+                    val record = recoveryStore.get().read(meetingId)
+                        .orElseThrow { IOException("原场现场不存在或原账号已改变") }
+                    val identity = config.identityProvider().currentIdentity()
+                    if (identity.status() != IdentityResult.Status.LOGGED_IN) throw IOException("原场账号身份尚未就绪")
+                    val sessionConfig = config.forSession(identity.session()!!)
+                    if (record.serverUrl() != sessionConfig.serverUrl()) throw IOException("原场服务地址已改变")
+                    val server = servers.apply(sessionConfig)
+                    // 录音只为续办读取文件持久前缀；估算时长不冒充正常停止的计数门原值。
+                    val audio = RecoveredAudioFacts.sealedArtifact(meetingId, record.audioFile())
+                    // 发布快照要求本场冻结用量已提交；正常停止在发布前提交，续办必须补同一事实。
+                    LOG.info("原场冻结用量提交开始 durationMs=${audio.durationMs()}")
+                    server.submitUsage(meetingId, audio.durationMs())
+                    LOG.info("原场冻结用量已确认")
+                    // 纪要必须在写停止记录之前补交：一旦停止记录落盘，下次会走 resumeFinalization，
+                    // 那条路径只补用量、不会再补纪要，失败一次就会永久缺纪要。
+                    submitRecoveredSummary(record, server)
+                    var checkpoint = stoppedStore.get().save(StoppedMeetingCheckpoint.pending(
+                        MeetingArtifactPublisher.Context(meetingId, audio, audio.durationMs(), sessionConfig),
+                        record.activeDelivery()))
+                    LOG.info("原场现场续办开始 phase=${checkpoint.phase()} deliversResult=${checkpoint.deliversResult()}")
+                    val finished = finishSavedFinalization(checkpoint, stoppedStore.get(), server,
+                        sessionConfig.artifactPublisher(), BooleanSupplier { closed }, wallClockMs,
+                        Runnable {})
+                    // 停止记录已保存为 READY；先清现场再回调，失败时现场保留给下次扫描重试。
+                    // 被关闭打断时不删现场，留待下次扫描从停止记录继续。
+                    if (finished != null) discardRecoveredScene(meetingId, record)
+                    outcome = when (finished) {
+                        is SavedFinalizationOutcome.Delivered -> RecoveryResult(meetingId, finished.result)
+                        SavedFinalizationOutcome.EndedWithoutDelivery -> RecoveryResult(meetingId, null)
+                        null -> null
+                    }
                 }
             } catch (failure: Exception) {
                 if (failure !is IOException && failure !is RuntimeException) throw failure
@@ -250,6 +266,22 @@ class MeetingCoordinator(
             val code = errorCode
             if (actual != null) notifyClient { callback.onSuccess(actual) }
             else if (code != null) notifyClient { callback.onError(MeetingError(code)) }
+        }
+    }
+    /**
+     * 已收口后删除本机现场：先删字幕日志，再删现场记录。日志删不掉时保留现场记录，
+     * 让宿主下次扫描重试；重复清理幂等，不遮断已完成的会议结果。
+     */
+    private fun discardRecoveredScene(meetingId: String, record: CapturingMeeting) {
+        val journal = record.journalFile()
+        if (journal != null && journal.exists() && !journal.delete()) {
+            LOG.warning("原场字幕日志删除失败，保留现场等待下次清理")
+            return
+        }
+        try { config.meetingRecoveryStore().get().delete(meetingId) }
+        catch (failure: Exception) {
+            if (failure !is IOException && failure !is RuntimeException) throw failure
+            LOG.warning("原场现场清理失败 class=${failure.javaClass.simpleName}")
         }
     }
     /**
