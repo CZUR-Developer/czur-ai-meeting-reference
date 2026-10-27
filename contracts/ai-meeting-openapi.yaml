@@ -946,13 +946,13 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ErrorResponse"
+                $ref: "#/components/schemas/ErrorEnvelope"
         "503":
           description: 心跳存储暂不可用，可下个周期重试
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ErrorResponse"
+                $ref: "#/components/schemas/ErrorEnvelope"
         default:
           $ref: "#/components/responses/ErrorResponse"
 

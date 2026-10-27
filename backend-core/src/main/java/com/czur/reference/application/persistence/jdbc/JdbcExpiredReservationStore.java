@@ -83,7 +83,7 @@ public final class JdbcExpiredReservationStore implements ExpiredReservationStor
         Objects.requireNonNull(request, "request");
         /*
          * 数据库时间列（以及驱动的 Timestamp 绑定）只保留微秒，
-         * 并且采用四舍五入而不是简单截断。claim 返回的 LeaseToken 会在后续
+         * 并统一截断到微秒。claim 返回的 LeaseToken 会在后续
          * release/lease-aware cancel 中作为 fencing 条件再次与数据库比较，因此
          * 写入值和返回句柄必须先经过同一套规范化。这里同时规范 now 与 leaseUntil，
          * 避免请求中的纳秒部分只在其中一侧被舍入，造成 ClaimBatch 或 lease 栅栏

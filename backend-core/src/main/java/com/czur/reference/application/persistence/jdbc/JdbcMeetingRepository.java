@@ -32,9 +32,8 @@ import java.util.logging.Logger;
  * 数据库专有 Java API。独立查询可直接使用本类；会议命令需要跨会议、
  * 幂等和 Outbox 原子提交时，应通过 {@link JdbcMeetingUnitOfWork} 执行。</p>
  *
- * <p>读取同时兼容 V001/V002 与 V003：查询按基线物理列读取归属与版本事实，
- * 旧表缺少归属列时明确恢复为 {@code LEGACY_UNOWNED}，不会猜测真实主体。
- * 当前公开 {@code save} 只允许 legacy SQL，且不引用 V003 列。owned 快照通过
+ * <p>读取按 MySQL 基线物理列读取归属与版本事实；缺少归属列会直接失败，
+ * 不再兼容旧表。当前公开 {@code save} 只允许 legacy SQL，且不引用 V003 列。owned 快照通过
  * package-private {@link #insertOwned(Connection, MeetingAggregate.MeetingSnapshot)}
  * 首次写入；该原语只允许未来 owned 创建工作单元在同一连接中调用，普通
  * Repository 仍不能绕开 Reservation 的锁定、校验和版本更新。</p>

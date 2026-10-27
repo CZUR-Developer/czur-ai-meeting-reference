@@ -32,8 +32,8 @@ import java.util.logging.Logger;
  * 内全局唯一；相同标识且完整 envelope（包括 canonical JSON 原文）一致时返回
  * {@link AppendStatus#REPLAYED}，任意不可变字段不同都返回
  * {@link AppendStatus#CONFLICT}，原记录永远不会被覆盖。数据库同时保存原始
- * {@code canonical_payload} 和可查询的 JSON {@code payload}，V004 约束保证
- * 两者逻辑一致；重放和对外读取只使用前者，因此与内存适配器保持字符串精确
+ * {@code canonical_payload} 和可查询的 JSON {@code payload}，二者一致性由
+ * 应用层写入校验保证；重放和对外读取只使用前者，因此与内存适配器保持字符串精确
  * 相等语义。</p>
  *
  * <p>V004 之前的历史事件没有可靠的协议版本和逻辑流来源。读取时只要发现

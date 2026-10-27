@@ -100,9 +100,47 @@ def expect_invalid(name: str, expected: str, enums: dict[str, set[str]], *, tran
     else: fail(f"expected invalid fixture to fail: {name}")
 
 
+
+def check_local_refs() -> int:
+    """校验 OpenAPI 中所有本地 $ref 都能解析，避免生成器或严格校验失败。"""
+    import yaml
+    spec_path = CONTRACTS / "ai-meeting-openapi.yaml"
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    missing: list[tuple[str, str]] = []
+    checked = 0
+
+    def walk(node: object, trail: str) -> None:
+        nonlocal checked
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if isinstance(ref, str) and ref.startswith("#/"):
+                checked += 1
+                target: object = spec
+                for part in ref[2:].split("/"):
+                    part = part.replace("~1", "/").replace("~0", "~")
+                    if not isinstance(target, dict) or part not in target:
+                        missing.append((trail, ref))
+                        target = None
+                        break
+                    target = target[part]
+            for key, value in node.items():
+                walk(value, f"{trail}/{key}")
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                walk(value, f"{trail}/{index}")
+
+    walk(spec, "#")
+    if missing:
+        for trail, ref in missing:
+            print(f"UNRESOLVED_REF {trail} -> {ref}")
+        raise SystemExit(1)
+    return checked
+
+
 def main() -> None:
     if not CONTRACTS.is_dir():
         raise SystemExit("contracts directory is missing")
+    checked = check_local_refs()
     count = 0
     for path in CONTRACTS.rglob("*.json"):
         json.loads(path.read_text(encoding="utf-8"))
@@ -138,6 +176,7 @@ def main() -> None:
         if str(exc) != "audio checksum mismatch": fail(f"invalid checksum fixture: unexpected reason {exc}")
     else: fail("expected audio checksum fixture to fail")
     print(f"CONTRACT_FIXTURES_OK json={count} durable_events={durable_count} transient_messages={len(transient)} negatives=7")
+    print(f"OPENAPI_REFS_OK refs={checked}")
 
 
 if __name__ == "__main__":
