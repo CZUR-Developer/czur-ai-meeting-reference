@@ -186,6 +186,7 @@ paths:
     delete:
       tags: [Meetings]
       operationId: deleteMeeting
+      description: 参考分发默认以客户端直连模型，此入口未装配，调用返回 501；伙伴自建服务端中转时按本契约实现。
       summary: 撤销访问并异步删除会议及产物
       security:
         - bearerAuth: []
@@ -600,7 +601,7 @@ paths:
       tags: [Meetings]
       operationId: renewRealtimeToken
       summary: 已登录会议归属用户续期实时会话 Token
-      description: 仅对仍允许实时输入或恢复的会议开放，包括 STOPPING 与 INPUT_COMPLETE_PENDING；新凭据独立持久保存，不改写 Create v1 首次响应。相同幂等键重试返回同一续期结果，新一轮续期须用新键。WSS 握手使用返回的 sessionToken，不接受用户 Bearer 作为实时凭据。
+      description: 参考分发默认以客户端直连模型，此入口未装配，调用返回 501；伙伴自建服务端中转时按本契约实现。仅对仍允许实时输入或恢复的会议开放，包括 STOPPING 与 INPUT_COMPLETE_PENDING；新凭据独立持久保存，不改写 Create v1 首次响应。相同幂等键重试返回同一续期结果，新一轮续期须用新键。WSS 握手使用返回的 sessionToken，不接受用户 Bearer 作为实时凭据。
       security:
         - bearerAuth: []
       parameters:

@@ -23,6 +23,6 @@ else
   printf '[INFO] 已提供隔离 MySQL 连接；参考客户端 MySQL 集成测试已纳入上述 Maven 测试。\n'
 fi
 if [[ -n "${REFERENCE_TEST_DATABASE_URL:-}" ]]; then
-  printf '[INFO] 检测到旧 PostgreSQL 兼容测试变量；这些测试只适用于显式准备的旧 PG 夹具，不是本期参考默认路径。\n'
+  printf '[INFO] REFERENCE_TEST_DATABASE_URL 已不支持：旧 PostgreSQL 回归入口已移除，本次不会执行 PostgreSQL 集成测试。\n'
 fi
 printf '[INFO] 本机参考代码基础验证通过。\n'
