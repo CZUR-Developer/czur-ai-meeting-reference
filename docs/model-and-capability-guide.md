@@ -1,9 +1,9 @@
 # 模型与能力配置指南
 
-> 第一次接入 · 第 2/4 篇 ｜ 上一篇 ← [从零接入指南](partner-getting-started.md) ｜ 下一篇 → [本机局域网 HTTPS 联调](local-lan-https.md)
+> 第一次接入 · 第 2/4 篇 ｜ 上一篇 ← [从零接入指南](partner-getting-started.zh-CN.md) ｜ 下一篇 → [本机局域网 HTTPS 联调](local-lan-https.md)
 
 本文集中说明完整参考方案用到的第三方模型、CZUR 当前采用的平台、伙伴应准备的
-资源，以及可选能力缺失后的行为。首次接入步骤见[从零接入指南](partner-getting-started.md)。
+资源，以及可选能力缺失后的行为。首次接入步骤见[从零接入指南](partner-getting-started.zh-CN.md)。
 平台名称用于说明参考路径，不代表合作伙伴必须购买同一供应商或使用 CZUR 账号。
 服务开通、区域、额度、语言和资费以您自己的第三方平台配置为准，仓库不包含真实凭据。
 
@@ -121,7 +121,7 @@ AI_MEETING_MODEL_LANGUAGES=zh-CN,en-US
 - 组合路径关闭 ASR 原生译文，避免重复翻译；ASR 音源及会议仍共用原流程。
 
 两条路径均需按实际翻译模型声明语言。文本翻译样例的请求、响应、短期材料及续领说明
-见[独立文本翻译扩展](partner-integration-guide.md#可选独立文本翻译)。
+见[独立文本翻译扩展](partner-integration-guide.zh-CN.md#可选独立文本翻译)。
 
 ### 3.3 百炼：可选结构化纪要
 
@@ -249,4 +249,4 @@ Web 根据最终 `MeetingManifest`（本场结果清单）里的 READY `Artifact
 厂商 JSON、语言短码与字段差异留在 Adapter／Provider，公共核心与页面只看标准结果。
 
 默认结果 Web、本地离线 HTML 或自有结果平台也可独立替换，具体扩展见
-[结果动作与 Web 扩展](partner-integration-guide.md#5-结果动作和-web-扩展)。
+[结果动作与 Web 扩展](partner-integration-guide.zh-CN.md#5-结果动作和-web-扩展)。

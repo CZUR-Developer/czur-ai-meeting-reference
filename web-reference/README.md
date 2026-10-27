@@ -31,7 +31,7 @@ READY 的 `presentation.capture` 截图包按修订序号读取，画面按会�
 - 复制原译文、总结和待办。浏览器另提供 TXT、原始录音下载，以及演示图片的打印／保存
   PDF。打印 PDF 使用浏览器能力，形成每图一页；不依赖第三方在线转换服务。
 - Android WebView 默认没有下载和打印宿主，故隐藏分享／导出菜单，保留阅读、复制、
-  播放和图片预览。App 的可选本地 PDF 结果插件仍是独立扩展点，见[接入说明](../docs/partner-integration-guide.md#本地结果插件必须按需读取正文)。
+  播放和图片预览。App 的可选本地 PDF 结果插件仍是独立扩展点，见[接入说明](../docs/partner-integration-guide.zh-CN.md#本地结果插件必须按需读取正文)。
 
 没有结构化总结时，不显示总结和待办栏目。已有总结但 `actionItems` 为空时，待办栏目
 显示“暂无待办事项”；没有录音就不提供播放和文字跳转。只有录音、演示或译文的标准
@@ -108,7 +108,7 @@ READY 的 `presentation.capture` 截图包按修订序号读取，画面按会�
 伙伴可替换自己的账号／单点登录适配，不需要改姓名展示、登记或结果读取。
 参考默认链接策略不启用此表单，不建立账号管理或认证平台。
 
-本页面是参考方案的默认 `web` 结果动作，读取标准 `MeetingManifest` 和 `ArtifactRef`，不理解听悟或其他 Provider 的厂商字段。结果动作保持可替换：伙伴可以在 READY 后实现 `local.html`，将 Manifest 和所需产物写入本地目录／压缩包，使用相对路径离线查看，也可以实现邮件、NAS 或自有 Web 渲染器。替换渲染器不改变会议状态机、收口或结算。当前仓库交付默认 Web 页面和 App 可选 PDF 插件；离线 HTML 渲染器由伙伴实现，本地正文读取及媒体下载边界见[结果扩展说明](../docs/partner-integration-guide.md#本地结果插件必须按需读取正文)。
+本页面是参考方案的默认 `web` 结果动作，读取标准 `MeetingManifest` 和 `ArtifactRef`，不理解听悟或其他 Provider 的厂商字段。结果动作保持可替换：伙伴可以在 READY 后实现 `local.html`，将 Manifest 和所需产物写入本地目录／压缩包，使用相对路径离线查看，也可以实现邮件、NAS 或自有 Web 渲染器。替换渲染器不改变会议状态机、收口或结算。当前仓库交付默认 Web 页面和 App 可选 PDF 插件；离线 HTML 渲染器由伙伴实现，本地正文读取及媒体下载边界见[结果扩展说明](../docs/partner-integration-guide.zh-CN.md#本地结果插件必须按需读取正文)。
 
 部署使用合作伙伴已有的静态 Web 服务器；本仓库不提供 Web Docker 镜像。
 

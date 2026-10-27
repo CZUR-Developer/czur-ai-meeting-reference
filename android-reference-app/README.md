@@ -4,9 +4,9 @@
 实时字幕、双语互译、会后总结及结果回看。合作伙伴可替换身份、模型、结果动作和页面，
 继续复用同一套会议编排。
 
-首次接入请阅读[从零指南](../docs/partner-getting-started.md)；第三方平台、所需资源、
+首次接入请阅读[从零指南](../docs/partner-getting-started.zh-CN.md)；第三方平台、所需资源、
 能力开关与缺少能力时的表现见[模型与能力指南](../docs/model-and-capability-guide.md)。
-接口扩展见[接入手册](../docs/partner-integration-guide.md)。
+接口扩展见[接入手册](../docs/partner-integration-guide.zh-CN.md)。
 
 ## 支持环境与模块
 
@@ -30,7 +30,7 @@ SHA-256 `150f5a52294036b7e273a91d4d59afa7df212021bb6825e9199384023cd28053`，ABI
 业务 AAR 由本仓 `meeting-android/` 源码构建。构建不需要任何 `-P` 参数。设备 AAR 与业务
 模块初始化时做版本握手；宿主直接使用裸业务 AAR 时，还需显式提供 OkHttp 5.3.2 和
 kotlinx-coroutines-android 1.11.0。无需访问 CZUR 产品源码仓；模型 Key、真实会话材料和
-账号密码不放进构建配置。具体功能、版本配套与供应商账户准备方式见[从零指南](../docs/partner-getting-started.md)。
+账号密码不放进构建配置。具体功能、版本配套与供应商账户准备方式见[从零指南](../docs/partner-getting-started.zh-CN.md)。
 
 ## 部署配置与构建（代码即配置）
 
@@ -88,7 +88,7 @@ App 的部署校验拦住；需要构建 App 时再复制模板并填写两个�
 自动生成 App 入口。离线 HTML 等结果方式可使用同一结果插件接口扩展。
 
 当前功能的验证范围和硬件专项边界见[验证范围](../docs/validation-scope.md)。合作伙伴
-更换模型、账户、语言、存储或设备后，应按[从零指南](../docs/partner-getting-started.md)
+更换模型、账户、语言、存储或设备后，应按[从零指南](../docs/partner-getting-started.zh-CN.md)
 验证自己的部署。构建和 SDK 截图 API 的验证分别说明其范围，不替代实际模型／
 硬件场景及完整演示会议产物验证。
 
@@ -182,7 +182,7 @@ session.requestStop()
 **首跳是分界**：服务端用第一次心跳冻结本场“真正开始”时间，并从那时起按间隔检查
 活跃。宿主必须在会议开始后很快发出第一跳，不能等到失联窗口快结束才补。没有首跳、
 首跳后失联两种情况（以及已冻结采音用量例外）的窗口、终态和结算规则见
-[接入手册的活跃心跳与弃场收口](../docs/partner-integration-guide.md#活跃心跳与弃场收口)。
+[接入手册的活跃心跳与弃场收口](../docs/partner-integration-guide.zh-CN.md#活跃心跳与弃场收口)。
 
 用户点停止后不能立刻停心跳：冻结用量、纪要生成和后端 Stop 都可能排在业务队列里
 超过失联窗口。心跳要持续到服务端受理 Stop（收尾链确认 ACK），此时服务端进入
@@ -294,7 +294,7 @@ READY 的顺序收口。未登录、网络或后端失败时现场保留，下�
 会议按 0 用量取消为 `CANCELLED`，收到过首跳但超过 `max(3 × 心跳间隔, 10 分钟)` 无
 心跳的会议收口为 `READY_WITH_WARNINGS`。窗口、结算和“已冻结采音用量优先走正常
 Stop”的规则属于参考后端的默认产品策略，详见
-[接入手册的活跃心跳与弃场收口](../docs/partner-integration-guide.md#活跃心跳与弃场收口)。
+[接入手册的活跃心跳与弃场收口](../docs/partner-integration-guide.zh-CN.md#活跃心跳与弃场收口)。
 
 这决定了本机现场的可恢复范围：扫描收口之前，`recoverInterrupted` 可以补交冻结用量、
 纪要并 Stop 到 `READY`；会议一旦成为 `CANCELLED` 或 `READY_WITH_WARNINGS`，服务端
@@ -360,7 +360,7 @@ PDF 插件通过窄 `readContent` 读取正文，再将文件工作放到 `workE
 [`LocalPdfResultActionPlugin.kt`](app/src/main/java/com/czur/aimeeting/reference/LocalPdfResultActionPlugin.kt)。
 邮件插件冻结收件人，通过窄 `sendEmail` 发送 Web 链接，仍需部署邮件服务。
 离线 HTML 可沿 PDF 的正文读取方式替换文件输出。扩展示例见
-[结果交付手册](../docs/partner-integration-guide.md)。
+[结果交付手册](../docs/partner-integration-guide.zh-CN.md)。
 
 结果服务发现目前映射两类字段：`resultLinkTtlMs > 0` 为 `result.link`，
 `resultEmailEnabled == true` 为 `result.email`。新后端服务依赖需同步扩展协议、

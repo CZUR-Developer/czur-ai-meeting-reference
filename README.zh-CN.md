@@ -7,10 +7,10 @@ AI 字幕纪要的开源参考实现：Android 应用、后端、结果网页三
 
 | 你要做什么 | 读这个 | 约 |
 | --- | --- | --- |
-| 动手前先看要准备什么 | [接入前准备清单](docs/preparation-checklist.md) | 10 分钟 |
-| 第一次把真实字幕跑起来 | [从零接入指南](docs/partner-getting-started.md) | 30–60 分钟 |
+| 动手前先看要准备什么 | [接入前准备清单](docs/preparation-checklist.zh-CN.md) | 10 分钟 |
+| 第一次把真实字幕跑起来 | [从零接入指南](docs/partner-getting-started.zh-CN.md) | 30–60 分钟 |
 | 接自己的模型、语言或能力组合 | [模型与能力配置指南](docs/model-and-capability-guide.md) | 20 分钟 |
-| 换登录、存模型、加结果动作 | [扩展开发手册](docs/partner-integration-guide.md) | 40 分钟 |
+| 换登录、存模型、加结果动作 | [扩展开发手册](docs/partner-integration-guide.zh-CN.md) | 40 分钟 |
 | 交付到自己的服务器 | [部署说明](deploy/README.md) | 30 分钟 |
 | 只嵌入会议结果页 | [Web 结果页](web-reference/README.md) | 15 分钟 |
 | 先看哪些验证过、哪些没有 | [支持范围与验收清单](docs/validation-scope.md) | 10 分钟 |

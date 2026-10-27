@@ -7,8 +7,8 @@
 
 | # | 文档 | 解决的问题 | 约 |
 | --- | --- | --- | --- |
-| 0 | [接入前准备清单](preparation-checklist.md) | 要申请哪些账号、准备哪些基础设施和工具；没有听悟时怎么先跑通链路 | 10 分钟 |
-| 1 | [从零接入指南](partner-getting-started.md) | 准备源码与 SDK、建库、起后端、起 HTTPS、装 APK、开第一场真实会议、Docker 交付 | 30–60 分钟 |
+| 0 | [接入前准备清单](preparation-checklist.zh-CN.md) | 要申请哪些账号、准备哪些基础设施和工具；没有听悟时怎么先跑通链路 | 10 分钟 |
+| 1 | [从零接入指南](partner-getting-started.zh-CN.md) | 准备源码与 SDK、建库、起后端、起 HTTPS、装 APK、开第一场真实会议、Docker 交付 | 30–60 分钟 |
 | 2 | [模型与能力配置指南](model-and-capability-guide.md) | 听悟／百炼／讯飞各做什么、要申请什么、能不能缺、缺了什么表现 | 20 分钟 |
 | 3 | [本机局域网 HTTPS 联调](local-lan-https.md) | 自己签 CA、起 TLS 入口、让 Debug APK 信任它 | 15 分钟 |
 | 4 | [支持范围与验收清单](validation-scope.md) | 哪些是实测覆盖、哪些必须你的环境自己验 | 10 分钟 |
@@ -23,7 +23,7 @@
 
 ## 三、扩展开发
 
-主线是 **[扩展开发手册](partner-integration-guide.md)**：登录保持、鉴权、模型 Adapter、
+主线是 **[扩展开发手册](partner-integration-guide.zh-CN.md)**：登录保持、鉴权、模型 Adapter、
 存储、权益、结果动作、SDK 工具的扩展边界。接入自己的实时模型（协议与听悟／样例都不同）
 看 **[自定义模型 Adapter 教程](custom-model-adapter.md)**。按模块细读时：
 

@@ -2,7 +2,7 @@
 
 本文件说明参考后端的源码组成、公共核心的维护边界以及再分发时应保留的信息。
 接入与运行步骤见[后端参考说明](README.md)和
-[从零接入指南](../docs/partner-getting-started.md)。
+[从零接入指南](../docs/partner-getting-started.zh-CN.md)。
 
 ## 源码组成
 

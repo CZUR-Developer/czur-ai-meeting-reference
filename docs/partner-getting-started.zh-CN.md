@@ -1,6 +1,6 @@
 # 合作伙伴从零接入指南
 
-> 第一次接入 · 第 1/4 篇 ｜ 上一篇 ← [接入前准备清单](preparation-checklist.md) ｜ 下一篇 → [模型与能力配置指南](model-and-capability-guide.md)
+> 第一次接入 · 第 1/4 篇 ｜ 上一篇 ← [接入前准备清单](preparation-checklist.zh-CN.md) ｜ 下一篇 → [模型与能力配置指南](model-and-capability-guide.md)
 
 本文面向首次接触本项目的 Android／后端开发者。读完后，您可以准备所需资源，
 在自己的环境中完成“登录 → 真实语音字幕 → 停止 → 网页回看”，再按需加入互译、
@@ -10,7 +10,7 @@
 
 1. 本文：了解组成、准备环境、跑通第一场会议。
 2. [模型与能力配置指南](model-and-capability-guide.md)：集中查看第三方平台、申请资源、功能对应关系和可选能力配置。
-3. [扩展开发手册](partner-integration-guide.md)：替换登录、模型、存储、结果动作和 SDK 工具。
+3. [扩展开发手册](partner-integration-guide.zh-CN.md)：替换登录、模型、存储、结果动作和 SDK 工具。
 
 ## 1. 这套参考工程可以做什么
 
@@ -70,7 +70,7 @@ SDK 会探测设备能力：有兼容系统共享音源接口时使用该接口�
 ## 3. 开始前准备什么
 
 完整清单（含可选依赖、替代方案和“模型还没准备好”的路径）见
-[接入前准备清单](preparation-checklist.md)，以那篇为准；本节只列第一场会议必需的部分。
+[接入前准备清单](preparation-checklist.zh-CN.md)，以那篇为准；本节只列第一场会议必需的部分。
 
 ### 3.1 第一场真实字幕会议的必需资源
 
@@ -243,7 +243,7 @@ bash tools/migrate-reference-client.sh
 业务表。应用启动只检查登记结果，不自动建表；只手工执行 SQL 文件不会写登记，后端会
 拒绝启动。确需手工执行时，必须在整份 SQL 成功后补跑
 `INSERT INTO ai_trans_schema_migrations(version) VALUES ('V001__initial_schema')`，
-步骤与边界见[扩展开发手册的数据库初始化说明](partner-integration-guide.md#数据库初始化)。
+步骤与边界见[扩展开发手册的数据库初始化说明](partner-integration-guide.zh-CN.md#数据库初始化)。
 首次接入无需手工寻找其他版本脚本。
 
 ### 第 3 步：启动后端并确认健康
@@ -469,7 +469,7 @@ curl -sS "$BASE/v1/artifacts/$ARTIFACT?genTime=$GEN_TIME"
 
 完整配置组合和“缺少这项会怎样”见[模型与能力指南](model-and-capability-guide.md)。
 截图及其可选去重在 SDK 内部运行，不需要另申请图像模型；周期、末帧、排除窗口与
-保存确认接线见[截图扩展](partner-integration-guide.md#sdk-截图扩展)。
+保存确认接线见[截图扩展](partner-integration-guide.zh-CN.md#sdk-截图扩展)。
 
 ## 6. Docker 交付部署
 
@@ -531,7 +531,7 @@ REFERENCE_API_BASE_URL='https://192.0.2.10:8443' npm --prefix web-reference run 
 | 开会前检查 | App 会前 Hook | 可注入自有条件；参考代码不提供扫码接收端／小程序 |
 | 字幕控件与悬浮窗 | 设备 AAR 提供 `SubtitleTextView`；悬浮窗、Mini／大窗、权限和 Service 由参考 App 的 `basic-ui` 实现 | 窗口交互是可编辑的默认实现，不是 SDK 固定能力 |
 
-具体接口、线程与生命周期见[扩展开发手册](partner-integration-guide.md)、
+具体接口、线程与生命周期见[扩展开发手册](partner-integration-guide.zh-CN.md)、
 [Android 说明](../android-reference-app/README.md)、[公共核心说明](../backend-core/README.md)。
 SDK 与服务端核心应使用配套版本；复用公共核心 JAR，不依赖整个参考应用或复制状态机。
 

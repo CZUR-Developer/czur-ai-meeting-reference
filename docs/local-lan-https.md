@@ -57,7 +57,7 @@ CA 私钥只用于本机签证；代理只读取 `server.key`。Debug APK 只打
 
 ## 2. 启动已有 HTTP 后端和临时 HTTPS 入口
 
-先按[接入手册](partner-integration-guide.md)初始化 MySQL，并启动参考 HTTP 后端。
+先按[接入手册](partner-integration-guide.zh-CN.md)初始化 MySQL，并启动参考 HTTP 后端。
 使用交付容器时，先按[部署说明](../deploy/README.md)加载 `.env`、执行唯一 V001，
 再运行 Compose；下面的上游仍填写宿主机映射端口（默认 `8080`），不填写应用容器
 内部地址，也不把这个 HTTP 上游作为 Android 登录地址。

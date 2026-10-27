@@ -7,9 +7,9 @@ Java 21 参考应用，负责演示登录、默认插件选择、进程启动和
 
 首次接入请依次阅读：
 
-1. [从零接入指南](../docs/partner-getting-started.md)：环境、资源和首场真实会议。
+1. [从零接入指南](../docs/partner-getting-started.zh-CN.md)：环境、资源和首场真实会议。
 2. [模型与能力指南](../docs/model-and-capability-guide.md)：供应商、能力与可缺失组合。
-3. [伙伴扩展手册](../docs/partner-integration-guide.md)：替换登录、模型、存储和结果交付。
+3. [伙伴扩展手册](../docs/partner-integration-guide.zh-CN.md)：替换登录、模型、存储和结果交付。
 4. [部署说明](../deploy/README.md)：外部 MySQL、配置和后端应用镜像。
 
 ## 默认运行链
@@ -118,7 +118,7 @@ Adapter 有映射不等于供应商在所有组合中均保证同样的识别或
 正式供应商实现公共 `TranslationSessionIssuer`，在 Android 注册对应
 `TranslationAdapter`。SDK 在短期材料将过期时调用同场 `:translationSession`
 续领，不新建 ASR 任务或会议；翻译仍须通过本场授权。
-详细格式见[可选独立文本翻译](../docs/partner-integration-guide.md#可选独立文本翻译)。
+详细格式见[可选独立文本翻译](../docs/partner-integration-guide.zh-CN.md#可选独立文本翻译)。
 
 ### 可选百炼结构化总结
 
@@ -276,4 +276,4 @@ mvn -B -f pom.xml clean test
 固定文本 `MockModelDriver` 与 `AlternativeTextModelDriver` 均不访问真实模型。
 `ModelDriverContractTestKit` 验证对应端口生命周期与事件契约，
 不代替 SDK 直连模型、供应商质量或真实设备会议验收。
-真实接入按[从零指南的验收清单](../docs/partner-getting-started.md)确认。
+真实接入按[从零指南的验收清单](../docs/partner-getting-started.zh-CN.md)确认。

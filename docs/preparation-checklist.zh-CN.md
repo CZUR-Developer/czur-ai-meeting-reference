@@ -1,6 +1,6 @@
 # 接入前准备清单
 
-> 接入前 · 第 0/4 篇 ｜ 下一篇 → [从零接入指南](partner-getting-started.md) ｜ 全部文档见 [文档导航](README.md)
+> 接入前 · 第 0/4 篇 ｜ 下一篇 → [从零接入指南](partner-getting-started.zh-CN.md) ｜ 全部文档见 [文档导航](README.md)
 
 这篇回答一个问题：**动手之前，我到底要先准备什么。**
 
@@ -105,12 +105,12 @@ AI_MEETING_MODEL_ADAPTER=sample-json-ws
 AI_MEETING_SAMPLE_JSON_WS_ENDPOINT=ws://<开发机局域网 IP>:19091/model
 ```
 
-然后按[从零接入指南](partner-getting-started.md)第 2–6 步走完建库、起后端、起 HTTPS、
+然后按[从零接入指南](partner-getting-started.zh-CN.md)第 2–6 步走完建库、起后端、起 HTTPS、
 装 APK、开会。看到字幕刷出来，说明“音源 → 模型 → 归一化 → 界面 → 结果页”这条路是通的；
 接下来把 Adapter 和密钥换成自己的模型即可。写自己的 Adapter 见
 [自定义模型 Adapter 教程](custom-model-adapter.md)，替换边界见
 [模型与能力配置指南第 5 节](model-and-capability-guide.md#5-更换模型时修改边界是什么)
-和[扩展开发手册第 4 节](partner-integration-guide.md#4-模型和能力扩展)。
+和[扩展开发手册第 4 节](partner-integration-guide.zh-CN.md#4-模型和能力扩展)。
 
 ## 五、准备完成后的环境自检
 
@@ -131,7 +131,7 @@ AI_MEETING_SAMPLE_JSON_WS_ENDPOINT=ws://<开发机局域网 IP>:19091/model
 
 ## 六、接入后验收（不属于准备条件）
 
-准备就绪后，按[从零接入指南](partner-getting-started.md)第 2–6 步完成建库、启动、
+准备就绪后，按[从零接入指南](partner-getting-started.zh-CN.md)第 2–6 步完成建库、启动、
 装 APK 和第一场会议，再按[当前支持范围与验收清单](validation-scope.md#目标环境的最小验收)
 逐项验收。最低限度的入口检查是：
 
@@ -140,7 +140,7 @@ AI_MEETING_SAMPLE_JSON_WS_ENDPOINT=ws://<开发机局域网 IP>:19091/model
 - [ ] 参考 APK 安装成功，登录后能看到“开始”可用。
 - [ ] 真实开一场会，确认字幕、正常停止和结果页可回看；可选能力按实际声明逐项核对。
 
-入口检查没过时，对应文档：[数据库与初始化](partner-getting-started.md#第-2-步准备数据库并执行唯一初始化脚本)、
-[启动后端](partner-getting-started.md#第-3-步启动后端并确认健康)、
-[HTTPS 与 Web](partner-getting-started.md#第-4-步准备设备可达的-https-和-web)、
-[构建与安装](partner-getting-started.md#第-5-步构建并安装真实-sdk-版本-app)。
+入口检查没过时，对应文档：[数据库与初始化](partner-getting-started.zh-CN.md#第-2-步准备数据库并执行唯一初始化脚本)、
+[启动后端](partner-getting-started.zh-CN.md#第-3-步启动后端并确认健康)、
+[HTTPS 与 Web](partner-getting-started.zh-CN.md#第-4-步准备设备可达的-https-和-web)、
+[构建与安装](partner-getting-started.zh-CN.md#第-5-步构建并安装真实-sdk-版本-app)。

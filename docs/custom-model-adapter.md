@@ -9,7 +9,7 @@
 | 你的情况 | 要做什么 | 看哪篇 |
 | --- | --- | --- |
 | 用听悟，只是换成自己的账号 | 改配置里的 AppKey／AccessKey | [模型配置指南 3.1](model-and-capability-guide.md#31-听悟先只跑实时字幕) |
-| 用仓库自带的样例协议（`sample-json-ws`） | 起样例服务 + 改两个配置 | [从零接入指南](partner-getting-started.md) 或 [准备清单第四节](preparation-checklist.md#四模型还没准备好先跑样例链路) |
+| 用仓库自带的样例协议（`sample-json-ws`） | 起样例服务 + 改两个配置 | [从零接入指南](partner-getting-started.zh-CN.md) 或 [准备清单第四节](preparation-checklist.zh-CN.md#四模型还没准备好先跑样例链路) |
 | 自己的模型协议和以上都不同 | **写一个后端发行器 + 一个 Android Adapter**，就是本篇 |
 
 ## 一、两侧各管什么
@@ -225,7 +225,7 @@ AI_MEETING_ENTITLEMENT_SUPPORTED_CAPABILITIES=transcript.realtime
 - Android：`app/src/test/java/.../sample/SampleJsonModelAdapterTest.kt`（44 行）——覆盖 partial→final、修订递增、未知类型忽略、格式错误抛异常。
 - 后端：`backend-reference/src/test/java/.../model/SampleJsonWsModelSessionIssuerTest.java`——覆盖签发字段、有效期、缺配置时报错。
 
-**再端到端**。用样例服务把整条链路先跑通（见[准备清单第四节](preparation-checklist.md#四模型还没准备好先跑样例链路)），确认“音源 → 模型 → 归一化 → 界面 → 结果页”通了，再把环境变量指向你的模型。设备上要确认：
+**再端到端**。用样例服务把整条链路先跑通（见[准备清单第四节](preparation-checklist.zh-CN.md#四模型还没准备好先跑样例链路)），确认“音源 → 模型 → 归一化 → 界面 → 结果页”通了，再把环境变量指向你的模型。设备上要确认：
 
 - [ ] 点开始后，模型收到 `startMessage`，回 `ready` 后开始有音频；
 - [ ] 字幕按段出现，同一段修订时文字替换而不是新增一行；

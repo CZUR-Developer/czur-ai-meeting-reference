@@ -5,7 +5,7 @@
 Android 控件、权限申请、音源、模型网络传输、屏幕采集和本地 PDF 由平台层实现；
 实时音频通过设备 SDK 直达模型。
 
-首次接入见[从零指南](../../docs/partner-getting-started.md)，页面／Service 接线见
+首次接入见[从零指南](../../docs/partner-getting-started.zh-CN.md)，页面／Service 接线见
 [Android 参考应用](../README.md)。Android 参考交付最低支持 Android 14（API 34）。
 
 ## 模块内容与能力边界

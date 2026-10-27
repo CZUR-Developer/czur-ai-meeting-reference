@@ -68,7 +68,7 @@ docker compose up --build
 初始化、健康检查与 Compose 使用相同的配置，值含空格或 shell 特殊字符时应加引号。
 无参数运行脚本仍可使用前一节的 `export` 方式，不会自动加载其他目录的 `.env`。
 默认示例账号需填写根模板的 `REFERENCE_DEV_LOGIN_USERNAME/PASSWORD`；ASR 模型可
-按[伙伴手册](../docs/partner-integration-guide.md#模型配置)选择听悟发行器并填写其模型配置，
+按[伙伴手册](../docs/partner-integration-guide.zh-CN.md#模型配置)选择听悟发行器并填写其模型配置，
 或选择 `sample-json-ws` 并提供实际存在的 WebSocket 服务。这个模型端点从 Android
 设备直连，必须能被设备访问，不能填写应用容器自己的 `127.0.0.1`。
 

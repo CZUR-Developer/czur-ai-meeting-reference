@@ -1,13 +1,13 @@
 # 合作伙伴扩展开发手册
 
-> 扩展开发主线 ｜ 模块级说明见 [文档导航](README.md) ｜ 接入顺序见 [从零接入指南](partner-getting-started.md)
+> 扩展开发主线 ｜ 模块级说明见 [文档导航](README.md) ｜ 接入顺序见 [从零接入指南](partner-getting-started.zh-CN.md)
 
 本文面向需要二次开发的合作伙伴。它说明如何从本仓库启动一套可替换的
 Android App、Java 21 后端和静态 Web 结果页，并指出各项能力的扩展位置。
 本文只描述参考实现的公开边界；不会把 CZUR 的账号、模型密钥、私有地址或
 系统服务带入参考工程。
 
-首次接触项目请先读[从零接入指南](partner-getting-started.md)，按准备清单完成真实字幕
+首次接触项目请先读[从零接入指南](partner-getting-started.zh-CN.md)，按准备清单完成真实字幕
 闭环。全部第三方平台、资源、能力与缺失行为集中在[模型与能力配置指南](model-and-capability-guide.md)。
 本文重点说明已有参考实现和扩展接口，不要求伙伴了解内部开发阶段或CZUR私有工程。
 
@@ -61,7 +61,7 @@ bash tools/run-reference-web.sh
 ```
 
 将文档占位地址 `192.0.2.10` 换为设备可达的PC局域网地址。完整真实模型、HTTPS与
-SDK构建顺序见[从零指南第4节](partner-getting-started.md#4-按步骤完成第一场真实会议)；
+SDK构建顺序见[从零指南第4节](partner-getting-started.zh-CN.md#4-按步骤完成第一场真实会议)；
 模板默认的JSON模型端点需要另行提供服务，直接复制模板不能取得真实识别能力。
 
 参考客户端入口只启动 HTTP 业务接口；Android 通过
@@ -529,7 +529,7 @@ cd android-reference-app && ./gradlew :app:testDebugUnitTest :app:assembleDebug
 
 合作伙伴应使用自己的部署、设备和模型逐项记录上述结果；可选能力未配置时，按实际
 降级行为验收。已在会前选择的互译或总结若未获得本场授权，App会提示且不启动该场，
-不会静默替换所选业务。模型配置和最小验收清单见[从零接入指南](partner-getting-started.md)。
+不会静默替换所选业务。模型配置和最小验收清单见[从零接入指南](partner-getting-started.zh-CN.md)。
 
 ## 7. 参考仓与 CZUR 产品边界
 

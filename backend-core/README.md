@@ -6,7 +6,7 @@ Java 21 公共会议核心，输出普通 JAR：
 根 `pom.xml` 聚合 `backend-core` 与 `backend-reference`；核心 POM 自包含，
 不依赖参考应用或其父 POM。
 
-首次运行请先阅读[从零接入指南](../docs/partner-getting-started.md)；
+首次运行请先阅读[从零接入指南](../docs/partner-getting-started.zh-CN.md)；
 模型与能力配置见[模型与能力指南](../docs/model-and-capability-guide.md)。
 
 ## 模块边界
