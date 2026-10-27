@@ -105,6 +105,7 @@ paths:
     get:
       tags: [Meetings]
       operationId: listMeetings
+      description: 参考分发仅接受用户 bearerAuth；security 中的 resultAccessAuth 是伙伴可选扩展，参考实现不启用。
       summary: 查询当前凭证可访问的会议列表
       security:
         - bearerAuth: []
@@ -164,6 +165,7 @@ paths:
     get:
       tags: [Meetings]
       operationId: getMeeting
+      description: 参考分发仅接受用户 bearerAuth；security 中的 resultAccessAuth 是伙伴可选扩展，参考实现不启用。
       summary: 查询会议权威状态
       security:
         - bearerAuth: []
