@@ -99,6 +99,14 @@ class MeetingDeviceTests(unittest.TestCase):
             call.options("transcript", False, False, None, None), call.start(),
         ])
 
+    def test_setup_start_accepts_missing_credentials_for_an_existing_session(self):
+        # 已登录时不应为了复用会话再要一次密码；缺凭据只在未登录页面才报错。
+        with patch.object(device, "MeetingDevice") as factory, \
+                patch.dict(device.os.environ, {"CZUR_MEETING_USERNAME": "",
+                                               "CZUR_MEETING_PASSWORD": ""}):
+            self.assertEqual(device.main(["setup-start"]), 0)
+        self.assertIn(call.login("", ""), factory.return_value.method_calls)
+
     def test_device_tool_has_no_address_configuration_command_or_flags(self):
         with patch("sys.stderr"):
             for arguments in (["configure"], ["open", "--backend-url", "https://example.invalid"],
@@ -144,38 +152,74 @@ class MeetingDeviceTests(unittest.TestCase):
         self.assertEqual("UNKNOWN", tool.emit.call_args.args[0])
         self.assertEqual("UNKNOWN", tool.emit.call_args.kwargs["meetingState"])
 
-    def test_logged_in_switch_still_submits_requested_user(self):
+    def test_logged_in_login_reuses_the_session_without_tapping_the_account_button(self):
         adb = Mock()
         tool = device.MeetingDevice(adb)
         tool.tap_id, tool.fill = Mock(), Mock()
-        # 故意把退出项放前面：脚本必须依据本次层级里的完整文字点击切换，不能点首项。
-        menu = ET.fromstring('<hierarchy><node resource-id="android:id/text1" text="退出登录" '
-                             'enabled="true" bounds="[20,40][220,100]"/>'
-                             '<node resource-id="android:id/text1" text="切换账号" '
-                             'enabled="true" bounds="[20,120][220,180]"/></hierarchy>')
-        tool.dump = Mock(side_effect=[menu, hierarchy(("login_username", {})),
-                                     hierarchy(("start_meeting", {}))])
+        tool.emit = Mock()
+        # 已登录时账号按钮文字是“退出登录”；脚本不得点击，也不等待已移除的切换菜单。
+        tool.dump = Mock(return_value=hierarchy(("account_button", {"text": "退出登录"}),
+                                                ("account_name", {"text": "meeting-user"})))
         with patch("builtins.print"):
             tool.login("requested-user", "sample-secret!")
-        adb.run.assert_called_once_with("shell", "input", "tap", "120", "150")
-        self.assertEqual([call.args for call in tool.tap_id.call_args_list],
-                         [("account_button",), ("login_submit",)])
-        tool.fill.assert_any_call("login_username", "requested-user")
-        tool.fill.assert_any_call("login_password", "sample-secret!")
+        adb.run.assert_not_called()
+        tool.tap_id.assert_not_called()
+        tool.fill.assert_not_called()
+        self.assertEqual(tool.dump.call_count, 1)
+        tool.emit.assert_called_once_with("PASS", alreadyLoggedIn=True, account="meeting-user")
 
-    def test_first_login_uses_the_form_without_tapping_an_account_menu(self):
+    def test_setup_start_second_run_does_not_log_out_or_wait_for_a_switch_menu(self):
+        adb = Mock()
+        tool = device.MeetingDevice(adb)
+        # 账号按钮与开始按钮使用不同 bounds，便于断言没有任何触摸落在账号按钮上。
+        tool.dump = Mock(return_value=hierarchy(
+            ("account_button", {"text": "退出登录", "bounds": "[500,500][700,600]"}),
+            ("account_name", {"text": "meeting-user"}),
+            ("transcript_mode", {"checked": "true"}),
+            ("presentation_capture", {"checked": "false"}),
+            ("start_meeting", {})))
+        tool.log_state = Mock(side_effect=[
+            {"processRunning": True, "meetingId": None, "phase": None},
+            {"processRunning": True, "meetingId": "new-meeting", "phase": "RUNNING"}])
+        tool.emit = Mock()
+        with patch("builtins.print"), patch.object(device.time, "sleep"):
+            tool.open()
+            tool.login("requested-user", "sample-secret!")
+            tool.options("transcript", False, False, None, None)
+            tool.start()
+        taps = [call.args for call in adb.run.call_args_list
+                if call.args[:3] == ("shell", "input", "tap")]
+        self.assertEqual(taps, [("shell", "input", "tap", "120", "70")])  # 只点开始按钮
+        self.assertIn(call("PASS", alreadyLoggedIn=True, account="meeting-user"),
+                      tool.emit.call_args_list)
+        self.assertIn(call("PASS", confirmedBy="App RUNNING log",
+                           processRunning=True, meetingId="new-meeting", phase="RUNNING"),
+                      tool.emit.call_args_list)
+
+    def test_logged_out_login_opens_the_form_and_submits_the_requested_user(self):
         adb = Mock()
         tool = device.MeetingDevice(adb)
         tool.tap_id, tool.fill = Mock(), Mock()
-        tool.dump = Mock(side_effect=[hierarchy(("login_username", {})),
+        tool.dump = Mock(side_effect=[hierarchy(("account_button", {"text": "登录"})),
+                                     hierarchy(("login_username", {})),
                                      hierarchy(("start_meeting", {}))])
         with patch("builtins.print"):
             tool.login("first-user", "sample-secret!")
-        adb.run.assert_not_called()
+        # 未登录时点一次账号按钮打开参考表单，之后只提交，不碰任何账号菜单。
+        adb.run.assert_called_once_with("shell", "input", "tap", "120", "70")
         self.assertEqual([call.args for call in tool.tap_id.call_args_list],
-                         [("account_button",), ("login_submit",)])
+                         [("login_submit",)])
         tool.fill.assert_any_call("login_username", "first-user")
         tool.fill.assert_any_call("login_password", "sample-secret!")
+
+    def test_logged_out_login_without_credentials_fails_before_tapping(self):
+        adb = Mock()
+        tool = device.MeetingDevice(adb)
+        tool.dump = Mock(return_value=hierarchy(("account_button", {"text": "登录"})))
+        with self.assertRaises(device.ToolError) as failure:
+            tool.login(None, "")
+        self.assertIn("CZUR_MEETING_PASSWORD", str(failure.exception))
+        adb.run.assert_not_called()
 
     def test_same_meeting_log_modes_before_started_and_latest_phase(self):
         adb = Mock()

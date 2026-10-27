@@ -36,11 +36,16 @@
 
 ```java
 public interface ModelSessionIssuer {
-    Session issue(Request request);   // 每场首次 Create 后调用一次
+    Session issue(Request request);   // 每次 :modelSession 领取材料时调用
     // 记录：Request 里有 meetingId、sourceLanguage、targetLanguages、
     //       translationEnabled、multilingualInput；不要从客户端正文另取语言。
 }
 ```
+
+App 在 Create 成功后领取一次材料；模型连接重连时会对同一场再次领取，SDK 用
+新返回的材料和新 Adapter 实例续接。因此 `issue()` 必须是可重复调用的：每次返回
+新的短期令牌和 Adapter 材料，不能把首次结果缓存成全局单例，也不能依赖“每场只
+调用一次”来累加计数或做一次性初始化。
 
 返回的 `Session` 是四个字段：`adapterId`、`endpoint`、`expiresAt`、`initParams`（外加可选的 `translationSession`）。骨架：
 
@@ -200,7 +205,18 @@ AI_MEETING_PROFILE_REQUIRED_CAPABILITIES=transcript.realtime
 AI_MEETING_ENTITLEMENT_SUPPORTED_CAPABILITIES=transcript.realtime
 ```
 
-你声明了 `translation.realtime` 才可能出现互译入口；Adapter 注册时 `register(...)` 的 `capabilities` 也要包含对应能力。两边任一缺失，入口就不会出现——这是设计如此，不是 bug。
+互译检查分两阶段，不能把会前入口当成对本场 Adapter 的最终核验：
+
+- **会前发现**：SDK 把服务端部署能力与“已注册工厂能力的并集”求交
+  （`ModelAdapterRegistry.setupCapabilities()`）。只要任一已注册 Adapter 声明了
+  `translation.realtime`，互译入口就可能出现；这不代表本场最终选中的 Adapter 支持翻译。
+- **本场核验**：Create 后领取 `:modelSession` 材料，SDK 才按 `grant.adapterId` 收窄到
+  该 Adapter 工厂声明的能力，并核对服务端本场授权和独立翻译材料。互译真正启用需要
+  该 Adapter 声明翻译能力（或本场带有可用的 `translationSession`）且后端已授权；用户
+  选择的互译属于必需能力，缺失时本场启动失败，不会静默降级成只出字幕。
+
+伙伴仍要保证 `id()` 与后端 `Session.adapterId` 一致，`register(...)` 的 `capabilities`
+与实现一致；只在某个 Adapter 上支持翻译时，不要把它声明到其他 Adapter 上。
 
 ## 五、怎么验
 

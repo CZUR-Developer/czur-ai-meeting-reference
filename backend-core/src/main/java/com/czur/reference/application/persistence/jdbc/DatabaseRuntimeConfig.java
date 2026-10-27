@@ -11,15 +11,15 @@ import java.util.Objects;
 import java.util.Set;
 
 /**
- * 公共 PostgreSQL／MySQL 连接运行时的不可变配置。
+ * 公共 MySQL 连接运行时的不可变配置。
  *
  * <p>配置只在装配阶段从环境映射读取一次。数据库地址、账号和密码不会通过
  * {@link #toString()} 输出；校验失败也只报告字段和约束，不把完整 URL 或密码
- * 带入异常消息。两种引擎使用同一组字段，由显式 JDBC URL 选择；业务代码
- * 不按 hostname、profile 或数据库来源选择实现。支持连接不表示对应会议 Store
- * 已经可用；MySQL client-model 通过 {@link JdbcDatabaseContext} 及
- * {@link JdbcClientModelWorkers} 装配 Store/Worker 子集，完整
- * {@link JdbcDatabaseRuntime} 仍只支持 PostgreSQL。</p>
+ * 带入异常消息。地址必须是 {@code jdbc:mysql://}，其他协议在启动期被拒绝；
+ * 业务代码不按 hostname、profile 或数据库来源选择实现。client-model 通过
+ * {@link JdbcDatabaseContext} 及 {@link JdbcClientModelWorkers} 装配 Store/Worker
+ * 子集；旧的完整 {@link JdbcDatabaseRuntime} 仍明确拒绝 MySQL，不能作为参考交付
+ * 路径。</p>
  */
 public final class DatabaseRuntimeConfig {
     public static final String DATABASE_URL = "DATABASE_URL";
@@ -182,7 +182,7 @@ public final class DatabaseRuntimeConfig {
         return validationTimeout;
     }
 
-    /** 同一连接池共用的单次 socket 读超时；PG 驱动用秒，MySQL 驱动用毫秒。 */
+    /** 同一连接池共用的单次 socket 读超时；配置用秒，Connector/J 装配时换算为毫秒。 */
     public Duration socketTimeout() {
         return socketTimeout;
     }
@@ -258,8 +258,8 @@ public final class DatabaseRuntimeConfig {
         for (String parameter : url.substring(question + 1).split("&", -1)) {
             int separator = parameter.indexOf('=');
             String key = separator < 0 ? parameter : parameter.substring(0, separator);
-            // pgjdbc 42.6.2 的 URL key 原样且大小写敏感，首个 '=' 前的
-            // 精确 socketTimeout 会覆盖连接属性；无 '=' 也会产生同名 key。
+            // URL key 先按 UTF-8 解码再比对，避免编码变体绕过受管参数检查；
+            // 首个 '=' 前的精确 socketTimeout 会覆盖连接属性，无 '=' 也会产生同名 key。
             if (engine == JdbcDatabaseEngine.MYSQL) {
                 try {
                     key = URLDecoder.decode(key, StandardCharsets.UTF_8);

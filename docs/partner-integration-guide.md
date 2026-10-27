@@ -73,11 +73,18 @@ Android 部署参数在仓外本地文件 `android-reference-app/deployment.loca
 地址回退来源。
 构建与设备启动命令见 [工具说明](../tools/android-device/README.md)。
 
-数据库统一使用 MySQL 5.7。先由部署方创建隔离数据库，再执行仓库中当前唯一的
-`deploy/migrations/V001__initial_schema.sql`（或运行 `deploy/migrate.sh`）。该脚本只新增
-`ai_trans_*` 专用表，不创建数据库／账号，也不修改旧业务表。应用启动只做 readiness
-检查，不会自动建表或修改表结构。开发机没有隔离数据库时，只能执行 Mock／模块测试，
-不能把它写成真实局域网会议验收。
+数据库统一使用 MySQL 5.7，且只支持 `jdbc:mysql://` 地址（范围见
+[后端说明](../backend-reference/README.md#数据库范围)）。先由部署方创建隔离数据库，再用
+唯一入口 `bash deploy/migrate.sh` 执行仓库中当前的 `V001__initial_schema.sql`
+（本机模板走 `bash tools/migrate-reference-client.sh`）。该脚本只在整份 SQL 成功后登记
+`V001__initial_schema`；应用启动的 readiness 检查以登记表为准，不会自动建表或改表。
+直接手工执行 SQL 文件不会写登记，后端会以迁移未登记（`MIGRATION_MISSING`）拒绝启动；
+确需手工执行时，
+必须在整份 SQL 成功后补跑
+`INSERT INTO ai_trans_schema_migrations(version) VALUES ('V001__initial_schema')`，
+不能跳过。脚本只新增 `ai_trans_*` 专用表，不创建数据库／账号，也不修改旧业务表。
+细节见[数据库基线](../deploy/migrations/README.md)。开发机没有隔离数据库时，只能执行
+Mock／模块测试，不能把它写成真实局域网会议验收。
 
 ### MySQL client-model 的后台 Worker
 
@@ -165,7 +172,8 @@ MeetingAppAssembly.registerLoginEntry(object : AppLoginEntry {
 ```
 
 只注册 `open` 的 lambda 仍可编译，已登录时走 `signOut` 的默认实现（清理参考会话）。
-替换入口会完全接管账号退出／切换，页面不会先执行默认退出。会话保存／恢复由伙伴 Provider
+参考 App 默认只有“登录／退出登录”两个动作，不提供切换账号菜单；替换入口后由伙伴自己
+实现退出或切换，页面不会先执行默认退出。会话保存／恢复由伙伴 Provider
 负责，回调只触发重新读取身份和能力；SDK 不申请账号、不弹登录 UI，也不引用系统账号。
 默认插件将会话与构建后端配对：同一后端升级／重启恢复有效登录，更换后端的 APK 不复用
 原后端会话。伙伴自定义身份插件应保持这种归属；它不提供运行时切换部署地址的入口。
@@ -197,6 +205,8 @@ Android 端通过 `ModelAdapter` 接收 Provider 数据，将原文、译文、�
 线程、时间及扩展接口见 [公共 Android core 说明](../android-reference-app/meeting-client-core/README.md#模型请求描述与独立文本翻译)。
 
 ### 活跃心跳与弃场收口
+
+本节是心跳与弃场收口的权威说明，其他文档只摘要并链接到这里。
 
 参考部署用“服务端心跳”判断一场会议还在不在。Create 响应里的
 `limits.heartbeatIntervalMs` 是服务端期望的间隔（缺省 120000，`0` 表示旧服务端
@@ -351,7 +361,9 @@ suspend fun captureOneFrame() {
 App 决定周期、末帧、排除哪些窗口及会议相对时间。每场沿用一次在途截图／提交，
 周期帧 ACK 结束后才开始末帧；末帧成功、无新图或失败均须续接原会议停止流程。
 停止后关闭 `images`，释放本场状态；`captureClient.close()` 另行释放原采集授权。
-完整参考接线见 [Android 截图说明](../android-reference-app/README.md#独立sdk截图与参考演示帧)。
+完整参考接线见 [Android 截图说明](../android-reference-app/README.md#独立sdk截图与参考演示帧)；
+公开 API、线程约束、资源所有权和关闭顺序见
+[SDK 截图公开入口与资源约束](../android-reference-app/docs/SCREEN-CAPTURE.md)。
 
 ## 5. 结果动作和 Web 扩展
 
@@ -445,7 +457,8 @@ Manifest 的 `ArtifactRef` 单独流式下载录音，再以本地相对路径�
 实际 PDF 接线见 [LocalPdfResultActionPlugin](../android-reference-app/app/src/main/java/com/czur/aimeeting/reference/LocalPdfResultActionPlugin.kt)，
 接口生命周期见 [公共客户端核心说明](../android-reference-app/meeting-client-core/README.md)。
 
-Web 只读取 `READY` Manifest。原文、译文、结构化总结和录音分别由真实
+Web 读取 `READY` 或 `READY_WITH_WARNINGS` Manifest；后者展示降级告警，但姓名编辑等
+只接受 `READY` 的写入口不显示。原文、译文、结构化总结和录音分别由真实
 `ArtifactRef` 决定是否展示；录音使用 `GET /v1/artifacts/{artifactId}?genTime=...`
 流式播放，不把长音频塞进 JSON。伙伴更换结果页面时，仍应复用 Manifest、产物类型和
 有效期规则。
@@ -475,19 +488,17 @@ Artifact Store 或反向代理时，应对齐该最长会议预算，避免录�
 的事件不会写入，已接受内容仍能正常 Stop 到 `READY`。单条 append 的请求体上限
 仍然单独生效，两个上限不能互相替代。
 
-默认参考 Web 在原文姓名处提供“单个／全局”改名；持有效结果链接即可修改，无需再次登录。
-全局仅指本场同一发言人。
-未配置声纹时仍可人工改名。有本场跨会议身份能力和产物时可勾选“下次自动识别”，
-额外登记到可替换 Provider。登记失败仍保留本场已保存名称并明确提示。
-编辑沿用原 `genTime` 的有效期，登记归属使用会议真实所属账号，不伪造访客身份。
-后端 `SpeakerResultAccessPolicy.Factory` 可替换此规则；选择所有者登录策略时，
-通过 `resultSpeakerEditingRequiresLogin=true` 告知 Web，再接入自己的认证方式。
-这不改变 App 登录、会议控制及独立人物库管理的授权。
-`speaker.identity` 是单独的标准产物，本场 speaker 编号与跨会议 `personId` 分开。
-参考讯飞插件、FFmpeg 依赖和可选环境项见 [后端说明](../backend-reference/README.md#可选跨会议声纹参考插件)。跨会议识别的业务范围由伙伴决定：参考实现只提供接口和最小示例（默认关闭），不定义“跨会议”的边界，也不保证示例在部分发布失败后的重试行为。
-及 [本机配置模板](../tools/reference-client.env.example)。未注册 Provider 时自动识别选项隐藏，
-字幕／译文／总结和录音照常交付；伙伴可用自己的 `SpeakerIdentityProvider` 替换供应商与人员库。
-写入协议、姓名优先级和登录扩展见 [Web 发言人编辑](../web-reference/README.md#发言人改名与可选跨会议记录)。
+Web 的发言人改名和可选跨会议登记默认使用有效结果链接，不要求再次登录；
+`READY_WITH_WARNINGS` 展示告警，但隐藏只接受 `READY` 的姓名编辑入口。编辑授权、
+姓名优先级、`remember` 语义和可替换的 `SpeakerResultAccessPolicy.Factory` 见
+[Web 发言人编辑](../web-reference/README.md#发言人改名与可选跨会议记录)。登记归属使用
+会议真实所属账号，不伪造访客身份；未注册 Provider 时仍可本场改名，自动识别选项隐藏，
+字幕／译文／总结和录音照常交付。`speaker.identity` 是单独的标准产物，本场 speaker
+编号与跨会议 `personId` 分开；讯飞示例、FFmpeg 依赖和可选环境项见
+[后端说明](../backend-reference/README.md#可选跨会议声纹参考插件) 及
+[本机配置模板](../tools/reference-client.env.example)。跨会议识别的业务范围由伙伴决定：
+参考实现只提供接口和最小示例（默认关闭），不定义“跨会议”的边界，也不保证示例在
+部分发布失败后的重试行为。
 
 ## 6. 交付前检查
 

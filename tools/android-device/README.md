@@ -38,7 +38,7 @@ python3 tools/android-device/check-screen-capture-api.py \
 
 ## 日常会议流程
 
-用 Python 3 标准库和 ADB 自动完成**打开 App → 真实账号登录 → 选择功能 → 开始会议**。
+用 Python 3 标准库和 ADB 自动完成**打开 App → 复用登录会话或真实账号登录 → 选择功能 → 开始会议**。
 地址已经在构建时注入，工具读取现有页面的 `resource-id`、`checked`、`enabled` 和
 `bounds`，每次使用当前控件位置；不注入 token、不复制 SDK、也不另建会议状态机。
 日常验证在开发机执行，无须 Docker 或测试平台。仅支持当前参考 App 的 UI；伙伴改 UI
@@ -50,8 +50,9 @@ python3 tools/android-device/check-screen-capture-api.py \
 1. 安装上述已注入部署地址的参考 App，连接 USB／ADB，后端与 Web 服务已正常启动。
 2. 后端构建地址使用已配置 HTTPS、且设备信任证书的 PC 地址，Web 可以使用局域网 HTTP。
    设备上的 `127.0.0.1` 指设备自身；loopback 构建地址仅用于显式创建 ADB reverse 的诊断。
-3. 参考账号为后端已经配置的终端用户账号。密码从环境注入，勿写进命令参数、脚本或证据。
-   可在本机用交互式 `read -s` 设置变量，或者使用已有环境注入方式：
+3. 参考账号为后端已经配置的终端用户账号。首次登录需要账号密码；设备上已有有效会话时可
+   只做复用、不提供密码。密码从环境注入，勿写进命令参数、脚本或证据。可在本机用
+   交互式 `read -s` 设置变量，或者使用已有环境注入方式：
 
 ```bash
 read -r -s 'CZUR_MEETING_PASSWORD?测试账号密码：'
@@ -82,11 +83,14 @@ python3 tools/android-device/meeting-device.py setup-start \
 `summaryAvailable=false` 等事实。只有明确请求一个后端未声明的可选能力时才失败；用户选择的
 必需能力缺失仍会阻止开始会议。
 
-未登录时直接填写账号表单；已登录时读取实际 UI 层级，在账号菜单中按完整文字选择
-“切换账号”，再提交本次账号，不按菜单序号点击，也不选择“退出登录”。登录成功后由
-原页面替换会话，取消或登录失败保留原有效身份。同一编译后端下有效登录会话在进程重启
-后恢复；换后端重新打包后不会误用原身份。只想重开会议时可直接使用
-`open → options → start`。工具不清除 App 数据，也不强杀会议。
+未登录时点一次账号按钮打开参考登录表单，再提交 `--username` 与密码环境变量；已登录时
+账号按钮只有“退出登录”一个动作（App 默认登录行为见
+[Android 说明](../../android-reference-app/README.md#页面登录与集中装配)），工具不点击它，
+也不等待已移除的“切换账号”菜单，直接沿用当前会话继续会前设置和开始。重跑
+`setup-start`／`login` 时可省略账号密码；PASS 回执里 `alreadyLoggedIn=true` 和 `account`
+表示本次复用了页面显示的现有账号。要换账号先在 App 内点“退出登录”，再重新执行。登录成功后由原页面替换会话，取消或登录失败保留原有效身份。
+同一编译后端下有效登录会话在进程重启后恢复；换后端重新打包后不会误用原身份。只想重开
+会议时可直接使用 `open → options → start`。工具不清除 App 数据，也不强杀会议。
 
 开始阶段会确认已知的系统录音／整屏采集授权按钮，走与人工点击相同的权限流程，不使用
 `pm grant`。加 `--manual-permissions` 可保留弹窗供人工确认；未知弹窗或等待超时会输出
@@ -140,7 +144,8 @@ WindowManager 的 `APPLICATION_OVERLAY` 实际尺寸；Activity 的 `BASE_APPLIC
 直接是会议状态：`APP_RUNNING_NO_MEETING`、`MEETING_RUNNING`、`MEETING_READY`、
 `UNKNOWN`，同时回执里也带 `meetingState`；其他命令是 PASS／PROGRESS／FAIL。
 进程存在但没有会议时不会再报 PASS；没有可停止会议时 `stop` 直接失败。
-登录 PASS 确认真实登录与能力加载后开始按钮可用；开始 PASS 确认**本场 App RUNNING
+登录 PASS 区分两种情况：复用现有会话时回执 `alreadyLoggedIn=true`，页面有显示名时
+一并给出 `account`；新登录时确认真实登录与能力加载后开始按钮可用。开始 PASS 确认**本场 App RUNNING
 日志**，不以 ADB 点击回执代替业务成功。动态字幕和音量动画会影响 UI dump，所以开始后
 无需继续找停止按钮。`status` 可读取页面可见信息、当前 PID 的会议 ID／阶段、实际音源模式
 （如 MIC／CZUR_BROKER）和截图模式；未出现在日志中的字段为 `null`，不猜测。
@@ -205,20 +210,37 @@ Debug 包的 `AiMeetingReference` 日志还记录截图请求是否为末帧、�
 
 本机开发尚未配置 HTTPS 时，可以显式创建 ADB reverse，将设备 loopback HTTP 映射到
 PC 后端。现有登录客户端允许这个开发入口；直接构建 `http://<PC局域网IP>` 会被拒绝。
-以下例子将设备的 `127.0.0.1:8080` 映射到 PC 后端的 `38169` 端口，Web 仍走局域网：
+以下步骤都把工作目录固定为仓库根目录，只通过 `deployment.usb-debug.properties` 注入
+诊断地址，不改源码里的默认地址：
 
 ```bash
-# 开发者先把 ReferenceDeployment.BACKEND_URL 临时改成 http://127.0.0.1:8080，
-# 再构建并安装这个诊断APK；真实LAN验收仍使用HTTPS入口。
-cd android-reference-app && ./gradlew :app:assembleDebug
-python3 tools/android-device/meeting-device.py reverse --device-port 8080 --host-port 38169
-python3 tools/android-device/meeting-device.py setup-start --username 'meeting-user'
-python3 tools/android-device/meeting-device.py remove-reverse --device-port 8080
+cd /path/to/czur-ai-meeting-reference
+
+# 1. 复制一份只用于 USB 诊断的本地部署配置（已被 Git 忽略）。
+cp android-reference-app/deployment.local.properties.example \
+   android-reference-app/deployment.usb-debug.properties
+# 2. 编辑该文件：backendUrl 改成 http://127.0.0.1:8080；resultWebUrl 改成设备可达的
+#    Web 地址（保留模板占位值会被构建拒绝），Web 服务仍走局域网。
+# 3. 用这份配置构建并安装诊断 APK（构建放进子 shell，不改变后续命令的工作目录）。
+(cd android-reference-app && REFERENCE_DEPLOYMENT_FILE=deployment.usb-debug.properties \
+   ./gradlew :app:assembleDebug)
+adb -s '<ADB序列号>' install -r android-reference-app/app/build/outputs/apk/debug/app-debug.apk
+
+# 4. 把设备 127.0.0.1:8080 映射到 PC 后端的 38169 端口，再走正常 UI 流程。
+python3 tools/android-device/meeting-device.py reverse --serial '<ADB序列号>' \
+  --device-port 8080 --host-port 38169
+python3 tools/android-device/meeting-device.py setup-start --serial '<ADB序列号>' \
+  --username 'meeting-user' --output '/tmp/meeting-start-check'
+
+# 5. 诊断结束只移除本次映射；正式 LAN 验收仍用 HTTPS 入口另外构建。
+python3 tools/android-device/meeting-device.py remove-reverse --serial '<ADB序列号>' \
+  --device-port 8080
 ```
 
+`deployment.usb-debug.properties` 与正式的 `deployment.local.properties` 相互独立；
+不传 `REFERENCE_DEPLOYMENT_FILE` 时构建仍读正式配置，不会误把诊断包当成验收包。
 映射要求该 PC 端口确实提供后端 HTTP 路由，Web 服务也须已启动并可达；工具不启动服务器，
-不自动覆盖其他端口。
-`remove-reverse` 只移除指定端口，测试后由调用方执行。
+不自动覆盖其他端口。`remove-reverse` 只移除指定端口，测试后由调用方执行。
 
 ## 团队设备 runner 与主机单测
 

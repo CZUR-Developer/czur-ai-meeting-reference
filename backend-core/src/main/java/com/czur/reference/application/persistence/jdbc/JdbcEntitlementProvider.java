@@ -35,7 +35,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * 使用可替换资格策略的共享 JDBC 权益 Provider（PostgreSQL／MySQL）。
+ * 使用可替换资格策略的共享 JDBC 权益 Provider（当前仅 MySQL 5.7）。
  *
  * <p>{@link #authorizeStart(AuthorizeStartRequest)} 委托资格策略，不获取会议账本
  * 的JDBC连接；部署策略可只读访问自身账号服务。reserve、commit 和 cancel才访问Reservation与

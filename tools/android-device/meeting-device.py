@@ -18,6 +18,10 @@ import uuid
 import xml.etree.ElementTree as ET
 
 PACKAGE = "com.czur.aimeeting.reference"
+# 当前参考 App 的账号按钮只有两个动作：未登录时打开表单，已登录时直接退出。
+# 工具按按钮实际文字判断会话状态，不点击已登录的按钮，也不再等待已移除的账号菜单。
+ACCOUNT_LOGGED_IN_TEXT = "退出登录"
+ACCOUNT_LOGGED_OUT_TEXT = "登录"
 
 
 class ToolError(RuntimeError):
@@ -107,10 +111,12 @@ class Adb:
 class MeetingDevice:
     """串行执行正常 UI 流程；JSON 是操作回执，不作为第二份会议状态。"""
 
-    def __init__(self, adb, timeout=45, output=None, secrets=(), auto_permissions=True):
+    def __init__(self, adb, timeout=45, output=None, secrets=(), auto_permissions=True,
+                 password_env="CZUR_MEETING_PASSWORD"):
         self.adb, self.timeout = adb, timeout
         self.output = Path(output) if output else None
         self.secrets, self.auto_permissions = secrets, auto_permissions
+        self.password_env = password_env
         self.stage = "prepare"
         self.last_ui = ET.Element("hierarchy")
         if self.output:
@@ -242,24 +248,34 @@ class MeetingDevice:
         self.emit("PASS")
 
     def login(self, username, password):
+        """未登录时打开参考账号表单；已登录时直接沿用当前会话。
+
+        账号按钮在已登录时只有一个动作“退出登录”，点击会清掉当前会话。工具不把
+        “重跑一次开始流程”变成注销，因此先按按钮实际文字判断状态：已登录不点击、
+        不等待已移除的“切换账号”菜单，也不要求本次再提供账号密码；未登录才打开
+        表单并提交本次账号，取消或失败仍保留原有效身份。
+        """
         self.stage = "login"
-        self.tap_id("account_button")
 
-        def account_entry(root):
-            # 未登录时直接显示表单；已登录时，系统 AlertDialog 先展示账号菜单。
-            # 按实际层级的系统 ID 和完整文字匹配切换项，不依赖行序号或点击退出。
-            username_field = by_id(root, "login_username")
-            if username_field is not None:
-                return username_field
-            return next((node for node in root.iter("node")
-                         if node.get("resource-id") == "android:id/text1"
-                         and node.get("text") == "切换账号"), None)
+        def account_state(root):
+            button = by_id(root, "account_button")
+            # 身份异步刷新完成前按钮文字可能为空；等到明确状态再决定是否点击。
+            if button is not None and button.get("text") in (ACCOUNT_LOGGED_IN_TEXT,
+                                                             ACCOUNT_LOGGED_OUT_TEXT):
+                account = by_id(root, "account_name")
+                return button, account.get("text", "") if account is not None else ""
+            return None
 
-        entry = self.wait(account_entry, "登录表单或账号切换菜单")
-        if entry.get("resource-id") == "android:id/text1":
-            self.tap(entry)
-            self.wait(lambda root: by_id(root, "login_username"), "切换账号登录表单")
-        # 切换成功才由原登录流程替换身份；取消／失败仍保留原会话，工具不提前退出。
+        button, account = self.wait(account_state, "账号按钮的登录状态")
+        if button.get("text") == ACCOUNT_LOGGED_IN_TEXT:
+            self.evidence()
+            self.emit("PASS", alreadyLoggedIn=True, account=account)
+            return
+        if not username or not password:
+            raise ToolError("当前未登录；请提供 --username 或 CZUR_MEETING_USERNAME，"
+                            "并设置密码环境变量 " + self.password_env + " 后重试")
+        self.tap(button)
+        self.wait(lambda root: by_id(root, "login_username"), "参考账号登录表单")
         self.fill("login_username", username)
         self.fill("login_password", password)
         self.tap_id("login_submit")
@@ -520,10 +536,11 @@ def main(argv=None):
     cli = parser()
     args = cli.parse_args(argv)
     password = os.environ.get(args.password_env, "")
-    if args.command in ("login", "setup-start") and not (args.username and password):
-        cli.error("请提供 --username 或 CZUR_MEETING_USERNAME，并设置密码环境变量 " + args.password_env)
+    # 已登录时 login／setup-start 直接复用当前会话，不要求本次账号密码；
+    # 未登录且缺少凭据时由 login 在真实页面状态确认后明确失败。
     tool = MeetingDevice(Adb(args.adb_command, args.serial, (password,)), args.timeout,
-                         args.output, (password,), not args.manual_permissions)
+                         args.output, (password,), not args.manual_permissions,
+                         args.password_env)
     try:
         if args.command == "setup-start":
             tool.open()

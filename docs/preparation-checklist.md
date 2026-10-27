@@ -110,18 +110,32 @@ AI_MEETING_SAMPLE_JSON_WS_ENDPOINT=ws://<开发机局域网 IP>:19091
 [模型与能力配置指南第 5 节](model-and-capability-guide.md#5-更换模型时修改边界是什么)
 和[扩展开发手册第 4 节](partner-integration-guide.md#4-模型和能力扩展)。
 
-## 五、准备完成后自检
+## 五、准备完成后的环境自检
 
-逐条过一遍，全绿再进入接入步骤：
+这一节只核对“资源和配置是否就位”，不要求后端已经在跑、App 已经装好或账号已经登录；
+这些属于接入后的验收，见下一节。逐条过一遍，全绿再进入接入步骤：
 
-- [ ] `mysql -h <host> -u <user> -p <db>` 能连上，且已执行唯一的 V001 初始化。
-- [ ] 后端能起，`curl http://127.0.0.1:<端口>/v1/capabilities` 返回当前能力与语言。
-- [ ] 设备浏览器能打开 `https://<主机>:8443/v1/capabilities`（自签证书需先在设备信任）。
+- [ ] `mysql -h <host> -u <user> -p <db>` 能连上，且已通过 `deploy/migrate.sh`
+      （本机模板用 `bash tools/migrate-reference-client.sh`）登记 `V001__initial_schema`；
+      只手工执行 SQL 文件不算完成。
 - [ ] `deployment.local.properties` 里 `backendUrl`、`resultWebUrl` 已填，构建时不再报“缺少部署配置”。
-- [ ] 模型端点从设备可达（`ws://` 或你的供应商地址，不能用设备自己的 `127.0.0.1`）。
-- [ ] 设备已装参考 App，登录后能看到“开始”可用。
+- [ ] `backendUrl` 是设备可达的 HTTPS 地址；开发自签证书已按
+      [本机局域网 HTTPS](local-lan-https.md) 放到 Debug CA 路径，正式环境由部署方提供证书。
+- [ ] 模型端点从设备可达（`ws://` 或你的供应商地址），不能用设备自己的 `127.0.0.1`。
+- [ ] 结果页构建产物里的 `config.json` 已指向浏览器可达的后端 `apiBaseUrl`。
 
-任一项没过，对应对应文档：[数据库与初始化](partner-getting-started.md#第-2-步准备数据库并执行唯一初始化脚本)、
+## 六、接入后验收（不属于准备条件）
+
+准备就绪后，按[从零接入指南](partner-getting-started.md)第 2–6 步完成建库、启动、
+装 APK 和第一场会议，再按[当前支持范围与验收清单](validation-scope.md#目标环境的最小验收)
+逐项验收。最低限度的入口检查是：
+
+- [ ] 后端启动后 `curl http://127.0.0.1:<端口>/v1/capabilities` 返回当前能力与语言，
+      设备浏览器也能打开 `https://<主机>:8443/v1/capabilities`（自签证书需先在设备信任）。
+- [ ] 参考 APK 安装成功，登录后能看到“开始”可用。
+- [ ] 真实开一场会，确认字幕、正常停止和结果页可回看；可选能力按实际声明逐项核对。
+
+入口检查没过时，对应文档：[数据库与初始化](partner-getting-started.md#第-2-步准备数据库并执行唯一初始化脚本)、
 [启动后端](partner-getting-started.md#第-3-步启动后端并确认健康)、
 [HTTPS 与 Web](partner-getting-started.md#第-4-步准备设备可达的-https-和-web)、
 [构建与安装](partner-getting-started.md#第-5-步构建并安装真实-sdk-版本-app)。

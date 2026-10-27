@@ -3,10 +3,12 @@ info:
   title: AI Meeting Control API
   version: 0.1.0
   description: |
-    AI 字幕纪要设备端与后端之间的公开控制面协议草案。
+    AI 字幕纪要设备端与后端之间的当前公开控制面协议。
     实时音频和事件使用 realtime.proto；最终结果清单使用
     meeting-manifest.schema.json。模型直连材料只由独立的已认证会话接口返回；
     其它会议控制接口不暴露模型厂商、对象存储路径或 CZUR 内部接口。
+    路径摘要中的“（可选扩展）”“（预留，未实现）”标注参考实现状态：可选扩展由
+    伙伴自行实现；预留接口当前没有 HTTP 分发路由，调用返回 404。
 servers:
   - url: https://ai.example.com
 tags:
@@ -610,7 +612,9 @@ paths:
     post:
       tags: [Meetings]
       operationId: cancelMeeting
-      summary: 幂等取消尚未完成的会议
+      x-implementation-status: reserved
+      summary: （预留，未实现）幂等取消尚未完成的会议
+      description: 参考 HTTP 分发当前没有此路由，调用返回 404；正常结束会议请使用 `:stop`，不要以取消代替收尾。协议保留该操作供后续扩展。
       security:
         - bearerAuth: []
       parameters:
@@ -637,7 +641,9 @@ paths:
     post:
       tags: [Meetings]
       operationId: issueMeetingResultAccess
-      summary: 由已登录 Android App 签发短期结果 Web 访问凭证
+      x-implementation-status: reserved
+      summary: （预留，未实现）由已登录 Android App 签发短期结果 Web 访问凭证
+      description: 参考 HTTP 分发当前没有此路由，调用返回 404。默认结果访问使用带 genTime 的结果链接；需要更严格结果控制时可参考 `/v1/result-access` 的可选扩展自行实现。
       security:
         - bearerAuth: []
       parameters:

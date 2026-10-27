@@ -227,6 +227,8 @@ if (snapshot instanceof JdbcClientMeetingResultFinalizer.Ready ready) {
 
 ## 数据库范围
 
+本节是数据库支持范围的权威说明，其他文档只摘要并链接到这里。
+
 默认客户端运行链使用 MySQL 5.7 与 `JdbcDatabaseContext`，全部会议表为
 `ai_trans_*`。会议命令工作单元将会议事实、幂等结果和命令 Outbox 放在同一事务。
 先执行唯一 MySQL V001，启动只读检查连接和初始化结果，不修改其他业务表。
@@ -254,9 +256,9 @@ Maven 从根 `contracts/realtime.proto` 使用固定版本 protoc 生成
 `backend-core/target/generated-sources/` 下的 Java 类，不依赖本机预装 protoc，
 也不提交生成文件。默认测试不启动数据库或厂商模型；外部数据库测试需显式提供夹具。
 
-MySQL 集成测试只接受 loopback 的 `ai_trans_m1_*` 隔离库。
-先建库并执行同一 V001，再按下例传入测试配置。部分测试会创建和删除自己唯一命名的
-`ai_trans_m2_*` 随机库，测试账号须有该权限；禁止指向部署库或其他已有业务库。
+MySQL 集成测试只接受 loopback 的 `ai_trans_m1_*` 隔离库。先建库并通过
+`deploy/migrate.sh` 登记同一 V001，再按下例传入测试配置。部分测试会创建和删除自己
+唯一命名的 `ai_trans_m2_*` 随机库，测试账号须有该权限；禁止指向部署库或其他已有业务库。
 
 ```bash
 REFERENCE_TEST_MYSQL_DATABASE_URL='jdbc:mysql://127.0.0.1:3306/ai_trans_m1_local?useSSL=false&allowPublicKeyRetrieval=true' \

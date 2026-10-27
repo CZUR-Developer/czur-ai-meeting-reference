@@ -27,7 +27,7 @@
 | 公共服务端核心 | 会议流程、标准协议、能力协商、持久化与扩展端口 | 本仓 `backend-core/`，构建成普通 JAR |
 | 参考后端 | 可启动的 HTTP 服务，装配示例登录、模型发行器和结果存储 | 本仓 `backend-reference/` |
 | Web 结果页 | 按实际结果显示原文、译文、总结、录音、图片及人物信息 | 本仓 `web-reference/`，构建成静态文件 |
-| 数据库初始化与部署示例 | 唯一 MySQL 初始化 SQL、后端 Dockerfile 和 Compose | 本仓 `deploy/` 及根目录 `Dockerfile` |
+| 数据库初始化与部署示例 | 唯一 MySQL 初始化入口 `deploy/migrate.sh`、后端 Dockerfile 和 Compose | 本仓 `deploy/` 及根目录 `Dockerfile` |
 
 AAR 是 Android 库包。参考 App 固定使用设备 AAR + 本仓业务 AAR 构建；字幕/占位使用
 设备 AAR 内的 `SubtitleTextView`，不再单独引入 UI AAR。设备 AAR 版本 0.5.0，
@@ -195,9 +195,12 @@ AI_MEETING_SPEAKER_IDENTITY_PROVIDER=none
 bash tools/migrate-reference-client.sh
 ```
 
-脚本执行 [`V001__initial_schema.sql`](../deploy/migrations/V001__initial_schema.sql)，
-创建 `ai_trans_*` 专用表并登记初始化。它不创建数据库或账号，不迁移其他业务表。
-应用启动只检查初始化结果，不自动建表。首次接入无需手工寻找其他版本脚本。
+该脚本委托唯一初始化入口 [deploy/migrate.sh](../deploy/migrate.sh) 执行
+[`V001__initial_schema.sql`](../deploy/migrations/V001__initial_schema.sql)，创建
+`ai_trans_*` 专用表并登记 `V001__initial_schema`。它不创建数据库或账号，不迁移其他
+业务表。应用启动只检查登记结果，不自动建表；只手工执行 SQL 文件不会写登记，后端会
+拒绝启动，确需手工执行时按[数据库基线](../deploy/migrations/README.md)补写登记。
+首次接入无需手工寻找其他版本脚本。
 
 ### 第 3 步：启动后端并确认健康
 
@@ -307,7 +310,7 @@ adb install -r android-reference-app/app/build/outputs/apk/debug/app-debug.apk
 | 双语互译 | 声明翻译与所需语言，确认所选模型开通翻译；也可装配独立翻译模型 | App 原文／译文；Web 实际译文 |
 | AI 纪要 | 准备百炼应用与 Key，或自己的总结 Adapter／发行器 | 会前可选总结；会后标题、概述、要点、待办 |
 | 本场分人 | 模型支持并声明本场发言人能力 | 本场发言人编号／分组；不等于跨场认识某个人 |
-| 跨会议人物身份 | 讯飞声纹资源或自定义 Provider、本场分人、留存录音及 FFmpeg | Web 人物信息、登录后命名注册、后续会议识别 |
+| 跨会议人物身份 | 讯飞声纹资源或自定义 Provider、本场分人、留存录音及 FFmpeg | Web 人物信息、默认用有效结果链接改名并附带登记、后续会议识别 |
 | 演示截图 | SDK 版、系统截图能力或标准屏幕捕获授权；选择演示模式 | 变化页面截图及 Web 演示区；参考 App 的互译与演示不同时选择 |
 | 替换账号／权益／存储／结果渠道 | 在对应装配点实现插件 | 使用自己的业务系统，会议公共流程保持共用 |
 
@@ -365,7 +368,7 @@ REFERENCE_API_BASE_URL='https://192.0.2.10:8443' npm --prefix web-reference run 
 
 | 想替换什么 | 扩展接缝 | 本仓提供的基础示例与边界 |
 | --- | --- | --- |
-| App 登录和登录保持 | `IdentityProvider`、`AppLoginEntry`，在 `MeetingAppAssembly` 注册 | 单账号表单、会话保存／恢复、切换／退出；没有注册和找回密码平台 |
+| App 登录和登录保持 | `IdentityProvider`、`AppLoginEntry`，在 `MeetingAppAssembly` 注册 | 单账号表单、会话保存／恢复、登录／退出；没有注册和找回密码平台 |
 | 后端鉴权 | 后端 `IdentityProvider` | 验证 Bearer 后生成已验证身份；对接伙伴自己的登录系统 |
 | 开会资格、套餐／扣费 | `EntitlementPolicy` 和用量结算接缝 | 固定权益／时长示例及实际会议用量事实；不连接支付渠道或预设伙伴价格 |
 | 存储 | `ArtifactStore` | 本地 file 与 S3 兼容示例；数据库另存元数据；用户空间配额由伙伴业务决定 |

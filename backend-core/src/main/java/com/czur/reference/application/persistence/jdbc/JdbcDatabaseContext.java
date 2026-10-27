@@ -12,13 +12,14 @@ import java.util.logging.Logger;
 /**
  * 公共 JDBC 连接上下文：唯一连接池、数据库引擎和固定表映射。
  *
- * <p>{@link #start(DatabaseRuntimeConfig)} 只证明连接及当前 V001 的最小基线可用，
- * 不装配会议 Store，也不证明 Create／Stop／Worker 已支持该引擎。M1 的 MySQL
- * 调用者仅使用本入口；完整会议入口 {@link JdbcDatabaseRuntime} 仍明确限定 PG。
- * 后续持久层适配应复用此上下文的同一数据源，不另建第二连接池或状态机。</p>
+ * <p>{@link #start(DatabaseRuntimeConfig)} 只证明 MySQL 连接及当前 V001 的最小
+ * 基线可用，不装配会议 Store，也不证明 Create／Stop／Worker 已覆盖全部组件。
+ * 客户端会议链使用本入口；旧的完整会议入口 {@link JdbcDatabaseRuntime} 仍明确
+ * 拒绝 MySQL，不属于参考交付路径。后续持久层适配应复用此上下文的同一数据源，
+ * 不另建第二连接池或状态机。</p>
  *
- * <p>启动和基线检查均只读，不自动建表、登记迁移或修补结构。MySQL 使用固定
- * {@code ai_trans_*} 表、UTC 会话及 utf8mb4；PG 保留原 URL 和驱动参数语义。
+ * <p>启动和基线检查均只读，不自动建表、登记迁移或修补结构。连接固定使用
+ * {@code jdbc:mysql://}、{@code ai_trans_*} 表、UTC 会话及 utf8mb4。
  * 关闭上下文只关闭连接池，重复关闭安全。</p>
  */
 public final class JdbcDatabaseContext implements AutoCloseable {
@@ -115,7 +116,7 @@ public final class JdbcDatabaseContext implements AutoCloseable {
         }
     }
 
-    /** 两种引擎共用唯一池装配点；旧 PG runtime 不增加额外连接池。 */
+    /** 唯一池装配点；旧 PG runtime 和 MySQL 客户端链都不额外创建连接池。 */
     static HikariDataSource createPool(DatabaseRuntimeConfig config) {
         return new HikariDataSource(poolConfiguration(config));
     }

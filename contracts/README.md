@@ -4,6 +4,12 @@ This directory contains the current public OpenAPI, JSON Schema, and realtime
 event definitions. Every contract change must update the corresponding positive
 and negative fixtures and document its effect on consumers.
 
+The OpenAPI labels operations the reference implementation does not serve:
+`x-implementation-status: reserved` together with a "（预留，未实现）" summary means
+the reference HTTP dispatcher has no route and returns 404. Operations marked
+"（可选扩展）" require a partner implementation and are not part of the default
+process.
+
 ## Optional post-meeting speaker identity
 
 `speaker-identity.schema.json` defines the optional `speaker.identity` JSON

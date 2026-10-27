@@ -61,6 +61,8 @@ READY 的 `presentation.capture` 截图包按修订序号读取，画面按会�
 
 ## 发言人改名与可选跨会议记录
 
+本节是 Web 编辑授权、改名与附带登记协议的权威说明，其他文档只摘要并链接到这里。
+
 参考宿主通过能力发现的 `resultSpeakerEditingEnabled=true` 开放原文姓名按钮；
 只有本场 Manifest 状态为 `READY` 时才真正渲染按钮。`READY_WITH_WARNINGS` 仍正常展示
 正文和降级告警，但后端姓名编辑端口只接受 `READY`，页面不再显示必然 409 的入口。

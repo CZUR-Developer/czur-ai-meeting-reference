@@ -14,9 +14,13 @@ MySQL 5.7 的 DDL（数据定义语句）会隐式提交，脚本只有在整份
 数据库使用 InnoDB、`utf8mb4`、二进制排序和 UTC `DATETIME(6)`。MySQL 5.7 不执行 PostgreSQL 的 CHECK 约束，领域校验和工作单元关系由公共持久层承担。JSON、规范化正文、音频和摘要按当前公共 core 的 MySQL 映射保存。表名固定为 `ai_trans_*`，不支持通过配置改前缀，避免误写现有业务表。
 
 已有开发库升级：本仓仍只维护一份 V001 基线，已登记 `V001__initial_schema` 的库
-不会自动重跑。新增 `ai_trans_meeting_finalization_pending` 时，只需对已有库执行
-与 V001 完全等价的单表 `CREATE TABLE`（字段、主键、索引、InnoDB／utf8mb4／
-`ROW_FORMAT=DYNAMIC` 一致），不要重跑整份基线，也不要改写已有业务数据。
+不会自动重跑。只有初始化时间早于 `ai_trans_meeting_finalization_pending` 表加入
+V001 的开发库才需要手工补齐：对已有库执行与 V001 完全等价的单表 `CREATE TABLE`
+（字段、主键、索引、InnoDB／utf8mb4／`ROW_FORMAT=DYNAMIC` 一致），不要重跑整份
+基线，也不要改写已有业务数据。这一步不产生新版本：不要删除或改写
+`ai_trans_schema_migrations` 中已有的 `V001__initial_schema` 行，也不要伪造
+`V002`；建表成功后用 `SHOW CREATE TABLE` 核对结构即可，readiness 只检查 V001
+登记和固定表存在。新建库仍统一使用 `deploy/migrate.sh`。
 
 本机局域网测试示例：
 
@@ -27,4 +31,4 @@ export DATABASE_PASSWORD='只在本机注入'
 bash deploy/migrate.sh
 ```
 
-MySQL 容器可以作为本机临时测试依赖，例如使用 `mysql:5.7` 并只绑定 loopback；容器、数据卷和测试账号由测试方维护。正式部署由部署方提供 MySQL 实例并执行同一份 V001。公共 core 包含 PostgreSQL 可选适配器，参考仓仅交付 MySQL 初始化脚本，默认链使用 MySQL。
+MySQL 容器可以作为本机临时测试依赖，例如使用 `mysql:5.7` 并只绑定 loopback；容器、数据卷和测试账号由测试方维护。正式部署由部署方提供 MySQL 实例，并通过 `deploy/migrate.sh` 执行同一份 V001。公共持久层当前只支持 MySQL 5.7，非 `jdbc:mysql://` 地址在启动期被拒绝；支持范围见[后端说明](../../backend-reference/README.md#数据库范围)。仓库不交付其他数据库的初始化脚本或适配路径。

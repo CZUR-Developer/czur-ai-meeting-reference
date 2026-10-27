@@ -60,7 +60,7 @@ WebView `com.android.webview 116.0.5845.195`。该 WebView 属于上述已知结
 
 ## 目标环境的最小验收
 
-1. 执行唯一 V001 初始化，确认后端存活、数据库就绪和真实能力列表。
+1. 通过 `deploy/migrate.sh` 执行唯一 V001 初始化，确认后端存活、数据库就绪和真实能力列表。
 2. 构建带目标地址的 SDK App，正常登录；关闭并重开 App，验证登录状态保持。
 3. 播放或说出真实语音，确认设置页退出、跨应用悬浮窗实时显示；打开其他应用并操作窗口外
    控件，检查 Mini 恢复和互译大小切换保持同一场；正常停止后立即退窗，结果进入 READY。
@@ -82,4 +82,4 @@ HDMI-IN、投屏、外设音源和实体方向角依赖匹配的系统能力及�
 参考仓不含真实模型 Key、运行配置或设备签名；设备 AAR 随仓交付（`android-reference-app/meeting-android/libs/ai-meeting-device.aar`，版本与 SHA-256 见 Android 说明）。
 Debug 开发 CA 仅用于本机联调，不进入 Release 信任配置。Release 的签名、公开域名、
 第三方服务资源和最终产品验收由部署方负责。后端交付 Docker 应用镜像和外部配置入口，
-数据库只交付唯一初始化 SQL，Web 交付静态资源。
+数据库只交付唯一 V001 初始化 SQL 及执行入口 `deploy/migrate.sh`，Web 交付静态资源。
