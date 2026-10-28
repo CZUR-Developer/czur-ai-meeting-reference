@@ -46,7 +46,7 @@ Typical baseline: an Android 14 (API 34) device, a JDK 21 backend, MySQL 5.7 and
 main pipeline is login → Create → realtime model session → transcript events → Stop → manifest → results
 page; translation, structured summary and session speaker diarization are optional capabilities.
 
-## Choose a path
+## Documentation map
 
 | What you want to do | Read this | Approx. |
 | --- | --- | --- |
