@@ -141,6 +141,24 @@ http://<主机>:8090/index.html?meetingId=<mtg_...>&genTime=<毫秒时间戳>
 静态 Web 与后端不在同一来源时，需要部署侧允许结果接口跨域读取。不要把真实地址或令牌
 提交到 Git；HTTPS 后端需使用浏览器／设备实际信任的证书。
 
+### 构建后自检
+
+每次构建或重启 Web 后，先确认产物里的地址和后端一致：
+
+```bash
+curl -s http://<主机>:<WEB_PORT>/config.json
+curl -s "<上一步返回的 apiBaseUrl>/v1/capabilities"
+```
+
+第一条应返回构建时写入的 `apiBaseUrl`，第二条应返回 200 且包含 `transcript.realtime`。
+App 的 `resultWebUrl` 和这里的 `apiBaseUrl` 必须指向同一套部署。
+
+| 现象 | 先查什么 |
+| --- | --- |
+| 结果页 `Failed to fetch` | `config.json` 的 `apiBaseUrl` 是否指向运行中的后端；设备浏览器能否打开该地址的 `/v1/capabilities`；CORS 是否允许页面来源 |
+| 提示缺少会议编号或生成时间 | URL 是否带 `meetingId` 与 `genTime` |
+| 页面能开但清单为空 | 后端是否连到这场会议所在的库；两个地址是否同一套部署 |
+
 ## 验证
 
 Node 测试覆盖产物读取、链接编辑与可选登录协议、时间轴、原译配对、复制文本和缺能力投影。

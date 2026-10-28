@@ -283,6 +283,24 @@ bash tools/run-reference-web.sh
 局域网结果页可使用 HTTP，避免浏览器额外信任开发 CA；正式 HTTPS 结果页须配 HTTPS API。
 同时确认电脑防火墙和无线网络允许设备访问所用端口。
 
+构建后先做一次自检，确认页面和后端配到了同一套部署：
+
+```bash
+curl -s http://<PC_LAN_IP>:8090/config.json
+# 期望：{"apiBaseUrl":"http://<PC_LAN_IP>:8080"}
+curl -s "<上一步返回的 apiBaseUrl>/v1/capabilities"
+# 期望：HTTP 200，且包含 transcript.realtime
+```
+
+**App 的结果页地址（`resultWebUrl`）和 Web 的 `apiBaseUrl` 必须指向同一套部署。** 一个指 8090、
+一个指 8080 时，页面能打开但拉不到数据。
+
+| 现象 | 先查什么 |
+| --- | --- |
+| 结果页显示 `Failed to fetch` | `config.json` 的 `apiBaseUrl` 是否与当前后端一致；该地址在设备浏览器里能否打开 `/v1/capabilities`；后端 CORS 是否允许页面来源 |
+| 结果页提示缺少会议编号或生成时间 | URL 是否带 `meetingId` 与 `genTime`，`genTime` 是否为本次结果的时间戳 |
+| 页面能开但清单为空 | 后端是否连到这场会议所在的库／部署；`resultWebUrl` 与 `apiBaseUrl` 是否同一套部署 |
+
 | 地址 | 谁访问它 | 本机联调示例 |
 | --- | --- | --- |
 | 数据库 JDBC 地址 | 后端进程 | `jdbc:mysql://127.0.0.1:3306/meeting_reference` |

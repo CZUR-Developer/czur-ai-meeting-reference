@@ -338,6 +338,24 @@ still uses HTTPS. A LAN results page may use HTTP to avoid making the browser tr
 a production HTTPS results page requires an HTTPS API. Also make sure the computer's firewall and
 wireless network allow the device to reach the ports in use.
 
+After building, verify that the page and the backend point at the same deployment:
+
+```bash
+curl -s http://<PC_LAN_IP>:8090/config.json
+# expected: {"apiBaseUrl":"http://<PC_LAN_IP>:8080"}
+curl -s "<the apiBaseUrl returned above>/v1/capabilities"
+# expected: HTTP 200 including transcript.realtime
+```
+
+**The App's results-page address (`resultWebUrl`) and the Web `apiBaseUrl` must point at the same
+deployment.** If one targets 8090 and the other 8080, the page opens but cannot fetch data.
+
+| Symptom | Check first |
+| --- | --- |
+| The results page shows `Failed to fetch` | Whether `apiBaseUrl` in `config.json` matches the running backend; whether that address serves `/v1/capabilities` from the device browser; whether backend CORS allows the page origin |
+| The page complains about a missing meeting id or generation time | Whether the URL carries `meetingId` and `genTime`, and whether `genTime` is the timestamp of this result |
+| The page opens but the manifest is empty | Whether the backend points at the deployment that owns this meeting; whether `resultWebUrl` and `apiBaseUrl` target the same deployment |
+
 | Address | Who accesses it | Local integration example |
 | --- | --- | --- |
 | Database JDBC address | Backend process | `jdbc:mysql://127.0.0.1:3306/meeting_reference` |
