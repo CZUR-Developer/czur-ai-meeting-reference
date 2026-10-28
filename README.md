@@ -2,36 +2,12 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-An open-source reference implementation of AI meeting transcripts and minutes: three pieces of
-runnable code — the Android app, the backend and the results web page — plus public contracts and
-test tools. Partners provide and operate their own models, storage, accounts and billing.
-
-
-## What this project is
-
-A runnable reference implementation, not a hosted product: the code, contracts and deployment shape
-are all in the repository, while model accounts, storage, identity and billing are served by your own
-systems. The point is to get one complete pipeline running, then replace modules one at a time.
-
-| Component | Responsibility |
-| --- | --- |
-| Android app (`android-reference-app/`) | Meeting capture and UI: login, options, live transcript, floating window, result replay; includes the public client core and the device AAR |
-| Backend (`backend-core/`, `backend-reference/`) | Client-facing control plane, meeting state machine, artifact storage, manifest, entitlement boundary and background workers |
-| Results web page (`web-reference/`) | Static reader for transcript, translation, summary, speaker names and result links |
-| Contracts (`contracts/`) | Control-plane OpenAPI, manifest schema, realtime protocol and conformance fixtures |
-| Tools (`tools/`) | Local launch scripts, device helpers, contract validators and delivery checks |
-| Deployment (`deploy/`) | The single MySQL 5.7 baseline and reference deployment examples |
-
-Typical baseline: an Android 14 (API 34) device, a JDK 21 backend, MySQL 5.7 and a static web host. The
-main pipeline is login → Create → realtime model session → transcript events → Stop → manifest → results
-page; translation, structured summary and session speaker diarization are optional capabilities.
-
+An open-source reference implementation of the AI meeting pipeline: the Android app, the backend,
+the results web page, public contracts and test tools live in one repository. You can run the complete
+flow end to end, then replace modules with your own; model accounts, storage, identity and billing are
+provided by your own services.
 
 ## What this project is
-
-A runnable reference implementation, not a hosted product: the code, contracts and deployment shape
-are all in the repository, while model accounts, storage, identity and billing are served by your own
-systems. The point is to get one complete pipeline running, then replace modules one at a time.
 
 | Component | Responsibility |
 | --- | --- |
