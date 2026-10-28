@@ -51,13 +51,11 @@ clean checkout. All other documents (module READMEs, tools, public contracts) ar
 | `deploy/` | Backend Docker Compose example (connecting to an external MySQL) |
 | `tools/` | Local verification, contract validation, device-side tools |
 
-## Usage and delivery boundaries
+## License
 
-| Who | Boundary |
-| --- | --- |
-| Integrators | Keep production addresses, keys, certificates, user data and device signing material out of the repository; local configuration lives outside it or in untracked files |
-| Partners using the device AAR | The AAR binary ships with this reference repository; the closed-source SDK source is used under the delivery license |
-| Release owners | Before releasing, self-test against the [acceptance checklist](docs/validation-scope.md#目标环境的最小验收) with your own signing and deployment environment |
+This reference implementation is released under the [Apache License 2.0](LICENSE) in the repository
+root. The device AAR binary ships with this reference repository; its closed-source SDK source is
+licensed separately under the delivery license.
 
-Development environment, verification commands, contribution workflow and release boundaries are in
+Development environment, verification commands and contribution workflow are in
 [CONTRIBUTING.md](CONTRIBUTING.md) and [local development verification](tools/README.md).

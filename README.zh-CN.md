@@ -46,13 +46,10 @@ AI 字幕纪要的开源参考实现：Android 应用、后端、结果网页、
 | `deploy/` | 后端 Docker Compose 示例（连接外部 MySQL） |
 | `tools/` | 本机验证、契约校验、设备侧工具 |
 
-## 使用与交付边界
+## 许可
 
-| 谁 | 约定 |
-| --- | --- |
-| 接入方 | 不把生产地址、密钥、证书、用户数据或设备签名材料提交进仓库；本地配置放仓外或未跟踪文件 |
-| 使用设备 AAR 的伙伴 | AAR 二进制随本参考仓交付；闭源 SDK 源码按交付许可使用 |
-| 发布方 | 发布前按[验收清单](docs/validation-scope.md#目标环境的最小验收)自测，使用正式签名和自己的部署环境 |
+本参考实现使用仓库根目录的 [Apache License 2.0](LICENSE)。设备 AAR 二进制随本参考仓交付；
+其闭源 SDK 源码不随仓库公开，按交付许可使用。
 
-开发环境、验证命令、贡献流程和发布边界见 [CONTRIBUTING.md](CONTRIBUTING.md) 与
+开发环境、验证命令和贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md) 与
 [本机开发验证](tools/README.md)。
