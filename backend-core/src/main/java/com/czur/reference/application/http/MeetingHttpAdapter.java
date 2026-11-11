@@ -79,6 +79,8 @@ public final class MeetingHttpAdapter {
             "^/v1/meetings/(mtg_[A-Za-z0-9_-]+)/presentation-captures:append$");
     private static final Pattern SUMMARY_SUBMIT_PATH = Pattern.compile(
             "^/v1/meetings/(mtg_[A-Za-z0-9_-]+)/summary:submit$");
+    private static final Pattern SUMMARY_REQUEST_PATH = Pattern.compile(
+            "^/v1/meetings/(mtg_[A-Za-z0-9_-]+)/summary:request$");
     private static final Pattern USAGE_SUBMIT_PATH = Pattern.compile(
             "^/v1/meetings/(mtg_[A-Za-z0-9_-]+)/usage:submit$");
     private static final Pattern RENEW_PATH = Pattern.compile(
@@ -412,7 +414,8 @@ public final class MeetingHttpAdapter {
                 || CLIENT_APPEND_PATH.matcher(request.path()).matches()
                 || PRESENTATION_APPEND_PATH.matcher(request.path()).matches()
                 || USAGE_SUBMIT_PATH.matcher(request.path()).matches()
-                || SUMMARY_SUBMIT_PATH.matcher(request.path()).matches())) {
+                || SUMMARY_SUBMIT_PATH.matcher(request.path()).matches()
+                || SUMMARY_REQUEST_PATH.matcher(request.path()).matches())) {
             return AuthenticationRoute.CLIENT_WRITE;
         }
         if ("POST".equals(request.method())
@@ -631,6 +634,18 @@ public final class MeetingHttpAdapter {
             return errors.summarySubmit(summarySubmit.group(1),
                     clientInputPort.submitSummary(context, summarySubmit.group(1),
                             decodeSummary(request)));
+        }
+
+        Matcher summaryRequest = SUMMARY_REQUEST_PATH.matcher(path);
+        if ("POST".equals(method) && summaryRequest.matches()) {
+            if (clientInputPort == null) return errors.notImplemented();
+            if (context == null) return errors.missingContext();
+            if (!request.query().isEmpty()) {
+                throw new IllegalArgumentException("summary request query is invalid");
+            }
+            return errors.summaryRequest(summaryRequest.group(1),
+                    clientInputPort.requestSummary(context, summaryRequest.group(1),
+                            decodeSummaryLanguages(request)));
         }
 
         if ("POST".equals(method) && MEETINGS_PATH.equals(path)) {
@@ -992,6 +1007,41 @@ public final class MeetingHttpAdapter {
         }
     }
 
+    /** 纪要语言请求：只接受 1～2 个非空语言码，拒绝其它字段。 */
+    private static List<String> decodeSummaryLanguages(HttpRequest request) {
+        String contentType = request.header("content-type");
+        if (contentType == null || !contentType.matches(
+                "(?i)application/json(?:[ \\t]*;[ \\t]*charset=utf-8)?")) {
+            throw new IllegalArgumentException("summary request content-type is invalid");
+        }
+        JsonNode root;
+        try {
+            root = JSON.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                    .with(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+                    .readTree(request.body());
+        } catch (JsonProcessingException failure) {
+            throw new IllegalArgumentException("summary request JSON is invalid");
+        }
+        requireFields(root, Set.of("languages"));
+        JsonNode languages = root.get("languages");
+        if (languages == null || !languages.isArray()
+                || languages.size() < 1 || languages.size() > 2) {
+            throw new IllegalArgumentException("summary languages are invalid");
+        }
+        List<String> values = new ArrayList<>();
+        languages.forEach(item -> {
+            if (!item.isTextual() || item.textValue().isBlank()
+                    || item.textValue().length() > 64) {
+                throw new IllegalArgumentException("summary languages are invalid");
+            }
+            values.add(item.textValue());
+        });
+        if (new HashSet<>(values).size() != values.size()) {
+            throw new IllegalArgumentException("summary languages are invalid");
+        }
+        return List.copyOf(values);
+    }
+
     private static List<String> summaryItems(JsonNode node) {
         if (node == null || !node.isArray()) {
             throw new IllegalArgumentException("summary items are invalid");
@@ -1070,6 +1120,8 @@ public final class MeetingHttpAdapter {
             return "appendPresentation";
         if ("POST".equals(request.method())
                 && SUMMARY_SUBMIT_PATH.matcher(request.path()).matches()) return "submitSummary";
+        if ("POST".equals(request.method())
+                && SUMMARY_REQUEST_PATH.matcher(request.path()).matches()) return "requestSummary";
         if ("POST".equals(request.method())
                 && USAGE_SUBMIT_PATH.matcher(request.path()).matches()) return "submitUsage";
         if ("POST".equals(request.method()) && MEETINGS_PATH.equals(request.path())) {

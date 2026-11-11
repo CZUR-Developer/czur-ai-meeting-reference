@@ -288,6 +288,18 @@ public final class HttpErrorMapper {
         return clientInputFailure(((ClientMeetingInputPort.Rejected) result).reason());
     }
 
+    /** 纪要语言请求只返回受理事实；正文由服务端异步生成，不进入本次响应。 */
+    public HttpResponse summaryRequest(String meetingId,
+            ClientMeetingInputPort.SummaryRequestResult result) {
+        Objects.requireNonNull(result, "result");
+        if (result instanceof ClientMeetingInputPort.SummaryRequested requested) {
+            return success(requested.created() ? 201 : 200, Map.of(
+                    "meetingId", meetingId, "accepted", true,
+                    "languages", requested.languages()));
+        }
+        return clientInputFailure(((ClientMeetingInputPort.Rejected) result).reason());
+    }
+
     /** 首次冻结与同值重放返回同一累计值；价格／扣费规则不进入公共响应。 */
     public HttpResponse usageSubmit(String meetingId,
             ClientMeetingInputPort.UsageSubmitResult result) {

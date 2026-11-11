@@ -23,6 +23,9 @@ public final class CapabilityIds {
     /** 模型可生成符合公共结构的会议纪要。 */
     public static final String SUMMARY_STRUCTURED = "summary.structured";
 
+    /** 服务端按客户端语言列表生成纪要；只在生成 worker 已装配时授予。 */
+    public static final String SUMMARY_SERVER_GENERATED = "summary.server";
+
     private CapabilityIds() {
     }
 }

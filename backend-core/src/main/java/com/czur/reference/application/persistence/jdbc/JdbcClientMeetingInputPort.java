@@ -4,6 +4,7 @@ import com.czur.reference.application.artifact.MeetingBodyArtifactBudget;
 import com.czur.reference.application.command.MeetingAccessGuard;
 import com.czur.reference.application.command.MeetingCommandContext;
 import com.czur.reference.application.port.ClientMeetingInputPort;
+import com.czur.reference.application.port.OutboxStore;
 import com.czur.reference.application.port.EventLog;
 import com.czur.reference.application.port.EventLogStore;
 import com.czur.reference.application.port.artifact.ArtifactStore;
@@ -133,6 +134,75 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
                 rollbackQuietly(connection);
                 LOGGER.log(Level.WARNING, "客户端采音用量保存未完成");
                 return new Rejected(Reason.STORAGE_UNAVAILABLE);
+            }
+        } catch (SQLException failure) {
+            return new Rejected(Reason.STORAGE_UNAVAILABLE);
+        }
+    }
+
+    /**
+     * 登记本场纪要语言请求：写入 outbox 事件，由后台 worker 生成正文。
+     *
+     * <p>事件在同一会议行锁事务内查询并追加，首次请求并发时只有一个能插入；
+     * eventId 由会议号与该次请求的序列化载荷派生，重复提交按重放返回。</p>
+     */
+    @Override
+    public SummaryRequestResult requestSummary(MeetingCommandContext context,
+            String meetingId, java.util.List<String> languages) {
+        Objects.requireNonNull(context, "context");
+        MeetingIdPolicy.requireValid(meetingId);
+        SummaryRequested requested = new SummaryRequested(true, languages);
+        final String payload;
+        try {
+            payload = JSON.writeValueAsString(
+                    java.util.Map.of("languages", requested.languages()));
+        } catch (JsonProcessingException impossible) {
+            throw new IllegalStateException("summary request serialization unavailable", impossible);
+        }
+        final String eventId = "sum_" + sha256((meetingId + "|" + payload)
+                .getBytes(StandardCharsets.UTF_8));
+        try (Connection connection = dataSource.getConnection()) {
+            connection.setAutoCommit(false);
+            try {
+                MeetingRow meeting = lockMeeting(connection, meetingId);
+                Rejected rejected = checkOwner(context, meeting);
+                if (rejected != null) {
+                    connection.rollback();
+                    return rejected;
+                }
+                if (abandonmentDecided(connection, meetingId)
+                        || meeting.state() == MeetingState.CANCELLED) {
+                    connection.rollback();
+                    return new Rejected(Reason.INVALID_STATE);
+                }
+                if (!clientSourceExists(connection, meetingId)) {
+                    connection.rollback();
+                    return new Rejected(Reason.INPUT_SOURCE_CONFLICT);
+                }
+                // 只在服务端生成能力已装配并授予时受理，避免没有消费者却返回 accepted。
+                if (!capabilityEnabled(connection, meetingId,
+                        CapabilityIds.SUMMARY_SERVER_GENERATED)) {
+                    connection.rollback();
+                    return new Rejected(Reason.SUMMARY_NOT_GRANTED);
+                }
+                java.time.Instant occurredAt = JdbcOutboxStore
+                        .find(connection, engine, eventId)
+                        .map(OutboxStore.OutboxEvent::occurredAt)
+                        .orElseGet(clock::instant);
+                OutboxStore.OutboxEvent event = new OutboxStore.OutboxEvent(eventId, "meeting",
+                        meetingId, "SUMMARY_GENERATE", payload, occurredAt, occurredAt,
+                        OutboxStore.EventStatus.PENDING, 0, null, null, null, null);
+                OutboxStore.AppendResult appended =
+                        JdbcOutboxStore.append(connection, engine, event);
+                connection.commit();
+                return switch (appended.status()) {
+                    case APPENDED -> new SummaryRequested(true, requested.languages());
+                    case REPLAYED -> new SummaryRequested(false, requested.languages());
+                    case CONFLICT -> new Rejected(Reason.EVENT_CONFLICT);
+                };
+            } catch (SQLException | RuntimeException failure) {
+                rollbackQuietly(connection);
+                throw failure;
             }
         } catch (SQLException failure) {
             return new Rejected(Reason.STORAGE_UNAVAILABLE);

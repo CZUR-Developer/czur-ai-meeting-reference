@@ -449,6 +449,32 @@ class MeetingHttpAdapterContractTest {
     }
 
     @Test
+    void clientSummaryRequestAcceptsLanguagesAndRejectsInvalidPayload() {
+        RecordingClientInput client = new RecordingClientInput();
+        MeetingHttpAdapter adapter = new MeetingHttpAdapter(query, deletion, decoder,
+                new HttpErrorMapper(() -> "summary-diagnostic"), stopService(),
+                null, null, false, null, null, null, null, client);
+        HttpRequest request = new HttpRequest("POST",
+                "/v1/meetings/mtg_client/summary:request",
+                Map.of("content-type", "application/json"), "{\"languages\":[\"zh-CN\",\"ja-JP\"]}");
+        assertEquals(MeetingHttpAdapter.AuthenticationRoute.CLIENT_WRITE,
+                MeetingHttpAdapter.authenticationRoute(request));
+        assertEquals(201, adapter.handle(request, context()).status());
+        assertEquals(java.util.List.of("zh-CN", "ja-JP"), client.summaryLanguages);
+        client.created = false;
+        assertEquals(200, adapter.handle(request, context()).status());
+        assertEquals(401, adapter.handle(request, null).status());
+        assertEquals(400, adapter.handle(new HttpRequest("POST", request.path(),
+                request.headers(), "{\"languages\":[]}"), context()).status());
+        assertEquals(400, adapter.handle(new HttpRequest("POST", request.path(),
+                request.headers(), "{\"languages\":[\"zh-CN\"],\"extra\":1}"),
+                context()).status());
+        assertEquals(400, adapter.handle(new HttpRequest("POST", request.path(),
+                request.headers(), "{\"languages\":[\"zh-CN\",\"zh-CN\"]}"),
+                context()).status());
+    }
+
+    @Test
     void clientStartAndAppendAcceptOnlyCanonicalTranscriptAndReturnServerEnvelope() {
         RecordingClientInput client = new RecordingClientInput();
         adapter = new MeetingHttpAdapter(query, deletion, decoder,
@@ -1087,6 +1113,13 @@ class MeetingHttpAdapterContractTest {
         private boolean created = true;
         private PresentationChunk capture;
         private StructuredSummary summary;
+        private java.util.List<String> summaryLanguages;
+
+        @Override public SummaryRequestResult requestSummary(MeetingCommandContext context,
+                String meetingId, java.util.List<String> languages) {
+            this.summaryLanguages = languages;
+            return new SummaryRequested(created, languages);
+        }
 
         @Override public SummarySubmitResult submitSummary(MeetingCommandContext context,
                 String meetingId, StructuredSummary request) {

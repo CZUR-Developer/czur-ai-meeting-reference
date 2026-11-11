@@ -83,6 +83,33 @@ public interface ClientMeetingInputPort {
 
     record SummarySubmitted(boolean created) implements SummarySubmitResult { }
 
+    /**
+     * 客户端声明本场要生成的纪要语言（有序 1～2 个）。生成在服务端异步进行，
+     * 本方法只登记请求并保证同一会议同一语言列表幂等，不在请求内产出正文。
+     */
+    default SummaryRequestResult requestSummary(MeetingCommandContext context,
+            String meetingId, java.util.List<String> languages) {
+        return new Rejected(Reason.STORAGE_UNAVAILABLE);
+    }
+
+    sealed interface SummaryRequestResult permits SummaryRequested, Rejected { }
+
+    /** created=false 表示同语言列表的请求已存在，后续仍由同一任务生成。 */
+    record SummaryRequested(boolean created, java.util.List<String> languages)
+            implements SummaryRequestResult {
+        public SummaryRequested {
+            if (languages == null || languages.isEmpty() || languages.size() > 2) {
+                throw new IllegalArgumentException("summary languages are invalid");
+            }
+            if (languages.stream().anyMatch(item -> item == null || item.isBlank()
+                    || item.length() > 64)
+                    || new java.util.HashSet<>(languages).size() != languages.size()) {
+                throw new IllegalArgumentException("summary languages are invalid");
+            }
+            languages = java.util.List.copyOf(languages);
+        }
+    }
+
     /** 上传一个不可变的有序演示截图包；正文为规范化 JSON，内容由 ArtifactStore 保存。 */
     default CaptureAppendResult appendPresentation(MeetingCommandContext context,
             String meetingId, PresentationChunk request) {
@@ -206,7 +233,8 @@ public interface ClientMeetingInputPort {
 
     /** 当前会议不可接受客户端事件；不会包含身份或正文。 */
     record Rejected(Reason reason) implements StartResult, AppendResult,
-            CaptureAppendResult, AudioAppendResult, SummarySubmitResult, UsageSubmitResult {
+            CaptureAppendResult, AudioAppendResult, SummarySubmitResult, UsageSubmitResult,
+            SummaryRequestResult {
         public Rejected { Objects.requireNonNull(reason, "reason"); }
     }
 
