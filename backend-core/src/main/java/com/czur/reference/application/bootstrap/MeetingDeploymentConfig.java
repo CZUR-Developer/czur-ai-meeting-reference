@@ -26,6 +26,8 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * 共享会议部署的不可变可信配置；不创建连接池、身份凭据、Token 或网络监听。
@@ -38,6 +40,7 @@ import java.util.TreeSet;
  * 日志和异常不得拼接输入值；本对象的诊断文本也不显示连接串、身份或 Secret。</p>
  */
 public class MeetingDeploymentConfig {
+    private static final Logger LOGGER = Logger.getLogger(MeetingDeploymentConfig.class.getName());
     // 首版公开音频仅支持 16 kHz、单声道、16-bit PCM，最短帧 20 ms。
     private static final int MINIMUM_PUBLIC_AUDIO_FRAME_BYTES = 16_000 * 2 * 20 / 1_000;
     // 客户端心跳缺省两分钟；过密周期没有业务收益，只会放大单场写入次数。
@@ -49,6 +52,8 @@ public class MeetingDeploymentConfig {
     private static final String MODEL_TRANSLATION_ARTIFACT = "translation.final";
     private static final String MODEL_SUMMARY_WORKFLOW = "model.summary.text";
     private static final String MODEL_SUMMARY_ARTIFACT = "summary.structured";
+    // 服务端按客户端语言列表生成纪要；与客户端直连模型共用同一个公共产物。
+    private static final String MODEL_SUMMARY_SERVER_WORKFLOW = "model.summary.server";
     private static final String MODEL_SPEAKER_WORKFLOW = "model.speaker.session";
     public static final String DEPLOYMENT_SCOPE = "AI_MEETING_DEPLOYMENT_SCOPE";
     public static final String PROFILE_ID = "AI_MEETING_PROFILE_ID";
@@ -180,15 +185,37 @@ public class MeetingDeploymentConfig {
     /**
      * 读取共享会议配置，不读取演示账号、登录Token或用户密码。
      * 身份实现由装配方通过IdentityProvider注入；本方法只冻结受众和客户端标识。
+     *
+     * <p>不传宿主能力声明时保持既有行为：能力清单仍从四个环境变量读取，
+     * 参考应用与既有测试继续使用该签名。</p>
      */
     public static MeetingDeploymentConfig fromEnvironmentWithExternalIdentity(
             Map<String, String> source, String audience, String clientId) {
+        return fromEnvironmentWithExternalIdentity(source, audience, clientId, null);
+    }
+
+    /**
+     * 宿主在代码里声明能力时使用的入口；声明非空时四个环境变量不再决定能力。
+     *
+     * <p>环境变量里同名的四项只在取值与声明不一致时输出一条告警，日志只记
+     * 键名与差异项数，不打印能力清单。声明为空时退化为旧的环境变量行为。</p>
+     */
+    public static MeetingDeploymentConfig fromEnvironmentWithExternalIdentity(
+            Map<String, String> source, String audience, String clientId,
+            HostCapabilityDeclaration hostCapabilities) {
         return fromEnvironment(source, trustedIdentityText("audience", audience),
-                trustedIdentityText("clientId", clientId));
+                trustedIdentityText("clientId", clientId), hostCapabilities);
+    }
+
+    /** 旧签名保留：不传宿主能力声明即沿用四个环境变量的能力清单。 */
+    private static MeetingDeploymentConfig fromEnvironment(
+            Map<String, String> source, String externalAudience, String externalClientId) {
+        return fromEnvironment(source, externalAudience, externalClientId, null);
     }
 
     private static MeetingDeploymentConfig fromEnvironment(
-            Map<String, String> source, String externalAudience, String externalClientId) {
+            Map<String, String> source, String externalAudience, String externalClientId,
+            HostCapabilityDeclaration hostCapabilities) {
         Objects.requireNonNull(source, "source");
         final Map<String, String> environment;
         try {
@@ -205,12 +232,35 @@ public class MeetingDeploymentConfig {
         String clientId = externalClientId;
         String profileId = required(environment, PROFILE_ID);
         int revision = positiveInt(environment, PROFILE_REVISION);
-        Set<String> required = capabilities(environment, PROFILE_REQUIRED_CAPABILITIES, true);
-        TreeSet<String> optionalValues = new TreeSet<>(capabilities(environment,
-                PROFILE_OPTIONAL_CAPABILITIES, false));
-        // 本场发言人始终是可请求项；是否启用仍由权益、模型和部署限制共同决定。
-        optionalValues.add(CapabilityIds.SPEAKER_DIARIZATION_SESSION);
-        Set<String> optional = Collections.unmodifiableSet(optionalValues);
+        // 宿主在代码里声明能力时，四个同名环境变量只用于比对告警；未声明时沿用旧行为。
+        Set<String> required;
+        Set<String> optional;
+        Set<String> supported;
+        Set<String> mockDeclared;
+        String capabilityKey;
+        if (hostCapabilities == null) {
+            required = capabilities(environment, PROFILE_REQUIRED_CAPABILITIES, true);
+            TreeSet<String> optionalValues = new TreeSet<>(capabilities(environment,
+                    PROFILE_OPTIONAL_CAPABILITIES, false));
+            // 本场发言人始终是可请求项；是否启用仍由权益、模型和部署限制共同决定。
+            optionalValues.add(CapabilityIds.SPEAKER_DIARIZATION_SESSION);
+            optional = Collections.unmodifiableSet(optionalValues);
+            supported = capabilities(environment, ENTITLEMENT_SUPPORTED_CAPABILITIES, true);
+            capabilityKey = environment.containsKey(MODEL_CAPABILITIES)
+                    ? MODEL_CAPABILITIES : MOCK_CAPABILITIES;
+            mockDeclared = capabilities(environment, capabilityKey, true);
+        } else {
+            // 宿主声明为准：环境变量里的同名四项不参与决策，只在取值不一致时告警。
+            required = hostCapabilities.requiredCapabilities();
+            TreeSet<String> optionalValues = new TreeSet<>(hostCapabilities.optionalCapabilities());
+            // 兼容既有客户端：本场发言人仍保留为可请求项，授予与否由权益／模型决定。
+            optionalValues.add(CapabilityIds.SPEAKER_DIARIZATION_SESSION);
+            optional = Collections.unmodifiableSet(optionalValues);
+            supported = hostCapabilities.entitlementSupportedCapabilities();
+            capabilityKey = MODEL_CAPABILITIES;
+            mockDeclared = hostCapabilities.modelCapabilities();
+            warnOnEnvironmentCapabilityDrift(environment, hostCapabilities);
+        }
         ProductProfile profile;
         try {
             // P5-5 登记真实模型互译的本场执行能力；客户端标准译文事件和最终结果
@@ -231,6 +281,15 @@ public class MeetingDeploymentConfig {
                 workflows.put(CapabilityIds.SUMMARY_STRUCTURED,
                         List.of(MODEL_SUMMARY_WORKFLOW));
                 artifacts.put(CapabilityIds.SUMMARY_STRUCTURED,
+                        List.of(MODEL_SUMMARY_ARTIFACT));
+            }
+            if (optional.contains(CapabilityIds.SUMMARY_SERVER_GENERATED)
+                    || required.contains(CapabilityIds.SUMMARY_SERVER_GENERATED)) {
+                // 服务端按语言列表生成纪要：执行映射与服务端 worker 对应，
+                // 产物仍是公共 summary.structured，客户端读取方式不变。
+                workflows.put(CapabilityIds.SUMMARY_SERVER_GENERATED,
+                        List.of(MODEL_SUMMARY_SERVER_WORKFLOW));
+                artifacts.put(CapabilityIds.SUMMARY_SERVER_GENERATED,
                         List.of(MODEL_SUMMARY_ARTIFACT));
             }
             workflows.put(CapabilityIds.SPEAKER_DIARIZATION_SESSION,
@@ -265,8 +324,6 @@ public class MeetingDeploymentConfig {
             throw invalid(PROFILE_REQUIRED_CAPABILITIES);
         }
 
-        Set<String> supported = capabilities(environment,
-                ENTITLEMENT_SUPPORTED_CAPABILITIES, true);
         long maxEntitled = positiveLong(environment, ENTITLEMENT_MAX_DURATION_MS);
         Duration grantTtl = positiveDuration(environment, ENTITLEMENT_GRANT_TTL_MS);
         Duration reservationTtl = positiveDuration(environment, ENTITLEMENT_RESERVATION_TTL_MS);
@@ -282,16 +339,14 @@ public class MeetingDeploymentConfig {
             throw invalid(ENTITLEMENT_SUPPORTED_CAPABILITIES);
         }
 
-        String capabilityKey = environment.containsKey(MODEL_CAPABILITIES)
-                ? MODEL_CAPABILITIES : MOCK_CAPABILITIES;
-        Set<String> mockDeclared = capabilities(environment, capabilityKey, true);
         Set<String> disabled = capabilities(environment, DISABLED_CAPABILITIES, false);
         CapabilityDescriptor mock;
         DeploymentLimits limits;
         try {
             mock = new CapabilityDescriptor(
-                    environment.containsKey(MODEL_CAPABILITIES)
-                            ? "reference-model" : "reference-mock",
+                    hostCapabilities != null ? "host-declared-model"
+                            : environment.containsKey(MODEL_CAPABILITIES)
+                                    ? "reference-model" : "reference-mock",
                     "1", 1, mockDeclared);
             limits = new DeploymentLimits(disabled);
         } catch (RuntimeException malformed) {
@@ -535,6 +590,49 @@ public class MeetingDeploymentConfig {
 
     private static Duration positiveDuration(Map<String, String> environment, String key) {
         return Duration.ofMillis(positiveLong(environment, key));
+    }
+
+    /**
+     * 宿主声明能力时与环境变量比对；只记键名与差异项数，不打印任何能力清单。
+     *
+     * <p>环境变量取值非法也不阻止启动：既然能力以宿主代码声明为准，这些键
+     * 只剩迁移期比对用途；非法取值按“全部不一致”计数。</p>
+     */
+    private static void warnOnEnvironmentCapabilityDrift(Map<String, String> environment,
+            HostCapabilityDeclaration hostCapabilities) {
+        warnOnDrift(environment, PROFILE_REQUIRED_CAPABILITIES,
+                hostCapabilities.requiredCapabilities());
+        warnOnDrift(environment, PROFILE_OPTIONAL_CAPABILITIES,
+                hostCapabilities.optionalCapabilities());
+        warnOnDrift(environment, ENTITLEMENT_SUPPORTED_CAPABILITIES,
+                hostCapabilities.entitlementSupportedCapabilities());
+        warnOnDrift(environment, MODEL_CAPABILITIES, hostCapabilities.modelCapabilities());
+    }
+
+    private static void warnOnDrift(Map<String, String> environment, String key,
+            Set<String> declared) {
+        String value = environment.get(key);
+        if (value == null || value.isBlank()) {
+            // 未配置即与声明无冲突：迁移期允许直接删除这四个键。
+            return;
+        }
+        TreeSet<String> fromEnvironment = new TreeSet<>();
+        for (String part : value.split(",", -1)) {
+            String capability = part.trim();
+            if (!capability.isEmpty()) {
+                fromEnvironment.add(capability);
+            }
+        }
+        TreeSet<String> symmetricDifference = new TreeSet<>(fromEnvironment);
+        TreeSet<String> onlyDeclared = new TreeSet<>(declared);
+        symmetricDifference.removeAll(declared);
+        onlyDeclared.removeAll(fromEnvironment);
+        symmetricDifference.addAll(onlyDeclared);
+        if (!symmetricDifference.isEmpty()) {
+            LOGGER.log(Level.WARNING,
+                    "能力声明以宿主代码为准，环境变量键 {0} 与代码声明不一致 {1} 项",
+                    new Object[]{key, symmetricDifference.size()});
+        }
     }
 
     private static Set<String> capabilities(Map<String, String> environment,
