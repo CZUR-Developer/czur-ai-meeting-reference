@@ -180,7 +180,7 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
                     return new Rejected(Reason.INPUT_SOURCE_CONFLICT);
                 }
                 // 只在服务端生成能力已装配并授予时受理，避免没有消费者却返回 accepted。
-                if (!capabilityEnabled(connection, meetingId,
+                if (!capabilityGrantedByDecision(connection, meetingId,
                         CapabilityIds.SUMMARY_SERVER_GENERATED)) {
                     connection.rollback();
                     return new Rejected(Reason.SUMMARY_NOT_GRANTED);
@@ -656,6 +656,20 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
     private boolean speakerEnabled(Connection connection, String meetingId) {
         return capabilityEnabled(connection, meetingId,
                 CapabilityIds.SPEAKER_DIARIZATION_SESSION);
+    }
+
+    /**
+     * 只按冻结的 Create 决策判断能力是否可用：required 能力可被自动 ENABLE，
+     * 不要求客户端当时显式请求，因此不能再用 requestedCapabilities 收窄。
+     */
+    private boolean capabilityGrantedByDecision(Connection connection, String meetingId,
+            String capability) {
+        var first = new JdbcCreateMeetingFactStore(connection, engine)
+                .findByMeetingId(meetingId).orElse(null);
+        if (first == null) return false;
+        return first.response().capabilityDecisions().stream().anyMatch(decision ->
+                capability.equals(decision.capability())
+                && decision.action() == CapabilityDecision.Action.ENABLE);
     }
 
     private boolean capabilityEnabled(Connection connection, String meetingId,
