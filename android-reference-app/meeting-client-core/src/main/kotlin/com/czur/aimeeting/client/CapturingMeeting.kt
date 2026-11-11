@@ -7,7 +7,8 @@ import java.io.File
  *
  * 不保存当前账号、展示名、宿主私有载荷或停止键；账号归属由宿主 Store 核对，
  * 宿主的展示方式等私有数据由 Store 自己附带。录音文件是本场同源输入在封口前的
- * 位置，未封口时不能当作已发布或已计费事实。
+ * 位置，未封口时不能当作已发布或已计费事实。sourceLanguage／targetLanguage 只用于
+ * 原场重跑时重新上报服务端纪要语言，targetLanguage 为空表示本场没有实时翻译。
  */
 class CapturingMeeting(
     private val meetingId: String,
@@ -20,11 +21,20 @@ class CapturingMeeting(
     private val summaryEnabled: Boolean,
     private val retainAudio: Boolean,
     private val activeDelivery: Boolean,
+    private val targetLanguage: String?,
 ) {
+    /** 兼容没有保存目标语种的旧现场记录；原场重跑按单语纪要上报。 */
+    constructor(meetingId: String, serverUrl: String, clientIdentity: ClientIdentity,
+        audioFile: File, journalFile: File?, startedAtMs: Long, sourceLanguage: String,
+        summaryEnabled: Boolean, retainAudio: Boolean, activeDelivery: Boolean) : this(
+        meetingId, serverUrl, clientIdentity, audioFile, journalFile, startedAtMs,
+        sourceLanguage, summaryEnabled, retainAudio, activeDelivery, null)
+
     init {
         require(meetingId.isNotBlank()) { "恢复记录缺少会议编号" }
         require(serverUrl.isNotBlank()) { "恢复记录缺少会议服务地址" }
         require(sourceLanguage.isNotBlank()) { "恢复记录缺少原文语种" }
+        require(targetLanguage == null || targetLanguage.isNotBlank()) { "恢复记录目标语种不能为空" }
         require(audioFile.absoluteFile.parentFile != null) { "恢复记录缺少录音目录" }
         require(!activeDelivery || retainAudio) { "主动交付要求本场保留同源录音" }
     }
@@ -36,6 +46,8 @@ class CapturingMeeting(
     fun journalFile(): File? = journalFile?.absoluteFile
     fun startedAtMs(): Long = startedAtMs
     fun sourceLanguage(): String = sourceLanguage
+    /** 本场实时翻译目标语种；没有实时翻译时为 null。 */
+    fun targetLanguage(): String? = targetLanguage
     fun summaryEnabled(): Boolean = summaryEnabled
     fun retainAudio(): Boolean = retainAudio
     /** NO_ACTIVE_DELIVERY 场次只为停止收口，不读取结果清单。 */

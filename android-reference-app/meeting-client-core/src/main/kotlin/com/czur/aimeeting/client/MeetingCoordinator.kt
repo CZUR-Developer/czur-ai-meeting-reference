@@ -24,9 +24,10 @@ import java.util.logging.Logger
 import java.util.regex.Pattern
 
 /**
- * 平台无关的唯一正常会议编排。状态／显示／deadline 只在 state 队列，HTTP／总结在 io，
+ * 平台无关的唯一正常会议编排。状态／显示／deadline 只在 state 队列，HTTP 在 io，
  * start／stop／close 在 modelControl 保序，使挂起 HTTP 不拖停音源；心跳另用独立单线程，
- * 不受业务 io 队列积压影响。SDK／Mock 只注入运行时。
+ * 不受业务 io 队列积压影响。SDK／Mock 只注入运行时。纪要改为服务端生成：停止时只上报
+ * 语言列表，不再在设备侧调用文本模型或提交纪要正文。
  * 单客户端最多一场会议；未确认标准事件仅内存保留原包，由后续事件／停止补交。
  * 停止记录只覆盖尾部确认后的发布／同键 Stop／实际 READY；装配原场现场端口时，
  * 采音起点另落一份 CapturingMeeting，供进程异常退出后由宿主逐场调用 recoverInterrupted，
@@ -170,6 +171,8 @@ class MeetingCoordinator(
                     LOG.info("原场停止收尾补交冻结采音用量 durationMs=${checkpoint.context().frozenAudioDurationMs()}")
                     server.submitUsage(checkpoint.checkpointId(), checkpoint.context().frozenAudioDurationMs())
                 }
+                // 停止记录带会前语言快照：发布确认后如未上报纪要语言，续办会先补发再 Stop；
+                // 已上报（或旧记录没有快照）不再请求，旧记录行为与修复前一致。
                 outcome = finishSavedFinalization(checkpoint, store.get(), server, config.artifactPublisher(),
                     BooleanSupplier { closed }, wallClockMs, Runnable {})
             } catch (failure: Exception) {
@@ -213,7 +216,7 @@ class MeetingCoordinator(
                     throw IOException("原场已有未完成停止记录，应由停止续办收口")
                 if (existingStop != null) {
                     // 停止记录已 READY：服务端早已收口，本次只清可能残留的现场，不重复提交
-                    // 用量／纪要，也不再发布、Stop 或读取清单；现场缺失或读不出来同样按已完成返回。
+                    // 用量／纪要语言，也不再发布、Stop 或读取清单；现场缺失或读不出来同样按已完成返回。
                     LOG.info("原场停止记录已 READY，只清理残留现场")
                     try {
                         recoveryStore.get().read(meetingId).orElse(null)
@@ -237,12 +240,9 @@ class MeetingCoordinator(
                     LOG.info("原场冻结用量提交开始 durationMs=${audio.durationMs()}")
                     server.submitUsage(meetingId, audio.durationMs())
                     LOG.info("原场冻结用量已确认")
-                    // 纪要必须在写停止记录之前补交：一旦停止记录落盘，下次会走 resumeFinalization，
-                    // 那条路径只补用量、不会再补纪要，失败一次就会永久缺纪要。
-                    submitRecoveredSummary(record, server)
-                    var checkpoint = stoppedStore.get().save(StoppedMeetingCheckpoint.pending(
+                    val checkpoint = stoppedStore.get().save(StoppedMeetingCheckpoint.pending(
                         MeetingArtifactPublisher.Context(meetingId, audio, audio.durationMs(), sessionConfig),
-                        record.activeDelivery()))
+                        record.activeDelivery()).withSummaryLanguages(recoverySummaryLanguages(record)))
                     LOG.info("原场现场续办开始 phase=${checkpoint.phase()} deliversResult=${checkpoint.deliversResult()}")
                     val finished = finishSavedFinalization(checkpoint, stoppedStore.get(), server,
                         sessionConfig.artifactPublisher(), BooleanSupplier { closed }, wallClockMs,
@@ -285,36 +285,49 @@ class MeetingCoordinator(
         }
     }
     /**
-     * 用本机字幕日志补交标准纪要；日志缺失或为空时不伪造，按静音／短会继续收口。
-     * 模型材料与正常停止同一入口，不新增第二套总结路径。
+     * 原场现场只保存会前语言快照；正文与模型调用都由服务端负责。
+     * 语言列表规则沿用 SummaryLanguages，失败只告警，不阻断原场发布与 Stop。
      */
-    private fun submitRecoveredSummary(record: CapturingMeeting, server: MeetingServerClient) {
-        if (!record.summaryEnabled()) return
-        val journal = record.journalFile() ?: return
-        val input = TranscriptJournal(journal).summaryInput(record.sourceLanguage()) ?: return
-        LOG.info("原场纪要重跑开始")
-        val grant = if (runtime.usesServerModelMaterials()) server.requestSummarySession(record.meetingId()) else null
-        val adapter = if (grant == null) null else adapters.createSummary(grant.adapterId())
-        try {
-            server.submitSummary(record.meetingId(), runtime.summarize(grant, adapter, input))
-            LOG.info("原场纪要已提交")
-        } catch (conflict: MeetingHttpStatusException) {
-            if (conflict.status != 409) throw conflict
-            LOG.warning("原场纪要已存在且正文不同，保留服务端版本继续收尾")
+    private fun recoverySummaryLanguages(record: CapturingMeeting): List<String>? =
+        if (!record.summaryEnabled()) null
+        else SummaryLanguages.from(record.sourceLanguage(), record.targetLanguage())
+    /**
+     * 每次续办只调用一次同账号身份扩展，先持久保存新材料，再允许外部发布／Stop。
+     *
+     * <p>READY 记录通常只读已收口的结果，不需要再核验凭据，保持原有行为直接返回；
+     * 但还欠一次纪要语言上报时例外：补报走原账号 Bearer，记录里的令牌过期会一直 401，
+     * 这条 READY 补报路径永远补不上。此时必须核验原账号归属并用新令牌落盘，让后续
+     * 纪要请求使用刷新后的凭据。</p>
+     *
+     * <p>READY 的核验失败只降级为“本轮仍用原凭据”：服务端已经收口，不能因为一次身份
+     * 核验挡住读取结果；未上报状态保留在记录里，下一轮扫描会再核验、再补报。其它阶段
+     * 的核验失败仍抛给续办调用方，保持原有失败语义。</p>
+     */
+    private fun renewFinalizationIdentity(checkpoint: StoppedMeetingCheckpoint, store: StoppedMeetingStore): StoppedMeetingCheckpoint {
+        val ready = checkpoint.phase() == StoppedMeetingCheckpoint.Phase.READY
+        // READY 且不需要补报：只读已收口结果，保持原行为不核验凭据。
+        if (ready && !needsSummaryReport(checkpoint)) return checkpoint
+        return try {
+            val original = IdentitySession(checkpoint.context().accessToken(), "")
+            val identity = config.identityProvider().identityForFinalization(checkpoint.checkpointId(), original)
+            if (identity.status() != IdentityResult.Status.LOGGED_IN) throw IOException("原场账号身份尚未就绪")
+            val accessToken = identity.session()!!.accessToken()
+            if (accessToken == original.accessToken()) checkpoint
+            else store.save(checkpoint.withAccessToken(accessToken)).also {
+                LOG.info("原场停止收尾访问凭据已更新，原会议及确认进度保持")
+            }
+        } catch (failure: Exception) {
+            // 能走到这里的 READY 一定是欠上报的 READY：核验失败不挡读取已收口的结果，
+            // 未上报状态保留，下一轮扫描会重新核验并补报。
+            if (!ready || failure !is IOException && failure !is RuntimeException) throw failure
+            logFailure("原场停止收尾身份核验", failure)
+            LOG.warning("READY 续办身份核验失败，本轮沿用原凭据读取结果，记录保留待下轮")
+            checkpoint
         }
     }
-    /** 每次续办只调用一次同账号身份扩展，先持久保存新材料，再允许外部发布／Stop。 */
-    private fun renewFinalizationIdentity(checkpoint: StoppedMeetingCheckpoint, store: StoppedMeetingStore): StoppedMeetingCheckpoint {
-        if (checkpoint.phase() == StoppedMeetingCheckpoint.Phase.READY) return checkpoint
-        val original = IdentitySession(checkpoint.context().accessToken(), "")
-        val identity = config.identityProvider().identityForFinalization(checkpoint.checkpointId(), original)
-        if (identity.status() != IdentityResult.Status.LOGGED_IN) throw IOException("原场账号身份尚未就绪")
-        val accessToken = identity.session()!!.accessToken()
-        if (accessToken == original.accessToken()) return checkpoint
-        val refreshed = store.save(checkpoint.withAccessToken(accessToken))
-        LOG.info("原场停止收尾访问凭据已更新，原会议及确认进度保持")
-        return refreshed
-    }
+    /** 停止记录还欠一次纪要语言上报：带会前语言快照且尚未落盘“已上报”。 */
+    private fun needsSummaryReport(checkpoint: StoppedMeetingCheckpoint): Boolean =
+        checkpoint.summaryLanguages() != null && !checkpoint.summaryReported()
     /** 已确认尾部共用唯一流程，真实 ACK 先保存；READY 也读实际清单，不由本地阶段伪造。 */
     private sealed interface SavedFinalizationOutcome {
         class Delivered(val result: MeetingResult) : SavedFinalizationOutcome
@@ -326,6 +339,12 @@ class MeetingCoordinator(
         acceptedGenTime: LongSupplier, onStopAccepted: Runnable): SavedFinalizationOutcome? {
         if (aborted.asBoolean) return null
         var checkpoint = store.save(initial)
+        // 进入本轮时 Stop 已受理（STOP_ACCEPTED／READY）：上一轮在 Stop 前上报纪要若失败，
+        // 记录就会停在已受理 Stop 的阶段，本轮不再走 PUBLISHED 分支，必须按同一幂等步骤
+        // 补报一次，否则该场永久缺纪要。同一轮首次停止已在 Stop 前尝试过一次，此时不立即
+        // 重发，保持“同一轮一次请求”的既有语义。
+        val resumesAcceptedStop =
+            checkpoint.phase().ordinal >= StoppedMeetingCheckpoint.Phase.STOP_ACCEPTED.ordinal
         if (aborted.asBoolean) return null
         if (checkpoint.phase() == StoppedMeetingCheckpoint.Phase.PUBLISH_PENDING) {
             if (!publisher.supportsAudioPublication()) throw IOException("停止记录续办需要原场产物发布器")
@@ -336,6 +355,10 @@ class MeetingCoordinator(
         }
         if (aborted.asBoolean) return null
         if (checkpoint.phase() == StoppedMeetingCheckpoint.Phase.PUBLISHED) {
+            // 会前语言快照存在且尚未上报时，在发布确认后、Stop 前补发纪要请求；
+            // 成功立即落盘，进程再次续办不会重复请求，失败只告警并保留未上报状态。
+            checkpoint = reportCheckpointSummary(checkpoint, store, server)
+            if (aborted.asBoolean) return null
             LOG.info("后端原键 Stop 开始")
             if (!server.stopMeeting(checkpoint.checkpointId(), checkpoint.stableStopKey()).accepted())
                 throw IOException("后端尚未受理本场停止")
@@ -344,6 +367,12 @@ class MeetingCoordinator(
         }
         if (aborted.asBoolean) return null
         onStopAccepted.run()
+        if (resumesAcceptedStop) {
+            // Stop 已被受理后的续办：读取清单／推进 READY 之前补一次纪要上报。
+            // 服务端允许 Stop 之后仍受理纪要请求；已上报或无语言快照时该步骤直接返回。
+            checkpoint = reportCheckpointSummary(checkpoint, store, server)
+            if (aborted.asBoolean) return null
+        }
         if (!checkpoint.deliversResult()) {
             // NO_ACTIVE_DELIVERY 只收口到 ENDED，不读清单；本地阶段仍记录到 Stop 已受理。
             if (checkpoint.phase() != StoppedMeetingCheckpoint.Phase.READY) store.save(checkpoint.ready())
@@ -354,6 +383,20 @@ class MeetingCoordinator(
         val result = server.readResult(checkpoint.checkpointId(), checkpoint.genTime()!!, false)
         if (checkpoint.phase() != StoppedMeetingCheckpoint.Phase.READY) store.save(checkpoint.ready())
         return SavedFinalizationOutcome.Delivered(result)
+    }
+    /**
+     * 幂等的纪要语言补报步骤：仅当停止记录带会前语言快照且尚未上报时请求一次，
+     * 服务端受理后立刻把“已上报”写回 Store。已上报或旧记录没有快照（null）时直接返回，
+     * 因此发布确认后、Stop 前与 Stop 已受理后的续办都可安全调用，不会重复请求。
+     * 请求失败只告警并保留未上报状态，由下一次续办重试，不阻断 Stop／结果读取。
+     */
+    private fun reportCheckpointSummary(checkpoint: StoppedMeetingCheckpoint,
+        store: StoppedMeetingStore, server: MeetingServerClient): StoppedMeetingCheckpoint {
+        if (checkpoint.summaryReported()) return checkpoint
+        val languages = checkpoint.summaryLanguages() ?: return checkpoint
+        LOG.info("停止记录纪要语言补报开始 languages=${languages.size}")
+        if (!requestSummaryQuietly(server, checkpoint.checkpointId(), languages)) return checkpoint
+        return store.save(checkpoint.withSummaryReported())
     }
     private fun requireOpen() { check(!closed) { "会议客户端已关闭" } }
     private fun enqueue(task: Runnable) {
@@ -372,7 +415,6 @@ class MeetingCoordinator(
         private lateinit var server: MeetingServerClient
         private lateinit var sessionConfig: MeetingClientConfig
         private val display = MeetingDisplayState()
-        private val finals = FinalTranscriptCollector()
         @Volatile var done = false
         @Volatile private var cancelled = false
         /** 状态队列关门后，已排队电平也不能再次点亮 UI。 */
@@ -415,10 +457,8 @@ class MeetingCoordinator(
         private var frozenAudioDuration = OptionalLong.empty()
         private var usageRead = false
         private var usageSubmitted = false
-        private var summarySubmitted = false
-        // 纪要一旦生成就冻结：提交确认丢失后重试必须原样重放，
-        // 否则模型每次生成不同正文，后端会判 EVENT_CONFLICT 导致永远停不下来。
-        private var pendingSummary: SummaryResult? = null
+        /** 本场只在发布确认后上报一次纪要语言；Stop 重试不重复请求。 */
+        private var summaryRequested = false
         /** 含失败在内，同场只读取一次 sealed 事实，仅 IO 队列访问。 */
         private var audioArtifactRead = false
         private var audioArtifactFailure: IOException? = null
@@ -491,7 +531,14 @@ class MeetingCoordinator(
                     if (grant?.translationSession() != null && runtime.supportsTextTranslation() &&
                         adapters.hasTranslation(grant.translationSession()!!.adapterId()))
                         local.add(MeetingCapabilityState.TRANSLATION)
-                    if (setupCapabilities().contains(MeetingCapabilityState.SUMMARY)) local.add(MeetingCapabilityState.SUMMARY)
+                    // 纪要正文在服务端生成，执行位置不在本机：只要部署声明与 Create 授权就可用，
+                    // 不要求本地注册文本总结 Adapter。设备直连兼容期的 summary.structured 仍按
+                    // 本机实际注册（注册表声明）参与交集，不复用服务端生成能力冒充。
+                    val readyCapabilities = setupCapabilities()
+                    if (readyCapabilities.contains(MeetingCapabilityState.SUMMARY_SERVER))
+                        local.add(MeetingCapabilityState.SUMMARY_SERVER)
+                    if (readyCapabilities.contains(MeetingCapabilityState.SUMMARY))
+                        local.add(MeetingCapabilityState.SUMMARY)
                     val enabled = HashSet<String>()
                     for (capability in createOptions.requestedCapabilities())
                         if (capability != MeetingCapabilityState.SPEAKER_IDENTITY_CROSS_MEETING &&
@@ -610,7 +657,8 @@ class MeetingCoordinator(
                 val record = CapturingMeeting(id, sessionConfig.serverUrl(), sessionConfig.clientIdentity(),
                     audio, journal.file(), startedAtMs, options.sourceLanguage(), options.summaryEnabled(),
                     options.retainAudio(),
-                    options.resultOptions().policy() != ResultOptions.Policy.NO_ACTIVE_DELIVERY)
+                    options.resultOptions().policy() != ResultOptions.Policy.NO_ACTIVE_DELIVERY,
+                    if (options.mode() == MeetingOptions.Mode.LIVE_TRANSLATION) options.targetLanguage() else null)
                 store.get().save(record)
                 recoveryRecord = record; audioJournal = journal
                 LOG.info("原场现场已落盘")
@@ -631,7 +679,7 @@ class MeetingCoordinator(
             val standard = if (available.contains(MeetingCapabilityState.SPEAKER)) event else event.withoutSpeaker()
             val nowMs = monotonicMs.asLong
             if (standard.text().isNotBlank()) notifyListener { listener.onTranscriptActivity(nowMs) }
-            finals.apply(standard); display.apply(standard, nowMs); showDisplay(); scheduleDeadline()
+            display.apply(standard, nowMs); showDisplay(); scheduleDeadline()
             audioJournal?.let { journal -> io.execute { journal.append(standard) } }
             val number = ++sequence
             io.execute { saveStandardEvent(PendingStandardEvent(number, standard, null)) }
@@ -912,19 +960,9 @@ class MeetingCoordinator(
             }
             completionQueued = true; phase = MeetingSessionState.Phase.FINALIZING
             publish()
-            var input: SummaryInput? = null
-            if (!audioFailed && available.contains(MeetingCapabilityState.SUMMARY) && options.summaryEnabled()) {
-                try { input = finals.input(options.sourceLanguage()) }
-                catch (empty: IllegalArgumentException) {
-                    // 静音／短会无有效 final 时不伪造总结、不请求模型，继续用量／录音／Stop。
-                    LOG.info("本场没有有效最终字幕，跳过纪要并继续正常停止")
-                    publish(notice = MeetingNotice.NO_FINAL_TRANSCRIPT)
-                }
-            }
-            val summaryInput = input
-            io.execute { complete(summaryInput) }
+            io.execute { complete() }
         }
-        private fun complete(input: SummaryInput?) {
+        private fun complete() {
             if (cancelled || closed) return
             var step = "检查标准事件保存"
             try {
@@ -937,24 +975,6 @@ class MeetingCoordinator(
                     LOG.info("冻结采音用量提交开始 durationMs=$durationMs")
                     server.submitUsage(id, durationMs); usageSubmitted = true; LOG.info("冻结采音用量已确认")
                 }
-                if (input != null && !summarySubmitted) {
-                    step = "生成/提交标准纪要"
-                    val frozen = pendingSummary ?: run {
-                        LOG.info("标准纪要生成开始")
-                        val grant = if (runtime.usesServerModelMaterials()) server.requestSummarySession(id) else null
-                        val adapter = if (grant == null) null else adapters.createSummary(grant.adapterId())
-                        runtime.summarize(grant, adapter, input).also { pendingSummary = it }
-                    }
-                    try {
-                        server.submitSummary(id, frozen)
-                        summarySubmitted = true; LOG.info("标准纪要已提交")
-                    } catch (conflict: MeetingHttpStatusException) {
-                        if (conflict.status != 409) throw conflict
-                        // 服务端已有纪要（可能正是上次丢失确认的那次提交），保留服务端版本继续收尾。
-                        summarySubmitted = true
-                        LOG.warning("标准纪要已存在且正文不同，保留服务端版本并继续停止")
-                    }
-                }
                 if (cancelled || closed) return
                 // 只在原尾部全部 ACK 与 sealed 读取成功后保存候选，无痕继续 Stop→ENDED。
                 val store = sessionConfig.stoppedMeetingStore()
@@ -962,7 +982,8 @@ class MeetingCoordinator(
                     step = "保存并完成原场停止收尾"
                     readAudioArtifactOnce()
                     if (cancelled || closed) return
-                    if (stoppedCheckpoint == null) stoppedCheckpoint = StoppedMeetingCheckpoint.pending(publicationContext!!)
+                    if (stoppedCheckpoint == null) stoppedCheckpoint = StoppedMeetingCheckpoint
+                        .pending(publicationContext!!).withSummaryLanguages(summaryLanguages())
                     else {
                         var checkpoint = store.get().read(stoppedCheckpoint!!.checkpointId()).orElse(stoppedCheckpoint!!)
                         // 首次候选写失败也可重按：先保存，身份扩展才有原账号归属可核。
@@ -998,6 +1019,8 @@ class MeetingCoordinator(
                     }
                 }
                 if (cancelled || closed) return
+                // 资源已经发布（或本场没有可发布资源）：现在才上报纪要语言，仍先于 Stop。
+                requestSummaryOnce()
                 step = "后端 Stop"; LOG.info("后端 Stop 开始")
                 if (!server.stopMeeting(id).accepted()) {
                     LOG.info("后端 Stop 尚未受理，等待用户再次确认")
@@ -1024,6 +1047,22 @@ class MeetingCoordinator(
                 enqueue { completionFailed("结束会议失败，请检查连接后再次确认停止") }
             }
         }
+        /**
+         * 按会前选择上报本场纪要语言，正文由服务端异步生成。
+         * 仅用于没有停止记录、无法靠续办补发的场次；有停止记录时由
+         * finishSavedFinalization 按记录里的语言快照上报并持久化。
+         * 同场只上报一次；请求失败只告警，不阻断发布／Stop。
+         */
+        private fun requestSummaryOnce() {
+            if (summaryRequested) return
+            val languages = summaryLanguages() ?: return
+            summaryRequested = true
+            requestSummaryQuietly(server, id, languages)
+        }
+        /** 会前语言快照：不要纪要时为空，避免没有纪要的场次续办时误发请求。 */
+        private fun summaryLanguages(): List<String>? = if (!options.summaryEnabled()) null
+            else SummaryLanguages.from(options.sourceLanguage(),
+                options.targetLanguage().takeIf { options.mode() == MeetingOptions.Mode.LIVE_TRANSLATION })
         private fun ready(finalResult: MeetingResult) {
             if (done) return
             heartbeatAllowed = false
@@ -1117,6 +1156,24 @@ class MeetingCoordinator(
     companion object {
         private val LOG = Logger.getLogger(MeetingCoordinator::class.java.name)
         private val HTTP_CODE = Pattern.compile("HTTP[ =:]*(\\d{3})")
+        /**
+         * 纪要语言上报失败只记 WARNING 并继续调用方流程：纪要能否生成由服务端能力与
+         * 状态判定，设备不能因为一次纪要请求卡住发布或 Stop。
+         * 返回 true 表示服务端已受理，调用方据此决定是否把“已上报”持久化。
+         */
+        private fun requestSummaryQuietly(server: MeetingServerClient, meetingId: String,
+            languages: List<String>): Boolean {
+            try {
+                val ack = server.requestSummary(meetingId, languages)
+                LOG.info("纪要语言已上报 languages=${languages.size} status=${ack.summaryStatus() ?: "UNKNOWN"}")
+                return true
+            } catch (failure: Exception) {
+                if (failure !is IOException && failure !is RuntimeException) throw failure
+                logFailure("上报纪要语言", failure)
+                LOG.warning("纪要语言上报失败，继续结束本场")
+                return false
+            }
+        }
         private fun logFailure(step: String, failure: Throwable) {
             var code = ""
             val message = failure.message

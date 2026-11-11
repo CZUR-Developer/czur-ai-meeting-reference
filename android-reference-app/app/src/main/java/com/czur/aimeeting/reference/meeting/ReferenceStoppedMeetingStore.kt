@@ -12,6 +12,7 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.util.Optional
 import java.util.concurrent.Executor
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -59,7 +60,16 @@ class ReferenceStoppedMeetingStore(context: Context) : StoppedMeetingStore {
             StoppedMeetingCheckpoint.Phase.valueOf(json.getString("phase")),
             if (json.isNull("genTime")) null else json.getLong("genTime"),
             // 旧记录没有该字段：沿用修复前的主动读取结果行为，不能悄悄改成不交付。
-            json.optBoolean("deliversResult", true)))
+            json.optBoolean("deliversResult", true),
+            // 旧记录没有语言快照／上报标记：按 null／false 续办，不补发也不报错。
+            summaryLanguages(json),
+            json.optBoolean("summaryReported", false)))
+    }
+
+    private fun summaryLanguages(json: JSONObject): List<String>? {
+        if (json.isNull("summaryLanguages")) return null
+        val array = json.getJSONArray("summaryLanguages")
+        return (0 until array.length()).map { index -> array.getString(index) }
     }
 
     /** 尚未收口到 READY 的停止记录；交给 resumeFinalization 逐场推进。 */
@@ -105,6 +115,9 @@ class ReferenceStoppedMeetingStore(context: Context) : StoppedMeetingStore {
             .put("phase", checkpoint.phase().name)
             .put("genTime", checkpoint.genTime() ?: JSONObject.NULL)
             .put("deliversResult", checkpoint.deliversResult())
+            // 会前语言快照与上报标记：发布成功、上报纪要语言前进程退出时靠它们补发。
+            .put("summaryLanguages", checkpoint.summaryLanguages()?.let { JSONArray(it) } ?: JSONObject.NULL)
+            .put("summaryReported", checkpoint.summaryReported())
         if (!directory.isDirectory && !directory.mkdirs()) throw IOException("无法创建停止记录目录")
         val target = file(checkpoint.checkpointId())
         val temporary = File(directory, "${checkpoint.checkpointId()}.json.tmp")

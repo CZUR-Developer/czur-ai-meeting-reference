@@ -103,6 +103,19 @@ class HttpMeetingServerClient(config: MeetingClientConfig) : MeetingServerClient
         } catch (invalidResponse: JSONException) { throw IOException("模型会话响应格式错误", invalidResponse) }
     }
     @Throws(IOException::class)
+    override fun requestSummary(meetingId: String, languages: List<String>): SummaryRequestAck {
+        if (languages.isEmpty() || languages.size > 2) throw IOException("纪要语言数量必须为1～2个")
+        try {
+            val body = JSONObject().put("languages", JSONArray(languages))
+            val response = parseJson(post("/v1/meetings/$meetingId/summary:request",
+                body.toString(), null, 200, 201).body)
+            if (response.optString("meetingId") != meetingId) throw IOException("纪要请求确认与会议 ID 不一致")
+            return SummaryRequestAck(meetingId, response.optBoolean("accepted", true),
+                response.optString("summaryStatus").takeIf { it.isNotBlank() })
+        } catch (invalidResponse: JSONException) { throw IOException("纪要请求响应格式错误", invalidResponse) }
+    }
+    @Deprecated("服务端生成纪要后不再由设备调用，改用 requestSummary")
+    @Throws(IOException::class)
     override fun requestSummarySession(meetingId: String): SummarySessionGrant {
         try {
             val body = JSONObject(post("/v1/meetings/$meetingId:summarySession", null, null, 200,
@@ -180,6 +193,7 @@ class HttpMeetingServerClient(config: MeetingClientConfig) : MeetingServerClient
                 !response.getBoolean("accepted")) throw IOException("采音用量确认与本场冻结值不一致")
         } catch (invalidResponse: JSONException) { throw IOException("采音用量响应格式错误", invalidResponse) }
     }
+    @Deprecated("服务端生成纪要后不再由设备调用，改用 requestSummary")
     @Throws(IOException::class)
     override fun submitSummary(meetingId: String, summary: SummaryResult) {
         try {

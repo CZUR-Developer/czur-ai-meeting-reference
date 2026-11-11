@@ -8,7 +8,13 @@ import org.json.JSONException
 import org.json.JSONObject
 import java.io.IOException
 
-/** 百炼 completion 文本协议，不持有 Key、AppId 或会议状态。 */
+/**
+ * 百炼 completion 文本协议，不持有 Key、AppId 或会议状态。
+ *
+ * @deprecated 纪要改由服务端生成后，SDK 不再在设备侧领取文本模型材料或调用本协议；
+ * 仅为兼容仍直接引用它的参考 App／伙伴代码而保留。
+ */
+@Deprecated("服务端生成纪要后不再由设备调用；仅保留给参考 App 兼容")
 class BailianSummaryAdapter : SummaryAdapter {
     override fun id(): String = ID
     override fun requestBody(input: SummaryInput): String {

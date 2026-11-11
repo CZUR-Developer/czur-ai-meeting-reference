@@ -37,6 +37,10 @@ interface MeetingRuntimePort {
         listener: ModelSessionListener, retainAudio: Boolean, reconnector: ModelSessionReconnector?,
         audioMix: AudioMixOptions): ModelSession =
         open(grant, adapter, transcripts, listener, retainAudio, reconnector)
+    /**
+     * 设备侧文本总结入口。纪要改由服务端生成后 Coordinator 不再调用；
+     * 保留给仍直接使用短期文本模型材料的参考 App／伙伴运行时。
+     */
     @Throws(IOException::class)
     fun summarize(grant: SummarySessionGrant?, adapter: SummaryAdapter?, input: SummaryInput): SummaryResult
 }

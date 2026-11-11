@@ -93,7 +93,10 @@ class ResultActionRegistryTest {
         val chosen = MeetingOptions(MeetingOptions.Mode.LIVE_TRANSLATION, "zh-CN", "en-US", false,
             ResultOptions.action("partner.notice"), "", emptyList(), true)
         assertEquals("partner.notice", chosen.resultOptions().actionId()); assertTrue(chosen.summaryEnabled())
-        assertTrue(chosen.requiredCapabilities().contains("translation.realtime")); assertTrue(chosen.requiredCapabilities().contains("summary.structured"))
+        assertTrue(chosen.requiredCapabilities().contains("translation.realtime"))
+        // 纪要由服务端生成：必需项是 summary.server，设备直连的 summary.structured 只是兼容项。
+        assertTrue(chosen.requiredCapabilities().contains(MeetingCapabilityState.SUMMARY_SERVER))
+        assertFalse(chosen.requiredCapabilities().contains(MeetingCapabilityState.SUMMARY))
     }
     private fun plugin(id: String, prepareBlock: (MeetingOptions) -> ResultActionPlugin.Preparation): ResultActionPlugin = object : ResultActionPlugin {
         override fun id(): String = id

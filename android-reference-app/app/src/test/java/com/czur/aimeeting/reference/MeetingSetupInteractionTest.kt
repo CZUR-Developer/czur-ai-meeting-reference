@@ -143,7 +143,7 @@ class MeetingSetupInteractionTest {
 
     companion object {
         private val FULL_CAPABILITIES = setOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.TRANSLATION,
-            MeetingCapabilityState.SUMMARY)
+            MeetingCapabilityState.SUMMARY_SERVER, MeetingCapabilityState.SUMMARY)
         private val LANGUAGES = listOf("fr-FR", "de-DE", "ja-JP")
     }
 }

@@ -17,6 +17,8 @@ class ModelAdapterRegistryTest {
         assertTrue(registry.setupCapabilities().contains(MeetingCapabilityState.TRANSCRIPT))
         assertTrue(registry.setupCapabilities().contains(MeetingCapabilityState.TRANSLATION))
         assertTrue(registry.setupCapabilities().contains(MeetingCapabilityState.SUMMARY))
+        assertTrue("服务端纪要不需要本机注册文本总结工厂",
+            registry.setupCapabilities().contains(MeetingCapabilityState.SUMMARY_SERVER))
         assertEquals(BailianSummaryAdapter.ID, registry.createSummary(BailianSummaryAdapter.ID).id())
         assertTrue(registry.realtimeCapabilities(TingwuModelAdapter.ID).contains(MeetingCapabilityState.TRANSLATION))
         assertFalse(registry.realtimeCapabilities(SampleJsonModelAdapter.ID).contains(MeetingCapabilityState.TRANSLATION))

@@ -36,7 +36,8 @@ class MeetingSetup(
 
     enum class Mode(private val displayName: String, private val requiredCapability: String) {
         LIVE_TRANSCRIPT("实时字幕", MeetingCapabilityState.TRANSCRIPT),
-        MEETING_MINUTES("AI 会议纪要", MeetingCapabilityState.SUMMARY),
+        // “AI 会议纪要”依赖服务端生成能力；设备直连的 summary.structured 不再是必需项。
+        MEETING_MINUTES("AI 会议纪要", MeetingCapabilityState.SUMMARY_SERVER),
         LIVE_TRANSLATION("现场互译", MeetingCapabilityState.TRANSLATION);
         fun displayName() = displayName
         fun requiredCapability() = requiredCapability

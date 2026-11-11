@@ -190,6 +190,56 @@ class HttpMeetingServerClientTest {
         }
     }
 
+    @Test fun summaryRequestPostsOrderedLanguagesAndAcceptsCreatedOrReplay() {
+        Fixture().use { fixture ->
+            fixture.reply(201, "{\"meetingId\":\"mtg_minutes\",\"accepted\":true,\"summaryStatus\":\"QUEUED\"}")
+            fixture.reply(200, "{\"meetingId\":\"mtg_minutes\",\"accepted\":true}")
+            val client = fixture.client()
+            val created = client.requestSummary("mtg_minutes", listOf("zh-CN", "ja-JP"))
+            assertTrue(created.accepted())
+            assertEquals("QUEUED", created.summaryStatus())
+            val replay = client.requestSummary("mtg_minutes", listOf("zh-CN", "ja-JP"))
+            assertTrue("200 同样表示受理", replay.accepted())
+            assertNull("旧服务端缺 summaryStatus 时不伪造进度", replay.summaryStatus())
+            val first = fixture.request()
+            val second = fixture.request()
+            assertEquals("/v1/meetings/mtg_minutes/summary:request", first.path())
+            assertEquals(first.path(), second.path())
+            assertEquals("Bearer test-token", first.authorization())
+            assertEquals("application/json", first.contentType())
+            assertEquals(listOf("zh-CN", "ja-JP"),
+                JSONObject(first.body()).getJSONArray("languages").toList())
+            assertEquals(first.body(), second.body())
+            assertNull("纪要请求不携带停止幂等键", first.stopKey())
+        }
+    }
+
+    @Test fun summaryRequestKeepsConflictAndAccessDeniedStatusForCallerPolicy() {
+        Fixture().use { fixture ->
+            fixture.reply(409, "{\"specVersion\":\"0.1\",\"error\":{\"domain\":\"CONTRACT\","
+                + "\"code\":\"EVENT_CONFLICT\",\"severity\":\"FATAL\",\"retryable\":false,"
+                + "\"retryAfterMs\":null,\"userAction\":\"NONE\","
+                + "\"messageKey\":\"ai_meeting.contract.event_conflict\",\"diagnosticId\":\"diag-summary\"}}")
+            fixture.reply(403, "{\"specVersion\":\"0.1\",\"error\":{\"domain\":\"IDENTITY\","
+                + "\"code\":\"ACCESS_DENIED\",\"severity\":\"FATAL\",\"retryable\":false,"
+                + "\"retryAfterMs\":null,\"userAction\":\"CONTACT_ADMIN\","
+                + "\"messageKey\":\"ai_meeting.identity.access_denied\",\"diagnosticId\":\"diag-denied\"}}")
+            val client = fixture.client()
+            val conflict = assertThrows(MeetingHttpStatusException::class.java) {
+                client.requestSummary("mtg_minutes", listOf("zh-CN"))
+            }
+            assertEquals(409, conflict.status)
+            assertEquals("EVENT_CONFLICT", conflict.errorCode)
+            val denied = assertThrows(MeetingHttpStatusException::class.java) {
+                client.requestSummary("mtg_minutes", listOf("zh-CN"))
+            }
+            assertEquals(403, denied.status)
+            assertEquals("ACCESS_DENIED", denied.errorCode)
+            assertEquals("/v1/meetings/mtg_minutes/summary:request", fixture.request().path())
+            assertEquals("/v1/meetings/mtg_minutes/summary:request", fixture.request().path())
+        }
+    }
+
     @Test fun stopAcceptanceKeepsManifestStateSeparateAndReusesSameStopKey() {
         Fixture().use { fixture ->
             fixture.reply(202, "{\"inputState\":\"INPUT_COMPLETE_PENDING\",\"manifestState\":\"GENERATING\"}")
