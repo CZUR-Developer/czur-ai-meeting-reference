@@ -411,6 +411,9 @@ class MeetingCoordinator(
         enqueue { current?.cancel(); io.shutdown(); modelControl.shutdown(); state.shutdown() }
     }
 
+    /** 本场是否真正获授服务端纪要能力；本地/直连部署为 false，不上报语言。 */
+    private var serverSummaryCapable = false
+
     private inner class Session(private val options: MeetingOptions, private val listener: MeetingListener) : MeetingSession {
         private lateinit var server: MeetingServerClient
         private lateinit var sessionConfig: MeetingClientConfig
@@ -459,6 +462,8 @@ class MeetingCoordinator(
         private var usageSubmitted = false
         /** 本场只在发布确认后上报一次纪要语言；Stop 重试不重复请求。 */
         private var summaryRequested = false
+        // 只有服务端生成纪要的部署才有 summary:request；本地/直连部署不上报语言。
+        private var summaryServerAvailable = false
         /** 含失败在内，同场只读取一次 sealed 事实，仅 IO 队列访问。 */
         private var audioArtifactRead = false
         private var audioArtifactFailure: IOException? = null
@@ -513,17 +518,21 @@ class MeetingCoordinator(
                     step = "能力发现"
                     val deployment = server.discover()
                     val setup = availableDeploymentCapabilities(deployment)
-                    requireCapabilities(setup)
+                    val negotiatedOptions = options.withAvailableCapabilities(setup)
+                    requireCapabilities(setup, negotiatedOptions)
                     LOG.info("本场部署能力已确认")
                     step = "创建会议"
                     // 只把本场实际可用的可选能力交给 Create；必需能力仍由原始设置决定。
                     // 本场发言人来自实时 Adapter，跨会议身份来自服务端会后 Provider，二者分开协商。
-                    val createOptions = options.withAvailableCapabilities(setup)
+                    val createOptions = negotiatedOptions
                     val created = server.createMeeting(createOptions)
                     val granted = HashSet<String>()
                     for (capability in createOptions.requestedCapabilities())
                         if (setup.contains(capability) && created.capabilities().canUse(capability, setup)) granted.add(capability)
-                    requireCapabilities(granted)
+                    requireCapabilities(granted, createOptions)
+                    // 只有本场真正获授服务端纪要能力时才上报语言：本地/直连部署没有 summary:request。
+                    summaryServerAvailable = granted.contains(MeetingCapabilityState.SUMMARY_SERVER)
+                    serverSummaryCapable = summaryServerAvailable
                     LOG.info("会议创建及必需能力已确认")
                     step = "模型材料/工厂选择"
                     val grant = if (runtime.usesServerModelMaterials()) server.requestModelSession(created.meetingId()) else null
@@ -548,7 +557,7 @@ class MeetingCoordinator(
                     if (granted.contains(MeetingCapabilityState.SPEAKER_IDENTITY_CROSS_MEETING) &&
                         enabled.contains(MeetingCapabilityState.SPEAKER))
                         enabled.add(MeetingCapabilityState.SPEAKER_IDENTITY_CROSS_MEETING)
-                    requireCapabilities(enabled)
+                    requireCapabilities(enabled, createOptions)
                     val adapter = if (grant == null) null else adapters.create(grant.adapterId())
                     LOG.info("本场模型材料与工厂已准备")
                     step = "启动客户端输入"
@@ -562,9 +571,9 @@ class MeetingCoordinator(
                 }
             }
         }
-        private fun requireCapabilities(capabilities: Set<String>) {
-            if (!capabilities.containsAll(options.requiredCapabilities())) {
-                LOG.warning("本场缺少用户已选择的必需能力 ${options.requiredCapabilities()}")
+        private fun requireCapabilities(capabilities: Set<String>, negotiated: MeetingOptions) {
+            if (!capabilities.containsAll(negotiated.requiredCapabilities())) {
+                LOG.warning("本场缺少用户已选择的必需能力 ${negotiated.requiredCapabilities()}")
                 throw IOException("本场缺少必需字幕或模式能力")
             }
         }
@@ -655,7 +664,10 @@ class MeetingCoordinator(
                 val audio = model?.audioArtifactFile()?.orElse(null) ?: return
                 val journal = TranscriptJournal(File(audio.absoluteFile.parentFile, "${id}.jsonl"))
                 val record = CapturingMeeting(id, sessionConfig.serverUrl(), sessionConfig.clientIdentity(),
-                    audio, journal.file(), startedAtMs, options.sourceLanguage(), options.summaryEnabled(),
+                    audio, journal.file(), startedAtMs, options.sourceLanguage(),
+                    // 只有本场真正获授服务端纪要能力的部署才在续办现场记纪要意图，
+                    // 否则续办会给没有 summary:request 的本地/直连部署反复补报。
+                    options.summaryEnabled() && summaryServerAvailable,
                     options.retainAudio(),
                     options.resultOptions().policy() != ResultOptions.Policy.NO_ACTIVE_DELIVERY,
                     if (options.mode() == MeetingOptions.Mode.LIVE_TRANSLATION) options.targetLanguage() else null)
@@ -982,8 +994,10 @@ class MeetingCoordinator(
                     step = "保存并完成原场停止收尾"
                     readAudioArtifactOnce()
                     if (cancelled || closed) return
+                    // 只有服务端生成纪要的部署才记录语言快照；本地/直连部署不记，避免续办误发。
                     if (stoppedCheckpoint == null) stoppedCheckpoint = StoppedMeetingCheckpoint
-                        .pending(publicationContext!!).withSummaryLanguages(summaryLanguages())
+                        .pending(publicationContext!!)
+                        .withSummaryLanguages(if (summaryServerAvailable) summaryLanguages() else null)
                     else {
                         var checkpoint = store.get().read(stoppedCheckpoint!!.checkpointId()).orElse(stoppedCheckpoint!!)
                         // 首次候选写失败也可重按：先保存，身份扩展才有原账号归属可核。
@@ -1055,6 +1069,8 @@ class MeetingCoordinator(
          */
         private fun requestSummaryOnce() {
             if (summaryRequested) return
+            // 本地/设备直连纪要的部署没有 summary:request 接口，语言上报只服务服务端生成。
+            if (!summaryServerAvailable) return
             val languages = summaryLanguages() ?: return
             summaryRequested = true
             requestSummaryQuietly(server, id, languages)

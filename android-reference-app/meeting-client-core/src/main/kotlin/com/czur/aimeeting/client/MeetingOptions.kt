@@ -26,6 +26,8 @@ data class MeetingOptions(
     // 主构造器保持原十二参，连同 Kotlin 生成的 copy／copy$default 保留原 JVM 签名，
     // 已编译的 SDK／伙伴调用方可继续消费新版 core；赋值入口只在下方两个复制方法内。
     private var requestedCapabilitiesOverride: List<String>? = null
+    /** 本场能力发现结果；为空表示尚未协商（旧调用方直接读取快照）。 */
+    private var availableCapabilitySet: Set<String> = emptySet()
     /** 本场共享音频混流选项；不进入 Create 请求，只影响设备端采集。 */
     private var audioMixOptions: AudioMixOptions = AudioMixOptions()
 
@@ -117,14 +119,15 @@ data class MeetingOptions(
     fun withAvailableCapabilities(availableCapabilities: Set<String>): MeetingOptions =
         MeetingOptions(mode, sourceLanguage, targetLanguage, presentationCapture, resultDelivery,
             resultWebUrl, resultEmails, summaryEnabled, resultOptions, title, timezone, retainAudio).also {
+            it.availableCapabilitySet = availableCapabilities
             it.requestedCapabilitiesOverride = java.util.List.copyOf(buildList {
-                addAll(requiredCapabilities())
+                addAll(it.requiredCapabilities())
                 addAll(structuredSummaryCompatibility(availableCapabilities))
                 addAll(optionalCapabilities().filter(availableCapabilities::contains))
                 if (retainAudio && availableCapabilities.contains(MeetingCapabilityState.SPEAKER) &&
                     availableCapabilities.contains(MeetingCapabilityState.SPEAKER_IDENTITY_CROSS_MEETING))
                     add(MeetingCapabilityState.SPEAKER_IDENTITY_CROSS_MEETING)
-            })
+            }.distinct())
             it.audioMixOptions = audioMixOptions
         }
 
@@ -159,8 +162,22 @@ data class MeetingOptions(
     fun requiredCapabilities(): List<String> = java.util.List.copyOf(buildList {
         add(MeetingCapabilityState.TRANSCRIPT)
         if (mode == Mode.LIVE_TRANSLATION) add(MeetingCapabilityState.TRANSLATION)
-        // 纪要由服务端按客户端上报的语言列表生成：必需项是 summary.server，不是设备直连能力。
-        if (summaryEnabled) add(MeetingCapabilityState.SUMMARY_SERVER)
+        // 纪要由服务端按客户端上报的语言列表生成时必需 summary.server；
+        // 部署若仍由本机/本地服务生成纪要（如本地化部署只声明 summary.structured），
+        // 则退回该兼容能力，避免可用集合有纪要能力却被门禁判为缺少必需项。
+        if (summaryEnabled) {
+            when {
+                availableCapabilitySet.contains(MeetingCapabilityState.SUMMARY_SERVER) ->
+                    add(MeetingCapabilityState.SUMMARY_SERVER)
+                // 本地化部署（如 ai-meeting-local-deployment）只声明 summary.structured，
+                // 但纪要由本地服务在 Stop 时自行生成，客户端不提交正文，也不请求 summary:request。
+                availableCapabilitySet.contains(MeetingCapabilityState.SUMMARY) ->
+                    add(MeetingCapabilityState.SUMMARY)
+                // 未协商过可用集合（旧调用方直接读取）时保持原来的服务端语义。
+                // 未协商（旧调用方）或部署两者都没声明：保持服务端要求，让门禁拒绝而不是静默降级。
+                else -> add(MeetingCapabilityState.SUMMARY_SERVER)
+            }
+        }
     })
     fun targetLanguages(): List<String> = if (mode == Mode.LIVE_TRANSLATION) listOf(targetLanguage) else emptyList()
 }

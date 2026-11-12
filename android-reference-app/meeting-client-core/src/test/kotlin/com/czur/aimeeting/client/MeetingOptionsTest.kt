@@ -166,4 +166,17 @@ class MeetingOptionsTest {
         assertEquals(listOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.SPEAKER),
             original.requestedCapabilities())
     }
+
+    @Test
+    fun localDeploymentWithoutServerSummaryRequiresStructuredSummary() {
+        val options = MeetingOptions(MeetingOptions.Mode.MEETING_MINUTES, "zh-CN", "", false,
+            MeetingOptions.ResultDelivery.LOCAL, "", listOf(), true)
+        val available = mutableSetOf<String>()
+        available.add(MeetingCapabilityState.TRANSCRIPT)
+        available.add(MeetingCapabilityState.SUMMARY)
+        val negotiated = options.withAvailableCapabilities(available)
+        assertTrue(negotiated.requiredCapabilities().contains(MeetingCapabilityState.SUMMARY))
+        assertFalse(negotiated.requiredCapabilities().contains(MeetingCapabilityState.SUMMARY_SERVER))
+        assertTrue(negotiated.requestedCapabilities().contains(MeetingCapabilityState.SUMMARY))
+    }
 }
