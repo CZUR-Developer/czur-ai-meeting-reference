@@ -58,6 +58,15 @@ import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
+import javax.sql.DataSource;
+import java.io.PrintWriter;
+import java.sql.SQLException;
+import java.sql.SQLFeatureNotSupportedException;
+import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -119,6 +128,104 @@ class JdbcMysqlClientInputIntegrationTest {
             try (var connection = admin(); var statement = connection.createStatement()) {
                 statement.execute("DROP DATABASE " + databaseName);
             }
+        }
+    }
+
+    @Test
+    void growingHistoryIsReplayedOnlyOnCacheMissAndAnotherWriterInvalidatesIt() throws Exception {
+        String id = createMeeting("body-cache", false);
+        var counted = new CountingDataSource(database.dataSource());
+        var first = input(counted);
+        assertStarted(first, id);
+        for (int sequence = 1; sequence <= 120; sequence++) {
+            append(first, id, transcript("event-" + sequence, sequence, "s" + ((sequence - 1) / 4),
+                    sequence, "正文😀" + sequence, sequence % 4 == 0));
+        }
+        assertEquals(1, counted.replays.get(), "热路径不得每条修订重读整场历史");
+        // 模拟另一实例：使用不同InputPort及缓存，但复用同一权威数据库。
+        var other = input();
+        append(other, id, transcript("other", 121, "other", 1, "另一实例", true));
+        var next = transcript("next", 122, "next", 1, "继续", true);
+        append(first, id, next);
+        assertEquals(2, counted.replays.get(), "数据库序号变化必须重建，不能误用旧缓存");
+        assertFalse(assertInstanceOf(ClientMeetingInputPort.Appended.class,
+                first.append(context(), id, next)).created());
+        assertEquals(2, counted.replays.get(), "原幂等重放不重复写入或推进缓存");
+        append(first, id, transcript("last", 123, "last", 1, "末句", true));
+        assertEquals(2, counted.replays.get());
+        try (var connection = database.dataSource().getConnection()) {
+            var projection = JdbcClientMeetingResultFinalizer.project(connection, database.engine(), id);
+            assertEquals(33, projection.segmentCount());
+            assertTrue(projection.text().contains("正文😀120"));
+            assertTrue(projection.text().contains("另一实例"));
+            assertTrue(projection.text().contains("末句"));
+        }
+    }
+
+    @Test
+    void rejectedPartialBudgetIncreaseRollsBackBothRowsAndCachedState() throws Exception {
+        String id = createMeeting("cache-rollback", false);
+        var counted = new CountingDataSource(database.dataSource());
+        var input = input(counted);
+        assertStarted(input, id);
+        append(input, id, transcriptWithLanguage("tiny", 1, "tiny", "en-US", "a", true));
+        append(input, id, transcriptWithLanguage("large", 2, "large", "L".repeat(1_100_000), "b", true));
+        var rejected = input.append(context(), id,
+                transcriptWithLanguage("partial", 3, "tiny", "en-US", "partial", false));
+        assertEquals(ClientMeetingInputPort.Reason.CONTENT_TOO_LARGE,
+                assertInstanceOf(ClientMeetingInputPort.Rejected.class, rejected).reason());
+        // 同一下一序号可提交较小事实；被回滚候选不能污染已提交缓存。
+        append(input, id, transcriptWithLanguage("correct", 3, "tiny", "en-US", "correct", true));
+        assertEquals(1, counted.replays.get());
+        assertEquals(3, count("ai_trans_meeting_client_event"));
+        try (var connection = database.dataSource().getConnection()) {
+            var projection = JdbcClientMeetingResultFinalizer.project(connection, database.engine(), id);
+            assertEquals(2, projection.segmentCount());
+            assertEquals("mul", projection.language());
+            assertTrue(projection.text().contains("correct"));
+        }
+    }
+
+    @Test
+    void summaryAddedWithoutAClientSequenceChangeStillCountsAgainstTheNextAppend() throws Exception {
+        String id = createMeeting("cache-summary", false);
+        var counted = new CountingDataSource(database.dataSource());
+        var input = input(counted);
+        assertStarted(input, id);
+        append(input, id, transcriptWithLanguage("tiny", 1, "tiny", "en-US", "a", true));
+        append(input, id, transcriptWithLanguage("large", 2, "large",
+                "L".repeat(2 * 1024 * 1024 - 150_000), "b", true));
+        var summary = new ClientMeetingInputPort.StructuredSummary("zh-CN", "标题",
+                "合法长度的概要", java.util.Collections.nCopies(25, "x".repeat(4000)), List.of());
+        assertInstanceOf(ClientMeetingInputPort.SummarySubmitted.class,
+                input.submitSummary(context(), id, summary));
+        int reads = counted.replays.get();
+        assertEquals(ClientMeetingInputPort.Reason.CONTENT_TOO_LARGE,
+                assertInstanceOf(ClientMeetingInputPort.Rejected.class, input.append(context(), id,
+                        transcriptWithLanguage("extra", 3, "extra", "en-US", "中".repeat(10_000), true))).reason());
+        assertEquals(reads, counted.replays.get(), "summary独立读取即可，不需重播原事件");
+        assertEquals(2, count("ai_trans_meeting_client_event"));
+    }
+
+    @Test
+    void failedCommitCannotPublishAnUncommittedProjection() throws Exception {
+        String id = createMeeting("cache-commit-failure", false);
+        var counted = new CountingDataSource(database.dataSource());
+        var input = input(counted);
+        assertStarted(input, id);
+        append(input, id, transcript("first", 1, "first", 1, "已提交", true));
+        counted.failNextCommit.set(true);
+        assertEquals(ClientMeetingInputPort.Reason.STORAGE_UNAVAILABLE,
+                assertInstanceOf(ClientMeetingInputPort.Rejected.class, input.append(context(), id,
+                        transcript("failed", 2, "failed", 1, "必须回滚", true))).reason());
+        assertEquals(1, count("ai_trans_meeting_client_event"));
+        append(input, id, transcript("retry", 2, "retry", 1, "重新提交", true));
+        assertEquals(1, counted.replays.get());
+        try (var connection = database.dataSource().getConnection()) {
+            String text = JdbcClientMeetingResultFinalizer.project(connection, database.engine(), id).text();
+            assertFalse(text.contains("必须回滚"));
+            assertTrue(text.contains("已提交"));
+            assertTrue(text.contains("重新提交"));
         }
     }
 
@@ -305,11 +412,55 @@ class JdbcMysqlClientInputIntegrationTest {
     }
 
     private JdbcClientMeetingInputPort input() throws ArtifactStoreException {
+        return input(database.dataSource());
+    }
+
+    private JdbcClientMeetingInputPort input(DataSource source) throws ArtifactStoreException {
         var coordinator = new RealtimeMeetingStartCoordinator(SCOPE,
                 new JdbcRealtimeStartFactsLookup(database), (id, revision) -> Optional.of(PROFILE),
                 MODEL, DeploymentLimits.NONE, CLOCK,
                 new JdbcMeetingStartExecutionUnitOfWork(database, new CapabilityPlanner()));
-        return new JdbcClientMeetingInputPort(database, coordinator, CLOCK, artifacts());
+        return new JdbcClientMeetingInputPort(source, coordinator, CLOCK, artifacts());
+    }
+
+    private static ClientMeetingInputPort.ClientTranscript transcriptWithLanguage(String clientId,
+            long sequence, String segment, String language, String text, boolean complete) {
+        return new ClientMeetingInputPort.ClientTranscript(clientId, sequence,
+                new CanonicalTranscriptEvent(segment, (int) sequence, CanonicalTranscriptEvent.Operation.UPSERT,
+                        0, 2000, language, text, complete, null, 0, List.of(), List.of()));
+    }
+
+    /** 只统计真实JDBC重播SQL，不替代连接、事务、服务器或结果集。 */
+    private static final class CountingDataSource implements DataSource {
+        private final DataSource delegate;
+        final AtomicInteger replays = new AtomicInteger();
+        final AtomicBoolean failNextCommit = new AtomicBoolean();
+        CountingDataSource(DataSource delegate) { this.delegate = delegate; }
+        @Override public Connection getConnection() throws SQLException { return count(delegate.getConnection()); }
+        @Override public Connection getConnection(String user, String password) throws SQLException {
+            return count(delegate.getConnection(user, password));
+        }
+        private Connection count(Connection connection) {
+            return (Connection) Proxy.newProxyInstance(Connection.class.getClassLoader(),
+                    new Class<?>[]{Connection.class}, (proxy, method, arguments) -> {
+                        if (method.getName().equals("commit") && failNextCommit.getAndSet(false)) {
+                            throw new SQLException("fixture commit failure");
+                        }
+                        if (method.getName().equals("prepareStatement") && arguments[0] instanceof String sql
+                                && sql.contains("e.canonical_payload") && sql.contains("ORDER BY c.client_sequence")) {
+                            replays.incrementAndGet();
+                        }
+                        try { return method.invoke(connection, arguments); }
+                        catch (InvocationTargetException failure) { throw failure.getCause(); }
+                    });
+        }
+        @Override public PrintWriter getLogWriter() throws SQLException { return delegate.getLogWriter(); }
+        @Override public void setLogWriter(PrintWriter writer) throws SQLException { delegate.setLogWriter(writer); }
+        @Override public void setLoginTimeout(int timeout) throws SQLException { delegate.setLoginTimeout(timeout); }
+        @Override public int getLoginTimeout() throws SQLException { return delegate.getLoginTimeout(); }
+        @Override public Logger getParentLogger() throws SQLFeatureNotSupportedException { return delegate.getParentLogger(); }
+        @Override public <T> T unwrap(Class<T> type) throws SQLException { return delegate.unwrap(type); }
+        @Override public boolean isWrapperFor(Class<?> type) throws SQLException { return delegate.isWrapperFor(type); }
     }
 
     private PersistentFileSystemMockArtifactStore artifacts() throws ArtifactStoreException {

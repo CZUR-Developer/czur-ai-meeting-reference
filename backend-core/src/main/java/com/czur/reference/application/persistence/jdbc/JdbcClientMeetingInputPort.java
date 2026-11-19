@@ -55,6 +55,7 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
     private final RealtimeMeetingStartCoordinator startCoordinator;
     private final Clock clock;
     private final ArtifactStore artifactStore;
+    private final JdbcClientBodyProjectionCache bodyProjections = new JdbcClientBodyProjectionCache();
     private final long maxClientArtifactBytes;
 
     @Override
@@ -589,8 +590,13 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
                     connection.rollback();
                     return new Appended(winner, false);
                 }
-                if (request.clientSequence() != lastClientSequence(connection, meetingId) + 1) {
+                long previousSequence = lastClientSequence(connection, meetingId);
+                if (request.clientSequence() != previousSequence + 1) {
                     return rollback(connection, new Rejected(Reason.EVENT_CONFLICT));
+                }
+                var previousProjection = bodyProjections.find(meetingId, previousSequence);
+                if (previousProjection == null) {
+                    previousProjection = JdbcClientMeetingResultFinalizer.readClientEvents(connection, engine, meetingId);
                 }
                 long sequence = Math.addExact(
                         JdbcMeetingEventLogStore.currentSequence(connection, engine, meetingId), 1);
@@ -616,13 +622,17 @@ public final class JdbcClientMeetingInputPort implements ClientMeetingInputPort 
                 // 单条请求上限之外还必须按“最终聚合正文”累计：同一 segment 的
                 // 后续修订可能让最终产物超过部署预算，Stop 时再拒绝只会把会议卡在
                 // STOPPING。这里在受理事务内按发布端同一序列化口径预检并回滚。
-                if (!withinClientBodyBudget(connection, meetingId)) {
+                var nextProjection = previousProjection.with(event, request.clientSequence());
+                var body = JdbcClientMeetingResultFinalizer.project(nextProjection,
+                        JdbcClientMeetingResultFinalizer.readClientSummary(connection, engine, meetingId));
+                if (JdbcClientMeetingResultFinalizer.serializedClientBodyBytes(body) > maxClientArtifactBytes) {
                     connection.rollback();
                     LOGGER.log(Level.INFO, "客户端正文累计超过部署预算，已拒绝 type={0}",
                             event.eventType());
                     return new Rejected(Reason.CONTENT_TOO_LARGE);
                 }
                 connection.commit();
+                bodyProjections.committed(meetingId, request.clientSequence(), nextProjection);
                 LOGGER.log(Level.FINE, "客户端标准事件已保存 type={0}", event.eventType());
                 return new Appended(event, true);
             } catch (SQLException | RuntimeException failure) {

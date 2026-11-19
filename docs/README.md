@@ -29,7 +29,7 @@
 
 | 模块 | 文档 | 里面有什么 |
 | --- | --- | --- |
-| 后端核心 | [backend-core](../backend-core/README.md) | 共享 JAR 的端口、装配与消费方式 |
+| 后端核心 | [backend-core](../backend-core/README.md) | 共享 JAR 的端口、装配、消费与客户端正文预算投影 |
 | 参考后端 | [backend-reference](../backend-reference/README.md) | 启动、演示登录、Mock、数据库集成测试 |
 | 参考 App | [android-reference-app](../android-reference-app/README.md) | 模块划分、运行模式、会前开会条件 hook、构建期部署地址 |
 | 客户端核心 | [meeting-client-core](../android-reference-app/meeting-client-core/README.md) | 会议状态机、事件、身份与结果动作契约 |

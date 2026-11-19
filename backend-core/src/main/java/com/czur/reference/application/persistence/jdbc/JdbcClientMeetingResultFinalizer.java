@@ -1,5 +1,7 @@
 package com.czur.reference.application.persistence.jdbc;
 
+import com.czur.reference.application.port.EventLog;
+
 import com.czur.aimeeting.contract.realtime.v1.TranscriptUpsert;
 import com.czur.aimeeting.contract.realtime.v1.TranslationUpsert;
 import com.czur.reference.application.artifact.MeetingBodyArtifactBudget;
@@ -1177,7 +1179,10 @@ public final class JdbcClientMeetingResultFinalizer
      */
     static long serializedClientBodyBytes(Connection connection, JdbcDatabaseEngine engine,
             String meetingId) throws SQLException {
-        Projection projection = project(connection, engine, meetingId);
+        return serializedClientBodyBytes(project(connection, engine, meetingId));
+    }
+
+    static long serializedClientBodyBytes(Projection projection) {
         long total = 0;
         if (projection.segmentCount() > 0) {
             total = Math.addExact(total, utf8Length(transcriptArtifactBody(projection)));
@@ -1195,8 +1200,14 @@ public final class JdbcClientMeetingResultFinalizer
         return body.toString().getBytes(StandardCharsets.UTF_8).length;
     }
 
-    /** 两引擎共享既有最终修订规则；只读快照不使用锁定读取。 */
+    /** 结果发布只读数据库，不依赖输入端的进程缓存。 */
     static Projection project(Connection connection, JdbcDatabaseEngine engine, String meetingId)
+            throws SQLException {
+        return project(readClientEvents(connection, engine, meetingId),
+                readClientSummary(connection, engine, meetingId));
+    }
+
+    static ClientEvents readClientEvents(Connection connection, JdbcDatabaseEngine engine, String meetingId)
             throws SQLException {
         Map<String, TranscriptUpsert> latest = new HashMap<>();
         Map<String, TranslationRevision> latestTranslations = new HashMap<>();
@@ -1228,6 +1239,37 @@ public final class JdbcClientMeetingResultFinalizer
                 }
             }
         }
+        return new ClientEvents(latest, latestTranslations);
+    }
+
+    static ObjectNode readClientSummary(Connection connection, JdbcDatabaseEngine engine, String meetingId)
+            throws SQLException {
+        ObjectNode summary = null;
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT summary_json FROM " + JdbcDatabaseTable.MEETING_CLIENT_SUMMARY.physicalName(engine)
+                        + " WHERE meeting_id=?")) {
+            JdbcValues.setText(statement, 1, engine, meetingId);
+            try (ResultSet rows = statement.executeQuery()) {
+                if (rows.next()) {
+                    try {
+                        JsonNode parsed = JSON.readTree(rows.getString(1));
+                        if (!(parsed instanceof ObjectNode object)) {
+                            throw new IllegalStateException("stored summary is invalid");
+                        }
+                        summary = object;
+                    } catch (com.fasterxml.jackson.core.JsonProcessingException invalid) {
+                        throw new IllegalStateException("stored summary is invalid", invalid);
+                    }
+                }
+            }
+        }
+        return summary;
+    }
+
+    /** 与慢路径共用排序、final、语言及序列化规则，避免预算口径分叉。 */
+    static Projection project(ClientEvents events, ObjectNode summary) {
+        Map<String, TranscriptUpsert> latest = events.latest();
+        Map<String, TranslationRevision> latestTranslations = events.latestTranslations();
         // Stop 后 append 已关闭，等待 partial 变成 final 只会永久停在 STOPPING。
         // 未完成片段不进入结果；即使一场会议仅有 partial，也能以无字幕结果收口。
         List<TranscriptUpsert> ordered = new ArrayList<>(latest.values().stream()
@@ -1261,27 +1303,40 @@ public final class JdbcClientMeetingResultFinalizer
         LinkedHashSet<String> targets = new LinkedHashSet<>();
         finalTranslations.forEach(item -> targets.add(item.getTargetLanguage()));
         String translationLanguage = targets.size() == 1 ? targets.iterator().next() : "mul";
-        ObjectNode summary = null;
-        try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT summary_json FROM " + JdbcDatabaseTable.MEETING_CLIENT_SUMMARY.physicalName(engine)
-                        + " WHERE meeting_id=?")) {
-            JdbcValues.setText(statement, 1, engine, meetingId);
-            try (ResultSet rows = statement.executeQuery()) {
-                if (rows.next()) {
-                    try {
-                        JsonNode parsed = JSON.readTree(rows.getString(1));
-                        if (!(parsed instanceof ObjectNode object)) {
-                            throw new IllegalStateException("stored summary is invalid");
-                        }
-                        summary = object;
-                    } catch (com.fasterxml.jackson.core.JsonProcessingException invalid) {
-                        throw new IllegalStateException("stored summary is invalid", invalid);
-                    }
-                }
-            }
-        }
         return new Projection(text, language, durationMs, ordered, finalTranslations,
                 List.copyOf(targets), translationLanguage, summary);
+    }
+
+
+    /** 不含 summary：它可在不推进客户端事件序号时变化，始终单独读取。 */
+    record ClientEvents(Map<String, TranscriptUpsert> latest,
+            Map<String, TranslationRevision> latestTranslations) {
+        ClientEvents {
+            latest = Map.copyOf(latest);
+            latestTranslations = Map.copyOf(latestTranslations);
+        }
+
+        ClientEvents with(EventLog event, long clientSequence) {
+            Map<String, TranscriptUpsert> transcripts = new HashMap<>(latest);
+            Map<String, TranslationRevision> translations = new HashMap<>(latestTranslations);
+            if (RealtimeTranscriptEventMapper.EVENT_TYPE.equals(event.eventType())) {
+                TranscriptUpsert item = RealtimeTranscriptEventMapper.fromStored(event).getTranscriptUpsert();
+                transcripts.put(item.getSegmentId(), item);
+            } else if (RealtimeTranslationEventMapper.EVENT_TYPE.equals(event.eventType())) {
+                TranslationUpsert item = RealtimeTranslationEventMapper.fromStored(event).getTranslationUpsert();
+                translations.put(item.getTranslationId(), new TranslationRevision(item, clientSequence));
+            } else {
+                throw new IllegalStateException("unsupported client result event type");
+            }
+            return new ClientEvents(transcripts, translations);
+        }
+
+        long estimatedWeight() {
+            long bytes = 128;
+            for (var value : latest.values()) bytes += 256L + 2L * value.getSerializedSize();
+            for (var value : latestTranslations.values()) bytes += 256L + 2L * value.value().getSerializedSize();
+            return bytes;
+        }
     }
 
     private static String sha256(byte[] bytes) {
@@ -1292,7 +1347,7 @@ public final class JdbcClientMeetingResultFinalizer
         }
     }
 
-    private record TranslationRevision(TranslationUpsert value, long sequence) { }
+    record TranslationRevision(TranslationUpsert value, long sequence) { }
 
     record Projection(String text, String language, long durationMs,
             List<TranscriptUpsert> transcripts, List<TranslationUpsert> translations,
