@@ -288,6 +288,28 @@ class HttpMeetingServerClientTest {
         }
     }
 
+    @Test(timeout = 35_000) fun stopWaitsForSynchronousFinalizationButOrdinaryEventsKeepTheirReadBudget() {
+        Fixture().use { fixture ->
+            fixture.reply(200, "{\"inputState\":\"INPUT_ACCEPTED\",\"manifestState\":\"READY\"}", delayMs = 11_000)
+            val client = fixture.client()
+            val started = System.nanoTime()
+            assertTrue(client.stopMeeting("mtg_slow_stop", "same-stop-key").accepted())
+            assertTrue(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) >= 10_000)
+            val stopped = fixture.request()
+            assertEquals("/v1/meetings/mtg_slow_stop:stop", stopped.path())
+            assertEquals("same-stop-key", stopped.stopKey())
+            assertTrue("慢Stop不能自动重发", fixture.requests.isEmpty())
+
+            fixture.reply(201, "{}", delayMs = 11_000)
+            assertThrows(SocketTimeoutException::class.java) {
+                client.appendTranscript("mtg_slow_stop", 1,
+                    TranscriptEvent("s1", 1, 0, 100, "zh-CN", "最终原文", true))
+            }
+            assertEquals("/v1/meetings/mtg_slow_stop/events:append", fixture.request().path())
+            assertTrue("普通事件超时同样不自动重发", fixture.requests.isEmpty())
+        }
+    }
+
     @Test fun frozenUsageUsesSameAuthenticatedBodyForFirstSubmitAndReplay() {
         Fixture().use { fixture ->
             val confirmation = "{\"meetingId\":\"mtg_usage\",\"audioDurationMs\":1000,\"accepted\":true}"

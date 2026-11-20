@@ -1292,6 +1292,66 @@ class MeetingCoordinatorTest {
         }
     }
 
+    @Test(timeout = 25_000) fun slowStopAckAutomaticallyPersistsAcceptanceAndReadsActualReadyManifest() {
+        val http = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val paths = Collections.synchronizedList(ArrayList<String>())
+        val keys = Collections.synchronizedList(ArrayList<String>())
+        val entered = CountDownLatch(1)
+        http.createContext("/") { exchange ->
+            val path = exchange.requestURI.path
+            exchange.requestBody.readAllBytes()
+            paths.add(path)
+            val body = if (path.endsWith(":stop")) {
+                keys.add(exchange.requestHeaders.getFirst("Idempotency-Key"))
+                entered.countDown()
+                Thread.sleep(11_000)
+                "{\"inputState\":\"INPUT_ACCEPTED\",\"manifestState\":\"READY\"}"
+            } else "{\"status\":\"READY\",\"title\":\"慢响应真实清单\",\"artifacts\":[]}"
+            val bytes = body.toByteArray(StandardCharsets.UTF_8)
+            exchange.sendResponseHeaders(200, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+            exchange.close()
+        }
+        http.start()
+        try {
+            val store = MemoryStore()
+            val publisher = Publisher()
+            val fake = Server(ALL)
+            publisher.server = fake
+            val runtime = Runtime(true)
+            runtime.prepareAudio(audio("mtg_test", 32000))
+            val config = MeetingClientConfig.reference("http://127.0.0.1:${http.address.port}", "test-token")
+                .withArtifactPublisher(publisher).withStoppedMeetingStore(store)
+            val transport = HttpMeetingServerClient(config)
+            val server = object : MeetingServerClient by fake {
+                override fun stopMeeting(id: String, stableStopKey: String) = transport.stopMeeting(id, stableStopKey)
+                override fun readResult(id: String, genTime: Long, includeContent: Boolean) =
+                    transport.readResult(id, genTime, includeContent)
+            }
+            val probe = Probe()
+            MeetingCoordinator(config, ModelAdapterRegistry(), runtime,
+                java.util.function.Supplier { server }, { System.nanoTime() / 1_000_000 }, { 555L }).use { client ->
+                val session = client.start(retainedOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT), probe)
+                assertTrue(runtime.started.await(2, TimeUnit.SECONDS))
+                session.requestStop()
+                assertTrue(entered.await(2, TimeUnit.SECONDS))
+                val pending = store.read("mtg_test").orElseThrow()
+                assertEquals(StoppedMeetingCheckpoint.Phase.PUBLISHED, pending.phase())
+                assertNull(pending.genTime())
+                assertTrue(runtime.stopped.await(1, TimeUnit.SECONDS))
+                val result = probe.results.poll(18, TimeUnit.SECONDS)
+                assertNotNull("单次Stop应等真实慢ACK后自动READY，不需手动重按", result)
+                probe.awaitPhase(MeetingSessionState.Phase.READY)
+                assertEquals("慢响应真实清单", result!!.title())
+                assertEquals(StoppedMeetingCheckpoint.Phase.READY, store.read("mtg_test").orElseThrow().phase())
+                assertEquals(listOf(pending.stableStopKey()), keys)
+                assertEquals(listOf("/v1/meetings/mtg_test:stop", "/v1/meetings/mtg_test/manifest"), paths)
+                assertEquals(1, publisher.contexts.size)
+                assertEquals(1, runtime.stopCalls)
+            }
+        } finally { http.stop(0) }
+    }
+
     @Test fun acceptedStopWithLostAckResumesSameKeyWithoutRepeatingPublication() {        val store: MemoryStore = MemoryStore()
         val originalPublisher: Publisher = Publisher()
         lateinit var server: Server
@@ -2302,6 +2362,123 @@ class MeetingCoordinatorTest {
         }
     }
 
+    @Test fun inputStopsBeforeDelayedPictureBarrierButFinalPublicationWaits() {
+        Fixture(true, ALL).use { f ->
+            val continuation = CompletableFuture<Runnable>()
+            f.probe.beforeStop = java.util.function.Consumer { continuation.complete(it) }
+            f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.WEB, true)
+            f.session.requestStop()
+            val release = continuation.get(2, TimeUnit.SECONDS)
+            assertTrue("停音不能等待宿主图片屏障", f.runtime.stopped.await(1, TimeUnit.SECONDS))
+            assertFalse(f.server.steps.contains("stop"))
+            assertEquals(0, f.runtime.durationReads)
+            // 模型已同步结束，但屏障释放前仍接受已冻结的末帧。
+            val saved = CompletableFuture<Void?>()
+            f.session.submitPresentation(1000, byteArrayOf(1, 2), resultCallback(saved))
+            saved.get(2, TimeUnit.SECONDS)
+            assertFalse(f.server.steps.contains("stop"))
+            release.run()
+            release.run()
+            assertNotNull(f.probe.result())
+            assertEquals(1, f.runtime.stopCalls)
+            assertEquals(1, f.probe.beforeStopCalls.get())
+            assertArrayEquals(byteArrayOf(1, 2), f.server.jpeg)
+        }
+    }
+
+    @Test fun blockedEventIoCannotDelayInputStopAndPictureRetentionStillPrecedesPublication() {
+        Fixture(true, ALL).use { f ->
+            f.server.blockAppend = true
+            f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.WEB, true)
+            f.runtime.emit("pending", 1, "zh-CN", "原场字幕", true)
+            assertTrue(f.server.appendEntered.await(1, TimeUnit.SECONDS))
+            val retained = java.util.concurrent.atomic.AtomicBoolean()
+            f.probe.beforeStop = java.util.function.Consumer { continuation ->
+                f.session.submitPresentation(1000, byteArrayOf(3), object : MeetingClient.Callback<Void?> {
+                    override fun onSuccess(result: Void?) {
+                        retained.set(true) // 模拟宿主完成真实 ACK 后的 NAS 保留才续接。
+                        continuation.run()
+                    }
+                    override fun onError(error: MeetingError) { fail(error.code.name) }
+                })
+            }
+            f.session.requestStop()
+            assertTrue("停音使用独立控制队列", f.runtime.stopped.await(1, TimeUnit.SECONDS))
+            assertEquals(1L, f.server.releaseAppend.count)
+            assertFalse(retained.get())
+            assertFalse(f.server.steps.contains("stop"))
+            f.server.releaseAppend.countDown()
+            assertNotNull(f.probe.result())
+            assertTrue(retained.get())
+            assertEquals(1, f.runtime.stopCalls)
+            assertEquals(1, f.server.captures.size)
+        }
+    }
+
+    @Test fun stopInputRetryDoesNotRestartOrRecloseThePictureBarrier() {
+        Fixture(true, ALL).use { f ->
+            f.runtime.failStopOnce = true
+            val continuation = CompletableFuture<Runnable>()
+            f.probe.beforeStop = java.util.function.Consumer { continuation.complete(it) }
+            f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.WEB, true)
+            f.session.requestStop()
+            val release = continuation.get(2, TimeUnit.SECONDS)
+            f.probe.awaitNotice(MeetingNotice.STOP_RETRY_REQUIRED)
+            release.run()
+            f.session.requestStop()
+            assertNotNull(f.probe.result())
+            assertEquals(2, f.runtime.stopCalls)
+            assertEquals(1, f.probe.beforeStopCalls.get())
+        }
+    }
+
+    @Test fun cancelledPictureBarrierCannotFinalizeOldOrFollowingSession() {
+        Fixture(true, ALL).use { f ->
+            val continuation = CompletableFuture<Runnable>()
+            f.probe.beforeStop = java.util.function.Consumer { continuation.complete(it) }
+            f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.WEB, true)
+            f.session.requestStop()
+            val release = continuation.get(2, TimeUnit.SECONDS)
+            assertTrue(f.runtime.stopped.await(1, TimeUnit.SECONDS))
+            f.session.close()
+            assertTrue(f.runtime.closed.await(1, TimeUnit.SECONDS))
+            release.run()
+            release.run()
+            val nextProbe = Probe()
+            val next = f.client.start(options(MeetingOptions.Mode.LIVE_TRANSCRIPT,
+                MeetingOptions.ResultDelivery.WEB, false), nextProbe)
+            nextProbe.awaitPhase(MeetingSessionState.Phase.RUNNING)
+            assertFalse(f.server.steps.contains("usage"))
+            assertFalse(f.server.steps.contains("stop"))
+            assertTrue(f.probe.results.isEmpty())
+            next.requestStop()
+            assertNotNull(nextProbe.result())
+            assertEquals(1, f.server.steps.count { it == "stop" })
+            assertEquals(2, f.runtime.stopCalls)
+        }
+    }
+
+    @Test fun successfulStopInputRetryStillWaitsForUnreleasedPictureBarrier() {
+        Fixture(true, ALL).use { f ->
+            f.runtime.failStopOnce = true
+            val continuation = CompletableFuture<Runnable>()
+            f.probe.beforeStop = java.util.function.Consumer { continuation.complete(it) }
+            f.start(MeetingOptions.Mode.LIVE_TRANSCRIPT, MeetingOptions.ResultDelivery.WEB, true)
+            f.session.requestStop()
+            val release = continuation.get(2, TimeUnit.SECONDS)
+            f.probe.awaitNotice(MeetingNotice.STOP_RETRY_REQUIRED)
+            f.session.requestStop()
+            assertTrue(f.runtime.stopped.await(1, TimeUnit.SECONDS))
+            assertFalse(f.server.steps.contains("stop"))
+            assertEquals(0, f.runtime.durationReads)
+            assertEquals(1, f.probe.beforeStopCalls.get())
+            release.run()
+            assertNotNull(f.probe.result())
+            assertEquals(2, f.runtime.stopCalls)
+            assertEquals(1, f.server.steps.count { it == "stop" })
+        }
+    }
+
     @Test fun failedFinalCaptureContinuesBeforeStopAndDoesNotPoisonTextResult() {
         Fixture(true, ALL).use { f ->
             f.server.failPresentationCalls = 1
@@ -2323,8 +2500,11 @@ class MeetingCoordinatorTest {
             assertEquals(1, captureErrors.get())
             assertEquals(1, f.probe.beforeStopCalls.get())
             assertEquals(1, f.runtime.stopCalls)
-            assertEquals(listOf("discover", "create", "grant", "start", "capture1",
-                    "event1", "stop", "manifest"), f.server.steps)
+            assertEquals(listOf("discover", "create", "grant", "start", "event1", "stop", "manifest"),
+                f.server.steps.filterNot { it == "capture1" })
+            assertEquals(1, f.server.steps.count { it == "capture1" })
+            assertTrue(f.server.steps.indexOf("capture1") in
+                (f.server.steps.indexOf("start") + 1) until f.server.steps.indexOf("stop"))
             assertEquals("最后字幕", f.server.transcripts.get(0).text())
             f.probe.awaitPhase(MeetingSessionState.Phase.READY)
         }
@@ -2340,7 +2520,11 @@ class MeetingCoordinatorTest {
             f.probe.beforeStop = java.util.function.Consumer { continuation -> f.session.submitPresentation(1500, byteArrayOf(3)); continuation.run(); }
             f.session.requestStop()
             val result: MeetingResult = f.probe.result()
-            assertEquals(listOf("discover", "create", "grant", "start", "capture1", "event1", "translation2", "usage", "stop", "manifest"), f.server.steps)
+            assertEquals(listOf("discover", "create", "grant", "start", "event1", "translation2", "usage", "stop", "manifest"),
+                f.server.steps.filterNot { it == "capture1" })
+            assertEquals(1, f.server.steps.count { it == "capture1" })
+            assertTrue(f.server.steps.indexOf("capture1") in
+                (f.server.steps.indexOf("start") + 1) until f.server.steps.indexOf("usage"))
             assertEquals(listOf(0L), f.server.usages)
             assertFalse(f.server.includeContent)
             assertEquals(MeetingResult.DeliveryStatus.NOT_REQUESTED, result.deliveryStatus())
@@ -2853,6 +3037,7 @@ class MeetingCoordinatorTest {
         var audioMix: AudioMixOptions? = null
         var summaryInput: SummaryInput? = null
         @Volatile var stopCalls = 0
+        @Volatile var failStopOnce = false
         var emitTail = false
         var emitFinished = true
         @Volatile var duration = OptionalLong.empty()
@@ -2909,6 +3094,7 @@ class MeetingCoordinatorTest {
                 override fun stopInput() {
                     controlCalls.add("stop")
                     stopCalls++
+                    if (failStopOnce) { failStopOnce = false; throw IllegalStateException("受控停输入失败") }
                     stopped.countDown()
                     if (real) {
                         if (emitTail) {

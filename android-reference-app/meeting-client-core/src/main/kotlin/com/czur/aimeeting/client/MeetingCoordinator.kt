@@ -440,6 +440,9 @@ class MeetingCoordinator(
         private var canStop = false
         private var stopRequested = false
         private var stopInputSent = false
+        private var stopInputInFlight = false
+        private var beforeStopStarted = false
+        private var beforeStopCompleted = false
         private var modelFinished = false
         @Volatile private var audioFailed = false
         private var completionQueued = false
@@ -947,24 +950,46 @@ class MeetingCoordinator(
                 cancelDeadline(); publish()
                 // 只在用户确认停止时重试已失败的原输入，不增加定时任务或无限重试。
                 pendingTextTranslations.values.toList().forEach(::submitTextTranslation)
-                if (stopInputSent) { maybeComplete(); return@enqueue }
-                val continued = AtomicBoolean()
-                notifyListener { listener.beforeStop { if (continued.compareAndSet(false, true)) enqueue { continueStop() } } }
+                // 停音走独立 modelControl，不等待图片保存 IO；图片 ACK/NAS 屏障仍先于最终发布。
+                val beginBarrier = !beforeStopStarted
+                beforeStopStarted = true
+                stopModelInput()
+                if (beginBarrier) {
+                    val continued = AtomicBoolean()
+                    notifyListener {
+                        listener.beforeStop {
+                            if (continued.compareAndSet(false, true)) enqueue { releaseStopBarrier() }
+                        }
+                    }
+                } else maybeComplete()
             }
         }
-        private fun continueStop() {
-            if (done || stopInputSent) return
+        private fun releaseStopBarrier() {
+            if (done) return
+            beforeStopCompleted = true
             acceptingPresentation = false
+            maybeComplete()
+        }
+        private fun stopModelInput() {
+            if (done || stopInputSent || stopInputInFlight) return
+            stopInputInFlight = true
             modelControl.execute {
-                try { model!!.stopInput(); enqueue { stopInputSent = true; maybeComplete() } }
+                try {
+                    model!!.stopInput()
+                    enqueue { stopInputInFlight = false; stopInputSent = true; maybeComplete() }
+                }
                 catch (failure: RuntimeException) {
                     logFailure("停止模型输入", failure)
-                    enqueue { canStop = true; publish(notice = MeetingNotice.STOP_RETRY_REQUIRED) }
+                    enqueue {
+                        stopInputInFlight = false
+                        canStop = true
+                        publish(notice = MeetingNotice.STOP_RETRY_REQUIRED)
+                    }
                 }
             }
         }
         private fun maybeComplete() {
-            if (done || completionQueued || !stopRequested || !stopInputSent || runtime.waitsForModelFinish() && !modelFinished) return
+            if (done || completionQueued || !stopRequested || !stopInputSent || !beforeStopCompleted || runtime.waitsForModelFinish() && !modelFinished) return
             if (translating.isNotEmpty()) return
             if (pendingTextTranslations.isNotEmpty()) {
                 completionFailed("独立翻译尚未完成，请检查模型连接后再次确认停止")

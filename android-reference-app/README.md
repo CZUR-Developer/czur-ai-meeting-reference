@@ -158,7 +158,7 @@ val session = client.start(setup.toOptions(), object : MeetingListener {
         // SDK 已完成配对和路由；UI 渲染 final=100%、partial=80%。
     }
     override fun beforeStop(continuation: Runnable) {
-        // 有屏采时：停周期采集，等保存确认，完成末帧及关闭，再调用 continuation。
+        // 有屏采时：停周期采集，空闲时立即采末帧，等已接纳帧确认及关闭后续接。
         continuation.run() // 无屏采时直接继续。完整接线见 MeetingService。
     }
     override fun onResult(result: MeetingResult) {
@@ -325,8 +325,11 @@ App 决定 10 秒周期、相对本场单调起点的偏移、排除窗口和末
 
 当前参考端使用 SDK File 输出，IO 协程读 JPEG 后清理临时文件，再提交
 `session.submitPresentation(offsetMs, jpeg, callback)`。只有后端真实保存 ACK 成功后
-调用 `confirmAccepted()`；失败不确认。周期请求完成后才采末帧，成功、无新图或失败
-均关闭会话／客户端并续接 `beforeStop`。截图计算、编码、文件和网络不阻塞主线程。
+调用 `confirmAccepted()`；失败不确认。上一帧仍在采集或等待 ACK 时跳过周期请求，
+不排队积压。Stop 并行发起输入停止并禁止新周期帧：空闲时立即请求一张末帧，忙时仅等待
+已接纳帧的真实 ACK／失败，不在 ACK 后补截 Stop 后的画面。因此参考端末帧是
+best effort，忙时不保证额外 Stop 快照。成功、无新图、失败或投影撤销均关闭会话／
+客户端并只续接一次 `beforeStop`。截图计算、编码、文件和网络不阻塞主线程。
 
 兼容系统使用 `SYSTEM_CAPTURE` 排除悬浮窗：每次在主线程读取当前已挂载的
 `View.getWindowToken()`，不缓存跨挂载句柄。自定义窗口工厂应实现
@@ -338,7 +341,7 @@ SDK 另提供 Bitmap 输出；关闭处理时 File 为 PNG，开启处理时为 
 交付后的 Bitmap／File 归调用方回收或保留，接受确认不负责回收，也不执行网络。
 公开 API、线程约束、资源所有权和关闭顺序见
 [SDK 截图公开入口与资源约束](docs/SCREEN-CAPTURE.md)。
-从窗口停止时，App 等末帧结束才返回会议页面，避免自己的会议整页进入末帧。
+从窗口停止时，App 等已接纳帧结束才返回会议页面，避免自己的会议整页进入末帧。
 
 ## 可注册结果动作：默认只Web
 

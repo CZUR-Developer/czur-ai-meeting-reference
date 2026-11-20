@@ -206,7 +206,10 @@ class HttpMeetingServerClient(config: MeetingClientConfig) : MeetingServerClient
     override fun stopMeeting(meetingId: String): StopMeetingResponse = stopMeeting(meetingId, stopKey)
     @Throws(IOException::class)
     override fun stopMeeting(meetingId: String, stableStopKey: String): StopMeetingResponse {
-        val response = post("/v1/meetings/$meetingId:stop", null, stableStopKey, 200, 202)
+        // Stop 同步等待本场结算和最终产物，长会可超过普通事件的10秒预算。
+        // 仅放宽本动作读取等待；仍要求原键真实ACK，不增加自动重试或放宽连接超时。
+        val response = post("/v1/meetings/$meetingId:stop", null, stableStopKey, 200, 202,
+            readTimeoutMs = 120_000)
         val body = parseJson(response.body)
         return StopMeetingResponse(response.status == 200,
             body.optString("inputState", if (response.status == 200) "INPUT_ACCEPTED" else "INPUT_COMPLETE_PENDING"),

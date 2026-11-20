@@ -4,6 +4,7 @@ import android.content.Intent
 import android.os.Looper
 import android.os.SystemClock
 import android.os.PowerManager
+import android.os.IBinder
 import android.content.Context
 import com.czur.aimeeting.client.MeetingClient
 import com.czur.aimeeting.client.MeetingHeartbeatTimer
@@ -230,6 +231,90 @@ class MeetingServicePresentationTest {
             shadowOf(Looper.getMainLooper()).idle()
             assertEquals("已停止的本场不因重复息屏广播再次停止", 1, stops.get())
         } finally { host.destroy() }
+    }
+
+    @Test fun presentationStopWaitsForTheRealAckWithoutCapturingALaterFrame() {
+        val host = Robolectric.buildService(MeetingService::class.java).create()
+        val service = host.get()
+        val source = PresentationSource()
+        var ack: MeetingClient.Callback<Void?>? = null
+        val session = Proxy.newProxyInstance(MeetingSession::class.java.classLoader,
+            arrayOf(MeetingSession::class.java)) { _, method, args ->
+            if (method.name == "submitPresentation" && args.size == 3) {
+                @Suppress("UNCHECKED_CAST")
+                ack = args[2] as MeetingClient.Callback<Void?>
+            }
+            null
+        } as MeetingSession
+        set(service, "session", session)
+        set(service, "presentation", PresentationCapture(source, 0))
+        var completed = 0
+        var duplicate = 0
+        try {
+            service.javaClass.getDeclaredMethod("captureAndSubmit", Runnable::class.java)
+                .apply { isAccessible = true }.invoke(service, *arrayOf<Any?>(null))
+            assertNotNull(ack)
+            service.stopPresentationBefore(Runnable { completed++ })
+            service.stopPresentationBefore(Runnable { duplicate++ })
+            assertEquals(0, completed)
+            assertEquals(1, source.captures)
+            assertEquals(0, source.closed)
+            ack!!.onSuccess(null)
+            invoke(service, "finishPresentationStop")
+            assertEquals(1, source.accepted)
+            assertEquals(1, source.captures)
+            assertEquals(1, source.closed)
+            assertEquals(1, completed)
+            assertEquals(0, duplicate)
+        } finally { host.destroy() }
+    }
+
+    @Test fun revokedProjectionReleasesStopEvenIfCleanupFailsAndLateAckDoesNotConfirm() {
+        for (closeFails in listOf(false, true)) {
+            val host = Robolectric.buildService(MeetingService::class.java).create()
+            val service = host.get()
+            val source = PresentationSource(closeFails)
+            var ack: MeetingClient.Callback<Void?>? = null
+            val session = Proxy.newProxyInstance(MeetingSession::class.java.classLoader,
+                arrayOf(MeetingSession::class.java)) { _, method, args ->
+                if (method.name == "submitPresentation" && args.size == 3) {
+                    @Suppress("UNCHECKED_CAST")
+                    ack = args[2] as MeetingClient.Callback<Void?>
+                }
+                null
+            } as MeetingSession
+            set(service, "session", session)
+            set(service, "presentation", PresentationCapture(source, 0))
+            var completed = 0
+            try {
+                service.stopPresentationBefore(Runnable { completed++ })
+                assertNotNull(ack)
+                assertEquals(0, completed)
+                invoke(service, "onPresentationStopped")
+                ack!!.onSuccess(null)
+                invoke(service, "onPresentationStopped")
+                assertEquals(1, completed)
+                assertEquals(0, source.accepted)
+                assertEquals(1, source.closed)
+                assertNull(get(service, "presentation"))
+            } finally { host.destroy() }
+        }
+    }
+
+    private class PresentationSource(private val closeFails: Boolean = false) : ScreenCaptureSource {
+        var captures = 0
+        var accepted = 0
+        var closed = 0
+        override fun mode() = "TEST"
+        override fun supportsWindowExclusion() = false
+        override fun capture(excludedWindowTokens: Array<IBinder?>, callback: ScreenCaptureSource.Callback) {
+            captures++
+            callback.onSuccess(ScreenCaptureSource.Image(byteArrayOf(1)) { accepted++ })
+        }
+        override fun close() {
+            closed++
+            if (closeFails) error("close failed")
+        }
     }
 
     private fun display(text: String, translated: String) = MeetingDisplaySnapshot(true, "zh-CN", "en-US", true,

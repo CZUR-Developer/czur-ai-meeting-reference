@@ -30,8 +30,8 @@ interface MeetingListener {
     /** 旧入口；新代码只回错误码名称，不再回 SDK 文案。 */
     fun onAudioError(code: AudioInputErrorCode, message: String) {}
     /**
-     * App 停截图 tick，异步完成最后截图及保存确认后调用 continuation；无采集时直接调用。
-     * 不阻塞 UI、不遗漏续接；只首次续接有效，末帧必须在续接前提交，再停音源与后端 Stop。
+     * App 在停止边界冻结末帧，异步完成保存／归档后续接；无采集时直接续接，不阻塞 UI。
+     * SDK 停输入已并行启动，不等待此 ACK；仅首次续接有效，它只释放最终发布及后端 Stop 屏障。
      */
     fun beforeStop(continuation: Runnable) { continuation.run() }
     /** READY 清单先于 READY 状态；这里只保存结果，正文和通知由结果动作按需执行。 */
