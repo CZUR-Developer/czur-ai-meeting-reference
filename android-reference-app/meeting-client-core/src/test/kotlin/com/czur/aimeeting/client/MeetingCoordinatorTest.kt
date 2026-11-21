@@ -1586,6 +1586,169 @@ class MeetingCoordinatorTest {
         }
     }
 
+    @Test fun publishedStopConflictRecoversOnlyTheVerifiedResultAndPersistsItBeforeDelivery() {
+        val http = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val path = "/v1/meetings/mtg_test"
+        val requests = Collections.synchronizedList(mutableListOf<String>())
+        val manifestId = java.util.concurrent.atomic.AtomicReference("mtg_test")
+        val profileId = java.util.concurrent.atomic.AtomicReference("reference-asr")
+        http.createContext("/") { exchange ->
+            val route = exchange.requestURI.path
+            requests.add(exchange.requestMethod + " " + route)
+            val response = when {
+                exchange.requestHeaders.getFirst("Authorization") != "Bearer original-scene" -> 403 to "{}"
+                route == "$path:stop" && exchange.requestHeaders.getFirst("Idempotency-Key") == "original-key" ->
+                    409 to """{"error":{"code":"INVALID_MEETING_STATE"}}"""
+                route == path -> 200 to """{"meetingId":"mtg_test","state":"READY_WITH_WARNINGS","inputState":"INPUT_ACCEPTED","manifestState":"READY_WITH_WARNINGS"}"""
+                route == "$path/manifest" && exchange.requestURI.query == "genTime=777" ->
+                    200 to """{"meetingId":"${manifestId.get()}","profile":{"id":"${profileId.get()}","revision":1},"status":"READY_WITH_WARNINGS","title":"原场结果","artifacts":[]}"""
+                else -> 404 to "{}"
+            }
+            val bytes = response.second.toByteArray(StandardCharsets.UTF_8)
+            exchange.sendResponseHeaders(response.first, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+            exchange.close()
+        }
+        http.start()
+        try {
+            val original = MeetingClientConfig.reference("http://127.0.0.1:" + http.address.port, "original-scene")
+            val store = MemoryStore()
+            val sealed = audio("mtg_test", 32000)
+            store.save(StoppedMeetingCheckpoint.restore(sealed, 1000, original, "original-key",
+                StoppedMeetingCheckpoint.Phase.PUBLISHED, null, true, listOf("zh-CN"), true))
+            val runtime = Runtime(true)
+            fun reopen(currentStore: MemoryStore) = MeetingCoordinator(original.withStoppedMeetingStore(currentStore),
+                ModelAdapterRegistry(), runtime, ::HttpMeetingServerClient, { error("不得重采") }, { 777 })
+            reopen(store).use { client ->
+                val result = resumeResult(client).get(3, TimeUnit.SECONDS)
+                assertEquals("mtg_test", result.meetingId())
+                assertEquals(MeetingResult.Status.READY_WITH_WARNINGS, result.status())
+                assertEquals("原场结果", result.title())
+                val saved = store.read("mtg_test").orElseThrow()
+                assertEquals(StoppedMeetingCheckpoint.Phase.READY, saved.phase())
+                assertEquals(777L, saved.genTime())
+                assertEquals("original-key", saved.stableStopKey())
+                assertTrue(saved.summaryReported())
+                assertSame(sealed, saved.context().audio())
+            }
+            assertEquals(listOf("POST $path:stop", "GET $path", "GET $path/manifest"), requests)
+            requests.clear()
+            reopen(store.reopened()).use { client ->
+                assertEquals(777L, resumeResult(client).get(3, TimeUnit.SECONDS).genTime())
+            }
+            assertEquals(listOf("GET $path/manifest"), requests)
+            val restored = store.reopened()
+            for ((id, profile) in listOf("mtg_other" to "reference-asr", "mtg_test" to "other-profile")) {
+                manifestId.set(id)
+                profileId.set(profile)
+                requests.clear()
+                reopen(restored).use { client ->
+                    assertThrows(ExecutionException::class.java) { resumeResult(client).get(3, TimeUnit.SECONDS) }
+                }
+                assertEquals(listOf("GET $path/manifest"), requests)
+                assertEquals(StoppedMeetingCheckpoint.Phase.READY, restored.read("mtg_test").orElseThrow().phase())
+                assertEquals(777L, restored.read("mtg_test").orElseThrow().genTime())
+            }
+            assertEquals(0, runtime.openCalls)
+        } finally {
+            http.stop(0)
+        }
+    }
+
+    @Test fun normalStopStateConflictRetainsPublishedFactsUntilVerifiedReadyCanBeSaved() {
+        val store = MemoryStore().apply { failPhase = StoppedMeetingCheckpoint.Phase.READY }
+        val publisher = Publisher()
+        Fixture(true, ALL, ReferenceIdentityProvider("fixture-token"), publisher, store).use { f ->
+            f.runtime.prepareAudio(audio("mtg_test", 32000))
+            f.server.stopFailure = MeetingHttpStatusException(409, "INVALID_MEETING_STATE")
+            f.start(retainedOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT))
+            f.session.requestStop()
+            f.probe.awaitPhase(MeetingSessionState.Phase.STOP_PENDING)
+            val pending = store.read("mtg_test").orElseThrow()
+            assertEquals(StoppedMeetingCheckpoint.Phase.PUBLISHED, pending.phase())
+            assertNull(pending.genTime())
+
+            store.failPhase = null
+            f.session.requestStop()
+            assertEquals(MeetingResult.Status.READY, f.probe.result().status())
+            val ready = store.read("mtg_test").orElseThrow()
+            assertEquals(StoppedMeetingCheckpoint.Phase.READY, ready.phase())
+            assertEquals(555L, ready.genTime())
+            assertEquals(listOf(pending.stableStopKey(), pending.stableStopKey()), f.server.stopKeys)
+            assertEquals(1, f.runtime.stopCalls)
+            assertEquals(1, publisher.contexts.size)
+            assertEquals(listOf(1000L), f.server.usages)
+            assertNull("同键 Stop 始终没有返回 ACK", f.server.acceptedStopKey)
+        }
+    }
+
+    @Test fun otherStopFailuresAndNoDeliveryLeaveThePublishedCheckpointForRetry() {
+        val cases = listOf(true to MeetingHttpStatusException(409, "IDEMPOTENCY_CONFLICT"),
+            true to MeetingHttpStatusException(409), true to MeetingHttpStatusException(503, "INVALID_MEETING_STATE"),
+            true to IOException("Stop read timeout"), false to MeetingHttpStatusException(409, "INVALID_MEETING_STATE"))
+        for ((deliversResult, failure) in cases) {
+            val original = MeetingClientConfig.reference("http://127.0.0.1", "fixture")
+            val store = MemoryStore().apply { save(StoppedMeetingCheckpoint.restore(audio("mtg_test", 32000),
+                1000, original, "original-key", StoppedMeetingCheckpoint.Phase.PUBLISHED, null, deliversResult)) }
+            val server = Server(ALL).also { it.stopFailure = failure }
+            MeetingCoordinator(original.withStoppedMeetingStore(store), ModelAdapterRegistry(), Runtime(true),
+                java.util.function.Supplier { server }, { 0 }, { 777 }).use { client ->
+                assertThrows(ExecutionException::class.java) { resumeOutcome(client).get(3, TimeUnit.SECONDS) }
+                assertEquals(listOf("stop"), server.steps)
+                assertEquals(listOf("original-key"), server.stopKeys)
+                assertEquals(StoppedMeetingCheckpoint.Phase.PUBLISHED, store.read("mtg_test").orElseThrow().phase())
+            }
+        }
+    }
+
+    @Test fun closingDuringReconciliationPreservesTheLastDurablePhaseAndSuppressesDelivery() {
+        for (closeDuringSave in listOf(false, true)) {
+            val entered = CountDownLatch(1)
+            val release = CountDownLatch(1)
+            val worker = java.util.concurrent.atomic.AtomicReference<Thread>()
+            fun pauseWorker() {
+                worker.set(Thread.currentThread())
+                entered.countDown()
+                check(release.await(3, TimeUnit.SECONDS))
+            }
+            val config = MeetingClientConfig.reference("http://127.0.0.1", "fixture")
+            val memory = MemoryStore()
+            memory.save(StoppedMeetingCheckpoint.restore(audio("mtg_test", 32000), 1000, config,
+                "original-key", StoppedMeetingCheckpoint.Phase.PUBLISHED, null))
+            val store = object : StoppedMeetingStore by memory {
+                override fun save(checkpoint: StoppedMeetingCheckpoint): StoppedMeetingCheckpoint {
+                    if (closeDuringSave && checkpoint.phase() == StoppedMeetingCheckpoint.Phase.READY) pauseWorker()
+                    return memory.save(checkpoint)
+                }
+            }
+            val fake = Server(ALL).apply { stopFailure = MeetingHttpStatusException(409, "INVALID_MEETING_STATE") }
+            val server = object : MeetingServerClient by fake {
+                override fun readReconciledResult(meetingId: String, genTime: Long): MeetingResult {
+                    if (!closeDuringSave) pauseWorker()
+                    return fake.readReconciledResult(meetingId, genTime)
+                }
+            }
+            val client = MeetingCoordinator(config.withStoppedMeetingStore(store), ModelAdapterRegistry(),
+                Runtime(true), java.util.function.Supplier { server }, { 0 }, { 777 })
+            val outcome = resumeOutcome(client)
+            try {
+                assertTrue(entered.await(3, TimeUnit.SECONDS))
+                client.close()
+                release.countDown()
+                worker.get().join(3000)
+                assertFalse(worker.get().isAlive)
+                assertFalse(outcome.isDone)
+                val saved = memory.reopened().read("mtg_test").orElseThrow()
+                assertEquals(if (closeDuringSave) StoppedMeetingCheckpoint.Phase.READY
+                    else StoppedMeetingCheckpoint.Phase.PUBLISHED, saved.phase())
+                assertEquals(if (closeDuringSave) 777L else null, saved.genTime())
+            } finally {
+                release.countDown()
+                client.close()
+            }
+        }
+    }
+
     @Test fun expiredSavedAccessResumesOverRealHttpWithRenewedBearerAndOriginalFacts() {
         val http: HttpServer = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         val requests = Collections.synchronizedList(ArrayList<String>())
@@ -1600,7 +1763,7 @@ class MeetingCoordinatorTest {
             val body = when {
                 path.endsWith("/usage:submit") ->
                     "{\"meetingId\":\"mtg_test\",\"audioDurationMs\":1000,\"accepted\":true}"
-                path.endsWith("/manifest") -> "{\"status\":\"READY\",\"title\":\"原场\",\"artifacts\":[]}"
+                path.endsWith("/manifest") -> """{"meetingId":"mtg_test","profile":{"id":"reference-asr","revision":1},"status":"READY","title":"原场","artifacts":[]}"""
                 path.endsWith(":stop") -> "{\"inputState\":\"INPUT_ACCEPTED\",\"manifestState\":\"READY\"}"
                 else -> "{}"
             }
@@ -3175,6 +3338,7 @@ class MeetingCoordinatorTest {
         @Volatile var appendHttpStatus: Int? = null
         @Volatile var appendHttpErrorCode: String? = null
         var loseAppendAckOnce = false
+        var stopFailure: IOException? = null
         var pendingStop = false
         var failEmail = false
         var failContent = false
@@ -3330,6 +3494,7 @@ class MeetingCoordinatorTest {
         }
         override fun stopMeeting(id: String): StopMeetingResponse {
             steps.add("stop")
+            stopFailure?.let { throw it }
             val accepted = !pendingStop
             pendingStop = false
             return StopMeetingResponse(accepted, if (accepted) "INPUT_ACCEPTED" else "INPUT_COMPLETE_PENDING",
@@ -3347,6 +3512,10 @@ class MeetingCoordinatorTest {
                 throw IOException("fixture-stop-accepted-but-ack-lost")
             }
             return response
+        }
+        override fun readReconciledResult(meetingId: String, genTime: Long): MeetingResult {
+            steps.add("verify-terminal")
+            return readResult(meetingId, genTime, false)
         }
         override fun readResult(id: String, genTime: Long, includeContent: Boolean): MeetingResult {
             steps.add("manifest")

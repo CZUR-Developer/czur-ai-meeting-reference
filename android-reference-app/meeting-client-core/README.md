@@ -252,7 +252,12 @@ Stop HTTP 的读取等待独立设为120秒，覆盖服务端同步结算和最�
 取得真实ACK并读取实际READY清单；超时或未受理时保留原停止记录供正常续办。
 
 未确认的阶段保留 `STOP_PENDING/canStop=true`，再次停止沿用原场和已确认阶段。
-Stop 受理后生成一次 `genTime`，Manifest、产物、链接和邮件共用；受理不等于 READY。
+Stop 受理后冻结一次 `genTime`，供 Manifest、产物、链接和邮件使用。
+`PUBLISHED` 的主动交付记录若收到 `409 INVALID_MEETING_STATE`，SDK 使用原场身份查询会议。
+当会议及清单均为同一成功终态（`READY` 或 `READY_WITH_WARNINGS`）、输入已受理，
+且实际清单的会议 ID 和档位 ID／版本均匹配时，SDK 冻结本次结果访问时间并直接保存 `READY`，
+保存成功后才交付这份清单。恢复已保存的 `READY` 继续使用原 `genTime` 核对清单。
+身份、状态或清单核验失败、保存失败、其他 Stop 冲突均保留原记录，供下次显式续办。
 `onResult` 先交付真实清单，随后的 READY 状态才允许 App 派发动作。
 状态包括 CREATING、RUNNING、STOPPING、FINALIZING、STOP_PENDING、READY、ENDED、FAILED；
 STARTING／CLOSED 枚举未作为独立状态通知。

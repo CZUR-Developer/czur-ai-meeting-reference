@@ -336,7 +336,7 @@ class MeetingCoordinator(
     }
     private fun finishSavedFinalization(initial: StoppedMeetingCheckpoint, store: StoppedMeetingStore,
         server: MeetingServerClient, publisher: MeetingArtifactPublisher, aborted: BooleanSupplier,
-        acceptedGenTime: LongSupplier, onStopAccepted: Runnable): SavedFinalizationOutcome? {
+        acceptedGenTime: LongSupplier, onInputAccepted: Runnable): SavedFinalizationOutcome? {
         if (aborted.asBoolean) return null
         var checkpoint = store.save(initial)
         // 进入本轮时 Stop 已受理（STOP_ACCEPTED／READY）：上一轮在 Stop 前上报纪要若失败，
@@ -360,13 +360,32 @@ class MeetingCoordinator(
             checkpoint = reportCheckpointSummary(checkpoint, store, server)
             if (aborted.asBoolean) return null
             LOG.info("后端原键 Stop 开始")
-            if (!server.stopMeeting(checkpoint.checkpointId(), checkpoint.stableStopKey()).accepted())
+            val id = checkpoint.checkpointId()
+            val stop = try {
+                server.stopMeeting(id, checkpoint.stableStopKey())
+            } catch (failure: MeetingHttpStatusException) {
+                if (!checkpoint.deliversResult() || failure.status != 409 ||
+                    failure.errorCode != "INVALID_MEETING_STATE") throw failure
+                if (aborted.asBoolean) return null
+                LOG.info("原键 Stop 返回 INVALID_MEETING_STATE，核验原场终态")
+                val observedAt = wallClockMs.asLong
+                val result = server.readReconciledResult(id, observedAt)
+                if (result.meetingId() != id || result.genTime() != observedAt)
+                    throw IOException("终态核验结果不属于本场或结果访问时间不一致")
+                if (aborted.asBoolean) return null
+                store.save(checkpoint.reconciledReady(observedAt))
+                if (aborted.asBoolean) return null
+                onInputAccepted.run()
+                LOG.info("原场成功终态已核验并保存")
+                return SavedFinalizationOutcome.Delivered(result)
+            }
+            if (!stop.accepted())
                 throw IOException("后端尚未受理本场停止")
             checkpoint = store.save(checkpoint.stopAccepted(acceptedGenTime.asLong))
             LOG.info("后端 Stop 已受理并保存，结果尚需确认")
         }
         if (aborted.asBoolean) return null
-        onStopAccepted.run()
+        onInputAccepted.run()
         if (resumesAcceptedStop) {
             // Stop 已被受理后的续办：读取清单／推进 READY 之前补一次纪要上报。
             // 服务端允许 Stop 之后仍受理纪要请求；已上报或无语言快照时该步骤直接返回。
@@ -380,7 +399,9 @@ class MeetingCoordinator(
             return SavedFinalizationOutcome.EndedWithoutDelivery
         }
         LOG.info("读取原场实际 READY 清单开始")
-        val result = server.readResult(checkpoint.checkpointId(), checkpoint.genTime()!!, false)
+        val result = if (checkpoint.phase() == StoppedMeetingCheckpoint.Phase.READY)
+            server.readSavedReadyResult(checkpoint.checkpointId(), checkpoint.genTime()!!, false)
+        else server.readResult(checkpoint.checkpointId(), checkpoint.genTime()!!, false)
         if (checkpoint.phase() != StoppedMeetingCheckpoint.Phase.READY) store.save(checkpoint.ready())
         return SavedFinalizationOutcome.Delivered(result)
     }
@@ -1153,8 +1174,11 @@ class MeetingCoordinator(
         }
         override fun resultActionAccess(): ResultActionAccess = object : ResultActionAccess {
             override fun readContent(callback: MeetingClient.Callback<MeetingResultContent?>) {
-                accessResult("读取结果内容", callback) { result -> result.content()
-                    ?: server.readResult(result.meetingId(), result.genTime(), true).content() }
+                accessResult("读取结果内容", callback) { result ->
+                    result.content() ?: if (stoppedCheckpoint != null)
+                        server.readSavedReadyResult(result.meetingId(), result.genTime(), true).content()
+                    else server.readResult(result.meetingId(), result.genTime(), true).content()
+                }
             }
             override fun sendEmail(recipients: List<String>, resultUrl: String, callback: MeetingClient.Callback<Void?>) {
                 val frozenRecipients = java.util.List.copyOf(recipients)

@@ -534,6 +534,60 @@ class HttpMeetingServerClientTest {
         }
     }
 
+    @Test fun reconciliationRequiresAnAuthenticatedMatchingTerminalStateBeforeFetchingManifest() {
+        val state = """{"meetingId":"mtg_test","state":"READY","inputState":"INPUT_ACCEPTED","manifestState":"READY"}"""
+        val rejected = listOf(403 to "{}", 404 to "{}", 200 to "{}", 200 to "{",
+            200 to state.replace("mtg_test", "mtg_other"),
+            200 to state.replace("INPUT_ACCEPTED", "INPUT_COMPLETE_PENDING"),
+            200 to state.replace("manifestState\":\"READY", "manifestState\":\"READY_WITH_WARNINGS"))
+        val unavailable = listOf("RUNNING", "FINALIZING", "CANCELLED", "FAILED", "DELETED", "DELETION_PENDING", "UNKNOWN")
+        Fixture().use { fixture ->
+            val client = fixture.client()
+            for ((status, body) in rejected + unavailable.map { 200 to state.replace("READY", it) }) {
+                fixture.reply(status, body)
+                assertThrows(IOException::class.java) { client.readReconciledResult("mtg_test", 777) }
+                val request = fixture.request()
+                assertEquals("/v1/meetings/mtg_test", request.path())
+                assertEquals("Bearer test-token", request.authorization())
+                assertTrue("未经核验不应读取清单", fixture.requests.isEmpty())
+            }
+        }
+    }
+
+    @Test fun reconciliationUsesOneSuccessfulManifestForThisMeetingAndConfiguredProfile() {
+        val owner = """{"meetingId":"mtg_test","state":"READY","inputState":"INPUT_ACCEPTED","manifestState":"READY"}"""
+        val manifest = """{"meetingId":"mtg_test","profile":{"id":"reference-asr","revision":1},"status":"READY","title":"已完成","artifacts":[]}"""
+        val rejected = listOf(202 to "{}", 503 to "{}", 200 to "{", 200 to "{}",
+            200 to manifest.replace("mtg_test", "mtg_other"),
+            200 to manifest.replace("reference-asr", "other-profile"),
+            200 to manifest.replace("\"revision\":1", "\"revision\":2"),
+            200 to manifest.replace("\"revision\":1", "\"revision\":\"1\""),
+            200 to manifest.replace("\"profile\"", "\"unknown\""),
+            200 to manifest.replace("\"artifacts\"", "\"other\""),
+            200 to manifest.replace("[]", "{}"),
+            200 to manifest.replace("[]", "[1]"),
+            200 to manifest.replace("[]", """[{"status":"READY","type":"transcript.final"}]"""),
+            200 to manifest.replace("[]", """[{"status":"READY","artifactId":"art_text","type":false}]"""),
+            200 to manifest.replace("READY", "READY_WITH_WARNINGS"))
+        Fixture().use { fixture ->
+            val client = fixture.client()
+            for ((status, body) in rejected) {
+                fixture.reply(200, owner)
+                fixture.reply(status, body)
+                assertThrows(IOException::class.java) { client.readReconciledResult("mtg_test", 777) }
+                assertEquals("/v1/meetings/mtg_test", fixture.request().path())
+                assertEquals("/v1/meetings/mtg_test/manifest?genTime=777", fixture.request().path())
+                assertTrue(fixture.requests.isEmpty())
+            }
+            fixture.reply(200, owner)
+            fixture.reply(200, manifest)
+            val result = client.readReconciledResult("mtg_test", 777)
+            assertEquals(MeetingResult.Status.READY, result.status())
+            assertEquals("已完成", result.title())
+            assertEquals(2, fixture.requests.size)
+        }
+    }
+
     private fun options(): MeetingOptions = MeetingOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT, "en-US", "zh-CN", false,
         MeetingOptions.ResultDelivery.WEB, "https://result.example.test/index.html", emptyList())
     private data class Reply(val status: Int, val body: String, val delayMs: Long = 0)

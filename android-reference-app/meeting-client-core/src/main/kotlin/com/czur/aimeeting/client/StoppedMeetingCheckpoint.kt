@@ -30,7 +30,7 @@ class StoppedMeetingCheckpoint private constructor(
             "停止记录须使用同场 sealed 音频和原冻结用量"
         }
         require((phase.ordinal >= Phase.STOP_ACCEPTED.ordinal) == (genTime != null)) {
-            "genTime 仅能在 Stop 实际接受后保存"
+            "genTime 仅能在 Stop 受理或原场成功终态得到确认后保存"
         }
         require(summaryLanguages == null || summaryLanguages.size in 1..2) {
             "停止记录的纪要语言快照只能有1～2项"
@@ -41,7 +41,7 @@ class StoppedMeetingCheckpoint private constructor(
     /** 同场重试共用首次键，禁止日志。 */
     fun stableStopKey(): String = stableStopKey
     fun phase(): Phase = phase
-    /** Stop 接受前为 null，之后固定为首次 ACK 的结果链接基准。 */
+    /** 结果访问时间在 Stop ACK 或同场终态对账成功时冻结。 */
     fun genTime(): Long? = genTime
     /** 原场交付策略：false 表示 Stop 成功后只收口到 ENDED，不读取结果清单。 */
     fun deliversResult(): Boolean = deliversResult
@@ -61,6 +61,12 @@ class StoppedMeetingCheckpoint private constructor(
     fun ready(): StoppedMeetingCheckpoint =
         StoppedMeetingCheckpoint(context, stableStopKey, Phase.READY, genTime, deliversResult,
             summaryLanguages, summaryReported)
+    /** 原键 Stop 没有 ACK，但原 Owner 的状态及已发布清单均已核验。 */
+    internal fun reconciledReady(observedGenTime: Long): StoppedMeetingCheckpoint {
+        check(phase == Phase.PUBLISHED && deliversResult)
+        return StoppedMeetingCheckpoint(context, stableStopKey, Phase.READY, observedGenTime, true,
+            summaryLanguages, summaryReported)
+    }
     fun withAccessToken(accessToken: String): StoppedMeetingCheckpoint =
         StoppedMeetingCheckpoint(context.withAccessToken(accessToken), stableStopKey, phase, genTime,
             deliversResult, summaryLanguages, summaryReported)
