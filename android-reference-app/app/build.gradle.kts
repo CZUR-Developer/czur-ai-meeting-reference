@@ -3,7 +3,6 @@ import java.util.Properties
 
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
 }
 
 // 部署地址来自仓外本地配置：默认 android-reference-app/deployment.local.properties，
@@ -121,8 +120,8 @@ android {
         )
     }
 
-    sourceSets.getByName("main").java.srcDir("src/basic-ui/java")
-    sourceSets.getByName("debug").java.srcDir("src/sdk-debug/java")
+    sourceSets.getByName("main").kotlin.srcDir("src/basic-ui/java")
+    sourceSets.getByName("debug").kotlin.srcDir("src/sdk-debug/java")
     sourceSets.getByName("debug").manifest.srcFile("src/sdk-debug/AndroidManifest.xml")
     sourceSets.getByName("debug").res.srcDir(generatedDebugRes)
     sourceSets.getByName("minifiedDebug") {

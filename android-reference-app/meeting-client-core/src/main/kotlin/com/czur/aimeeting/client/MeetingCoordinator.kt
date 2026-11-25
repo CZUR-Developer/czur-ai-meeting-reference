@@ -793,6 +793,20 @@ class MeetingCoordinator(
                 else io.execute { savePresentation(frame, callback) }
             }
         }
+
+        override fun submitPresentation(
+            offsetMs: Long,
+            jpeg: ByteArray,
+            ocrText: String?,
+            callback: PresentationResultCallback,
+        ) {
+            val frame = PresentationFrame(offsetMs, jpeg, ocrText)
+            enqueue {
+                if (done || !acceptingPresentation) {
+                    notifyListener { callback.onError(MeetingError(MeetingErrorCode.PRESENTATION_REJECTED)) }
+                } else io.execute { savePresentation(frame, callback) }
+            }
+        }
         /** IO 队列先检查实际预算，不为本地超限保留帧或分配序号。 */
         private fun savePresentation(frame: PresentationFrame, callback: MeetingClient.Callback<Void?>) {
             if (closed || cancelled) return
@@ -818,10 +832,51 @@ class MeetingCoordinator(
                     "演示截图保存未确认；字幕会议继续")
             }
         }
+        /** 带结果回调的保存：预算超限先去文本；能力不支持时文本不发送。 */
+        private fun savePresentation(frame: PresentationFrame, callback: PresentationResultCallback) {
+            if (closed || cancelled) return
+            var effective = frame
+            var suppression: OcrTextSuppression? = null
+            try {
+                val candidate = presentationSequence + if (pendingPresentation == null) 1 else 2
+                try {
+                    HttpMeetingServerClient.validatePresentationRequestSize(
+                        candidate, frame.offsetMs(), frame.jpeg(), frame.ocrText())
+                } catch (withText: IOException) {
+                    if (frame.ocrText() == null) throw withText
+                    effective = PresentationFrame(frame.offsetMs(), frame.jpeg())
+                    HttpMeetingServerClient.validatePresentationRequestSize(
+                        candidate, effective.offsetMs(), effective.jpeg())
+                    suppression = OcrTextSuppression.BUDGET
+                }
+            } catch (invalidSize: IOException) {
+                logFailure("检查演示截图大小", invalidSize)
+                enqueue { notifyListener {
+                    callback.onError(MeetingError(MeetingErrorCode.PRESENTATION_TOO_LARGE))
+                } }
+                return
+            }
+            val textIncluded = effective.ocrText() != null
+            try {
+                if (pendingPresentation != null) savePendingPresentation()
+                pendingPresentation = effective
+                savePendingPresentation()
+                enqueue { notifyListener {
+                    callback.onSuccess(PresentationSubmitResult(true, textIncluded, suppression))
+                } }
+            } catch (failure: Exception) {
+                if (failure !is IOException && failure !is RuntimeException) throw failure
+                logFailure("保存演示截图", failure)
+                enqueue { notifyListener {
+                    callback.onError(MeetingError(MeetingErrorCode.PRESENTATION_SAVE_FAILED))
+                } }
+            }
+        }
+
         private fun savePendingPresentation() {
             val number = presentationSequence + 1
             val pending = pendingPresentation!!
-            server.appendPresentation(id, number, pending.offsetMs(), pending.jpeg())
+            server.appendPresentation(id, number, pending.offsetMs(), pending.jpeg(), pending.ocrText())
             presentationSequence = number; pendingPresentation = null
             LOG.fine("演示截图保存已确认 sequence=$number")
         }

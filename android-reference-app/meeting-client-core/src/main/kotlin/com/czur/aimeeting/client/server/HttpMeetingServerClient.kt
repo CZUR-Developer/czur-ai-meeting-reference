@@ -163,8 +163,19 @@ class HttpMeetingServerClient(config: MeetingClientConfig) : MeetingServerClient
     }
     @Throws(IOException::class)
     override fun appendPresentation(meetingId: String, chunkSequence: Int, offsetMs: Long, jpeg: ByteArray) {
+        appendPresentation(meetingId, chunkSequence, offsetMs, jpeg, null)
+    }
+
+    @Throws(IOException::class)
+    override fun appendPresentation(
+        meetingId: String,
+        chunkSequence: Int,
+        offsetMs: Long,
+        jpeg: ByteArray,
+        ocrText: String?,
+    ) {
         try {
-            val body = presentationBody(chunkSequence, offsetMs, jpeg)
+            val body = presentationBody(chunkSequence, offsetMs, jpeg, ocrText)
             val response = parseJson(post("/v1/meetings/$meetingId/presentation-captures:append", body, null, 200, 201).body)
             // 首存201／重放200均须确认本包一帧及产物 ID，不将空 JSON 当成功。
             if (response.getInt("chunkSequence") != chunkSequence || response.getInt("frameCount") != 1 ||
@@ -401,11 +412,18 @@ class HttpMeetingServerClient(config: MeetingClientConfig) : MeetingServerClient
         /** 只做同编码器的1MiB预检，不分配序号、持有图片或请求 HTTP。 */
         @JvmStatic @Throws(IOException::class)
         fun validatePresentationRequestSize(chunkSequence: Int, offsetMs: Long, jpeg: ByteArray) {
-            presentationBody(chunkSequence, offsetMs, jpeg)
+            presentationBody(chunkSequence, offsetMs, jpeg, null)
         }
-        private fun presentationBody(chunkSequence: Int, offsetMs: Long, jpeg: ByteArray): String {
+        @JvmStatic @Throws(IOException::class)
+        fun validatePresentationRequestSize(chunkSequence: Int, offsetMs: Long, jpeg: ByteArray, ocrText: String?) {
+            presentationBody(chunkSequence, offsetMs, jpeg, ocrText)
+        }
+        private fun presentationBody(chunkSequence: Int, offsetMs: Long, jpeg: ByteArray): String =
+            presentationBody(chunkSequence, offsetMs, jpeg, null)
+        private fun presentationBody(chunkSequence: Int, offsetMs: Long, jpeg: ByteArray, ocrText: String?): String {
             try {
                 val frame = JSONObject().put("offsetMs", offsetMs).put("jpegBase64", Base64.getEncoder().encodeToString(jpeg))
+                if (!ocrText.isNullOrBlank()) frame.put("ocrText", ocrText)
                 val frames = JSONArray().put(frame)
                 val body = JSONObject().put("chunkSequence", chunkSequence).put("frames", frames).toString()
                 // 计入后端真实保存结构，不把 schemaVersion 发给请求。

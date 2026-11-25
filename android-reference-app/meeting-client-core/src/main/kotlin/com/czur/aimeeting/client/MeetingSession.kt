@@ -24,6 +24,19 @@ interface MeetingSession : AutoCloseable {
     fun submitPresentation(offsetMs: Long, jpeg: ByteArray, callback: MeetingClient.Callback<Void?>) {
         throw UnsupportedOperationException("当前会议实现未提供演示截图保存确认")
     }
+    /**
+     * 带 OCR 文本的演示帧提交；结果显式区分图片成功与文本是否写入请求。
+     * 默认不支持，旧实现保持旧行为。
+     */
+    fun submitPresentation(
+        offsetMs: Long,
+        jpeg: ByteArray,
+        ocrText: String?,
+        callback: PresentationResultCallback,
+    ) {
+        throw UnsupportedOperationException("当前会议实现未提供 OCR 演示帧提交")
+    }
+
     /** 交换呈现位置，不改语义侧及真实语种。 */
     fun swapDisplayColumns()
     /**

@@ -9,7 +9,7 @@ val contractJar = project(":model-runtime-contract").tasks.named("jar")
 
 plugins {
     id("com.android.library")
-    id("org.jetbrains.kotlin.android")
+    // AGP 9 内置 Kotlin，不再应用 org.jetbrains.kotlin.android。
 }
 
 /**
@@ -28,6 +28,7 @@ require(deviceAar.isFile) {
 // AGP 不允许 Android library 直接依赖本地 .aar 再产出 AAR；把设备 AAR 的
 // classes.jar 与 jni 解包成本模块的普通文件依赖，业务 AAR 才能把设备能力一起打包。
 val deviceUnpacked = layout.buildDirectory.dir("device-aar")
+val deviceUnpackedDir = deviceUnpacked.get().asFile
 val unpackDeviceAar = tasks.register<Sync>("unpackDeviceAar") {
     from(zipTree(deviceAar)) { include("classes.jar", "jni/**", "proguard.txt") }
     into(deviceUnpacked)
@@ -41,7 +42,7 @@ android {
         // 与设备 AAR 和现有 CZUR App 保持一致；参考 App 的 34 由应用自身决定。
         minSdk = 31
         // 设备 AAR 的 JNI 保留规则必须作为消费端规则继续传递给宿主；只解包不打包等于丢了。
-        consumerProguardFiles(deviceUnpacked.map { it.file("proguard.txt") })
+        consumerProguardFiles(File(deviceUnpackedDir, "proguard.txt"))
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -56,10 +57,20 @@ android {
         unitTests.isReturnDefaultValues = true
         unitTests.isIncludeAndroidResources = true
     }
-    sourceSets.getByName("main").jniLibs.srcDir(deviceUnpacked.map { it.dir("jni") })
-    tasks.matching { it.name.contains("JniLibFolders") }.configureEach {
+    tasks.matching { it.name.contains("JniLibFolders") || it.name.contains("ConsumerProguard") }.configureEach {
         dependsOn(unpackDeviceAar)
     }
+
+}
+
+androidComponents {
+    onVariants { variant ->
+        variant.sources.jniLibs?.addStaticSourceDirectory(File(deviceUnpackedDir, "jni").absolutePath)
+    }
+}
+
+tasks.matching { it.name == "preBuild" }.configureEach {
+    dependsOn(unpackDeviceAar)
 }
 
 dependencies {

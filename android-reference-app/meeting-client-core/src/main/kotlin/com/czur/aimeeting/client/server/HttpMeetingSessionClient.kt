@@ -74,13 +74,12 @@ class HttpMeetingSessionClient(baseUrl: String) {
         } finally { connection.disconnect() }
     }
     companion object {
-        /** 账号仅经 HTTPS，唯一开发明文例外为 adb reverse 暴露的 loopback。 */
+        /** 本地化部署允许 HTTP；HTTPS 也支持，不做 host/IP 限制。 */
         @JvmStatic @Throws(IOException::class)
         fun validateLoginUrl(url: URL) {
             if (url.protocol.equals("https", true)) return
-            val host = url.host
-            if (url.protocol.equals("http", true) && (host.equals("localhost", true) || host == "127.0.0.1")) return
-            throw IOException("登录地址须使用 HTTPS；本机调试可使用 adb reverse 的 localhost")
+            if (url.protocol.equals("http", true)) return
+            throw IOException("登录地址须使用 HTTP 或 HTTPS")
         }
         @Throws(IOException::class)
         private fun readUtf8(input: InputStream): String {

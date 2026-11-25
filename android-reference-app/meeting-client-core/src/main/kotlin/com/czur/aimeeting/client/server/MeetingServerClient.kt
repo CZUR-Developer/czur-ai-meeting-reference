@@ -35,6 +35,11 @@ interface MeetingServerClient {
     @Throws(IOException::class) fun appendTranslation(meetingId: String, clientSequence: Int, event: TranslationEvent)
     /** 演示使用独立包序号，每包至少一帧。 */
     @Throws(IOException::class) fun appendPresentation(meetingId: String, chunkSequence: Int, offsetMs: Long, jpeg: ByteArray)
+    /** 带可选 OCR 文本的演示帧；默认实现忽略文本，保持旧后端兼容。 */
+    @Throws(IOException::class)
+    fun appendPresentation(meetingId: String, chunkSequence: Int, offsetMs: Long, jpeg: ByteArray, ocrText: String?) {
+        appendPresentation(meetingId, chunkSequence, offsetMs, jpeg)
+    }
     /**
      * 最终事件后、总结／Stop 前提交已冻结累计实采毫秒，允许零，同场重试值不变。
      * 默认明确不支持；只有模型会话提供实际冻结值时才调用。
