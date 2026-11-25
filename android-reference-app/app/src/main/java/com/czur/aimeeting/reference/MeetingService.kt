@@ -418,7 +418,7 @@ class MeetingService : Service() {
             presentationNotice = "屏幕采集启动失败；字幕会议继续，可停止后重试"
         } finally { projectionData = null }
     }
-    /** 周期帧→真实保存ACK→末帧→关闭→SDK收口；全部异步，不阻塞主线程。 */
+    /** 忙时跳过周期帧；停止只等待已接纳帧，空闲时才立即采末帧。 */
     private fun captureAndSubmit(completed: Runnable?) {
         val current = presentation
         val currentSession = session
@@ -431,10 +431,10 @@ class MeetingService : Service() {
             else emptyArray()
             // Debug 只记录公共调用是否完成，不暴露 SDK 的内部判断或跳过原因。
             if (BuildConfig.DEBUG) Log.d(TAG, "演示截图请求 final=${completed != null} excludedWindows=${excluded.size}")
-            current.capture(SystemClock.elapsedRealtime(), excluded, object : PresentationCapture.Callback {
+            val callback = object : PresentationCapture.Callback {
                 override fun onSuccess(frame: PresentationCapture.Frame?) {
                     if (BuildConfig.DEBUG) Log.d(TAG, "演示截图返回 final=${completed != null} hasImage=${frame != null}")
-                    if (frame == null) { completed?.run(); return }
+                    if (frame == null) return
                     if (destroyed || presentation !== current || session !== currentSession) {
                         frame.close()
                         return
@@ -450,7 +450,6 @@ class MeetingService : Service() {
                                     }
                                 } finally {
                                     frame.close()
-                                    if (!destroyed && presentation === current && session === currentSession) completed?.run()
                                 }
                             }
                             override fun onError(error: MeetingError) {
@@ -458,7 +457,6 @@ class MeetingService : Service() {
                                     if (presentation === current && session === currentSession) presentationFailed(error.userText())
                                 } finally {
                                     frame.close()
-                                    if (!destroyed && presentation === current && session === currentSession) completed?.run()
                                 }
                             }
                         })
@@ -466,14 +464,16 @@ class MeetingService : Service() {
                         try { presentationFailed("演示截图提交无法执行") }
                         finally {
                             frame.close()
-                            if (!destroyed && presentation === current && session === currentSession) completed?.run()
                         }
                     }
                 }
                 override fun onError(message: String) {
-                    try { presentationFailed(message) } finally { completed?.run() }
+                    presentationFailed(message)
                 }
-            })
+            }
+            val nowMs = SystemClock.elapsedRealtime()
+            if (completed == null) current.capture(nowMs, excluded, callback)
+            else current.stop(nowMs, excluded, callback, completed)
         } catch (failure: RuntimeException) {
             try { presentationFailed("SDK截图请求无法执行") } finally { completed?.run() }
         }
@@ -484,14 +484,15 @@ class MeetingService : Service() {
         if (!stopRequested) presentationNotice = "演示截图采集失败；字幕会议继续"
         publish()
     }
-    /** beforeStop主线程入口；末帧排在周期ACK后，无新图／失败也关闭并续接原停止。 */
+    /** beforeStop主线程入口；不积压截图，已接纳帧结束后关闭并续接原停止。 */
     fun stopPresentationBefore(continuation: Runnable) {
         main.removeCallbacks(presentationTick)
+        if (presentationStopContinuation != null) return
         presentationStopContinuation = continuation
         captureAndSubmit(Runnable(::finishPresentationStop))
     }
     private fun finishPresentationStop() {
-        val continuation = presentationStopContinuation
+        val continuation = presentationStopContinuation ?: return
         presentationStopContinuation = null
         try {
             closePresentation()
@@ -500,14 +501,20 @@ class MeetingService : Service() {
                 Log.i(TAG, "停止末帧处理结束，返回会议页面 meetingId=$meetingId")
                 openMeetingPage()
             }
-        } finally { continuation?.run() }
+        } finally { continuation.run() }
     }
     private fun onPresentationStopped() {
         closePresentation(); main.removeCallbacks(presentationTick)
         if (presentationStopContinuation != null) finishPresentationStop()
         if (active && !stopRequested) { presentationNotice = "系统已结束屏幕共享，字幕会议继续"; publish() }
     }
-    private fun closePresentation() { val current = presentation; presentation = null; current?.close() }
+    private fun closePresentation() {
+        val current = presentation
+        presentation = null
+        try { current?.close() } catch (failure: RuntimeException) {
+            Log.w(TAG, "演示截图关闭失败 errorType=${failure.javaClass.simpleName}")
+        }
+    }
     fun requestStop() = requestStop("正在等待模型最终字幕…")
     private fun requestStop(progressText: String) {
         val current = session

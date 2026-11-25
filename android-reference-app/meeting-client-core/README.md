@@ -227,9 +227,11 @@ context.access().readContent(object : MeetingClient.Callback<MeetingResultConten
 
 ### 正常停止与结果
 
-只有 `canStop=true` 时受理 `requestStop()`。先冲刷显示，并调用
-`beforeStop(continuation)`；App 停止周期截图、结束末帧和采集后调用 continuation，
-无截图时直接续接。continuation 仅首次有效，不要在主线程等网络或遗漏续接。
+只有 `canStop=true` 时受理 `requestStop()`。先冲刷显示，并通过独立的 modelControl
+停止同一音源输入，同时调用 `beforeStop(continuation)`。App 在停止边界冻结末帧，
+异步等待已接纳图片的保存确认及本地归档后调用 continuation；无截图时直接续接。
+输入停止不等待图片 ACK，最终发布仍等待该屏障和模型尾帧；continuation 仅首次有效，
+不要在主线程等网络或遗漏续接。停输入失败时只重试该操作，不重建图片屏障。
 
 截图使用 `submitPresentation(offsetMs, jpeg, callback)`，时间相对 `startedAtMs`。
 后端 ACK 的序号、单帧数量和产物 ID 确认后才调用 `onSuccess`；无回调入口仅表示排队。
@@ -240,13 +242,22 @@ App 只有成功时才确认 SDK 图片被接受。无新图或截图失败仍�
 停止先补交队首，确认后再推进，复用后端幂等。该补交只覆盖当前宿主内存，不提供磁盘队列
 或进程恢复。`savedEventCount` 只计已确认原文事件，不因译文或重复提交增加。
 
-随后停止同一音源、排完尾帧并等待模型最终事件，按顺序确认事件、冻结用量、总结、
+同一音源停止、尾帧排完且图片屏障释放后，按顺序确认事件、冻结用量、总结、
 音频发布和后端 Stop。PCM16 的时长为完整字节数／32 的整数毫秒，静音、模型连接前采音
 和尾帧计入；网络重发与会后等待不计入。没有实采用量的 Mock 不提交虚构的零。
 无有效最终字幕时跳过总结并提示，仍可发布真实录音和正常结束，不制造空总结。
 
+Stop HTTP 的读取等待独立设为120秒，覆盖服务端同步结算和最终产物写入；普通事件／
+心跳等请求与连接超时仍为10秒。该等待不拖延本场停音，不自动重放Stop，仍以原幂等键
+取得真实ACK并读取实际READY清单；超时或未受理时保留原停止记录供正常续办。
+
 未确认的阶段保留 `STOP_PENDING/canStop=true`，再次停止沿用原场和已确认阶段。
-Stop 受理后生成一次 `genTime`，Manifest、产物、链接和邮件共用；受理不等于 READY。
+Stop 受理后冻结一次 `genTime`，供 Manifest、产物、链接和邮件使用。
+`PUBLISHED` 的主动交付记录若收到 `409 INVALID_MEETING_STATE`，SDK 使用原场身份查询会议。
+当会议及清单均为同一成功终态（`READY` 或 `READY_WITH_WARNINGS`）、输入已受理，
+且实际清单的会议 ID 和档位 ID／版本均匹配时，SDK 冻结本次结果访问时间并直接保存 `READY`，
+保存成功后才交付这份清单。恢复已保存的 `READY` 继续使用原 `genTime` 核对清单。
+身份、状态或清单核验失败、保存失败、其他 Stop 冲突均保留原记录，供下次显式续办。
 `onResult` 先交付真实清单，随后的 READY 状态才允许 App 派发动作。
 状态包括 CREATING、RUNNING、STOPPING、FINALIZING、STOP_PENDING、READY、ENDED、FAILED；
 STARTING／CLOSED 枚举未作为独立状态通知。

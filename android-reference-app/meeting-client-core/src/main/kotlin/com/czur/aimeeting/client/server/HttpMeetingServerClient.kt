@@ -217,7 +217,10 @@ class HttpMeetingServerClient(config: MeetingClientConfig) : MeetingServerClient
     override fun stopMeeting(meetingId: String): StopMeetingResponse = stopMeeting(meetingId, stopKey)
     @Throws(IOException::class)
     override fun stopMeeting(meetingId: String, stableStopKey: String): StopMeetingResponse {
-        val response = post("/v1/meetings/$meetingId:stop", null, stableStopKey, 200, 202)
+        // Stop 同步等待本场结算和最终产物，长会可超过普通事件的10秒预算。
+        // 仅放宽本动作读取等待；仍要求原键真实ACK，不增加自动重试或放宽连接超时。
+        val response = post("/v1/meetings/$meetingId:stop", null, stableStopKey, 200, 202,
+            readTimeoutMs = 120_000)
         val body = parseJson(response.body)
         return StopMeetingResponse(response.status == 200,
             body.optString("inputState", if (response.status == 200) "INPUT_ACCEPTED" else "INPUT_COMPLETE_PENDING"),
@@ -261,16 +264,21 @@ class HttpMeetingServerClient(config: MeetingClientConfig) : MeetingServerClient
         }
     }
     @Throws(IOException::class)
-    override fun readResult(meetingId: String, genTime: Long, includeContent: Boolean): MeetingResult {
-        val query = "?genTime=$genTime"
+    override fun readResult(meetingId: String, genTime: Long, includeContent: Boolean): MeetingResult =
+        resultFromManifest(awaitReadyManifest(meetingId, genTime), meetingId, genTime, includeContent)
+
+    @Throws(IOException::class)
+    override fun readSavedReadyResult(meetingId: String, genTime: Long, includeContent: Boolean): MeetingResult =
+        resultFromCheckpointManifest(awaitReadyManifest(meetingId, genTime), meetingId, genTime, includeContent)
+
+    private fun awaitReadyManifest(meetingId: String, genTime: Long): JSONObject {
         val encodedMeetingId = URLEncoder.encode(meetingId, StandardCharsets.UTF_8)
-        var manifest: JSONObject? = null
         for (attempt in 0 until 20) {
-            val response = get("/v1/meetings/$encodedMeetingId/manifest$query", 200, 202)
+            val response = get("/v1/meetings/$encodedMeetingId/manifest?genTime=$genTime", 200, 202)
             if (response.status == 200) {
                 val current = parseJson(response.body)
                 val currentStatus = current.optString("status")
-                if (currentStatus == "READY" || currentStatus == "READY_WITH_WARNINGS") { manifest = current; break }
+                if (currentStatus == "READY" || currentStatus == "READY_WITH_WARNINGS") return current
                 if (currentStatus == "FAILED") throw IOException("本场结果未就绪：FAILED")
             }
             try { Thread.sleep(1500L) }
@@ -279,7 +287,56 @@ class HttpMeetingServerClient(config: MeetingClientConfig) : MeetingServerClient
                 throw IOException("等待本场结果时被中断", interrupted)
             }
         }
-        val readyManifest = manifest ?: throw IOException("本场结果尚未就绪，请稍后重试")
+        throw IOException("本场结果尚未就绪，请稍后重试")
+    }
+
+    @Throws(IOException::class)
+    override fun readReconciledResult(meetingId: String, genTime: Long): MeetingResult {
+        val path = "/v1/meetings/" + URLEncoder.encode(meetingId, StandardCharsets.UTF_8)
+        val ownerStatus = parseJson(get(path, 200, followRedirects = false).body)
+        val state = ownerStatus.opt("state")
+        if (ownerStatus.opt("meetingId") != meetingId) rejectReconciliation("状态响应的会议不匹配")
+        if (state != "READY" && state != "READY_WITH_WARNINGS") {
+            val reason = when (state) {
+                "CANCELLED", "FAILED", "DELETION_PENDING", "DELETED" -> "会议状态为 $state"
+                else -> "会议尚无可确认的成功终态"
+            }
+            rejectReconciliation(reason)
+        }
+        if (ownerStatus.opt("inputState") != "INPUT_ACCEPTED" || ownerStatus.opt("manifestState") != state)
+            rejectReconciliation("输入或清单状态与成功终态不一致")
+
+        val manifest = parseJson(get("$path/manifest?genTime=$genTime", 200, followRedirects = false).body)
+        if (manifest.opt("status") != state) rejectReconciliation("清单状态与原场终态不一致")
+        return resultFromCheckpointManifest(manifest, meetingId, genTime, includeContent = false)
+    }
+
+    private fun rejectReconciliation(reason: String): Nothing {
+        java.util.logging.Logger.getLogger(HttpMeetingServerClient::class.java.name).warning("原场终态核验失败：$reason")
+        throw IOException(reason)
+    }
+
+    private fun resultFromCheckpointManifest(manifest: JSONObject, meetingId: String, genTime: Long,
+        includeContent: Boolean): MeetingResult {
+        val manifestProfile = manifest.optJSONObject("profile")
+        if (manifest.opt("meetingId") != meetingId || manifestProfile?.opt("id") != profile.id() ||
+            manifestProfile.opt("revision") != profile.revision())
+            rejectReconciliation("结果清单的会议或档位与原场不一致")
+        val artifacts = manifest.optJSONArray("artifacts") ?: rejectReconciliation("清单缺少产物数组")
+        for (i in 0 until artifacts.length()) {
+            val item = artifacts.optJSONObject(i) ?: rejectReconciliation("清单产物格式错误")
+            when (item.opt("status")) {
+                "PENDING", "FAILED", "DELETED" -> Unit
+                "READY" -> if ((item.opt("artifactId") as? String).isNullOrBlank() ||
+                    (item.opt("type") as? String).isNullOrBlank()) rejectReconciliation("就绪产物缺少标识或类型")
+                else -> rejectReconciliation("清单产物状态无效")
+            }
+        }
+        return resultFromManifest(manifest, meetingId, genTime, includeContent)
+    }
+
+    private fun resultFromManifest(readyManifest: JSONObject, meetingId: String, genTime: Long,
+        includeContent: Boolean): MeetingResult {
         val status = readyManifest.optString("status")
         val title = if (readyManifest.isNull("title")) "参考会议" else readyManifest.optString("title", "参考会议")
         val artifacts = readyManifest.optJSONArray("artifacts")
@@ -291,6 +348,7 @@ class HttpMeetingServerClient(config: MeetingClientConfig) : MeetingServerClient
         }
         // Web／邮件仅查清单，不为生成 PDF 下载所有内容。
         if (!includeContent) return MeetingResult(meetingId, title, genTime, MeetingResult.Status.valueOf(status), types, null)
+        val query = "?genTime=$genTime"
         ready.sortBy { it.optInt("revision", 0) }
         var transcriptText = ""
         val segments = ArrayList<FinalTranscriptSegment>()
@@ -341,10 +399,12 @@ class HttpMeetingServerClient(config: MeetingClientConfig) : MeetingServerClient
         return MeetingResult(meetingId, title, genTime, MeetingResult.Status.valueOf(status), types,
             MeetingResultContent(types, transcriptText, segments, translations, summary, frames))
     }
-    private fun get(path: String, vararg accepted: Int): Response {
+    private fun get(path: String, vararg accepted: Int,
+        followRedirects: Boolean = HttpURLConnection.getFollowRedirects()): Response {
         val connection = URL(baseUrl + path).openConnection() as HttpURLConnection
         try {
             connection.requestMethod = "GET"
+            connection.instanceFollowRedirects = followRedirects
             connection.connectTimeout = 10_000
             connection.readTimeout = 10_000
             connection.setRequestProperty("Authorization", "Bearer $bearerToken")

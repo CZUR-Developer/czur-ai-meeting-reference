@@ -74,4 +74,11 @@ interface MeetingServerClient {
     @Throws(IOException::class) fun sendResultEmail(meetingId: String, recipients: List<String>, resultUrl: String)
     /** Stop200 后等实际 Manifest，只读 READY 产物。 */
     @Throws(IOException::class) fun readResult(meetingId: String, genTime: Long, includeContent: Boolean): MeetingResult
+    /** 已持久化的 READY 再读取时仍须绑定原会议和档位。 */
+    @Throws(IOException::class) fun readSavedReadyResult(meetingId: String, genTime: Long, includeContent: Boolean): MeetingResult =
+        readResult(meetingId, genTime, includeContent)
+    /** Stop 状态冲突时，先以原场身份核对终态，再返回同场、同档位的成功清单。 */
+    @Throws(IOException::class) fun readReconciledResult(meetingId: String, genTime: Long): MeetingResult {
+        throw IOException("当前后端端口未实现原场终态核验")
+    }
 }

@@ -5,7 +5,7 @@ import com.czur.aimeeting.client.result.ResultActionAccess
 /** 单场业务控制，UI／截图线程可调用，内部串行排队。 */
 interface MeetingSession : AutoCloseable {
     /**
-     * beforeStop→停输入→等最终事件→总结／Stop→实际 READY。仅 canStop 时受理。
+     * 独立停输入，并等 beforeStop 屏障及模型尾帧；然后总结／Stop→实际 READY，仅 canStop 时受理。
      * Stop 202 为 STOP_PENDING 可再次确认，不重复末帧／停音源／总结；无痕以 ENDED 结束。
      */
     fun requestStop()

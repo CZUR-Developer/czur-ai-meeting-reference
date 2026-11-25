@@ -1,12 +1,12 @@
 package com.czur.aimeeting.reference
 
 import android.os.IBinder
-import java.util.ArrayDeque
 
 /**
  * 单场截图的 App 编排：只保留会议相对时间、窗口排除以及周期帧／末帧的先后顺序。
  * 图像处理全部由 SDK 完成，字节原样提交。主线程发起并接收结果；上一帧业务回执结束前，
- * 不开始下一帧，避免末帧越过周期帧的接受确认。周期和停止规则仍归 Service。
+ * 不开始下一帧，忙时跳过周期请求。Stop 空闲时采末帧，否则只等待已接纳帧，
+ * 避免在保存 ACK 之后才截取 Stop 后的画面。周期和停止规则仍归 Service。
  */
 class PresentationCapture(
     private val source: ScreenCaptureSource, private val meetingStartedAtMs: Long
@@ -39,30 +39,41 @@ class PresentationCapture(
     private class Request(val nowMs: Long, val excluded: Array<IBinder?>, val callback: Callback) {
         var delivered = false
     }
-    private val queued = ArrayDeque<Request>()
     private var current: Request? = null
     private var closed = false
+    private var stopping = false
+    private var stopCompleted: Runnable? = null
 
     fun mode() = source.mode()
     fun supportsWindowExclusion() = source.supportsWindowExclusion()
 
     fun capture(nowMs: Long, excluded: Array<IBinder?>, callback: Callback) {
         if (closed) { callback.onError("本场截图已关闭"); return }
-        queued.add(Request(nowMs, excluded.copyOf(), callback))
-        startNext()
+        if (stopping || current != null) { callback.onSuccess(null); return }
+        start(Request(nowMs, excluded.copyOf(), callback))
     }
 
-    private fun startNext() {
-        if (closed || current != null || queued.isEmpty()) return
-        val request = queued.remove()
+    /**
+     * 停止边界只接受一次：空闲时立即采图；忙时不增加末帧，也不启动迟到截图。
+     * 已交付帧的真实业务 ACK／失败释放 Frame 后才续接；关闭或撤销同样只续接一次。
+     */
+    fun stop(nowMs: Long, excluded: Array<IBinder?>, callback: Callback, completed: Runnable) {
+        if (stopping) return
+        stopping = true
+        stopCompleted = completed
+        if (closed) { completeStop(); return }
+        if (current == null) start(Request(nowMs, excluded.copyOf(), callback))
+    }
+
+    private fun start(request: Request) {
         current = request
         try {
             source.capture(request.excluded, object : ScreenCaptureSource.Callback {
                 override fun onSuccess(image: ScreenCaptureSource.Image?) {
-                    if (closed || current !== request) return
+                    if (closed || current !== request || request.delivered) return
                     if (image == null) {
-                        finish(request)
-                        request.callback.onSuccess(null)
+                        request.delivered = true
+                        try { request.callback.onSuccess(null) } finally { finish(request) }
                     } else {
                         request.delivered = true
                         request.callback.onSuccess(Frame(maxOf(0L, request.nowMs - meetingStartedAtMs), image) {
@@ -71,35 +82,39 @@ class PresentationCapture(
                     }
                 }
                 override fun onError(message: String) {
-                    if (closed || current !== request) return
-                    finish(request)
-                    request.callback.onError(message)
+                    if (closed || current !== request || request.delivered) return
+                    request.delivered = true
+                    try { request.callback.onError(message) } finally { finish(request) }
                 }
             })
         } catch (failure: RuntimeException) {
             if (current !== request) throw failure
-            finish(request)
-            request.callback.onError("SDK截图请求无法执行")
+            request.delivered = true
+            try { request.callback.onError("SDK截图请求无法执行") } finally { finish(request) }
         }
     }
 
     private fun finish(request: Request) {
         if (current !== request) return
         current = null
-        startNext()
+        completeStop()
+    }
+
+    private fun completeStop() {
+        val completed = stopCompleted ?: return
+        stopCompleted = null
+        completed.run()
     }
 
     /** 正常末帧确认后关闭；授权撤销也释放等待中的请求，迟到输出不会重复续接停止。 */
     override fun close() {
         if (closed) return
         closed = true
-        val waiting = ArrayList<Request>()
-        current?.takeUnless { it.delivered }?.let(waiting::add)
-        waiting.addAll(queued)
+        val waiting = current?.takeUnless { it.delivered }
         current = null
-        queued.clear()
         // 先结束 SDK 会话和授权，再通知末帧失败，保持回页／停止的原顺序。
-        source.close()
-        for (request in waiting) request.callback.onError("本场截图已关闭")
+        try { source.close() } finally {
+            try { waiting?.callback?.onError("本场截图已关闭") } finally { completeStop() }
+        }
     }
 }
