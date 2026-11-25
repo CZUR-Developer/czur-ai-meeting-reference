@@ -629,9 +629,14 @@ class MeetingService : Service() {
         private const val CHANNEL = "ai_meeting_active"
         private const val NOTIFICATION_ID = 100
         private const val PRESENTATION_INTERVAL_MS = 10_000L
-        private fun describeCapabilities(available: Set<String>) = "本场功能：实时字幕" +
-            (if (available.contains(MeetingCapabilityState.TRANSLATION)) "、实时翻译" else "；实时翻译已关闭") +
-            (if (available.contains(MeetingCapabilityState.SPEAKER)) "、本场发言人" else "；本场发言人已关闭") +
-            (if (available.contains(MeetingCapabilityState.SUMMARY)) "、会议纪要" else "；会议纪要已关闭")
+        /** 纪要正文由服务端生成：summary.server 或设备直连兼容项任一可用就显示“会议纪要”。 */
+        private fun describeCapabilities(available: Set<String>): String {
+            val summary = available.contains(MeetingCapabilityState.SUMMARY_SERVER) ||
+                available.contains(MeetingCapabilityState.SUMMARY)
+            return "本场功能：实时字幕" +
+                (if (available.contains(MeetingCapabilityState.TRANSLATION)) "、实时翻译" else "；实时翻译已关闭") +
+                (if (available.contains(MeetingCapabilityState.SPEAKER)) "、本场发言人" else "；本场发言人已关闭") +
+                (if (summary) "、会议纪要" else "；会议纪要已关闭")
+        }
     }
 }

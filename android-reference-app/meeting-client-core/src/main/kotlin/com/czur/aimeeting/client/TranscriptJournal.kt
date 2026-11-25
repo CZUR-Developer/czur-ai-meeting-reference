@@ -7,11 +7,10 @@ import java.util.logging.Logger
 import org.json.JSONObject
 
 /**
- * 本场最终字幕的本地追加日志，只在进程异常退出后用于重建纪要输入。
+ * 本场最终字幕的本地追加日志，供原场现场保留与诊断使用。
  *
- * 每行一条 final 字幕，写入后立即关闭文件句柄，断电最多丢最后一行；读回时跳过
- * 不可解析的残行，按片段保留最高修订。它不是服务端标准事件副本：字幕仍以服务端
- * ACK 的事件为准，这里只补总结所需的原文。
+ * 纪要正文已改由服务端生成，Coordinator 不再从本日志重建总结输入；`summaryInput`
+ * 仅为既有测试／旧调用保留，不参与正常停止或原场重跑。
  */
 internal class TranscriptJournal(private val file: File) {
     fun file(): File = file

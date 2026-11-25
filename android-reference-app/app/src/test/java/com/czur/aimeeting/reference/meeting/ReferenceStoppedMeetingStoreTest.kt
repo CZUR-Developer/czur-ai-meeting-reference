@@ -40,4 +40,35 @@ class ReferenceStoppedMeetingStoreTest {
         legacyFile.writeText(legacy.toString())
         assertTrue(store.read("mtg_stopped").orElseThrow().deliversResult())
     }
+
+    /** 发布成功、上报纪要语言前退出：语言快照与上报标记必须能跨进程读回。 */
+    @Test fun summarySnapshotAndReportedFlagSurviveDiskAndLegacyRecordDefaultsToNull() {
+        val context: Context = RuntimeEnvironment.getApplication()
+        val directory = File(context.filesDir, "meeting-stopped")
+        directory.deleteRecursively()
+        val pcm = File(context.cacheDir, "mtg_summary.pcm").apply { writeBytes(ByteArray(3200)) }
+        val audio = SealedAudioArtifact("mtg_summary", pcm,
+            SealedAudioArtifact.Format.PCM16, pcm.length(), pcm.length())
+        val store = ReferenceStoppedMeetingStore(context)
+        val pending = StoppedMeetingCheckpoint.pending(
+            MeetingArtifactPublisher.Context("mtg_summary", audio, 100L,
+                MeetingClientConfig.reference("https://service.example.test", "fixture-token")))
+            .withSummaryLanguages(listOf("zh-CN", "en-US"))
+        store.save(pending)
+        val saved = store.read("mtg_summary").orElseThrow()
+        assertEquals(listOf("zh-CN", "en-US"), saved.summaryLanguages())
+        assertFalse(saved.summaryReported())
+        store.save(saved.withSummaryReported())
+        assertTrue(store.read("mtg_summary").orElseThrow().summaryReported())
+
+        // 旧版本记录没有这两个字段：按 null／false 读回，续办既不补发也不报错。
+        val legacyFile = File(directory, "mtg_summary.json")
+        val legacy = JSONObject(legacyFile.readText())
+        legacy.remove("summaryLanguages")
+        legacy.remove("summaryReported")
+        legacyFile.writeText(legacy.toString())
+        val legacyRead = store.read("mtg_summary").orElseThrow()
+        assertNull(legacyRead.summaryLanguages())
+        assertFalse(legacyRead.summaryReported())
+    }
 }

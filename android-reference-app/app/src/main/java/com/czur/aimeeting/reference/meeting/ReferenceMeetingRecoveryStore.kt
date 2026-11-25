@@ -37,6 +37,7 @@ class ReferenceMeetingRecoveryStore(context: Context) : MeetingRecoveryStore {
             .put("journalFile", record.journalFile()?.absolutePath ?: JSONObject.NULL)
             .put("startedAtMs", record.startedAtMs())
             .put("sourceLanguage", record.sourceLanguage())
+            .put("targetLanguage", record.targetLanguage() ?: JSONObject.NULL)
             .put("summaryEnabled", record.summaryEnabled())
             .put("retainAudio", record.retainAudio())
             .put("activeDelivery", record.activeDelivery())
@@ -73,6 +74,8 @@ class ReferenceMeetingRecoveryStore(context: Context) : MeetingRecoveryStore {
             json.getBoolean("summaryEnabled"),
             json.getBoolean("retainAudio"),
             json.getBoolean("activeDelivery"),
+            // 旧现场没有目标语种字段：按单语纪要续办，不能凭空补第二语言。
+            if (json.isNull("targetLanguage")) null else json.getString("targetLanguage"),
         ))
     }
 

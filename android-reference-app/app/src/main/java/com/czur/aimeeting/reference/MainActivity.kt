@@ -400,8 +400,12 @@ class MainActivity : Activity() {
     /** 实时字幕是所有参考会议的必选能力；未发现部署结果前保留默认会前页面。 */
     private fun transcriptCapabilityAvailable(): Boolean =
         displayedIdentity == null || discovery == null || deploymentCapabilities.contains(MeetingCapabilityState.TRANSCRIPT)
+    /**
+     * 纪要入口只看部署是否声明服务端生成能力：正文由服务端按语言列表生成，本机不再注册
+     * 文本总结 Adapter，所以不能再用设备直连的 `summary.structured` 判断入口。
+     */
     private fun summaryCapabilityAvailable(): Boolean =
-        displayedIdentity != null && deploymentCapabilities.contains(MeetingCapabilityState.SUMMARY)
+        displayedIdentity != null && deploymentCapabilities.contains(MeetingCapabilityState.SUMMARY_SERVER)
     private fun translationCapabilityAvailable(): Boolean = displayedIdentity != null &&
         deploymentCapabilities.contains(MeetingCapabilityState.TRANSCRIPT) &&
         deploymentCapabilities.contains(MeetingCapabilityState.TRANSLATION) && deploymentLanguages.size >= 2

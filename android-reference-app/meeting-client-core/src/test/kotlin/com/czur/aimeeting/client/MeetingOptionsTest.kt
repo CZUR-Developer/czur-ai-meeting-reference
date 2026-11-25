@@ -57,6 +57,52 @@ class MeetingOptionsTest {
             original.requestedCapabilities())
     }
 
+    @Test fun summaryRequestAddsServerGenerationWhileKeepingStructuredCompatibility() {
+        val minutes = MeetingOptions(MeetingOptions.Mode.MEETING_MINUTES, "zh-CN", "en-US",
+            false, MeetingOptions.ResultDelivery.WEB, "https://result.example.test", emptyList())
+        assertTrue(minutes.summaryEnabled())
+        // 服务端纪要是 optional：不请求就不会授予，所以要纪要时必须显式带上 summary.server；
+        // 设备直连兼容期的 summary.structured 仍随默认请求发出，但不再是必需能力。
+        assertEquals(listOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.SUMMARY_SERVER,
+            MeetingCapabilityState.SUMMARY, MeetingCapabilityState.SPEAKER),
+            minutes.requestedCapabilities())
+        assertEquals(listOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.SUMMARY_SERVER),
+            minutes.requiredCapabilities())
+        val negotiated = minutes.withAvailableCapabilities(setOf(MeetingCapabilityState.TRANSCRIPT,
+            MeetingCapabilityState.SUMMARY_SERVER, MeetingCapabilityState.SUMMARY, MeetingCapabilityState.SPEAKER))
+        assertEquals(listOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.SUMMARY_SERVER,
+            MeetingCapabilityState.SUMMARY, MeetingCapabilityState.SPEAKER),
+            negotiated.requestedCapabilities())
+        val subtitleWithSummary = MeetingOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT, "zh-CN", "en-US",
+            false, MeetingOptions.ResultDelivery.WEB, "https://result.example.test", emptyList(), true)
+        assertTrue(subtitleWithSummary.requestedCapabilities()
+            .contains(MeetingCapabilityState.SUMMARY_SERVER))
+        val noSummary = MeetingOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT, "zh-CN", "en-US",
+            false, MeetingOptions.ResultDelivery.WEB, "https://result.example.test", emptyList(), false)
+        assertFalse(noSummary.requestedCapabilities().contains(MeetingCapabilityState.SUMMARY_SERVER))
+        assertFalse(noSummary.withAvailableCapabilities(setOf(MeetingCapabilityState.TRANSCRIPT,
+            MeetingCapabilityState.SPEAKER)).requestedCapabilities()
+            .contains(MeetingCapabilityState.SUMMARY_SERVER))
+    }
+
+    /**
+     * 纯服务端纪要部署：发现结果只有 transcript.realtime 与 summary.server 时，
+     * 建会请求与服务端生成能力一致，不再要求也不再附带设备直连的 summary.structured。
+     */
+    @Test fun serverOnlySummaryDeploymentRequestsNeitherDeviceSummaryNorFailsItsRequirement() {
+        val minutes = MeetingOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT, "zh-CN", "en-US",
+            false, MeetingOptions.ResultDelivery.WEB, "https://result.example.test", emptyList(), true)
+        val negotiated = minutes.withAvailableCapabilities(setOf(MeetingCapabilityState.TRANSCRIPT,
+            MeetingCapabilityState.SUMMARY_SERVER))
+        assertEquals(listOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.SUMMARY_SERVER),
+            negotiated.requestedCapabilities())
+        assertFalse("纯服务端部署不得顺带请求设备直连纪要能力",
+            negotiated.requestedCapabilities().contains(MeetingCapabilityState.SUMMARY))
+        assertEquals("纪要仍是本场必需能力，不静默降级成无纪要",
+            listOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.SUMMARY_SERVER),
+            negotiated.requiredCapabilities())
+    }
+
     @Test fun serverPostMeetingIdentityNeedsExplicitDiscoverySpeakerAndRetainedAudio() {
         val original = MeetingOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT, "zh-CN", "en-US",
             false, MeetingOptions.ResultDelivery.WEB, "https://result.example.test", emptyList())
@@ -119,5 +165,18 @@ class MeetingOptionsTest {
         }
         assertEquals(listOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.SPEAKER),
             original.requestedCapabilities())
+    }
+
+    @Test
+    fun localDeploymentWithoutServerSummaryRequiresStructuredSummary() {
+        val options = MeetingOptions(MeetingOptions.Mode.MEETING_MINUTES, "zh-CN", "", false,
+            MeetingOptions.ResultDelivery.LOCAL, "", listOf(), true)
+        val available = mutableSetOf<String>()
+        available.add(MeetingCapabilityState.TRANSCRIPT)
+        available.add(MeetingCapabilityState.SUMMARY)
+        val negotiated = options.withAvailableCapabilities(available)
+        assertTrue(negotiated.requiredCapabilities().contains(MeetingCapabilityState.SUMMARY))
+        assertFalse(negotiated.requiredCapabilities().contains(MeetingCapabilityState.SUMMARY_SERVER))
+        assertTrue(negotiated.requestedCapabilities().contains(MeetingCapabilityState.SUMMARY))
     }
 }

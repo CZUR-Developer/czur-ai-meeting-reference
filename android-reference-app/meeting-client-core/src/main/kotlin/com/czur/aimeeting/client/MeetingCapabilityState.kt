@@ -9,19 +9,26 @@ class MeetingCapabilityState private constructor(effectiveCapabilities: Map<Stri
     private val effectiveCapabilities = Collections.unmodifiableMap(HashMap(effectiveCapabilities))
     /**
      * 降级能力不冒充原能力；实时能力仍须有本场 Adapter 实现。
-     * 纪要由独立总结注册表执行，跨会议身份由服务端会后 Provider 执行，两者均不要求
-     * 实时 Adapter 声明；调用方仍需核对部署、本场请求及各自执行前提，不能只凭本方法启用。
+     * 纪要（服务端生成的 summary.server 与设备直连兼容期的 summary.structured）和
+     * 跨会议身份都不要求实时 Adapter 声明；调用方仍需核对部署、本场请求及各自执行前提，
+     * 不能只凭本方法启用。纪要的两种能力各按自己的决策判定，不互相兜底。
      */
     fun canUse(capability: String, adapterRealtimeCapabilities: Set<String>): Boolean {
         val effective = effectiveCapabilities[capability] ?: return false
         if (capability != effective) return false
-        return capability == SUMMARY || capability == SPEAKER_IDENTITY_CROSS_MEETING ||
-            adapterRealtimeCapabilities.contains(capability)
+        return capability == SUMMARY || capability == SUMMARY_SERVER ||
+            capability == SPEAKER_IDENTITY_CROSS_MEETING || adapterRealtimeCapabilities.contains(capability)
     }
     companion object {
         const val TRANSCRIPT = "transcript.realtime"
         const val TRANSLATION = "translation.realtime"
         const val SUMMARY = "summary.structured"
+        /**
+         * 服务端按客户端上报的语言列表生成纪要。该能力在部署里是可选（optional），
+         * 只有本场 Create 显式请求并得到 ENABLE 才会受理 summary:request；
+         * 它与设备直连模式兼容期的 [SUMMARY] 并存，客户端不自行生成正文。
+         */
+        const val SUMMARY_SERVER = "summary.server"
         const val SPEAKER = "speaker.diarization.session"
         /** 服务端用本场发言人与已发布录音生成持久身份，不属于模型实时解析能力。 */
         const val SPEAKER_IDENTITY_CROSS_MEETING = "speaker.identity.cross_meeting"

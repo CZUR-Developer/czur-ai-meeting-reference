@@ -253,8 +253,11 @@ class HttpMeetingServerClientAppTest {
                     .getJSONArray("targets").getString(0))
             assertEquals("translation.realtime",
                     request.getJSONArray("requestedCapabilities").getString(1))
-            assertEquals("summary.structured",
+            // 纪要必需项是服务端生成能力，设备直连的 summary.structured 只作兼容随请求发出。
+            assertEquals("summary.server",
                     request.getJSONArray("requestedCapabilities").getString(2))
+            assertEquals("summary.structured",
+                    request.getJSONArray("requestedCapabilities").getString(3))
             assertTrue(request.getJSONObject("artifactPolicy").getBoolean("presentationCapture"))
             assertTrue(!request.has("resultDelivery"))
         }

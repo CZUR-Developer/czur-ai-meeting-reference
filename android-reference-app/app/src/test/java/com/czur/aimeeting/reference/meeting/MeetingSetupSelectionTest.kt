@@ -35,7 +35,7 @@ class MeetingSetupSelectionTest {
 
     @Test fun theSharedStartRuleRequiresAValidPairOnlyForTranslationAndHonorsSummaryAndBusyState() {
         val capabilities = setOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.TRANSLATION,
-            MeetingCapabilityState.SUMMARY)
+            MeetingCapabilityState.SUMMARY_SERVER)
         val languages = listOf("ja-JP", "de-DE")
         val selection = MeetingSetupSelection(MeetingSetup.Mode.LIVE_TRANSLATION, "ja-JP", "de-DE", true)
         assertTrue(selection.canStart(true, false, capabilities, languages, true))
@@ -43,7 +43,13 @@ class MeetingSetupSelectionTest {
         assertFalse(selection.canStart(true, true, capabilities, languages, true))
         assertFalse(selection.canStart(false, false, capabilities, languages, true))
         assertFalse(selection.canStart(true, false, capabilities, languages, false))
-        assertFalse(selection.canStart(true, false, capabilities - MeetingCapabilityState.SUMMARY, languages, true))
+        // 纪要入口只认服务端生成能力：缺它时不允许开始，也不悄悄降级成“没有纪要”。
+        assertFalse(selection.canStart(true, false, capabilities - MeetingCapabilityState.SUMMARY_SERVER,
+            languages, true))
+        assertFalse("设备直连的 summary.structured 不再能打开纪要入口",
+            selection.canStart(true, false,
+                capabilities - MeetingCapabilityState.SUMMARY_SERVER + MeetingCapabilityState.SUMMARY,
+                languages, true))
         assertTrue(selection.copy(mode = MeetingSetup.Mode.LIVE_TRANSCRIPT, targetLanguage = "ja-JP")
             .canStart(true, false, capabilities, languages, true))
     }

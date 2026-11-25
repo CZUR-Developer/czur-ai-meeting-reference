@@ -15,6 +15,8 @@ class ModelAdapterRegistryTest {
         assertFalse(registry.create(SampleJsonModelAdapter.ID).mayEmitDeferredSourceLanguage())
         assertNotSame(registry.create(TingwuModelAdapter.ID), registry.create(TingwuModelAdapter.ID))
         assertNotSame(registry.create(SampleJsonModelAdapter.ID), registry.create(SampleJsonModelAdapter.ID))
+        // 纪要正文由服务端生成：本机能力声明里恒有 summary.server，不要求注册文本总结 Adapter。
+        assertTrue(registry.setupCapabilities().contains(MeetingCapabilityState.SUMMARY_SERVER))
         assertTrue(registry.setupCapabilities().contains(MeetingCapabilityState.SUMMARY))
         assertTrue(registry.setupCapabilities().contains(MeetingCapabilityState.SPEAKER))
     }

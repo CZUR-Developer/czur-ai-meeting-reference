@@ -20,8 +20,11 @@ Android 控件、权限申请、音源、模型网络传输、屏幕采集和本
 | `client.result` | 结果动作注册、会前准备、同场结果访问与执行 |
 
 功能能力按本地可执行能力、后端部署和本场授权确定，不能从供应商品牌推断。
-所有当前会议模式要求 `transcript.realtime`；互译另需 `translation.realtime`，
-开启独立总结另需 `summary.structured`。用户选择的必需能力无法授予时，不启动本场模型。
+所有当前会议模式要求 `transcript.realtime`；互译另需 `translation.realtime`。
+用户要纪要时必需能力是 `summary.server`（服务端按客户端上报的语言列表生成正文，
+该能力在部署里是 optional，不请求就不会授予），本机不再注册文本总结 Adapter，也不再用
+设备直连的 `summary.structured` 作为入口或建会前提。`summary.structured` 只是兼容项：
+部署仍声明时随请求发出，但不再是必需能力。用户选择的必需能力无法授予时，不启动本场模型。
 本场分人为可选能力，未授予时移除发言人字段，仍可开字幕会议。
 
 语言列表直接来自后端 `AI_MEETING_MODEL_LANGUAGES`，App 按发现结果显示。
@@ -40,7 +43,7 @@ Android `AiMeetingClient` 装配平台运行时，Mock 注入 `MeetingRuntimePor
 二者共用 `MeetingCoordinator`。同进程基础输入、诊断和完整会议应择一持有真实音源。
 
 正常链为当前身份读取 → 能力发现 → Create → 领取材料／创建 Adapter → StartClient →
-采音／模型 → 标准事件确认 → 冻结采音用量 → 按需总结 → 录音发布 → 后端 Stop →
+采音／模型 → 标准事件确认 → 冻结采音用量 → 录音发布 → 上报纪要语言 → 后端 Stop →
 真实 READY 清单 → App 显式结果动作。后端负责身份、模型选择、权益／计费和存储。
 模型完整地址、短期材料及本场授权均由后端下发。
 
@@ -265,11 +268,14 @@ STARTING／CLOSED 枚举未作为独立状态通知。
 `StoppedMeetingCheckpoint` 同时保存原场交付策略：`NO_ACTIVE_DELIVERY` 续办在 Stop
 成功后只推进到 ENDED，不读取结果清单，成功回调仍是 `FinalizationResult`，但
 `result()` 为 null、`delivered()` 为 false；旧停止记录没有策略字段时按主动交付处理。
+停止记录还会留下会前纪要语言快照和“是否已上报”：发布确认后、Stop 前上报一次；
+这次上报失败不会阻断 Stop，之后从 STOP_ACCEPTED（或 READY）续办时会在读取清单前
+按同一幂等步骤补报，已上报的场次不重复请求，失败仍只告警、不阻断 Stop 或结果读取。
 
 `IdentityProvider.identityForFinalization(meetingId, originalIdentity)` 可在原场再次收尾时
 提供同账号新会话，默认返回原身份。部署者须自行确认原账号归属，不能只比较显示名。
-新的材料同步用于发布、Stop 和 Manifest，会议 ID、用量、幂等键、已确认阶段和
-`genTime` 不变；此接口不引入后台自动登录或跨账号恢复。
+新的材料同步用于发布、Stop、纪要补报和 Manifest；不需要补报纪要的 READY 续办不调用它。
+会议 ID、用量、幂等键、已确认阶段和 `genTime` 不变；此接口不引入后台自动登录或跨账号恢复。
 
 ### 默认听悟与国内显示
 

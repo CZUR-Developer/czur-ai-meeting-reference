@@ -81,7 +81,9 @@ class AiMeetingClientTest {
                     assertEquals(IdentityResult.Status.LOGIN_REQUIRED, initialIdentity.get(5, TimeUnit.SECONDS).status())
                     val discovery = CompletableFuture<MeetingDiscovery>()
                     beforeLogin.discover(callback(discovery, callbackThreads))
-                    assertEquals(setOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.SUMMARY),
+                    // 纪要正文由服务端生成：发现结果按 summary.server 声明，设备直连项只是兼容保留。
+                    assertEquals(setOf(MeetingCapabilityState.TRANSCRIPT,
+                        MeetingCapabilityState.SUMMARY_SERVER, MeetingCapabilityState.SUMMARY),
                         discovery.get(5, TimeUnit.SECONDS).availableCapabilities())
                     val login = CompletableFuture<ReferenceLoginSession>()
                     beforeLogin.login("fixture-user", "fixture-password", callback(login, callbackThreads))
@@ -154,7 +156,8 @@ class AiMeetingClientTest {
                     assertNotNull(started.get())
                     assertEquals("mtg_facade", started.get().meetingId())
                     assertEquals(600000L, started.get().maxMeetingDurationMs())
-                    assertEquals(setOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.SUMMARY),
+                    assertEquals(setOf(MeetingCapabilityState.TRANSCRIPT,
+                        MeetingCapabilityState.SUMMARY_SERVER, MeetingCapabilityState.SUMMARY),
                         started.get().availableCapabilities())
                     assertEquals(listOf("begin:server-tag", "A", "T", "end"), fixture.modelMessages)
                     assertEquals(1, fixture.audio.starts)
@@ -346,12 +349,11 @@ class AiMeetingClientTest {
                 override fun dispatch(request: RecordedRequest): MockResponse {
                     requests.add(request)
                     return when (request.requestUrl!!.encodedPath) {
-                        "/v1/capabilities" -> json(200, """{"capabilities":["transcript.realtime","summary.structured"],"resultLinkTtlMs":600000,"resultEmailEnabled":false}""")
+                        "/v1/capabilities" -> json(200, """{"capabilities":["transcript.realtime","summary.server","summary.structured"],"resultLinkTtlMs":600000,"resultEmailEnabled":false}""")
                         "/v1/reference/session:login" -> json(200, """{"accessToken":"fixture-access","expiresAt":"2030-01-01T00:00:00Z"}""")
-                        "/v1/meetings" -> json(201, """{"meetingId":"mtg_facade","limits":{"maxMeetingDurationMs":600000},"capabilityDecisions":[{"capability":"transcript.realtime","availability":"AVAILABLE"},{"capability":"summary.structured","availability":"AVAILABLE"}]}""")
+                        "/v1/meetings" -> json(201, """{"meetingId":"mtg_facade","limits":{"maxMeetingDurationMs":600000},"capabilityDecisions":[{"capability":"transcript.realtime","availability":"AVAILABLE"},{"capability":"summary.server","availability":"AVAILABLE"},{"capability":"summary.structured","availability":"AVAILABLE"}]}""")
                         "/v1/meetings/mtg_facade:modelSession" -> json(200, """{"meetingId":"mtg_facade","adapterId":"partner-string","endpoint":"${server.url("/model")}","expiresAt":"2030-01-01T00:00:00Z","initParams":{"sessionTag":"server-tag"}}""")
-                        "/v1/meetings/mtg_facade:summarySession" -> json(200, """{"adapterId":"bailian-summary","meetingId":"mtg_facade","endpoint":"${server.url("/summary-model")}","expiresAt":"2030-01-01T00:00:00Z","token":"fixture-summary"}""")
-                        "/summary-model" -> json(200, "{\"output\":{\"text\":\"" + SUMMARY.replace("\"", "\\\"") + "\"}}")
+                        "/v1/meetings/mtg_facade/summary:request" -> json(200, """{"meetingId":"mtg_facade","accepted":true,"summaryStatus":"REQUESTED"}""")
                         "/model" -> MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
                             override fun onMessage(webSocket: WebSocket, text: String) {
                                 modelMessages.add(text)
@@ -378,8 +380,8 @@ class AiMeetingClientTest {
                         "/v1/artifacts/summary" -> json(200, SUMMARY)
                         "/v1/artifacts/slides" -> json(200, """{"frames":[{"offsetMs":200,"jpegBase64":"AQID"}]}""")
                         "/v1/meetings/mtg_facade/presentation-captures:append" -> json(201, """{"artifactId":"slides","chunkSequence":1,"frameCount":1}""")
-                        "/v1/meetings/mtg_facade:startClient", "/v1/meetings/mtg_facade/events:append",
-                        "/v1/meetings/mtg_facade/summary:submit" -> json(200, "{}")
+                        "/v1/meetings/mtg_facade:startClient",
+                        "/v1/meetings/mtg_facade/events:append" -> json(200, "{}")
                         else -> json(404, "{}")
                     }
                 }
@@ -399,8 +401,8 @@ class AiMeetingClientTest {
             val base = "/v1/meetings/mtg_facade"
             assertEquals(listOf("/v1/capabilities", "/v1/reference/session:login", "/v1/capabilities",
                 "/v1/meetings", base + ":modelSession", base + ":startClient", "/model",
-                base + "/presentation-captures:append", base + "/events:append", base + "/usage:submit", base + ":summarySession",
-                "/summary-model", base + "/summary:submit", base + ":stop", base + "/manifest", base + "/manifest",
+                base + "/presentation-captures:append", base + "/events:append", base + "/usage:submit", base + "/summary:request",
+                base + ":stop", base + "/manifest", base + "/manifest",
                 base + "/manifest", "/v1/artifacts/text", "/v1/artifacts/summary", "/v1/artifacts/slides"), paths)
             val create = JSONObject(request("/v1/meetings").body.clone().readUtf8())
             assertEquals("partner.app", create.getJSONObject("client").getString("appId"))
@@ -417,8 +419,11 @@ class AiMeetingClientTest {
             val usage = JSONObject(request(base + "/usage:submit").body.clone().readUtf8())
             assertEquals(200L, usage.getLong("audioDurationMs")) // A + 完整尾帧 T，各100ms。
             assertEquals("Bearer fixture-access", request(base + "/usage:submit").getHeader("Authorization"))
-            assertTrue(request("/summary-model").body.clone().readUtf8().contains("最后确认字幕"))
-            assertEquals("Bearer fixture-summary", request("/summary-model").getHeader("Authorization"))
+            // 纪要正文改由服务端按已接收的标准事件生成，设备只上报本场语言列表。
+            val summaryRequest = JSONObject(request(base + "/summary:request").body.clone().readUtf8())
+            assertEquals(1, summaryRequest.getJSONArray("languages").length())
+            assertEquals("zh-CN", summaryRequest.getJSONArray("languages").getString(0))
+            assertEquals("Bearer fixture-access", request(base + "/summary:request").getHeader("Authorization"))
             assertNotNull(request(base + ":stop").getHeader("Idempotency-Key"))
             requests.filter { it.requestUrl!!.encodedPath.contains("/manifest") || it.requestUrl!!.encodedPath.startsWith("/v1/artifacts/") }
                 .forEach { assertEquals(genTime.toString(), it.requestUrl!!.queryParameter("genTime")) }

@@ -41,8 +41,15 @@ class ModelAdapterRegistry {
         ?: throw IllegalArgumentException("参考 App 未注册独立翻译 Adapter: $adapterId")).get()
     fun create(adapterId: String): ModelAdapter = entry(adapterId).factory.create()
     fun realtimeCapabilities(adapterId: String): Set<String> = entry(adapterId).capabilities
+    /**
+     * 本机可执行能力，用作部署能力的求交一端。纪要正文由服务端按语言列表生成，执行位置
+     * 在部署侧，所以 `summary.server` 恒定可用，不要求本机注册文本总结 Adapter；设备直连
+     * 兼容期的 `summary.structured` 仍只在确有 Adapter 时声明。纯服务端部署据此不再被
+     * 本机能力交集挡住纪要。
+     */
     fun setupCapabilities(): Set<String> {
         val ready = entries.values.flatMap { it.capabilities }.filter(READY_MEETING_CAPABILITIES::contains).toMutableSet()
+        ready.add(MeetingCapabilityState.SUMMARY_SERVER)
         if (summaryAdapters.isNotEmpty()) ready.add(MeetingCapabilityState.SUMMARY)
         if (translationAdapters.isNotEmpty()) ready.add(MeetingCapabilityState.TRANSLATION)
         return java.util.Set.copyOf(ready)

@@ -38,11 +38,15 @@ data class MeetingSetupSelection(
 
     fun swapLanguages(): MeetingSetupSelection = copy(sourceLanguage = targetLanguage, targetLanguage = sourceLanguage)
 
-    /** 页面按钮和实际点击入口共用；最终 Create 授权仍由 SDK／后端负责。 */
+    /**
+     * 页面按钮和实际点击入口共用；最终 Create 授权仍由 SDK／后端负责。
+     * 纪要由服务端生成，入口只认 `summary.server`：该能力缺失时不静默降级成
+     * “没有纪要但仍允许开始”，而是保持入口不可用，等部署补齐能力。
+     */
     fun canStart(loggedIn: Boolean, busy: Boolean, capabilities: Set<String>, languages: List<String>,
         hasResultAction: Boolean): Boolean = loggedIn && !busy && hasResultAction &&
         MeetingCapabilityState.TRANSCRIPT in capabilities && sourceLanguage in languages &&
-        (!summaryEnabled || MeetingCapabilityState.SUMMARY in capabilities) &&
+        (!summaryEnabled || MeetingCapabilityState.SUMMARY_SERVER in capabilities) &&
         (mode != MeetingSetup.Mode.LIVE_TRANSLATION ||
             (MeetingCapabilityState.TRANSLATION in capabilities && targetLanguage in languages &&
                 targetLanguage != sourceLanguage))

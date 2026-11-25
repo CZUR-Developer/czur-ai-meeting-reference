@@ -37,6 +37,27 @@ class MeetingCapabilityStateTest {
         assertTrue(state.canUse(MeetingCapabilityState.SUMMARY, setOf()))
     }
 
+    /**
+     * 服务端纪要按自己的决策判定：授予 summary.server 即不要求本机 Adapter；
+     * 未授予或降级到设备直连能力时不冒充可用，避免“显示入口却没有纪要”。
+     */
+    @Test fun serverSummaryNeedsItsOwnGrantAndNeverBorrowsTheDeviceDirectDecision() {
+        val granted = MeetingCapabilityState.fromCreateResponse(JSONObject("{\"capabilityDecisions\":["
+                + "{\"capability\":\"summary.server\",\"availability\":\"AVAILABLE\"}]}"))
+        assertTrue(granted.canUse(MeetingCapabilityState.SUMMARY_SERVER, setOf()))
+        assertFalse("没有设备直连决策时不能启用 summary.structured",
+                granted.canUse(MeetingCapabilityState.SUMMARY, setOf(MeetingCapabilityState.SUMMARY)))
+        val degraded = MeetingCapabilityState.fromCreateResponse(JSONObject("{\"capabilityDecisions\":["
+                + "{\"capability\":\"summary.server\",\"availability\":\"DEGRADED\","
+                + "\"fallbackCapability\":\"summary.structured\"}]}"))
+        assertFalse("降级到设备直连不冒充服务端纪要",
+                degraded.canUse(MeetingCapabilityState.SUMMARY_SERVER, setOf(MeetingCapabilityState.SUMMARY)))
+        val notRequested = MeetingCapabilityState.fromCreateResponse(JSONObject("{\"capabilityDecisions\":["
+                + "{\"capability\":\"summary.server\",\"availability\":\"AVAILABLE\","
+                + "\"reasonCode\":\"NOT_REQUESTED\"}]}"))
+        assertFalse(notRequested.canUse(MeetingCapabilityState.SUMMARY_SERVER, setOf()))
+    }
+
     @Test fun degradedTranslationDoesNotPretendTranscriptFallbackIsTranslation() {
         val state = MeetingCapabilityState.fromCreateResponse(JSONObject("{"
                 + "\"capabilityDecisions\":[{\"capability\":\"translation.realtime\","

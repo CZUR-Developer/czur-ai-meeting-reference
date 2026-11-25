@@ -28,7 +28,19 @@ interface MeetingServerClient {
     @Throws(IOException::class) fun requestTranslationSession(meetingId: String): TranslationSessionGrant {
         throw IOException("当前后端端口未实现独立翻译材料续领")
     }
-    /** 最终字幕齐备后领取文本模型材料，Mock 不调用。 */
+    /**
+     * 上报本场纪要语言（有序 1～2 个，首个为主语言），由服务端异步生成并回填产物。
+     * 200/201 视为受理；409/403 等按 HTTP 错误抛出，不在设备侧吞掉。
+     * 默认明确不支持；只装配旧后端的实现无需改造，协调器会按告警继续停止。
+     */
+    @Throws(IOException::class) fun requestSummary(meetingId: String, languages: List<String>): SummaryRequestAck {
+        throw IOException("当前后端端口未实现纪要语言请求")
+    }
+    /**
+     * 领取设备侧文本模型材料，Mock 或未装配时为空。
+     * @deprecated 服务端生成纪要后设备不再领取材料，改用 [requestSummary]。
+     */
+    @Deprecated("服务端生成纪要后不再由设备调用，改用 requestSummary")
     @Throws(IOException::class) fun requestSummarySession(meetingId: String): SummarySessionGrant
     @Throws(IOException::class) fun appendTranscript(meetingId: String, clientSequence: Int, event: TranscriptEvent)
     /** 译文与字幕共用 clientSequence，仅授权互译时提交。 */
@@ -47,6 +59,11 @@ interface MeetingServerClient {
     @Throws(IOException::class) fun submitUsage(meetingId: String, audioDurationMs: Long) {
         throw IOException("当前后端端口未实现采音用量提交")
     }
+    /**
+     * 提交设备侧生成的标准纪要正文。
+     * @deprecated 正文已由服务端生成，设备不再提交，改用 [requestSummary]。
+     */
+    @Deprecated("服务端生成纪要后不再由设备调用，改用 requestSummary")
     @Throws(IOException::class) fun submitSummary(meetingId: String, summary: SummaryResult)
     /** accepted 只表示输入接管，202 尚在收尾，实际 READY 需读清单。 */
     @Throws(IOException::class) fun stopMeeting(meetingId: String): StopMeetingResponse

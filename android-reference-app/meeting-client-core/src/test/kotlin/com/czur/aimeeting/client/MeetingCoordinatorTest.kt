@@ -37,8 +37,11 @@ import org.junit.Test
 /** 只覆盖正常会议编排及明确能力门：同一核心使用真实材料端口或本地 Mock 端口。 */
 class MeetingCoordinatorTest {
     companion object {
+        /** 只有服务端纪要的纯后端部署：不再要求设备直连的 summary.structured。 */
+        private val SERVER_SUMMARY = setOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.SUMMARY_SERVER)
         private val ALL = setOf(MeetingCapabilityState.TRANSCRIPT,
-            MeetingCapabilityState.TRANSLATION, MeetingCapabilityState.SUMMARY, MeetingCapabilityState.SPEAKER)
+            MeetingCapabilityState.TRANSLATION, MeetingCapabilityState.SUMMARY,
+            MeetingCapabilityState.SUMMARY_SERVER, MeetingCapabilityState.SPEAKER)
         private const val CROSS_MEETING = MeetingCapabilityState.SPEAKER_IDENTITY_CROSS_MEETING
     }
 
@@ -227,6 +230,69 @@ class MeetingCoordinatorTest {
             assertTrue(f.probe.info!!.availableCapabilities().contains(MeetingCapabilityState.SPEAKER))
             assertFalse("旧部署没有声明时保持原能力", f.server.requested.requestedCapabilities().contains(CROSS_MEETING))
             assertFalse(f.probe.info!!.availableCapabilities().contains(CROSS_MEETING))
+        }
+    }
+
+    /**
+     * 纯服务端纪要部署：只声明并授予 transcript.realtime + summary.server 时，纪要入口可用、
+     * 建会成功、停止时仍按语言快照上报；请求与必需能力里都不再出现设备直连的 summary.structured。
+     */
+    @Test fun serverOnlySummaryDeploymentStartsMeetingAndUsesServerSummaryWithoutDeviceAdapter() {
+        Fixture(true, SERVER_SUMMARY).use { f ->
+            f.server.deploymentCapabilities = SERVER_SUMMARY
+            f.start(summaryOptions())
+            assertEquals(listOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.SUMMARY_SERVER),
+                f.server.requested.requestedCapabilities())
+            assertEquals(listOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.SUMMARY_SERVER),
+                f.server.requested.requiredCapabilities())
+            assertTrue("纪要入口按服务端生成能力可用",
+                f.probe.info!!.availableCapabilities().contains(MeetingCapabilityState.SUMMARY_SERVER))
+            assertFalse("没有设备直连能力时不能谎报 summary.structured",
+                f.probe.info!!.availableCapabilities().contains(MeetingCapabilityState.SUMMARY))
+            val discovery = CompletableFuture<MeetingDiscovery>()
+            f.client.discover(resultCallback(discovery))
+            assertTrue("能力发现结果同样供 App 判断纪要入口",
+                discovery.get(2, TimeUnit.SECONDS).availableCapabilities()
+                    .contains(MeetingCapabilityState.SUMMARY_SERVER))
+            f.runtime.emit("s1", 1, "zh-CN", "最终字幕", true)
+            f.probe.awaitCanStop()
+            f.session.requestStop()
+            assertNotNull("纯服务端纪要部署必须能正常收口", f.probe.result())
+            assertEquals(listOf("zh-CN"), f.server.summaryRequests.single().languages())
+            assertFalse("设备不再领取纪要模型材料", f.server.steps.contains("summaryGrant"))
+        }
+    }
+
+    /**
+     * 部署声明了 summary.server 但本场 Create 没有授予：不得静默降级成“没有纪要但照样开会”，
+     * 按必需能力缺失在本场开始阶段失败，让宿主看到错误而不是悄悄丢纪要。
+     */
+    @Test fun missingServerSummaryGrantFailsTheMeetingInsteadOfSilentlyDroppingSummary() {
+        Fixture(true, setOf(MeetingCapabilityState.TRANSCRIPT)).use { f ->
+            f.server.deploymentCapabilities = SERVER_SUMMARY
+            f.session = f.client.start(summaryOptions(), f.probe)
+            val failed = f.probe.awaitPhase(MeetingSessionState.Phase.FAILED)
+            assertEquals(MeetingErrorCode.START_FAILED, failed.errorCode())
+            assertNull("未授予时不能宣布会议已开始", f.probe.info)
+            assertFalse(f.probe.states.any { it.phase() == MeetingSessionState.Phase.RUNNING })
+            assertTrue("缺失发生在 Create 授权之后", f.server.steps.contains("create"))
+            assertFalse("缺少必需能力时不得启动客户端输入", f.server.steps.contains("start"))
+        }
+    }
+
+    /**
+     * 设备直连兼容：部署同时声明 summary.server 与 summary.structured 时，请求列表仍保留
+     * summary.structured，本场两种纪要能力都可用；它只是兼容项，不再单独决定能否建会。
+     */
+    @Test fun deviceDirectSummaryStaysInRequestWhenDeploymentStillDeclaresIt() {
+        Fixture(true, ALL).use { f ->
+            f.server.deploymentCapabilities = ALL
+            f.start(summaryOptions())
+            assertEquals(listOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.SUMMARY_SERVER,
+                MeetingCapabilityState.SUMMARY, MeetingCapabilityState.SPEAKER),
+                f.server.requested.requestedCapabilities())
+            assertTrue(f.probe.info!!.availableCapabilities().contains(MeetingCapabilityState.SUMMARY_SERVER))
+            assertTrue(f.probe.info!!.availableCapabilities().contains(MeetingCapabilityState.SUMMARY))
         }
     }
 
@@ -440,7 +506,7 @@ class MeetingCoordinatorTest {
         }
     }
 
-    @Test fun shortMinutesWithoutFinalTranscriptSkipsSummaryAndStillPublishesThenStops() {
+    @Test fun shortMinutesWithoutFinalTranscriptStillRequestsServerSummaryAndStops() {
         val publisher: Publisher = Publisher()
         Fixture(true, ALL, ReferenceIdentityProvider("fixture-token"), publisher).use { f ->
             val sealed: SealedAudioArtifact = audio("mtg_test", 32000)
@@ -448,14 +514,16 @@ class MeetingCoordinatorTest {
             f.start(retainedOptions(MeetingOptions.Mode.MEETING_MINUTES))
             f.session.requestStop()
             assertNotNull(f.probe.result())
-            assertNull("没有最终字幕不调用总结运行时", f.runtime.summaryInput)
-            assertTrue("不添加占位字幕或伪总结", f.server.transcripts.isEmpty())
-            assertTrue(f.probe.states.any { value -> value.notice() == MeetingNotice.NO_FINAL_TRANSCRIPT })
+            assertNull("设备不再生成纪要正文", f.runtime.summaryInput)
+            assertTrue("不添加占位字幕", f.server.transcripts.isEmpty())
+            assertFalse("本场有无本地最终字幕不再由设备决定纪要",
+                f.probe.states.any { value -> value.notice() == MeetingNotice.NO_FINAL_TRANSCRIPT })
+            assertEquals(listOf("zh-CN"), f.server.summaryRequests.single().languages())
             assertSame(sealed, publisher.contexts.get(0).audio())
             assertEquals(listOf(1000L), f.server.usages)
             assertEquals(1, f.runtime.stopCalls)
             assertEquals(listOf("discover", "create", "grant", "start", "usage",
-                    "publish", "stop", "manifest"), f.server.steps)
+                    "publish", "summaryRequest", "stop", "manifest"), f.server.steps)
         }
     }
 
@@ -478,7 +546,7 @@ class MeetingCoordinatorTest {
         }
     }
 
-    @Test fun retainedTailUsageAndSelectedSummaryAreSavedBeforePublicationThenStop() {
+    @Test fun retainedTailUsageAndServerSummaryRequestHappenAroundPublicationThenStop() {
         val publisher: Publisher = Publisher()
         Fixture(true, ALL, ReferenceIdentityProvider("fixture-token"), publisher).use { f ->
             val audio: SealedAudioArtifact = audio("mtg_test", 32000)
@@ -492,9 +560,10 @@ class MeetingCoordinatorTest {
             assertSame(audio, publisher.contexts.get(0).audio())
             assertEquals("mtg_test", publisher.contexts.get(0).meetingId())
             assertEquals(1000, publisher.contexts.get(0).frozenAudioDurationMs())
-            assertEquals("最后字幕", f.runtime.summaryInput!!.transcript())
+            assertNull("设备不再调用文本模型生成纪要", f.runtime.summaryInput)
+            assertEquals(listOf("zh-CN"), f.server.summaryRequests.single().languages())
             assertEquals(listOf("discover", "create", "grant", "start", "event1", "usage",
-                    "summaryGrant", "summary", "publish", "stop", "manifest"), f.server.steps)
+                    "publish", "summaryRequest", "stop", "manifest"), f.server.steps)
             assertEquals(1, f.runtime.artifactReads)
             assertEquals(1, f.runtime.durationReads)
             assertEquals(1, f.runtime.stopCalls)
@@ -643,7 +712,7 @@ class MeetingCoordinatorTest {
             f.session.requestStop()
             assertNotNull(f.probe.result())
             assertEquals(listOf("discover", "create", "grant", "start", "event1", "event1",
-                    "usage", "summaryGrant", "summary", "publish", "stop", "manifest"), f.server.steps)
+                    "usage", "publish", "summaryRequest", "stop", "manifest"), f.server.steps)
             assertEquals("远端第一次已保存，响应丢失后的同包只确认一次事实", 1, f.server.standardAccepted.size)
             assertEquals(2, f.server.standardAttempts.size)
             assertEquals(f.server.standardAttempts.get(0), f.server.standardAttempts.get(1))
@@ -726,7 +795,7 @@ class MeetingCoordinatorTest {
             assertEquals(1, f.probe.beforeStopCalls.get())
             assertEquals(listOf(1000L), f.server.usages)
             assertEquals(listOf("discover", "create", "grant", "start", "event1", "usage",
-                    "summaryGrant", "summary", "publish", "publish", "stop", "manifest"), f.server.steps)
+                    "publish", "publish", "summaryRequest", "stop", "manifest"), f.server.steps)
         }
     }
 
@@ -750,9 +819,9 @@ class MeetingCoordinatorTest {
         }
     }
 
-    @Test fun unconfirmedTailUsageOrSelectedSummaryNeverCreatesStoppedCheckpoint() {
-        // 只覆盖真实切点的三个前置屏障，不建立未 ACK 队列的磁盘恢复。
-        for (barrier in 0 until 3) {
+    @Test fun unconfirmedTailOrUsageNeverCreatesStoppedCheckpoint() {
+        // 只覆盖真实切点的两个前置屏障，不建立未 ACK 队列的磁盘恢复。
+        for (barrier in 0 until 2) {
             val store: MemoryStore = MemoryStore()
             val publisher: Publisher = Publisher()
             Fixture(true, ALL, ReferenceIdentityProvider("test-token"),
@@ -761,7 +830,6 @@ class MeetingCoordinatorTest {
                 f.runtime.emitTail = true
                 f.server.failAppend = barrier == 0
                 f.server.failUsageOnce = barrier == 1
-                f.server.failSummaryOnce = barrier == 2
                 f.start(retainedOptions(MeetingOptions.Mode.MEETING_MINUTES))
                 f.session.requestStop()
                 f.probe.awaitPhase(MeetingSessionState.Phase.STOP_PENDING)
@@ -774,21 +842,65 @@ class MeetingCoordinatorTest {
         }
     }
 
-    @Test fun summaryAckLossRetriesFrozenPayloadInsteadOfRegenerating() {
-        Fixture(true, ALL).use { f ->
-            f.runtime.varySummary = true
-            f.server.failSummaryOnce = true
-            f.start(MeetingOptions(MeetingOptions.Mode.MEETING_MINUTES, "zh-CN", "en-US", false,
-                MeetingOptions.ResultDelivery.WEB, "https://result.example.test", emptyList(), false))
-            f.runtime.emit("one", 1, "zh-CN", "你好", true)
+    @Test fun summaryRequestFailureIsWarnedAndStopStillCompletes() {
+        val publisher: Publisher = Publisher()
+        Fixture(true, ALL, ReferenceIdentityProvider("test-token"), publisher).use { f ->
+            f.runtime.prepareAudio(audio("mtg_test", 32000))
+            f.server.failSummaryRequestOnce = true
+            f.start(retainedOptions(MeetingOptions.Mode.MEETING_MINUTES))
             f.session.requestStop()
-            f.probe.awaitPhase(MeetingSessionState.Phase.STOP_PENDING)
+            assertNotNull("纪要请求失败不能卡住停止", f.probe.result())
+            assertEquals(listOf("discover", "create", "grant", "start", "usage",
+                    "publish", "summaryRequest", "stop", "manifest"), f.server.steps)
+            assertEquals(1, f.server.summaryRequests.size)
+            assertEquals(1, f.runtime.stopCalls)
+            assertNull("设备不因纪要失败回退到本地生成", f.runtime.summaryInput)
+            assertFalse(f.server.steps.contains("summaryGrant"))
+            assertFalse(f.server.steps.contains("summarySubmit"))
+        }
+    }
+
+    @Test fun bilingualStopReportsSourceThenTargetLanguage() {
+        val publisher: Publisher = Publisher()
+        Fixture(true, ALL, ReferenceIdentityProvider("test-token"), publisher).use { f ->
+            f.runtime.prepareAudio(audio("mtg_test", 32000))
+            f.start(MeetingOptions(MeetingOptions.Mode.LIVE_TRANSLATION, "zh-CN", "en-US", false,
+                MeetingOptions.ResultDelivery.WEB, "https://result.example.test", emptyList(), true)
+                .withCreateParameters("双语纪要", "Asia/Shanghai", true))
             f.session.requestStop()
             assertNotNull(f.probe.result())
-            assertEquals(2, f.server.summaryAttempts.size)
-            // 第一次确认丢失后重试必须原样重放；重新生成会导致后端 EVENT_CONFLICT。
-            assertEquals(f.server.summaryAttempts[0], f.server.summaryAttempts[1])
-            assertEquals(1, f.runtime.summaryCalls)
+            val request = f.server.summaryRequests.single()
+            assertEquals("mtg_test", request.meetingId())
+            assertEquals(listOf("zh-CN", "en-US"), request.languages())
+            // 纪要语言只在资源发布确认后、Stop 前上报；设备不再领取材料或提交正文。
+            assertTrue(f.server.steps.indexOf("publish") < f.server.steps.indexOf("summaryRequest"))
+            assertTrue(f.server.steps.indexOf("summaryRequest") < f.server.steps.indexOf("stop"))
+            assertFalse(f.server.steps.contains("summaryGrant"))
+            assertFalse(f.server.steps.contains("summarySubmit"))
+            assertNull(f.runtime.summaryInput)
+        }
+    }
+
+    @Test fun singleLanguageStopReportsOnlySourceLanguage() {
+        Fixture(true, ALL).use { f ->
+            f.start(options(MeetingOptions.Mode.MEETING_MINUTES, MeetingOptions.ResultDelivery.WEB, false))
+            f.session.requestStop()
+            assertNotNull(f.probe.result())
+            assertEquals(listOf("zh-CN"), f.server.summaryRequests.single().languages())
+            assertNull(f.runtime.summaryInput)
+        }
+    }
+
+    @Test fun samePrimaryLanguageTagIsReportedOnlyOnce() {
+        for ((source, target) in listOf("zh-CN" to "zh-TW", "en-US" to "en-GB")) {
+            Fixture(true, ALL).use { f ->
+                f.start(MeetingOptions(MeetingOptions.Mode.LIVE_TRANSLATION, source, target, false,
+                    MeetingOptions.ResultDelivery.WEB, "https://result.example.test", emptyList(), true))
+                f.session.requestStop()
+                assertNotNull(f.probe.result())
+                assertEquals("同主标签的 $source/$target 只报一个",
+                    listOf(source), f.server.summaryRequests.single().languages())
+            }
         }
     }
 
@@ -809,6 +921,9 @@ class MeetingCoordinatorTest {
             pending = store.read("mtg_test").orElseThrow()
             assertEquals(StoppedMeetingCheckpoint.Phase.PUBLISH_PENDING, pending.phase())
             assertNull(pending.genTime())
+            // 发布失败发生在纪要语言上报之前：停止记录必须带上会前语言快照且尚未上报。
+            assertEquals(listOf("zh-CN"), pending.summaryLanguages())
+            assertFalse(pending.summaryReported())
             assertEquals(0, f.clockCalls.get())
             assertEquals(1, f.runtime.artifactReads)
             assertTrue(f.probe.results.isEmpty())
@@ -830,18 +945,354 @@ class MeetingCoordinatorTest {
             assertEquals(sealed.capturedPcmBytes(), actual.audio().capturedPcmBytes())
             assertEquals(1000, actual.frozenAudioDurationMs())
             assertEquals("original-token", actual.accessToken())
-            assertEquals(StoppedMeetingCheckpoint.Phase.READY,
-                    restartedStore.read("mtg_test").orElseThrow().phase())
+            val resumed = restartedStore.read("mtg_test").orElseThrow()
+            assertEquals(StoppedMeetingCheckpoint.Phase.READY, resumed.phase())
+            // 发布确认后、Stop 之前按停止记录里的语言快照补发纪要请求，并持久化已上报。
+            assertEquals(listOf("zh-CN"), server.summaryRequests.single().languages())
+            assertTrue(server.steps.indexOf("publish") < server.steps.indexOf("summaryRequest"))
+            assertTrue(server.steps.indexOf("summaryRequest") < server.steps.indexOf("stop"))
+            assertTrue(resumed.summaryReported())
             assertResumeDidNotRestartBusiness(server, freshRuntime, currentIdentityReads)
-            assertEquals("已 ACK 的总结不重新请求", 1, Collections.frequency(server.steps, "summaryGrant"))
-            assertEquals(1, Collections.frequency(server.steps, "summary"))
+            assertFalse("续办不再领取旧纪要模型材料", server.steps.contains("summaryGrant"))
+            assertFalse("续办不再提交旧纪要正文", server.steps.contains("summarySubmit"))
             // 停止续办在发布前补交同场同值用量：正常停止已交过一次，服务端按幂等处理。
             assertEquals(listOf(1000L, 1000L), server.usages)
         }
     }
 
-    @Test fun acceptedStopWithLostAckResumesSameKeyWithoutRepeatingPublication() {
+    /**
+     * 评审场景：发布已成功落盘，但进程在“上报纪要语言”前退出。
+     * 停止记录带语言快照且未上报，续办必须在 Stop 之前补发一次请求，成功后标记已上报。
+     */
+    @Test fun publishedCheckpointWithoutReportedSummaryResumesRequestBeforeStop() {
         val store: MemoryStore = MemoryStore()
+        val sealed: SealedAudioArtifact = audio("mtg_test", 32000)
+        val config = MeetingClientConfig.reference("http://127.0.0.1", "original-token")
+        val pending = StoppedMeetingCheckpoint.restore(sealed, 1000, config, "stable-original-key",
+            StoppedMeetingCheckpoint.Phase.PUBLISHED, null).withSummaryLanguages(listOf("zh-CN", "en-US"))
+        assertFalse(pending.summaryReported())
+        store.save(pending)
+        val publisher: Publisher = Publisher()
+        val server = Server(ALL).also { publisher.server = it }
+        val runtime: Runtime = Runtime(true)
+        resumeClient(store, publisher, server, runtime, AtomicInteger(), { it.run() }, { 777 }).use { client ->
+            assertEquals(MeetingResult.Status.READY,
+                resumeResult(client).get(2, TimeUnit.SECONDS).status())
+            assertEquals(listOf("zh-CN", "en-US"), server.summaryRequests.single().languages())
+            assertTrue("发布确认之后才上报纪要语言",
+                server.steps.indexOf("summaryRequest") < server.steps.indexOf("stop"))
+            assertTrue("发布已确认，续办不再发布", publisher.contexts.isEmpty())
+            assertTrue("上报成功必须持久化为已上报",
+                store.read("mtg_test").orElseThrow().summaryReported())
+            assertFalse("续办不再领取旧纪要模型材料", server.steps.contains("summaryGrant"))
+            assertFalse("续办不再提交旧纪要正文", server.steps.contains("summarySubmit"))
+        }
+    }
+
+    /**
+     * 已上报纪要语言但 Stop 未被受理的场次：重复续办只能沿用记录，不再请求第二次。
+     * 依据是首次请求成功后立刻把“已上报”写回停止记录。
+     */
+    @Test fun repeatedResumeNeverResubmitsSummaryAlreadyReported() {
+        val store: MemoryStore = MemoryStore()
+        val publisher: Publisher = Publisher()
+        lateinit var server: Server
+        Fixture(true, ALL, ReferenceIdentityProvider("test-token"), publisher, store).use { f ->
+            f.runtime.prepareAudio(audio("mtg_test", 32000))
+            f.server.pendingStop = true
+            f.start(retainedOptions(MeetingOptions.Mode.MEETING_MINUTES))
+            f.session.requestStop()
+            f.probe.awaitPhase(MeetingSessionState.Phase.STOP_PENDING)
+            val saved = store.read("mtg_test").orElseThrow()
+            assertEquals(StoppedMeetingCheckpoint.Phase.PUBLISHED, saved.phase())
+            assertEquals(listOf("zh-CN"), saved.summaryLanguages())
+            assertTrue("上报成功后才允许标记已上报", saved.summaryReported())
+            server = f.server
+        }
+        assertEquals(1, server.summaryRequests.size)
+        val reopened: MemoryStore = store.reopened()
+        val resumedPublisher: Publisher = Publisher()
+        resumedPublisher.server = server
+        resumeClient(reopened, resumedPublisher, server, Runtime(true), AtomicInteger(),
+                { it.run() }, { 888 }).use { client ->
+            assertEquals(MeetingResult.Status.READY,
+                resumeResult(client).get(2, TimeUnit.SECONDS).status())
+            assertEquals("已上报的场次重复续办不能再请求纪要",
+                1, server.summaryRequests.size)
+            assertTrue("发布已确认，续办不再发布", resumedPublisher.contexts.isEmpty())
+        }
+    }
+
+    /** 旧停止记录没有语言快照字段：续办按 null 兼容，不补发纪要请求也不报错。 */
+    @Test fun legacyCheckpointWithoutSummaryFieldsResumesWithoutSummaryRequest() {
+        val store: MemoryStore = MemoryStore()
+        val sealed: SealedAudioArtifact = audio("mtg_test", 32000)
+        val config = MeetingClientConfig.reference("http://127.0.0.1", "original-token")
+        val legacy = StoppedMeetingCheckpoint.restore(sealed, 1000, config, "stable-original-key",
+            StoppedMeetingCheckpoint.Phase.PUBLISHED, null)
+        assertNull("旧记录没有语言快照", legacy.summaryLanguages())
+        assertFalse("旧记录没有上报标记", legacy.summaryReported())
+        store.save(legacy)
+        val publisher: Publisher = Publisher()
+        val server = Server(ALL).also { publisher.server = it }
+        resumeClient(store, publisher, server, Runtime(true), AtomicInteger(),
+                { it.run() }, { 999 }).use { client ->
+            assertEquals(MeetingResult.Status.READY,
+                resumeResult(client).get(2, TimeUnit.SECONDS).status())
+            assertTrue("旧记录不得凭空补发纪要请求", server.summaryRequests.isEmpty())
+            assertTrue("旧记录仍能正常 Stop", server.steps.contains("stop"))
+        }
+    }
+
+    /**
+     * 评审场景：上一轮在发布后上报纪要失败，流程仍完成 Stop，记录停在 STOP_ACCEPTED。
+     * 下次续办不再经过 PUBLISHED 分支，必须在读取清单前按记录里的语言快照补报并落盘。
+     */
+    @Test fun acceptedStopCheckpointWithoutReportedSummaryResumesRequestBeforeManifest() {
+        val store: MemoryStore = MemoryStore()
+        val sealed: SealedAudioArtifact = audio("mtg_test", 32000)
+        val config = MeetingClientConfig.reference("http://127.0.0.1", "original-token")
+        val accepted = StoppedMeetingCheckpoint.restore(sealed, 1000, config, "stable-original-key",
+            StoppedMeetingCheckpoint.Phase.STOP_ACCEPTED, 555L)
+            .withSummaryLanguages(listOf("zh-CN", "en-US"))
+        assertFalse("停止已受理但纪要尚未上报", accepted.summaryReported())
+        store.save(accepted)
+        val publisher = Publisher()
+        val server = Server(ALL).also { publisher.server = it }
+        val runtime: Runtime = Runtime(true)
+        resumeClient(store, publisher, server, runtime, AtomicInteger(), { it.run() },
+                { throw AssertionError("Stop 已受理，不得重建 genTime") }).use { client ->
+            assertEquals(MeetingResult.Status.READY,
+                resumeResult(client).get(2, TimeUnit.SECONDS).status())
+            assertEquals(1, server.summaryRequests.size)
+            assertEquals(listOf("zh-CN", "en-US"), server.summaryRequests.single().languages())
+            assertTrue("Stop 已受理，续办不再 Stop", server.stopKeys.isEmpty())
+            assertTrue("读取清单之前补报纪要语言",
+                server.steps.indexOf("summaryRequest") < server.steps.indexOf("manifest"))
+            val resumed = store.read("mtg_test").orElseThrow()
+            assertTrue("上报成功必须持久化为已上报", resumed.summaryReported())
+            assertEquals(StoppedMeetingCheckpoint.Phase.READY, resumed.phase())
+            assertTrue("发布已确认，续办不再发布", publisher.contexts.isEmpty())
+        }
+    }
+
+    /**
+     * 已补报并落盘的 STOP_ACCEPTED 记录再次续办：新进程读回“已上报”后不得再请求第二次。
+     */
+    @Test fun acceptedStopSummaryReportIsPersistedAndNeverRepeatedOnResume() {
+        val store: MemoryStore = MemoryStore()
+        val sealed: SealedAudioArtifact = audio("mtg_test", 32000)
+        val config = MeetingClientConfig.reference("http://127.0.0.1", "original-token")
+        store.save(StoppedMeetingCheckpoint.restore(sealed, 1000, config, "stable-original-key",
+            StoppedMeetingCheckpoint.Phase.STOP_ACCEPTED, 555L).withSummaryLanguages(listOf("zh-CN")))
+        val server = Server(ALL)
+        resumeClient(store, Publisher().also { it.server = server }, server, Runtime(true),
+                AtomicInteger(), { it.run() }, { throw AssertionError("Stop 已受理，不得重建 genTime") })
+            .use { client ->
+                assertEquals(MeetingResult.Status.READY,
+                    resumeResult(client).get(2, TimeUnit.SECONDS).status())
+            }
+        assertEquals(1, server.summaryRequests.size)
+        val reopened: MemoryStore = store.reopened()
+        assertTrue("已上报标记必须随停止记录保存",
+            reopened.read("mtg_test").orElseThrow().summaryReported())
+        resumeClient(reopened, Publisher().also { it.server = server }, server, Runtime(true),
+                AtomicInteger(), { it.run() }, { throw AssertionError("Stop 已受理，不得重建 genTime") })
+            .use { client ->
+                assertEquals(MeetingResult.Status.READY,
+                    resumeResult(client).get(2, TimeUnit.SECONDS).status())
+            }
+        assertEquals("已上报的场次再次续办不得重复请求纪要", 1, server.summaryRequests.size)
+    }
+
+    /**
+     * Stop 已受理后的补报失败：只告警，本轮续办仍读取真实清单并交付；
+     * 未上报状态保留，交给下一次续办（含 READY 续办）重试。
+     */
+    @Test fun acceptedStopSummaryReportFailureStillCompletesAndStaysUnreported() {
+        val store: MemoryStore = MemoryStore()
+        val sealed: SealedAudioArtifact = audio("mtg_test", 32000)
+        val config = MeetingClientConfig.reference("http://127.0.0.1", "original-token")
+        store.save(StoppedMeetingCheckpoint.restore(sealed, 1000, config, "stable-original-key",
+            StoppedMeetingCheckpoint.Phase.STOP_ACCEPTED, 555L).withSummaryLanguages(listOf("zh-CN")))
+        val publisher = Publisher()
+        val server = Server(ALL).also { publisher.server = it }
+        server.failSummaryRequestOnce = true
+        resumeClient(store, publisher, server, Runtime(true), AtomicInteger(), { it.run() },
+                { throw AssertionError("Stop 已受理，不得重建 genTime") }).use { client ->
+            assertEquals("纪要上报失败不能阻断结果读取",
+                MeetingResult.Status.READY, resumeResult(client).get(2, TimeUnit.SECONDS).status())
+            assertEquals(1, server.summaryRequests.size)
+            assertTrue("失败后仍读取真实清单", server.steps.contains("manifest"))
+            val resumed = store.read("mtg_test").orElseThrow()
+            assertEquals(StoppedMeetingCheckpoint.Phase.READY, resumed.phase())
+            assertFalse("上报失败不得置位已上报", resumed.summaryReported())
+        }
+    }
+
+    /** READY 之前最后一次续办仍未上报时也要补：服务端允许 Stop 之后受理纪要请求。 */
+    @Test fun readyCheckpointWithoutReportedSummaryReportsBeforeReturningResult() {
+        val store: MemoryStore = MemoryStore()
+        val sealed: SealedAudioArtifact = audio("mtg_test", 32000)
+        val config = MeetingClientConfig.reference("http://127.0.0.1", "original-token")
+        store.save(StoppedMeetingCheckpoint.restore(sealed, 1000, config, "stable-original-key",
+            StoppedMeetingCheckpoint.Phase.READY, 555L).withSummaryLanguages(listOf("zh-CN")))
+        val publisher = Publisher()
+        val server = Server(ALL).also { publisher.server = it }
+        val freshRuntime: Runtime = Runtime(true)
+        resumeClient(store, publisher, server, freshRuntime, AtomicInteger(), { it.run() },
+                { throw AssertionError("READY 续办不得重建 genTime") }).use { client ->
+            assertEquals(MeetingResult.Status.READY,
+                resumeResult(client).get(2, TimeUnit.SECONDS).status())
+            assertEquals(1, server.summaryRequests.size)
+            assertTrue("补报成功仍须落盘", store.read("mtg_test").orElseThrow().summaryReported())
+            assertEquals(StoppedMeetingCheckpoint.Phase.READY,
+                store.read("mtg_test").orElseThrow().phase())
+            assertTrue("READY 续办不重跑业务", publisher.contexts.isEmpty())
+            assertFalse(server.steps.contains("stop"))
+        }
+    }
+
+    /**
+     * 评审场景：READY 记录仍欠纪要语言上报，记录里的旧令牌已过期。补报走原账号
+     * Bearer，必须先核验原会议归属并换成新令牌落盘，再用新令牌请求纪要；否则每次
+     * 补报都 401，READY 补报路径永远补不上。
+     */
+    @Test fun readyCheckpointWithUnreportedSummaryRenewsAccessBeforeReporting() {
+        val store: MemoryStore = MemoryStore()
+        val sealed: SealedAudioArtifact = audio("mtg_test", 32000)
+        store.save(StoppedMeetingCheckpoint.restore(sealed, 1000,
+            MeetingClientConfig.reference("http://127.0.0.1", "expired-scene-token"),
+            "stable-original-key", StoppedMeetingCheckpoint.Phase.READY, 555L)
+            .withSummaryLanguages(listOf("zh-CN")))
+        val renewals = AtomicInteger()
+        val identity = object : IdentityProvider {
+            override fun currentIdentity(): IdentityResult =
+                throw AssertionError("READY 补报必须走同账号收尾续签，不能读取当前身份")
+            override fun identityForFinalization(id: String, original: IdentitySession): IdentityResult {
+                assertEquals("mtg_test", id)
+                assertEquals("expired-scene-token", original.accessToken())
+                renewals.incrementAndGet()
+                return IdentityResult.loggedIn(IdentitySession("renewed-scene-token", "原账号"))
+            }
+        }
+        val server = Server(ALL)
+        val resolvedTokens = ArrayList<String>()
+        readyResumeClient(store, identity, server, resolvedTokens).use { client ->
+            assertEquals(MeetingResult.Status.READY,
+                resumeResult(client).get(2, TimeUnit.SECONDS).status())
+        }
+        assertEquals("READY 欠上报必须先核验一次", 1, renewals.get())
+        assertEquals("纪要请求必须使用续签后的新令牌", listOf("renewed-scene-token"), resolvedTokens)
+        assertEquals(1, server.summaryRequests.size)
+        assertEquals(listOf("zh-CN"), server.summaryRequests.single().languages())
+        assertEquals(listOf(555L), server.genTimes)
+        val resumed = store.read("mtg_test").orElseThrow()
+        assertEquals("续签后的新令牌必须随停止记录落盘",
+            "renewed-scene-token", resumed.context().accessToken())
+        assertTrue("上报成功必须落盘已上报", resumed.summaryReported())
+        assertEquals(StoppedMeetingCheckpoint.Phase.READY, resumed.phase())
+    }
+
+    /** READY 且纪要已上报：不需要补报，保持原行为，不核验身份也不换凭据。 */
+    @Test fun readyCheckpointWithReportedSummarySkipsIdentityRenewal() {
+        val store: MemoryStore = MemoryStore()
+        val sealed: SealedAudioArtifact = audio("mtg_test", 32000)
+        store.save(StoppedMeetingCheckpoint.restore(sealed, 1000,
+            MeetingClientConfig.reference("http://127.0.0.1", "expired-scene-token"),
+            "stable-original-key", StoppedMeetingCheckpoint.Phase.READY, 555L)
+            .withSummaryLanguages(listOf("zh-CN")).withSummaryReported())
+        val renewals = AtomicInteger()
+        val identity = object : IdentityProvider {
+            override fun currentIdentity(): IdentityResult =
+                throw AssertionError("READY 续办不得读取当前身份")
+            override fun identityForFinalization(id: String, original: IdentitySession): IdentityResult {
+                renewals.incrementAndGet()
+                throw AssertionError("已上报的 READY 记录不得再核验身份")
+            }
+        }
+        val server = Server(ALL)
+        val resolvedTokens = ArrayList<String>()
+        readyResumeClient(store, identity, server, resolvedTokens).use { client ->
+            assertEquals(MeetingResult.Status.READY,
+                resumeResult(client).get(2, TimeUnit.SECONDS).status())
+        }
+        assertEquals("已上报的 READY 记录不核验身份", 0, renewals.get())
+        assertTrue("已上报的场次不得重复请求纪要", server.summaryRequests.isEmpty())
+        assertEquals("保持记录里的原凭据", listOf("expired-scene-token"), resolvedTokens)
+        assertEquals("凭据不因读取结果被改写",
+            "expired-scene-token", store.read("mtg_test").orElseThrow().context().accessToken())
+    }
+
+    /** 旧 READY 记录没有语言快照：等价于不需要补报，同样不核验身份也不发纪要请求。 */
+    @Test fun legacyReadyCheckpointWithoutSummarySnapshotSkipsIdentityRenewal() {
+        val store: MemoryStore = MemoryStore()
+        val sealed: SealedAudioArtifact = audio("mtg_test", 32000)
+        store.save(StoppedMeetingCheckpoint.restore(sealed, 1000,
+            MeetingClientConfig.reference("http://127.0.0.1", "expired-scene-token"),
+            "stable-original-key", StoppedMeetingCheckpoint.Phase.READY, 555L))
+        val renewals = AtomicInteger()
+        val identity = object : IdentityProvider {
+            override fun currentIdentity(): IdentityResult =
+                throw AssertionError("READY 续办不得读取当前身份")
+            override fun identityForFinalization(id: String, original: IdentitySession): IdentityResult {
+                renewals.incrementAndGet()
+                throw AssertionError("没有语言快照的 READY 记录不得核验身份")
+            }
+        }
+        val server = Server(ALL)
+        val resolvedTokens = ArrayList<String>()
+        readyResumeClient(store, identity, server, resolvedTokens).use { client ->
+            assertEquals(MeetingResult.Status.READY,
+                resumeResult(client).get(2, TimeUnit.SECONDS).status())
+        }
+        assertEquals("旧记录不需要补报，不得核验身份", 0, renewals.get())
+        assertTrue("旧记录不得凭空补发纪要请求", server.summaryRequests.isEmpty())
+        assertEquals(listOf("expired-scene-token"), resolvedTokens)
+    }
+
+    /**
+     * READY 补报前的身份核验失败（未登录或核验网络异常）：服务端已经收口，不能因为
+     * 核验挡住读取结果；本轮沿用原凭据尝试一次纪要请求，失败后未上报状态保留在记录
+     * 里，下一轮扫描会重新核验并补报。其它阶段的核验失败仍让续办报错。
+     */
+    @Test fun readySummaryIdentityRenewalFailureKeepsResultAndUnreportedRecord() {
+        val failures = listOf<() -> IdentityResult>(
+            { IdentityResult.loginRequired("请先登录") },
+            { throw IOException("fixture-identity-probe-failed") })
+        for (failure in failures) {
+            val store: MemoryStore = MemoryStore()
+            val sealed: SealedAudioArtifact = audio("mtg_test", 32000)
+            store.save(StoppedMeetingCheckpoint.restore(sealed, 1000,
+                MeetingClientConfig.reference("http://127.0.0.1", "expired-scene-token"),
+                "stable-original-key", StoppedMeetingCheckpoint.Phase.READY, 555L)
+                .withSummaryLanguages(listOf("zh-CN")))
+            val identity = object : IdentityProvider {
+                override fun currentIdentity(): IdentityResult =
+                    throw AssertionError("READY 补报不得读取当前身份")
+                override fun identityForFinalization(id: String, original: IdentitySession): IdentityResult =
+                    failure()
+            }
+            val server = Server(ALL)
+            server.failSummaryRequestOnce = true
+            val resolvedTokens = ArrayList<String>()
+            readyResumeClient(store, identity, server, resolvedTokens).use { client ->
+                assertEquals("核验失败不能挡住已收口的结果",
+                    MeetingResult.Status.READY,
+                    resumeResult(client).get(2, TimeUnit.SECONDS).status())
+            }
+            assertTrue("仍读取真实清单", server.steps.contains("manifest"))
+            assertEquals("本轮沿用原凭据尝试补报", listOf("expired-scene-token"), resolvedTokens)
+            assertEquals(1, server.summaryRequests.size)
+            val kept = store.read("mtg_test").orElseThrow()
+            assertEquals("核验失败不得改写原凭据",
+                "expired-scene-token", kept.context().accessToken())
+            assertFalse("核验失败不能伪造已上报", kept.summaryReported())
+            assertEquals("记录保留 READY 待下轮", StoppedMeetingCheckpoint.Phase.READY, kept.phase())
+        }
+    }
+
+    @Test fun acceptedStopWithLostAckResumesSameKeyWithoutRepeatingPublication() {        val store: MemoryStore = MemoryStore()
         val originalPublisher: Publisher = Publisher()
         lateinit var server: Server
         lateinit var originalKey: String
@@ -999,6 +1450,31 @@ class MeetingCoordinatorTest {
         assertFalse(noDelivery.deliversResult())
         assertFalse(noDelivery.published().deliversResult())
         assertThrows(IOException::class.java, { accepted.merge(noDelivery) })
+        // 会前语言快照是原场事实：旧记录可升级一次，但两侧都有值时必须一致。
+        val withLanguages = pending.withSummaryLanguages(listOf("zh-CN"))
+        assertEquals(listOf("zh-CN"), withLanguages.summaryLanguages())
+        assertFalse(withLanguages.summaryReported())
+        assertEquals(listOf("zh-CN"), withLanguages.published().stopAccepted(555).summaryLanguages())
+        assertThrows(IOException::class.java, {
+            withLanguages.merge(pending.withSummaryLanguages(listOf("en-US")))
+        })
+        // “已上报”只增不减：已上报记录不会被较早状态回退，也保留语言快照。
+        val reported = withLanguages.withSummaryReported()
+        assertTrue(reported.summaryReported())
+        assertTrue(reported.merge(withLanguages).summaryReported())
+        assertTrue(withLanguages.merge(reported).summaryReported())
+        assertEquals(listOf("zh-CN"), withLanguages.merge(reported).summaryLanguages())
+        // 发布／Stop 阶段转换不能丢语言快照与上报标记。
+        val advanced = reported.published().stopAccepted(555).ready()
+        assertEquals(listOf("zh-CN"), advanced.summaryLanguages())
+        assertTrue(advanced.summaryReported())
+        // 已编译合作伙伴仍在用的七参 restore／两参 pending JVM 方法必须保留。
+        assertNotNull(StoppedMeetingCheckpoint::class.java.getMethod("restore",
+            SealedAudioArtifact::class.java, java.lang.Long.TYPE, MeetingClientConfig::class.java,
+            String::class.java, StoppedMeetingCheckpoint.Phase::class.java,
+            java.lang.Long::class.java, java.lang.Boolean.TYPE))
+        assertNotNull(StoppedMeetingCheckpoint::class.java.getMethod("pending",
+            MeetingArtifactPublisher.Context::class.java, java.lang.Boolean.TYPE))
     }
 
     @Test fun pendingStopRenewsSameSceneAccessAndDoesNotOverwriteItOnAnotherRetry() {
@@ -1046,7 +1522,7 @@ class MeetingCoordinatorTest {
             assertEquals(1, f.runtime.artifactReads)
             assertEquals(1, f.runtime.durationReads)
             assertEquals(1, Collections.frequency(f.server.steps, "create"))
-            assertFalse(f.server.steps.contains("summary"))
+            assertFalse(f.server.steps.contains("summaryRequest"))
         }
     }
 
@@ -1195,7 +1671,7 @@ class MeetingCoordinatorTest {
                 assertTrue("无痕续办不得读取清单", !server.steps.contains("manifest"))
                 assertEquals(2, Collections.frequency(server.steps, "stop"))
                 assertNull(runtime.summaryInput)
-                assertFalse(server.steps.contains("summary"))
+                assertFalse(server.steps.contains("summaryRequest"))
             } finally { client.close() }
         } finally { dir.deleteRecursively() }
     }
@@ -1217,7 +1693,7 @@ class MeetingCoordinatorTest {
         }
     }
 
-    @Test fun recoversInterruptedMeetingWithJournalSummaryAndStop() {
+    @Test fun recoversInterruptedMeetingAndRequestsServerSummaryBeforeStop() {
         val dir = File.createTempFile("recovery", "").apply { delete(); mkdirs() }
         try {
             val audioFile = File(dir, "mtg_test.pcm").apply { writeBytes(ByteArray(32000)) }
@@ -1225,7 +1701,7 @@ class MeetingCoordinatorTest {
                 writeText("{\"segmentId\":\"a\",\"revision\":1,\"startMs\":0,\"language\":\"zh\",\"text\":\"第一段\"}\n")
             }
             val record = CapturingMeeting("mtg_test", "http://127.0.0.1", ClientIdentity.reference(),
-                audioFile, journal, 1L, "zh-CN", true, true, true)
+                audioFile, journal, 1L, "zh-CN", true, true, true, "en-US")
             val stopped = MemoryStore()
             val recovery = MemoryRecoveryStore(record)
             val publisher = Publisher()
@@ -1243,8 +1719,16 @@ class MeetingCoordinatorTest {
                 val result = future.get(3, TimeUnit.SECONDS)
                 assertEquals("mtg_test", result.meetingId())
                 assertTrue(result.delivered())
-                assertTrue(server.steps.containsAll(listOf("summaryGrant", "summary", "publish", "stop", "manifest")))
-                assertEquals("第一段", runtime.summaryInput!!.transcript())
+                // 原场重跑用记录里的 source/target 重新上报语言，发布确认后、Stop 之前。
+                assertEquals(listOf("zh-CN", "en-US"), server.summaryRequests.single().languages())
+                val publishIndex = server.steps.indexOf("publish")
+                val summaryIndex = server.steps.indexOf("summaryRequest")
+                val stopIndex = server.steps.indexOf("stop")
+                assertTrue(publishIndex in 0 until summaryIndex)
+                assertTrue(summaryIndex in 0 until stopIndex)
+                assertFalse("不再领取旧纪要模型材料", server.steps.contains("summaryGrant"))
+                assertFalse("不再提交旧纪要正文", server.steps.contains("summarySubmit"))
+                assertNull("设备不再生成纪要正文", runtime.summaryInput)
                 assertTrue("续办成功后删除现场", recovery.deleted)
                 assertTrue(!journal.exists())
                 assertEquals("续办不新建会议", 0, runtime.openCalls)
@@ -1254,7 +1738,7 @@ class MeetingCoordinatorTest {
         } finally { dir.deleteRecursively() }
     }
 
-    @Test fun recoveryWithoutJournalStillStopsWithoutFakeSummary() {
+    @Test fun recoveryWithoutJournalStillRequestsServerSummary() {
         val dir = File.createTempFile("recovery", "").apply { delete(); mkdirs() }
         try {
             val audioFile = File(dir, "mtg_test.pcm").apply { writeBytes(ByteArray(32000)) }
@@ -1276,8 +1760,9 @@ class MeetingCoordinatorTest {
                 client.recoverInterrupted("mtg_test", resultCallback(future))
                 assertTrue(future.get(3, TimeUnit.SECONDS).delivered())
                 assertTrue(server.steps.contains("stop"))
-                assertFalse("缺原文不得伪造纪要", server.steps.contains("summary"))
-                assertNull(runtime.summaryInput)
+                // 本地没有字幕日志也照常上报：正文由服务端按已接收的标准事件生成。
+                assertEquals(listOf("zh-CN"), server.summaryRequests.single().languages())
+                assertNull("缺本地原文不伪造设备侧纪要", runtime.summaryInput)
             } finally { client.close() }
         } finally { dir.deleteRecursively() }
     }
@@ -1425,6 +1910,24 @@ class MeetingCoordinatorTest {
                 assertEquals(original.clientIdentity(), resolved.clientIdentity())
                 server
             }, { throw AssertionError("恢复不得读取采音时钟") }, wallClock)
+    }
+
+    /**
+     * READY 续办的定向装配：记录服务器实际拿到的冻结配置，便于断言续办用了哪份 Bearer。
+     * 只用停止记录里的原事实，不新建会议、不重采、不重建 genTime。
+     */
+    private fun readyResumeClient(store: MemoryStore, identity: IdentityProvider,
+        server: Server, resolvedTokens: MutableList<String>): MeetingCoordinator {
+        val config = MeetingClientConfig("http://127.0.0.1", identity, ClientIdentity.reference(),
+            MeetingProfile.reference(), java.util.concurrent.Executor { it.run() })
+            .withArtifactPublisher(MeetingArtifactPublisher.none())
+            .withStoppedMeetingStore(store)
+        return MeetingCoordinator(config, ModelAdapterRegistry(), Runtime(true),
+            java.util.function.Function { resolved ->
+                resolvedTokens.add(resolved.accessToken())
+                server
+            }, { throw AssertionError("READY 续办不得读取采音时钟") },
+            { throw AssertionError("READY 续办不得重建 genTime") })
     }
 
     private fun assertResumeDidNotRestartBusiness(server: Server, runtime: Runtime,
@@ -1675,7 +2178,8 @@ class MeetingCoordinatorTest {
         }
 
     @Test fun mockMinutesSharesCoordinatorAndKeepsSummaryCapabilityAndFinalCaptureOrder() {
-        Fixture(false, setOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.SUMMARY)).use { f ->
+        Fixture(false, setOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.SUMMARY,
+            MeetingCapabilityState.SUMMARY_SERVER)).use { f ->
             f.start(MeetingOptions.Mode.MEETING_MINUTES, MeetingOptions.ResultDelivery.LOCAL, true)
             f.runtime.emit("s1", 1, "zh-CN", "初稿", false)
             f.runtime.emit("s1", 2, "zh-CN", "最终字幕", true)
@@ -1691,8 +2195,8 @@ class MeetingCoordinatorTest {
             assertNull(f.runtime.grant)
             assertNull(f.runtime.adapter)
             assertTrue(f.probe.info!!.availableCapabilities().contains(MeetingCapabilityState.SUMMARY))
-            assertEquals("最终字幕", f.runtime.summaryInput!!.transcript())
-            assertEquals(listOf("discover", "create", "start", "event1", "event2", "capture1", "summary", "stop", "manifest"), f.server.steps)
+            assertNull("Mock 也不再生成设备侧纪要", f.runtime.summaryInput)
+            assertEquals(listOf("discover", "create", "start", "event1", "event2", "capture1", "summaryRequest", "stop", "manifest"), f.server.steps)
             assertNull(f.server.transcripts.get(0).sessionSpeakerId())
             assertArrayEquals(byteArrayOf(1, 2), f.server.jpeg)
             assertEquals(MeetingResult.DeliveryStatus.NOT_REQUESTED, result.deliveryStatus())
@@ -1862,9 +2366,10 @@ class MeetingCoordinatorTest {
             assertNotNull(f.probe.result())
             assertTrue(f.probe.info!!.availableCapabilities().contains(MeetingCapabilityState.TRANSLATION))
             assertTrue(f.probe.info!!.availableCapabilities().contains(MeetingCapabilityState.SUMMARY))
-            assertEquals("最后字幕", f.runtime.summaryInput!!.transcript())
+            assertNull("设备不再生成纪要正文", f.runtime.summaryInput)
+            assertEquals(listOf("zh-CN", "en-US"), f.server.summaryRequests.single().languages())
             assertEquals(listOf("discover", "create", "grant", "start", "event1", "translation2",
-                    "usage", "summaryGrant", "summary", "stop", "manifest"), f.server.steps)
+                    "usage", "summaryRequest", "stop", "manifest"), f.server.steps)
             assertEquals(listOf(1000L), f.server.usages)
             assertTrue(f.server.requested.summaryEnabled())
         }
@@ -1992,13 +2497,13 @@ class MeetingCoordinatorTest {
             f.start(MeetingOptions.Mode.MEETING_MINUTES, MeetingOptions.ResultDelivery.WEB, false)
             f.session.requestStop()
             f.probe.awaitPhase(MeetingSessionState.Phase.STOP_PENDING)
-            assertFalse(f.server.steps.contains("summary"))
+            assertFalse(f.server.steps.contains("summaryRequest"))
             assertFalse(f.server.steps.contains("stop"))
             f.runtime.duration = OptionalLong.of(2000)
             f.session.requestStop()
             assertNotNull(f.probe.result())
             assertEquals(listOf("discover", "create", "grant", "start", "event1", "usage", "usage",
-                    "summaryGrant", "summary", "stop", "manifest"), f.server.steps)
+                    "summaryRequest", "stop", "manifest"), f.server.steps)
             assertEquals(listOf(1000L, 1000L), f.server.usages)
             assertEquals(1, f.runtime.durationReads)
             assertEquals(1, f.runtime.stopCalls)
@@ -2054,6 +2559,13 @@ class MeetingCoordinatorTest {
         capture: Boolean): MeetingOptions =
         MeetingOptions(mode, "zh-CN", "en-US", capture, delivery,
             "https://result.example.test/index.html?existing=1#section", listOf("recipient@example.test"))
+
+    /** 字幕会议加会后纪要：纪要正文由服务端生成，用于纯服务端能力协商。 */
+    private fun summaryOptions(): MeetingOptions =
+        MeetingOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT, "zh-CN", "en-US", false,
+            MeetingOptions.ResultDelivery.WEB,
+            "https://result.example.test/index.html?existing=1#section",
+            listOf("recipient@example.test"), true)
 
     @Test fun readyAccessKeepsSameResultAfterEmailFailureAndManualExecution() {
         val identity: ReferenceIdentityProvider = ReferenceIdentityProvider("same-scene-fixture")
@@ -2137,7 +2649,7 @@ class MeetingCoordinatorTest {
             assertEquals("最终字幕", retried.get(2, TimeUnit.SECONDS)!!.transcriptText())
             assertEquals(MeetingResult.Status.READY, ready.status())
             assertEquals(listOf(555L, 555L, 555L), f.server.genTimes)
-            assertEquals(1, Collections.frequency(f.server.steps, "summary"))
+            assertEquals(1, Collections.frequency(f.server.steps, "summaryRequest"))
             assertEquals(1, Collections.frequency(f.server.steps, "stop"))
             assertEquals(1, Collections.frequency(f.server.steps, "usage"))
             assertEquals(1, f.runtime.stopCalls)
@@ -2244,7 +2756,7 @@ class MeetingCoordinatorTest {
             val copy = MemoryStore()
             copy.saved = StoppedMeetingCheckpoint.restore(original.audio(), original.frozenAudioDurationMs(),
                 originalConfig, checkpoint.stableStopKey(), checkpoint.phase(), checkpoint.genTime(),
-                checkpoint.deliversResult())
+                checkpoint.deliversResult(), checkpoint.summaryLanguages(), checkpoint.summaryReported())
             return copy
         }
     }
@@ -2340,8 +2852,6 @@ class MeetingCoordinatorTest {
         var reconnector: ModelSessionReconnector? = null
         var audioMix: AudioMixOptions? = null
         var summaryInput: SummaryInput? = null
-        var varySummary = false
-        var summaryCalls = 0
         @Volatile var stopCalls = 0
         var emitTail = false
         var emitFinished = true
@@ -2433,10 +2943,6 @@ class MeetingCoordinatorTest {
         }
         override fun summarize(grant: SummarySessionGrant?, adapter: SummaryAdapter?, input: SummaryInput): SummaryResult {
             summaryInput = input
-            if (varySummary) {
-                summaryCalls += 1
-                return SummaryResult(input.language(), "总结", "概览$summaryCalls", listOf("要点"), emptyList())
-            }
             return SummaryResult(input.language(), "总结", "概览", listOf("要点"), emptyList())
         }
     }
@@ -2452,6 +2958,10 @@ class MeetingCoordinatorTest {
         fun sequence() = sequence
         fun transcript() = transcript
         fun translation() = translation
+    }
+    private data class SummaryRequest(private val meetingId: String, private val languages: List<String>) {
+        fun meetingId() = meetingId
+        fun languages() = languages
     }
 
     private class Server(private val granted: Set<String>) : MeetingServerClient {
@@ -2483,8 +2993,8 @@ class MeetingCoordinatorTest {
         var failEmail = false
         var failContent = false
         var failUsageOnce = false
-        var failSummaryOnce = false
-        val summaryAttempts: MutableList<SummaryResult> = Collections.synchronizedList(ArrayList())
+        var failSummaryRequestOnce = false
+        val summaryRequests: MutableList<SummaryRequest> = Collections.synchronizedList(ArrayList())
         var loseStopAckOnce = false
         var failManifest = false
         var acceptedStopKey: String? = null
@@ -2562,10 +3072,17 @@ class MeetingCoordinatorTest {
             translationGrantRequests++
             return renewedTranslationGrant!!
         }
+        @Deprecated("旧纪要材料入口只用于断言不再被调用")
         override fun requestSummarySession(id: String): SummarySessionGrant {
             steps.add("summaryGrant")
             return SummarySessionGrant(BailianSummaryAdapter.ID, "https://summary.example.test",
                 "2030-01-01T00:00:00Z", "fixture-summary")
+        }
+        override fun requestSummary(id: String, languages: List<String>): SummaryRequestAck {
+            steps.add("summaryRequest")
+            summaryRequests.add(SummaryRequest(id, java.util.List.copyOf(languages)))
+            if (failSummaryRequestOnce) { failSummaryRequestOnce = false; throw IOException("fixture-summary-request-failed") }
+            return SummaryRequestAck(id, true, "REQUESTED")
         }
         override fun startClient(id: String) { steps.add("start") }
         override fun appendTranscript(id: String, number: Int, event: TranscriptEvent) {
@@ -2608,10 +3125,9 @@ class MeetingCoordinatorTest {
                 throw IOException("受控截图响应未确认")
             }
         }
+        @Deprecated("旧纪要正文提交只用于断言不再被调用")
         override fun submitSummary(id: String, summary: SummaryResult) {
-            steps.add("summary")
-            summaryAttempts.add(summary)
-            if (failSummaryOnce) { failSummaryOnce = false; throw IOException("fixture-summary-ack-lost") }
+            steps.add("summarySubmit")
         }
         override fun submitUsage(id: String, duration: Long) {
             assertEquals("mtg_test", id)

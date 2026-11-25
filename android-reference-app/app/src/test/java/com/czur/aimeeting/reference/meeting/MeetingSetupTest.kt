@@ -24,23 +24,31 @@ class MeetingSetupTest {
         val setup = MeetingSetup(MeetingSetup.Mode.LIVE_TRANSLATION, "ja-JP", "en-US", false, MeetingSetup.ResultDelivery.WEB,
             "https://result.example.test", emptyList(), true)
         assertTrue(setup.summaryEnabled()); assertTrue(setup.toOptions().summaryEnabled())
-        assertEquals(listOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.TRANSLATION, MeetingCapabilityState.SUMMARY,
-            MeetingCapabilityState.SPEAKER), setup.requestedCapabilities())
-        assertEquals(listOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.TRANSLATION, MeetingCapabilityState.SUMMARY), setup.toOptions().requiredCapabilities())
+        // 纪要正文由服务端生成：请求与必需能力都以 summary.server 为准，summary.structured 只是兼容项。
+        assertEquals(listOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.TRANSLATION,
+            MeetingCapabilityState.SUMMARY_SERVER, MeetingCapabilityState.SUMMARY, MeetingCapabilityState.SPEAKER),
+            setup.requestedCapabilities())
+        assertEquals(listOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.TRANSLATION,
+            MeetingCapabilityState.SUMMARY_SERVER), setup.toOptions().requiredCapabilities())
         assertEquals(listOf("en-US"), setup.targetLanguages())
     }
     @Test fun subtitleSummaryIsIndependentOfResultDelivery() {
         val setup = MeetingSetup(MeetingSetup.Mode.LIVE_TRANSCRIPT, "en-US", "zh-CN", true, MeetingSetup.ResultDelivery.WEB,
             "https://result.example.test", emptyList(), true)
         assertTrue(setup.summaryEnabled())
-        assertEquals(listOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.SUMMARY, MeetingCapabilityState.SPEAKER), setup.requestedCapabilities())
+        assertEquals(listOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.SUMMARY_SERVER,
+            MeetingCapabilityState.SUMMARY, MeetingCapabilityState.SPEAKER), setup.requestedCapabilities())
         assertEquals(emptyList<String>(), setup.targetLanguages()); assertTrue(setup.toOptions().presentationCapture())
     }
     @Test fun oldModeAndConstructorsKeepTheirSummaryMeaning() {
         val minutes = MeetingSetup(MeetingSetup.Mode.MEETING_MINUTES, "zh-CN", "en-US", false, MeetingSetup.ResultDelivery.WEB, "https://result.example.test")
         assertTrue(minutes.summaryEnabled()); assertTrue(minutes.toOptions().summaryEnabled())
         assertFalse(MeetingSetup.transcript("zh-CN", "https://result.example.test").summaryEnabled())
-        assertEquals(listOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.SUMMARY, MeetingCapabilityState.SPEAKER), minutes.requestedCapabilities())
+        assertEquals(listOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.SUMMARY_SERVER,
+            MeetingCapabilityState.SUMMARY, MeetingCapabilityState.SPEAKER), minutes.requestedCapabilities())
+        assertEquals("模式要求服务端纪要能力，不再要求设备直连能力",
+            listOf(MeetingCapabilityState.TRANSCRIPT, MeetingCapabilityState.SUMMARY_SERVER),
+            minutes.toOptions().requiredCapabilities())
     }
     @Test fun newStringActionAndOldNoDeliveryKeepIndependentSummaryPolicy() {
         val setup = MeetingSetup(MeetingSetup.Mode.LIVE_TRANSLATION, "zh-CN", "en-US", false, ResultOptions.action("example.notice"), "", emptyList(), true)
