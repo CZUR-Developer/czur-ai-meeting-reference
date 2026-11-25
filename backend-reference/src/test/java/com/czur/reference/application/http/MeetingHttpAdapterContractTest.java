@@ -627,6 +627,55 @@ class MeetingHttpAdapterContractTest {
                 upload.headers(), body.replace("10000", "0")), context()).status());
     }
 
+    @Test
+    void presentationChunkIgnoresUnknownFieldsAndStoresOptionalOcrText() {
+        RecordingClientInput client = new RecordingClientInput();
+        adapter = new MeetingHttpAdapter(query, deletion, decoder,
+                new HttpErrorMapper(() -> "presentation-diagnostic"), stopService(),
+                null, null, false, null, null, null, null, client);
+        String body = """
+                {"chunkSequence":1,"unknownRoot":true,"frames":[
+                  {"offsetMs":0,"jpegBase64":"/9j/2Q==","ocrText":"第一行\\n第二行","unknownFrame":"x"}]}
+                """;
+        HttpRequest upload = new HttpRequest("POST",
+                "/v1/meetings/mtg_client/presentation-captures:append",
+                Map.of("content-type", "application/json"), body);
+        assertEquals(201, adapter.handle(upload, context()).status());
+        String canonical = new String(client.capture.content(), StandardCharsets.UTF_8);
+        assertTrue(canonical.contains("\"ocrText\":\"第一行\\n第二行\""));
+        assertFalse(canonical.contains("unknownRoot"));
+        assertFalse(canonical.contains("unknownFrame"));
+
+        String blank = """
+                {"chunkSequence":2,"frames":[{"offsetMs":10000,"jpegBase64":"/9j/2Q==","ocrText":"   "}]}
+                """;
+        assertEquals(201, adapter.handle(new HttpRequest("POST", upload.path(),
+                upload.headers(), blank), context()).status());
+        assertFalse(new String(client.capture.content(), StandardCharsets.UTF_8).contains("ocrText"));
+
+        String nonString = """
+                {"chunkSequence":3,"frames":[{"offsetMs":20000,"jpegBase64":"/9j/2Q==","ocrText":123}]}
+                """;
+        assertEquals(400, adapter.handle(new HttpRequest("POST", upload.path(),
+                upload.headers(), nonString), context()).status());
+
+        String tooLong = "{\"chunkSequence\":4,\"frames\":[{\"offsetMs\":30000,"
+                + "\"jpegBase64\":\"/9j/2Q==\",\"ocrText\":\"" + "x".repeat(8193) + "\"}]}";
+        assertEquals(400, adapter.handle(new HttpRequest("POST", upload.path(),
+                upload.headers(), tooLong), context()).status());
+
+        String blankTooLong = "{\"chunkSequence\":5,\"frames\":[{\"offsetMs\":40000,"
+                + "\"jpegBase64\":\"/9j/2Q==\",\"ocrText\":\"" + " ".repeat(8193) + "\"}]}";
+        assertEquals(400, adapter.handle(new HttpRequest("POST", upload.path(),
+                upload.headers(), blankTooLong), context()).status());
+
+        String explicitNull = """
+                {"chunkSequence":6,"frames":[{"offsetMs":50000,"jpegBase64":"/9j/2Q==","ocrText":null}]}
+                """;
+        assertEquals(400, adapter.handle(new HttpRequest("POST", upload.path(),
+                upload.headers(), explicitNull), context()).status());
+    }
+
     private MeetingHttpAdapter withEvents(MeetingEventLogPort events) {
         return new MeetingHttpAdapter(query, deletion, decoder,
                 new HttpErrorMapper(() -> "event-diagnostic"), stopService(),

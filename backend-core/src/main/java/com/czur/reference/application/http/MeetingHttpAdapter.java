@@ -918,7 +918,7 @@ public final class MeetingHttpAdapter {
         try {
             JsonNode root = JSON.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
                     .readTree(request.body());
-            requireFields(root, Set.of("chunkSequence", "frames"));
+            requirePresentationFields(root, Set.of("chunkSequence", "frames"));
             int sequence = intField(root, "chunkSequence");
             JsonNode frames = root.get("frames");
             if (!frames.isArray() || frames.isEmpty()) {
@@ -930,7 +930,7 @@ public final class MeetingHttpAdapter {
             var outputFrames = canonical.putArray("frames");
             long previous = -1;
             for (JsonNode frame : frames) {
-                requireFields(frame, Set.of("offsetMs", "jpegBase64"));
+                requirePresentationFields(frame, Set.of("offsetMs", "jpegBase64"));
                 long offset = longField(frame, "offsetMs");
                 if (offset <= previous) {
                     throw new IllegalArgumentException("presentation frame time is invalid");
@@ -946,6 +946,19 @@ public final class MeetingHttpAdapter {
                 var item = outputFrames.addObject();
                 item.put("offsetMs", offset);
                 item.put("jpegBase64", Base64.getEncoder().encodeToString(jpeg));
+                JsonNode ocrNode = frame.get("ocrText");
+                if (ocrNode != null) {
+                    if (!ocrNode.isTextual()) {
+                        throw new IllegalArgumentException("presentation OCR text is invalid");
+                    }
+                    String ocrText = ocrNode.textValue();
+                    if (ocrText.codePointCount(0, ocrText.length()) > 8192) {
+                        throw new IllegalArgumentException("presentation OCR text is too long");
+                    }
+                    if (!ocrText.isBlank()) {
+                        item.put("ocrText", ocrText);
+                    }
+                }
             }
             byte[] content = JSON.writeValueAsBytes(canonical);
             if (content.length > HttpRequest.MAX_BODY_BYTES) {
@@ -1064,6 +1077,18 @@ public final class MeetingHttpAdapter {
         while (fields.hasNext()) {
             if (!expected.contains(fields.next())) {
                 throw new IllegalArgumentException("client event fields are invalid");
+            }
+        }
+    }
+
+    /** 演示截图上传对未知字段宽容：只要求必填存在，未知字段不写入 canonical。 */
+    private static void requirePresentationFields(JsonNode node, Set<String> expected) {
+        if (node == null || !node.isObject()) {
+            throw new IllegalArgumentException("presentation fields are invalid");
+        }
+        for (String field : expected) {
+            if (!node.has(field)) {
+                throw new IllegalArgumentException("presentation fields are invalid");
             }
         }
     }

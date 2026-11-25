@@ -1231,7 +1231,8 @@ components:
           type: boolean
     AppendPresentationCaptureChunkRequest:
       type: object
-      additionalProperties: false
+      additionalProperties: true
+      description: 未知属性被忽略且不写入 artifact；必填字段缺失或已知字段非法仍返回 400。
       required: [chunkSequence, frames]
       properties:
         chunkSequence:
@@ -1242,7 +1243,7 @@ components:
           minItems: 1
           items:
             type: object
-            additionalProperties: false
+            additionalProperties: true
             required: [offsetMs, jpegBase64]
             properties:
               offsetMs:
@@ -1253,6 +1254,10 @@ components:
                 type: string
                 contentEncoding: base64
                 contentMediaType: image/jpeg
+              ocrText:
+                type: string
+                maxLength: 8192
+                description: 可选 OCR 文本；按 Unicode code point 计数，空白不写入，未知属性忽略。
     AppendPresentationCaptureChunkResponse:
       type: object
       additionalProperties: false
@@ -1366,6 +1371,10 @@ components:
                 type: string
                 contentEncoding: base64
                 contentMediaType: image/jpeg
+              ocrText:
+                type: string
+                maxLength: 8192
+                description: 可选 OCR 文本；按 Unicode code point 计数。
     CreateMeetingResponse:
       type: object
       additionalProperties: false
