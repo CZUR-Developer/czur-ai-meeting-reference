@@ -1,6 +1,7 @@
 package com.czur.aimeeting.client
 
 import com.czur.aimeeting.client.result.ResultActionAccess
+import java.util.function.Consumer
 
 /** 单场业务控制，UI／截图线程可调用，内部串行排队。 */
 interface MeetingSession : AutoCloseable {
@@ -9,6 +10,14 @@ interface MeetingSession : AutoCloseable {
      * Stop 202 为 STOP_PENDING 可再次确认，不重复末帧／停音源／总结；无痕以 ENDED 结束。
      */
     fun requestStop()
+    /** Explicit user Stop may be persisted by an opted-in application store. */
+    fun requestStop(persistIntent: Boolean) = requestStop()
+    /** Confirm the local intent and input stop independently of the finalization network. */
+    fun requestStopForHostExit(persistIntent: Boolean, onIntentSaved: Consumer<Boolean>, onInputStopped: Consumer<Boolean>) {
+        requestStop(persistIntent)
+        onIntentSaved.accept(!persistIntent)
+        onInputStopped.accept(false)
+    }
     /**
      * offsetMs 相对 onStarted.startedAtMs；调用时复制 JPEG。旧入口只表示排队，不是保存确认。
      * 只有开启演示截图且尚未完成 beforeStop 时接纳，失败提示不阻断字幕及 Stop。
@@ -50,4 +59,7 @@ interface MeetingSession : AutoCloseable {
         throw UnsupportedOperationException("当前会议实现未提供结果动作访问")
     /** 幂等取消释放，不产生正常 Stop 或结果。 */
     override fun close()
+
+    /** Registers a callback before closing the client, when the implementation can drain its queues. */
+    fun notifyAfterClientClose(onIdle: Runnable): Boolean = false
 }

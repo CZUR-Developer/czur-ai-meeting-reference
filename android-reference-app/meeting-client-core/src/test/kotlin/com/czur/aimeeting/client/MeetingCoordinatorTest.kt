@@ -1306,7 +1306,8 @@ class MeetingCoordinatorTest {
                 entered.countDown()
                 Thread.sleep(11_000)
                 "{\"inputState\":\"INPUT_ACCEPTED\",\"manifestState\":\"READY\"}"
-            } else "{\"status\":\"READY\",\"title\":\"慢响应真实清单\",\"artifacts\":[]}"
+            } else "{\"meetingId\":\"mtg_test\",\"profile\":{\"id\":\"reference-asr\",\"revision\":1}," +
+                "\"status\":\"READY\",\"title\":\"慢响应真实清单\",\"artifacts\":[]}"
             val bytes = body.toByteArray(StandardCharsets.UTF_8)
             exchange.sendResponseHeaders(200, bytes.size.toLong())
             exchange.responseBody.use { it.write(bytes) }
@@ -1325,8 +1326,8 @@ class MeetingCoordinatorTest {
             val transport = HttpMeetingServerClient(config)
             val server = object : MeetingServerClient by fake {
                 override fun stopMeeting(id: String, stableStopKey: String) = transport.stopMeeting(id, stableStopKey)
-                override fun readResult(id: String, genTime: Long, includeContent: Boolean) =
-                    transport.readResult(id, genTime, includeContent)
+                override fun readSavedReadyResult(id: String, genTime: Long, includeContent: Boolean) =
+                    transport.readSavedReadyResult(id, genTime, includeContent)
             }
             val probe = Probe()
             MeetingCoordinator(config, ModelAdapterRegistry(), runtime,
@@ -1913,6 +1914,136 @@ class MeetingCoordinatorTest {
             assertThrows(ExecutionException::class.java, { resumeResult(f.client).get(2, TimeUnit.SECONDS) })
             assertEquals(1, f.runtime.openCalls)
             assertFalse(f.server.steps.contains("stop"))
+        }
+    }
+
+    @Test fun liveStopDuringBlockedAckPersistsTheRestOfTheBatchAndKeepsItsSingleOwner() {
+        val directory = java.nio.file.Files.createTempDirectory("event-queue-live").toFile()
+        val file = File(directory, "mtg_test.pcm").apply { writeBytes(ByteArray(32_000)) }
+        try {
+            val store = MemoryStore()
+            val intent = MemoryExplicitStopStore(null, durable = true)
+            val bodies = Collections.synchronizedList(ArrayList<String>())
+            Fixture(true, ALL, publisher = Publisher(), store = store, recovery = intent).use { f ->
+                f.runtime.prepareAudio(SealedAudioArtifact("mtg_test", file, SealedAudioArtifact.Format.PCM16,
+                    32_000, 32_000))
+                f.server.durableAppend = { id, body ->
+                    assertEquals("mtg_test", id)
+                    bodies += body
+                    if (bodies.size == 1) {
+                        f.server.appendEntered.countDown()
+                        assertTrue(f.server.releaseAppend.await(4, TimeUnit.SECONDS))
+                    }
+                }
+                f.start(retainedOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT))
+                f.runtime.emit("first", 1, "zh-CN", "first", true)
+                assertTrue(f.server.appendEntered.await(2, TimeUnit.SECONDS))
+                f.runtime.emit("second", 1, "zh-CN", "second", true)
+                f.session.requestStop(true)
+                f.session.requestStop(true)
+                assertEquals(1_000L, intent.frozen.get(2, TimeUnit.SECONDS).frozenUsageMs)
+                val record = intent.read("mtg_test").orElseThrow()
+                val pending = PendingStandardEvents.open(record)!!.pending()
+                assertEquals(listOf(1, 2), pending.map { it.sequence })
+                assertEquals(listOf("first-r1", "second-r1"), pending.map { it.key })
+                assertTrue(f.server.usages.isEmpty())
+                f.server.releaseAppend.countDown()
+                f.probe.awaitPhase(MeetingSessionState.Phase.READY)
+                assertEquals(pending.map { it.body }, bodies)
+                assertEquals(listOf("durable-original-stop"), f.server.stopKeys)
+                assertEquals(1, f.runtime.stopCalls)
+                assertTrue(intent.read("mtg_test").isEmpty)
+            }
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test fun explicitStopFreezesBeforeBlockedTailAckAndReusesKeyOnLiveRetry() {
+        val store = MemoryStore()
+        val intent = MemoryExplicitStopStore(null)
+        val publisher = Publisher()
+        Fixture(true, ALL, publisher = publisher, store = store, recovery = intent).use { f ->
+            f.runtime.prepareAudio(audio("mtg_test", 32_000))
+            f.server.blockAppend = true
+            f.start(retainedOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT))
+            f.runtime.emit("tail", 1, "zh-CN", "tail", true)
+            assertTrue(f.server.appendEntered.await(2, TimeUnit.SECONDS))
+            f.session.requestStop(true)
+            val frozen = intent.frozen.get(2, TimeUnit.SECONDS)
+            assertEquals(1_000L, frozen.frozenUsageMs)
+            assertTrue(store.read("mtg_test").isEmpty)
+            assertTrue(f.server.usages.isEmpty())
+            f.server.loseStopAckOnce = true
+            f.server.releaseAppend.countDown()
+            f.probe.awaitPhase(MeetingSessionState.Phase.STOP_PENDING)
+            f.session.requestStop()
+            f.probe.awaitPhase(MeetingSessionState.Phase.READY)
+            assertEquals(listOf(frozen.stopKey, frozen.stopKey), f.server.stopKeys)
+            assertEquals(listOf(1_000L), f.server.usages)
+            assertEquals(1, f.runtime.stopCalls)
+        }
+    }
+
+    @Test fun accountExitJoinsAutomaticStopWhileNetworkIsBlockedAndKeepsTheOriginalScope() {
+        val store = MemoryStore()
+        val grant = MeetingStopGrant("durable-original-stop", "stop1~synthetic-test-capability")
+        val intent = MemoryExplicitStopStore(null, stopGrant = grant)
+        val publisher = Publisher()
+        Fixture(true, ALL, publisher = publisher, store = store, recovery = intent).use { f ->
+            f.runtime.prepareAudio(audio("mtg_test", 32_000))
+            f.server.blockAppend = true
+            f.start(retainedOptions(MeetingOptions.Mode.LIVE_TRANSCRIPT))
+            f.runtime.emit("tail", 1, "zh-CN", "tail", true)
+            assertTrue(f.server.appendEntered.await(2, TimeUnit.SECONDS))
+            f.session.requestStop()
+            val accepted = CompletableFuture<Boolean>()
+            val inputStopped = CompletableFuture<Boolean>()
+            f.session.requestStopForHostExit(true, { accepted.complete(it) }, { inputStopped.complete(it) })
+            assertTrue(accepted.get(2, TimeUnit.SECONDS))
+            assertTrue(inputStopped.get(2, TimeUnit.SECONDS))
+            val frozen = intent.readExplicitStop("mtg_test")!!
+            assertEquals(1_000L, frozen.frozenUsageMs)
+            assertEquals(grant.stopKey, frozen.stopKey)
+            assertTrue(f.server.usages.isEmpty())
+            assertTrue(store.read("mtg_test").isEmpty)
+            f.server.releaseAppend.countDown()
+            f.probe.awaitPhase(MeetingSessionState.Phase.READY)
+            assertEquals(listOf(grant.stopKey), f.server.stopKeys)
+            assertEquals(listOf(1_000L), f.server.usages)
+            assertEquals(grant.capability, publisher.contexts.single().accessToken())
+            assertEquals(1, f.runtime.stopCalls)
+        }
+    }
+
+    @Test fun explicitColdRecoveryPersistsCandidateBeforeUsageAndKeepsAmountAndKey() {
+        val audioFile = File.createTempFile("confirmed-seal", ".opus").apply { writeBytes(ByteArray(17)) }
+        try {
+            val record = CapturingMeeting("mtg_test", "http://127.0.0.1", ClientIdentity.reference(),
+                audioFile, null, 1L, "zh-CN", false, true, true)
+            val artifact = SealedAudioArtifact("mtg_test", audioFile,
+                SealedAudioArtifact.Format.OPUS_OGG, 17, 32_640)
+            val intent = MemoryExplicitStopStore(record)
+            intent.saveFrozenStop("mtg_test", MeetingStopIntent(intent.beginExplicitStop("mtg_test"), 1_020, artifact))
+            val stopped = MemoryStore()
+            val publisher = Publisher()
+            Fixture(true, ALL, publisher = publisher, store = stopped, recovery = intent).use { f ->
+                f.server.blockUsage = true
+                val outcome = CompletableFuture<RecoveryResult>()
+                f.client.recoverInterrupted("mtg_test", resultCallback(outcome))
+                assertTrue(f.server.usageEntered.await(2, TimeUnit.SECONDS))
+                val candidate = stopped.read("mtg_test").orElseThrow()
+                assertEquals(1_020L, candidate.context().frozenAudioDurationMs())
+                assertEquals("durable-original-stop", candidate.stableStopKey())
+                assertFalse(f.server.steps.contains("stop"))
+                f.server.releaseUsage.countDown()
+                assertTrue(outcome.get(3, TimeUnit.SECONDS).delivered())
+                assertEquals(listOf("durable-original-stop"), f.server.stopKeys)
+                assertEquals(listOf(1_020L), f.server.usages)
+                assertEquals(0, f.runtime.openCalls)
+            }
+        } finally {
+            audioFile.delete()
         }
     }
 
@@ -3022,6 +3153,7 @@ class MeetingCoordinatorTest {
         callbackExecutor: java.util.concurrent.Executor = java.util.concurrent.Executor { it.run() },
         publisher: MeetingArtifactPublisher = MeetingArtifactPublisher.none(),
         store: StoppedMeetingStore? = null,
+        recovery: MeetingRecoveryStore? = null,
     ) : AutoCloseable {
         val server = Server(granted)
         val runtime = Runtime(real)
@@ -3044,7 +3176,8 @@ class MeetingCoordinatorTest {
             val configured = MeetingClientConfig("http://127.0.0.1", identity,
                 ClientIdentity.reference(), MeetingProfile.reference(), callbackExecutor)
                 .withArtifactPublisher(publisher)
-            config = if (store == null) configured else configured.withStoppedMeetingStore(store)
+            config = configured.let { if (store == null) it else it.withStoppedMeetingStore(store) }
+                .let { if (recovery == null) it else it.withMeetingRecoveryStore(recovery) }
             client = MeetingCoordinator(config, adapters, runtime,
                 java.util.function.Function { resolved ->
                     sessionToken = resolved.accessToken()
@@ -3078,6 +3211,28 @@ class MeetingCoordinatorTest {
             Optional.ofNullable(record?.takeIf { it.meetingId() == meetingId })
         @Synchronized override fun delete(meetingId: String) {
             if (record?.meetingId() == meetingId) { record = null; deleted = true }
+        }
+    }
+
+    private class MemoryExplicitStopStore(record: CapturingMeeting?, private val durable: Boolean = false,
+        private val stopGrant: MeetingStopGrant? = null) : MeetingStopIntentStore {
+        private val capturing = MemoryRecoveryStore(record)
+        val frozen = CompletableFuture<MeetingStopIntent>()
+        @Volatile private var intent: MeetingStopIntent? = null
+        override fun usesDurableStandardEvents() = durable
+        override fun prepareStopGrant(meetingId: String, accessToken: String) = stopGrant
+        override fun canUseStopGrantAtCurrentLogin() = stopGrant != null
+        override fun save(record: CapturingMeeting) = capturing.save(record)
+        override fun read(meetingId: String) = capturing.read(meetingId)
+        override fun delete(meetingId: String) = capturing.delete(meetingId)
+        override fun beginExplicitStop(meetingId: String): String {
+            if (intent == null) intent = MeetingStopIntent("durable-original-stop")
+            return intent!!.stopKey
+        }
+        override fun readExplicitStop(meetingId: String) = intent
+        override fun saveFrozenStop(meetingId: String, stop: MeetingStopIntent) {
+            intent = stop
+            frozen.complete(stop)
         }
     }
 
@@ -3280,6 +3435,7 @@ class MeetingCoordinatorTest {
                     artifactFailure?.let { throw it }
                     return artifact
                 }
+                override fun audioArtifactFile(): Optional<File> = artifact.map { it.file() }
             }
         }
         fun prepareAudio(audio: SealedAudioArtifact) {
@@ -3338,6 +3494,7 @@ class MeetingCoordinatorTest {
         @Volatile var appendHttpStatus: Int? = null
         @Volatile var appendHttpErrorCode: String? = null
         var loseAppendAckOnce = false
+        var durableAppend: ((String, String) -> Unit)? = null
         var stopFailure: IOException? = null
         var pendingStop = false
         var failEmail = false
@@ -3435,6 +3592,9 @@ class MeetingCoordinatorTest {
             return SummaryRequestAck(id, true, "REQUESTED")
         }
         override fun startClient(id: String) { steps.add("start") }
+        override fun supportsStoredStandardEvents(): Boolean = durableAppend != null
+        override fun appendStoredStandardEvent(meetingId: String, body: String) =
+            checkNotNull(durableAppend)(meetingId, body)
         override fun appendTranscript(id: String, number: Int, event: TranscriptEvent) {
             steps.add("event" + number)
             transcripts.add(event)

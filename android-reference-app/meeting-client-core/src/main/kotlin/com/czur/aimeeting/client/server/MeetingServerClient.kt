@@ -45,6 +45,12 @@ interface MeetingServerClient {
     @Throws(IOException::class) fun appendTranscript(meetingId: String, clientSequence: Int, event: TranscriptEvent)
     /** 译文与字幕共用 clientSequence，仅授权互译时提交。 */
     @Throws(IOException::class) fun appendTranslation(meetingId: String, clientSequence: Int, event: TranslationEvent)
+    /** Sends the exact original body and returns only after the committed event receipt matches. */
+    @Throws(IOException::class)
+    fun appendStoredStandardEvent(meetingId: String, body: String) {
+        throw IOException("当前后端端口不支持持久标准事件")
+    }
+    fun supportsStoredStandardEvents(): Boolean = false
     /** 演示使用独立包序号，每包至少一帧。 */
     @Throws(IOException::class) fun appendPresentation(meetingId: String, chunkSequence: Int, offsetMs: Long, jpeg: ByteArray)
     /** 带可选 OCR 文本的演示帧；默认实现忽略文本，保持旧后端兼容。 */

@@ -1,6 +1,7 @@
 package com.czur.aimeeting.client
 
 import java.io.File
+import java.io.IOException
 
 /**
  * 已创建、尚未确认停止的原场现场，只覆盖进程异常退出后的续办必需事实。
@@ -22,7 +23,15 @@ class CapturingMeeting(
     private val retainAudio: Boolean,
     private val activeDelivery: Boolean,
     private val targetLanguage: String?,
+    private val standardEventJournal: Boolean,
 ) {
+    /** 兼容 B8 和已编译宿主。旧记录不宣称包含可重放的原标准事件。 */
+    constructor(meetingId: String, serverUrl: String, clientIdentity: ClientIdentity,
+        audioFile: File, journalFile: File?, startedAtMs: Long, sourceLanguage: String,
+        summaryEnabled: Boolean, retainAudio: Boolean, activeDelivery: Boolean, targetLanguage: String?) : this(
+        meetingId, serverUrl, clientIdentity, audioFile, journalFile, startedAtMs, sourceLanguage,
+        summaryEnabled, retainAudio, activeDelivery, targetLanguage, false)
+
     /** 兼容没有保存目标语种的旧现场记录；原场重跑按单语纪要上报。 */
     constructor(meetingId: String, serverUrl: String, clientIdentity: ClientIdentity,
         audioFile: File, journalFile: File?, startedAtMs: Long, sourceLanguage: String,
@@ -52,6 +61,24 @@ class CapturingMeeting(
     fun retainAudio(): Boolean = retainAudio
     /** NO_ACTIVE_DELIVERY 场次只为停止收口，不读取结果清单。 */
     fun activeDelivery(): Boolean = activeDelivery
+    fun hasStandardEventJournal(): Boolean = standardEventJournal
+
+    /** A saved READY flag alone does not authorize discarding an unconfirmed local transcript. */
+    @Throws(IOException::class)
+    fun requireAcknowledgedStandardEvents() {
+        if (PendingStandardEvents.open(this)?.pending()?.isNotEmpty() == true)
+            throw UnverifiedStandardEventsException()
+    }
+    /** 持续保留确认位，直到宿主成功移除本场现场指针。 */
+    @Throws(IOException::class)
+    fun discardAcknowledgedStandardEvents(checkScope: Runnable, removeRecord: Runnable) {
+        val pending = PendingStandardEvents.open(this)
+        if (pending == null) {
+            checkScope.run()
+            removeRecord.run()
+        } else pending.discardAcknowledged(checkScope, removeRecord)
+    }
+
     override fun toString(): String =
         "CapturingMeeting[meetingId=$meetingId, startedAt=$startedAtMs, summary=$summaryEnabled, delivery=$activeDelivery]"
 }

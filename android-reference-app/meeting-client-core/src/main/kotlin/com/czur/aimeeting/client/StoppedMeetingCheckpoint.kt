@@ -114,7 +114,11 @@ class StoppedMeetingCheckpoint private constructor(
         /** 仅尾部确认且 sealed 事实读取成功后生成一次停止键；默认按主动交付收口。 */
         @JvmStatic fun pending(context: MeetingArtifactPublisher.Context,
             deliversResult: Boolean = true): StoppedMeetingCheckpoint =
-            StoppedMeetingCheckpoint(context, UUID.randomUUID().toString(), Phase.PUBLISH_PENDING, null,
+            pendingWithKey(context, deliversResult, UUID.randomUUID().toString())
+
+        internal fun pendingWithKey(context: MeetingArtifactPublisher.Context, deliversResult: Boolean,
+            stableStopKey: String): StoppedMeetingCheckpoint =
+            StoppedMeetingCheckpoint(context, stableStopKey, Phase.PUBLISH_PENDING, null,
                 deliversResult, null, false)
         /**
          * 私有 Store 读回原事实，不重读当前账号／登录／音源。文件由 App 保持不变；

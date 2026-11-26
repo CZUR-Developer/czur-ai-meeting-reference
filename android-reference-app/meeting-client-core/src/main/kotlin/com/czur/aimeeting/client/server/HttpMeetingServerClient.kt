@@ -18,7 +18,7 @@ import java.util.Base64
 import java.util.UUID
 
 /** 参考会议后端 HTTP 实现，身份从冻结配置取得，不写入 APK 或日志。 */
-class HttpMeetingServerClient(config: MeetingClientConfig) : MeetingServerClient {
+class HttpMeetingServerClient(private val config: MeetingClientConfig) : MeetingServerClient {
     /** 录音发布器只需要地址和本场冻结 Token，不重新读取或刷新应用身份。 */
     constructor(serverUrl: String, accessToken: String) : this(
         MeetingClientConfig.reference(serverUrl, accessToken))
@@ -26,6 +26,7 @@ class HttpMeetingServerClient(config: MeetingClientConfig) : MeetingServerClient
     private val baseUrl = config.serverUrl().removeSuffix("/")
     private val bearerToken = config.accessToken()
     private val identity = config.clientIdentity()
+    private val stopScoped = bearerToken.startsWith("stop1~")
     private val profile = config.profile()
     private val stopKey = UUID.randomUUID().toString()
 
@@ -152,27 +153,28 @@ class HttpMeetingServerClient(config: MeetingClientConfig) : MeetingServerClient
     @Throws(IOException::class)
     override fun appendTranscript(meetingId: String, clientSequence: Int, event: TranscriptEvent) {
         try {
-            val transcript = JSONObject().put("segmentId", event.segmentId()).put("revision", event.revision())
-                .put("operation", "UPSERT_OPERATION_UPSERT").put("startMs", event.startMs()).put("endMs", event.endMs())
-                .put("language", event.language()).put("text", event.text()).put("final", event.isFinal())
-            if (event.sessionSpeakerId() != null) transcript.put("speaker", JSONObject().put("sessionSpeakerId", event.sessionSpeakerId()))
-            val body = JSONObject().put("clientEventId", "${event.segmentId()}-r${event.revision()}")
-                .put("clientSequence", clientSequence).put("transcriptUpsert", transcript)
-            post("/v1/meetings/$meetingId/events:append", body.toString(), null, 200, 201)
+            post("/v1/meetings/$meetingId/events:append", StandardEventPacket.transcript(clientSequence, event).body,
+                null, 200, 201)
         } catch (invalidEvent: JSONException) { throw IOException("字幕事件格式错误", invalidEvent) }
     }
     @Throws(IOException::class)
     override fun appendTranslation(meetingId: String, clientSequence: Int, event: TranslationEvent) {
         try {
-            // 与字幕 ID 空间分离，同一修订重试保持同一个 ID。
-            val body = JSONObject().put("clientEventId", "translation:${event.translationId()}:r${event.revision()}")
-                .put("clientSequence", clientSequence).put("translationUpsert", JSONObject()
-                    .put("translationId", event.translationId()).put("sourceSegmentId", event.sourceSegmentId())
-                    .put("revision", event.revision()).put("operation", "UPSERT_OPERATION_UPSERT")
-                    .put("sourceLanguage", event.sourceLanguage()).put("targetLanguage", event.targetLanguage())
-                    .put("text", event.text()).put("final", event.isFinal()).put("supersedesTranslationIds", JSONArray()))
-            post("/v1/meetings/$meetingId/events:append", body.toString(), null, 200, 201)
+            post("/v1/meetings/$meetingId/events:append", StandardEventPacket.translation(clientSequence, event).body,
+                null, 200, 201)
         } catch (invalidEvent: JSONException) { throw IOException("译文事件格式错误", invalidEvent) }
+    }
+
+    override fun supportsStoredStandardEvents(): Boolean = true
+
+    override fun appendStoredStandardEvent(meetingId: String, body: String) {
+        try {
+            val packet = StandardEventPacket.read(body)
+            val response = post("/v1/meetings/$meetingId/events:append", body, null, 200, 201)
+            packet.requireReceipt(meetingId, response.body)
+        } catch (_: JSONException) {
+            throw IOException("标准事件或受理回执格式不可用")
+        }
     }
     @Throws(IOException::class)
     override fun appendPresentation(meetingId: String, chunkSequence: Int, offsetMs: Long, jpeg: ByteArray) {
@@ -401,14 +403,17 @@ class HttpMeetingServerClient(config: MeetingClientConfig) : MeetingServerClient
     }
     private fun get(path: String, vararg accepted: Int,
         followRedirects: Boolean = HttpURLConnection.getFollowRedirects()): Response {
+        config.checkRequestAllowed()
         val connection = URL(baseUrl + path).openConnection() as HttpURLConnection
         try {
             connection.requestMethod = "GET"
-            connection.instanceFollowRedirects = followRedirects
+            connection.instanceFollowRedirects = followRedirects && !stopScoped
             connection.connectTimeout = 10_000
             connection.readTimeout = 10_000
             connection.setRequestProperty("Authorization", "Bearer $bearerToken")
+            if (stopScoped) connection.setRequestProperty("X-Meeting-Device", identity.deviceId())
             connection.setRequestProperty("Accept", "application/json")
+            config.checkRequestAllowed()
             val status = connection.responseCode
             for (expected in accepted) if (status == expected) return connection.inputStream.use { Response(status, readUtf8(it)) }
             throw IOException("读取本场结果失败，HTTP $status")
@@ -417,18 +422,22 @@ class HttpMeetingServerClient(config: MeetingClientConfig) : MeetingServerClient
     /** 模型材料发行允许等待厂商20秒，调用处单独留30秒；普通JSON请求保持原10秒。 */
     private fun post(path: String, jsonBody: String?, idempotencyKey: String?, vararg accepted: Int,
         readTimeoutMs: Int = 10_000): Response {
+        config.checkRequestAllowed()
         val connection = URL(baseUrl + path).openConnection() as HttpURLConnection
         try {
             connection.requestMethod = "POST"
+            if (stopScoped) connection.instanceFollowRedirects = false
             connection.connectTimeout = 10_000
             connection.readTimeout = readTimeoutMs
             connection.setRequestProperty("Authorization", "Bearer $bearerToken")
+            if (stopScoped) connection.setRequestProperty("X-Meeting-Device", identity.deviceId())
             connection.setRequestProperty("Accept", "application/json")
             if (idempotencyKey != null) connection.setRequestProperty("Idempotency-Key", idempotencyKey)
             val bytes = jsonBody?.toByteArray(StandardCharsets.UTF_8) ?: ByteArray(0)
             if (jsonBody != null) connection.setRequestProperty("Content-Type", "application/json")
             connection.doOutput = true
             connection.setFixedLengthStreamingMode(bytes.size)
+            config.checkRequestAllowed()
             connection.outputStream.use { it.write(bytes) }
             val status = connection.responseCode
             for (expected in accepted) if (status == expected) return connection.inputStream.use { Response(status, readUtf8(it)) }
@@ -439,6 +448,7 @@ class HttpMeetingServerClient(config: MeetingClientConfig) : MeetingServerClient
 
     private fun postBinary(path: String, file: File, contentType: String,
         contentLength: Long, checksum: String): Response {
+        config.checkRequestAllowed()
         val connection = URL(baseUrl + path).openConnection() as HttpURLConnection
         try {
             connection.requestMethod = "POST"
@@ -451,6 +461,7 @@ class HttpMeetingServerClient(config: MeetingClientConfig) : MeetingServerClient
             connection.setRequestProperty("X-Content-SHA256", checksum)
             connection.doOutput = true
             connection.setFixedLengthStreamingMode(contentLength)
+            config.checkRequestAllowed()
             file.inputStream().use { input ->
                 connection.outputStream.use { output -> input.copyTo(output, 16 * 1024) }
             }

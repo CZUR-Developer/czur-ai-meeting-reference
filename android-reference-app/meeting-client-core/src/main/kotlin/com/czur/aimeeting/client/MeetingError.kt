@@ -49,6 +49,12 @@ enum class MeetingErrorCode {
     STEP_FAILED,
     /** SDK 未归类的内部错误。 */
     UNKNOWN,
+    /** The server explicitly rejected the current identity for this original meeting. */
+    STOP_ACCESS_DENIED,
+    /** The server explicitly rejected the original Stop key. */
+    STOP_KEY_CONFLICT,
+    /** Protected local transcript still requires confirmed original event receipts. */
+    STOP_EVENTS_UNVERIFIED,
 }
 
 /** 只携带稳定错误码；不包含任何可直接展示给终端用户的句子。 */
